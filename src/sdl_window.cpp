@@ -343,6 +343,11 @@ void WindowSDL::WaitEvent() {
     case SDL_EVENT_SCREENSHOT_WITH_OVERLAYS:
         VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
         break;
+    case SDL_EVENT_INJECT_GAMEPAD_BUTTON:
+        controllers[0]->Button(
+            static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(event.user.code),
+            reinterpret_cast<uintptr_t>(event.user.data1) != 0);
+        break;
     default:
         break;
     }

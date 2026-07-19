@@ -11,6 +11,18 @@
         10
       ],
       "minimumDistinctScreenshots": 1,
+      "buttonEvents": [
+        {
+          "seconds": 5,
+          "button": "cross",
+          "pressed": true
+        },
+        {
+          "seconds": 5.1,
+          "button": "cross",
+          "pressed": false
+        }
+      ],
       "args": [
         "--config-clean"
       ],
