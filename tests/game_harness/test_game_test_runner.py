@@ -143,6 +143,7 @@ class ManifestTests(unittest.TestCase):
                             "timeoutSeconds": 2,
                             "useIpc": True,
                             "screenshotSeconds": [0.25, 1.5],
+                            "minimumDistinctScreenshots": 2,
                         }
                     ],
                 },
@@ -151,6 +152,7 @@ class ManifestTests(unittest.TestCase):
             manifest = load_manifest(path)
 
             self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
+            self.assertEqual(manifest.cases[0].minimum_distinct_screenshots, 2)
 
     def test_load_manifest_rejects_missing_game_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -309,6 +311,42 @@ class ManifestTests(unittest.TestCase):
                     }
                 ),
                 "unique and increasing",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "too many distinct screenshots",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "screenshotSeconds": [0.25],
+                                "minimumDistinctScreenshots": 2,
+                            }
+                        ],
+                    }
+                ),
+                "cannot exceed screenshotSeconds",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "boolean distinct screenshots",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "screenshotSeconds": [0.25],
+                                "minimumDistinctScreenshots": True,
+                            }
+                        ],
+                    }
+                ),
+                "must be an integer",
             ),
         ]
         for content, expected in invalid_manifests:
@@ -539,6 +577,10 @@ class RunnerTests(unittest.TestCase):
                 result.to_report()["screenshots"],
                 [str(path) for path in result.screenshots],
             )
+            self.assertEqual(len(result.screenshot_hashes), 2)
+            self.assertEqual(
+                result.to_report()["screenshot_hashes"], result.screenshot_hashes
+            )
             observation = json.loads(
                 (result.artifact_directory / "observation.json").read_text(
                     encoding="utf-8"
@@ -604,6 +646,62 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(result.screenshots, [])
             self.assertIn("captured 0 valid screenshots; expected 1", result.failures)
+
+    def test_run_case_rejects_identical_screenshots_when_progress_is_required(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "stuck visual",
+                    "timeoutSeconds": 0.2,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05, 0.1],
+                    "minimumDistinctScreenshots": 2,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(len(set(result.screenshot_hashes)), 1)
+            self.assertIn(
+                "captured 1 distinct screenshots; expected at least 2",
+                result.failures,
+            )
+
+    def test_run_case_accepts_required_visual_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "progressing visual",
+                    "timeoutSeconds": 0.2,
+                    "args": ["--expect-ipc", "--vary-screenshots"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05, 0.1],
+                    "minimumDistinctScreenshots": 2,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(len(set(result.screenshot_hashes)), 2)
 
     def test_run_case_caps_output_and_marks_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

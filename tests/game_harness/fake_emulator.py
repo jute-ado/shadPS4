@@ -20,9 +20,9 @@ def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     return len(data).to_bytes(4, "big") + chunk_type + data + checksum
 
 
-def one_pixel_png() -> bytes:
+def one_pixel_png(red: int = 0) -> bytes:
     ihdr = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
-    scanline = b"\x00\x00\x00\x00\xff"
+    scanline = b"\x00" + bytes((red, 0, 0, 255))
     return (
         b"\x89PNG\r\n\x1a\n"
         + png_chunk(b"IHDR", ihdr)
@@ -43,6 +43,7 @@ def main() -> int:
     parser.add_argument("--expect-ipc", action="store_true")
     parser.add_argument("--ignore-screenshots", action="store_true")
     parser.add_argument("--malformed-screenshots", action="store_true")
+    parser.add_argument("--vary-screenshots", action="store_true")
     parser.add_argument("game")
     args = parser.parse_args()
 
@@ -69,7 +70,7 @@ def main() -> int:
                 png = (
                     b"\x89PNG\r\n\x1a\nmalformed"
                     if args.malformed_screenshots
-                    else one_pixel_png()
+                    else one_pixel_png(index if args.vary_screenshots else 0)
                 )
                 (screenshots / f"fake_{index}.png").write_bytes(png)
             if command == "STOP" or not command:

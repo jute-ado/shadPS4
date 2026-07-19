@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import math
 import os
@@ -37,6 +38,7 @@ class GameCase:
     timeout_seconds: float
     use_ipc: bool = False
     screenshot_seconds: tuple[float, ...] = ()
+    minimum_distinct_screenshots: int = 0
     args: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ("exited_zero",)
     required_log_patterns: tuple[str, ...] = ()
@@ -60,6 +62,7 @@ class CaseResult:
     artifact_directory: Path
     output_truncated: bool
     screenshots: list[Path]
+    screenshot_hashes: list[str]
     failures: list[str]
 
     def to_report(self) -> dict[str, Any]:
@@ -124,6 +127,24 @@ def _require_screenshot_schedule(
     if schedule and not use_ipc:
         raise ManifestError(f"{case_name}: screenshotSeconds requires useIpc")
     return schedule
+
+
+def _require_minimum_distinct_screenshots(
+    raw: Any, *, case_name: str, screenshot_count: int
+) -> int:
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise ManifestError(
+            f"{case_name}: minimumDistinctScreenshots must be an integer"
+        )
+    if raw < 0:
+        raise ManifestError(
+            f"{case_name}: minimumDistinctScreenshots cannot be negative"
+        )
+    if raw > screenshot_count:
+        raise ManifestError(
+            f"{case_name}: minimumDistinctScreenshots cannot exceed screenshotSeconds"
+        )
+    return raw
 
 
 def _resolve_existing_path(root: Path, raw: Any, field: str) -> Path:
@@ -191,6 +212,12 @@ def load_manifest(path: str | Path) -> GameManifest:
             )
 
         use_ipc = _require_bool(raw_case.get("useIpc", False), "useIpc", name)
+        screenshot_seconds = _require_screenshot_schedule(
+            raw_case.get("screenshotSeconds"),
+            case_name=name,
+            timeout=float(timeout),
+            use_ipc=use_ipc,
+        )
         cases.append(
             GameCase(
                 name=name,
@@ -199,11 +226,11 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ),
                 timeout_seconds=float(timeout),
                 use_ipc=use_ipc,
-                screenshot_seconds=_require_screenshot_schedule(
-                    raw_case.get("screenshotSeconds"),
+                screenshot_seconds=screenshot_seconds,
+                minimum_distinct_screenshots=_require_minimum_distinct_screenshots(
+                    raw_case.get("minimumDistinctScreenshots", 0),
                     case_name=name,
-                    timeout=float(timeout),
-                    use_ipc=use_ipc,
+                    screenshot_count=len(screenshot_seconds),
                 ),
                 args=args,
                 allowed_outcomes=outcomes,
@@ -320,6 +347,14 @@ def _find_valid_screenshots(artifact_directory: Path) -> list[Path]:
     return [screenshot for screenshot in screenshots if _is_valid_png(screenshot)]
 
 
+def _hash_screenshot(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def run_case(
     case: GameCase,
     *,
@@ -372,6 +407,7 @@ def run_case(
             artifact_directory=artifact_directory,
             output_truncated=False,
             screenshots=[],
+            screenshot_hashes=[],
             failures=[failure],
         )
     assert process.stdout is not None
@@ -465,6 +501,7 @@ def run_case(
     )
     combined_log = "\n".join((stdout, stderr, emulator_log))
     screenshots = _find_valid_screenshots(artifact_directory)
+    screenshot_hashes = [_hash_screenshot(path) for path in screenshots]
 
     failures: list[str] = []
     if outcome not in case.allowed_outcomes:
@@ -483,6 +520,12 @@ def run_case(
             f"captured {len(screenshots)} valid screenshots; expected "
             f"{len(case.screenshot_seconds)}"
         )
+    distinct_screenshots = len(set(screenshot_hashes))
+    if distinct_screenshots < case.minimum_distinct_screenshots:
+        failures.append(
+            f"captured {distinct_screenshots} distinct screenshots; expected at least "
+            f"{case.minimum_distinct_screenshots}"
+        )
 
     return CaseResult(
         name=case.name,
@@ -495,6 +538,7 @@ def run_case(
             truncated.is_set() or stdout_truncated or stderr_truncated or log_truncated
         ),
         screenshots=screenshots,
+        screenshot_hashes=screenshot_hashes,
         failures=failures,
     )
 

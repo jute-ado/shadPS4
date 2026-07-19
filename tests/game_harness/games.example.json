@@ -10,6 +10,7 @@
       "screenshotSeconds": [
         10
       ],
+      "minimumDistinctScreenshots": 1,
       "args": [
         "--config-clean"
       ],

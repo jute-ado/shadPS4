@@ -25,6 +25,9 @@ Each case supports:
 - `screenshotSeconds`: optional increasing list of times, in seconds after
   launch, at which to capture game-only frames. Requires `useIpc`; every
   requested capture must produce a valid PNG for the case to pass.
+- `minimumDistinctScreenshots`: optional minimum number of unique screenshot
+  contents required for the case to pass. This detects frozen or repeatedly
+  blank output when multiple frames are scheduled.
 - `args`: arguments inserted before the game path.
 - `allowedOutcomes`: any of `exited_zero`, `exited_nonzero`, or `timed_out`.
 - `requiredLogPatterns`: literal strings that must occur in stdout, stderr, or
@@ -48,7 +51,7 @@ mode. The runner writes capped stdout and stderr logs, preserves the emulator
 log, and writes `game-test-report.json`. With `useIpc` enabled it sends `RUN`
 and `START`, then requests a graceful `STOP` at the deadline before falling
 back to complete process-tree termination. Scheduled screenshot paths are
-included in the report.
+included in the report together with their SHA-256 content hashes.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
