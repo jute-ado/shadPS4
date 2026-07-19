@@ -349,6 +349,8 @@ set(KERNEL_LIB src/core/libraries/kernel/coredump/coredump.cpp
                src/core/libraries/kernel/equeue.h
                src/core/libraries/kernel/file_system.cpp
                src/core/libraries/kernel/file_system.h
+               src/core/libraries/kernel/select_timing.cpp
+               src/core/libraries/kernel/select_timing.h
                src/core/libraries/kernel/kernel.cpp
                src/core/libraries/kernel/kernel.h
                src/core/libraries/kernel/memory.cpp

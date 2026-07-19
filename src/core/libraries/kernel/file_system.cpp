@@ -24,6 +24,7 @@
 #include "core/libraries/kernel/file_system.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
+#include "core/libraries/kernel/select_timing.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/network/sockets.h"
 #include "core/memory.h"
@@ -1263,6 +1264,7 @@ s32 PS4_SYSV_ABI posix_select(s32 nfds, fd_set_posix* readfds, fd_set_posix* wri
 
     std::map<s32, s32> host_to_guest;
     s32 socket_max_fd = -1;
+    bool has_immediate_ready = false;
 
     for (s32 i = 0; i < nfds; ++i) {
         bool want_read = readfds && FD_ISSET_POSIX(i, readfds);
@@ -1304,9 +1306,11 @@ s32 PS4_SYSV_ABI posix_select(s32 nfds, fd_set_posix* readfds, fd_set_posix* wri
             // For devices, stdin (fd 0) is never read-ready.
             if (want_read && i != 0) {
                 FD_SET_POSIX(i, &read_ready);
+                has_immediate_ready = true;
             }
             if (want_write) {
                 FD_SET_POSIX(i, &write_ready);
+                has_immediate_ready = true;
             }
             // exceptfds not supported on regular files
         } else if (file->type == Core::FileSys::FileType::Socket) {
@@ -1334,10 +1338,6 @@ s32 PS4_SYSV_ABI posix_select(s32 nfds, fd_set_posix* readfds, fd_set_posix* wri
               "Before select(): read_host.fd_count = {}, write_host.fd_count = {}, "
               "except_host.fd_count = {}",
               read_host.fd_count, write_host.fd_count, except_host.fd_count);
-
-    if (read_host.fd_count == 0 && write_host.fd_count == 0 && except_host.fd_count == 0) {
-        LOG_WARNING(Kernel_Fs, "No sockets in fd_sets, select() will return immediately");
-    }
 
     if (readfds) {
         FD_ZERO_POSIX(readfds);
@@ -1393,6 +1393,12 @@ s32 PS4_SYSV_ABI posix_select(s32 nfds, fd_set_posix* readfds, fd_set_posix* wri
             s32 fd = static_cast<s32>(except_host.fd_array[i]);
             FD_SET_POSIX(host_to_guest[fd], exceptfds);
         }
+    } else if (!has_immediate_ready && timeout &&
+               !WaitForSelectTimeout(timeout->tv_sec, timeout->tv_usec)) {
+        *__Error() = POSIX_EINVAL;
+        return -1;
+    } else if (!has_immediate_ready && !timeout) {
+        LOG_WARNING(Kernel_Fs, "No selectable descriptors and no timeout");
     }
 
     // Add regular/device files ready count
