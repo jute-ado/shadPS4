@@ -10,6 +10,7 @@
 #include "emulator_settings.h"
 #include "libraries/system/userservice.h"
 #include "user_manager.h"
+#include "user_migration.h"
 #include "user_settings.h"
 
 namespace fs = std::filesystem;
@@ -179,6 +180,9 @@ static void CheckAndMigrateTrophies(TransferOption option) {
     auto const old_trophy_base_dir =
         Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "game_data";
     auto const new_trophy_global_dir = Common::FS::GetUserPath(Common::FS::PathType::TrophyDir);
+    if (!fs::is_directory(old_trophy_base_dir)) {
+        return;
+    }
     try {
         for (auto const& entry : fs::directory_iterator(old_trophy_base_dir)) {
             if (!entry.is_directory()) {
@@ -296,7 +300,8 @@ Users UserManager::CreateDefaultUsers() {
             std::filesystem::create_directory(user_dir / "savedata");
             std::filesystem::create_directory(user_dir / "trophy");
             std::filesystem::create_directory(user_dir / "inputs");
-            if (u.user_id == 1000) {
+            if (u.user_id == 1000 && Core::UserMigration::HasLegacyData(
+                                         Common::FS::GetUserPath(Common::FS::PathType::UserDir))) {
                 TransferOption user_choice = AskMigrationOption();
                 CheckAndMigrateSaves(user_choice);
                 CheckAndMigrateTrophies(user_choice);
