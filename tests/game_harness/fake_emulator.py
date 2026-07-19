@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,14 +23,24 @@ def main() -> int:
     parser.add_argument("--log", default="")
     parser.add_argument("--emit-bytes", type=int, default=0)
     parser.add_argument("--spawn-child", action="store_true")
+    parser.add_argument("--expect-ipc", action="store_true")
     parser.add_argument("game")
     args = parser.parse_args()
+
+    ipc_commands: list[str] = []
+    if args.expect_ipc:
+        ipc_commands.extend(
+            (sys.stdin.readline().strip(), sys.stdin.readline().strip())
+        )
 
     if args.spawn_child:
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 
     if args.sleep:
         time.sleep(args.sleep)
+
+    if args.expect_ipc:
+        ipc_commands.append(sys.stdin.readline().strip())
 
     if args.stdout:
         print(args.stdout)
@@ -46,6 +57,8 @@ def main() -> int:
         "cwd": str(Path.cwd()),
         "game": args.game,
         "user_directory_exists": (Path.cwd() / "user").is_dir(),
+        "ipc_commands": ipc_commands,
+        "ipc_enabled": os.environ.get("SHADPS4_ENABLE_IPC"),
     }
     (Path.cwd() / "observation.json").write_text(
         json.dumps(observation), encoding="utf-8"

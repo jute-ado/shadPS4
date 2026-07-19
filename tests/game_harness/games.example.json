@@ -6,13 +6,16 @@
       "name": "CUSA00000 survives initial boot",
       "gamePath": "D:/private-games/CUSA00000",
       "timeoutSeconds": 30,
+      "useIpc": true,
       "args": [
         "--config-clean"
       ],
       "allowedOutcomes": [
         "timed_out"
       ],
-      "requiredLogPatterns": [],
+      "requiredLogPatterns": [
+        "Starting shadps4 emulator"
+      ],
       "forbiddenLogPatterns": [
         "Unhandled exception",
         "Assertion Failed"

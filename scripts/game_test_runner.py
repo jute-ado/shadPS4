@@ -33,6 +33,7 @@ class GameCase:
     name: str
     game_path: Path
     timeout_seconds: float
+    use_ipc: bool = False
     args: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ("exited_zero",)
     required_log_patterns: tuple[str, ...] = ()
@@ -82,6 +83,12 @@ def _require_string_list(raw: Any, field: str, case_name: str) -> tuple[str, ...
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
         raise ManifestError(f"{case_name}: {field} must be an array of strings")
     return tuple(raw)
+
+
+def _require_bool(raw: Any, field: str, case_name: str) -> bool:
+    if not isinstance(raw, bool):
+        raise ManifestError(f"{case_name}: {field} must be a boolean")
+    return raw
 
 
 def _resolve_existing_path(root: Path, raw: Any, field: str) -> Path:
@@ -155,6 +162,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                     root, raw_case.get("gamePath"), f"{name}: gamePath"
                 ),
                 timeout_seconds=float(timeout),
+                use_ipc=_require_bool(raw_case.get("useIpc", False), "useIpc", name),
                 args=args,
                 allowed_outcomes=outcomes,
                 required_log_patterns=_require_string_list(
@@ -246,14 +254,19 @@ def run_case(
 
     command = [*map(str, emulator_command), *case.args, str(case.game_path)]
     creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    environment = None
+    if case.use_ipc:
+        environment = os.environ.copy()
+        environment["SHADPS4_ENABLE_IPC"] = "true"
     started = time.monotonic()
     try:
         process = subprocess.Popen(
             command,
             cwd=artifact_directory,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if case.use_ipc else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=environment,
             creationflags=creation_flags,
             start_new_session=os.name != "nt",
         )
@@ -275,6 +288,10 @@ def run_case(
         )
     assert process.stdout is not None
     assert process.stderr is not None
+    if case.use_ipc:
+        assert process.stdin is not None
+        process.stdin.write(b"RUN\nSTART\n")
+        process.stdin.flush()
 
     truncated = threading.Event()
     readers = [
@@ -305,9 +322,21 @@ def run_case(
         process.wait(timeout=case.timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _kill_process_tree(process)
-        process.wait(timeout=5)
+        if case.use_ipc:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(b"STOP\n")
+                process.stdin.flush()
+                process.wait(timeout=5)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                _kill_process_tree(process)
+                process.wait(timeout=5)
+        else:
+            _kill_process_tree(process)
+            process.wait(timeout=5)
     finally:
+        if process.stdin is not None:
+            process.stdin.close()
         for reader in readers:
             reader.join(timeout=5)
         process.stdout.close()

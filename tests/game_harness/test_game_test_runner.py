@@ -105,6 +105,29 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "timeoutSeconds"):
                 load_manifest(path)
 
+    def test_load_manifest_accepts_explicit_ipc_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "controlled boot",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "useIpc": True,
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertTrue(manifest.cases[0].use_ipc)
+
     def test_load_manifest_rejects_missing_game_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_manifest(
@@ -179,6 +202,22 @@ class ManifestTests(unittest.TestCase):
                     }
                 ),
                 "allowedOutcomes",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "bad IPC",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": "yes",
+                            }
+                        ],
+                    }
+                ),
+                "useIpc",
             ),
         ]
         for content, expected in invalid_manifests:
@@ -344,6 +383,41 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(result.passed, result.failures)
             self.assertEqual(result.outcome, "timed_out")
             self.assertLess(result.duration_seconds, 5)
+
+    def test_run_case_uses_ipc_to_start_and_stop_gracefully(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "controlled survival",
+                    "timeoutSeconds": 0.2,
+                    "args": [
+                        "--expect-ipc",
+                        "--log",
+                        "gracefully stopped",
+                    ],
+                    "useIpc": True,
+                    "allowedOutcomes": ["timed_out"],
+                    "requiredLogPatterns": ["gracefully stopped"],
+                },
+            )
+            manifest = load_manifest(manifest_path)
+
+            result = run_case(
+                manifest.cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(observation["ipc_commands"], ["RUN", "START", "STOP"])
+            self.assertEqual(observation["ipc_enabled"], "true")
 
     def test_run_case_caps_output_and_marks_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
