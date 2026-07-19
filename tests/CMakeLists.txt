@@ -15,6 +15,17 @@ set(TEST_TARGETS
     shadps4_gcn_test
 )
 
+add_executable(shadps4_controller_button_test
+    ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
+    test_controller_button.cpp
+)
+target_include_directories(shadps4_controller_button_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_controller_button_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_controller_button_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_controller_button_test)
+
 set(SETTINGS_TEST_SOURCES
     # Under test
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp

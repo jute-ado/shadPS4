@@ -1179,6 +1179,8 @@ set(IMGUI src/imgui/imgui_config.h
 
 set(INPUT src/input/controller.cpp
           src/input/controller.h
+          src/input/controller_button.cpp
+          src/input/controller_button.h
           src/input/input_handler.cpp
           src/input/input_handler.h
           src/input/input_mouse.cpp
