@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "emulator": "../../Build/Release/shadPS4.exe",
+  "cases": [
+    {
+      "name": "CUSA00000 survives initial boot",
+      "gamePath": "D:/private-games/CUSA00000",
+      "timeoutSeconds": 30,
+      "args": [
+        "--config-clean"
+      ],
+      "allowedOutcomes": [
+        "timed_out"
+      ],
+      "requiredLogPatterns": [],
+      "forbiddenLogPatterns": [
+        "Unhandled exception",
+        "Assertion Failed"
+      ]
+    }
+  ]
+}

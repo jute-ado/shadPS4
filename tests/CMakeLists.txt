@@ -203,6 +203,23 @@ foreach(t ${TEST_TARGETS})
     )
 endforeach()
 
+# The game regression harness is intentionally tested with a synthetic emulator.
+# Private game dumps are never required for the normal unit-test suite.
+find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME game_harness_tests
+    COMMAND
+        ${Python3_EXECUTABLE}
+        -W error::ResourceWarning
+        -m unittest discover
+        -s ${CMAKE_CURRENT_SOURCE_DIR}/game_harness
+        -p test_*.py
+)
+set_tests_properties(game_harness_tests PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    TIMEOUT 30
+)
+
 # ===========================================================================
 # HTTP tests (libSceHttp - URI helpers and status-line parsing)
 # ===========================================================================

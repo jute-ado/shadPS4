@@ -16,6 +16,7 @@ path = [
     "documents/Screenshots/Windows/*",
     "flake.lock",
     "scripts/ps4_names.txt",
+    "tests/game_harness/games.example.json",
     "src/dist/MacOSBundleInfo.plist.in",
     "src/dist/net.shadps4.shadPS4.desktop",
     "src/dist/net.shadps4.shadPS4.svg",
