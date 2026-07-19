@@ -154,6 +154,47 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
             self.assertEqual(manifest.cases[0].minimum_distinct_screenshots, 2)
 
+    def test_load_manifest_accepts_scheduled_button_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "automated menu",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "buttonEvents": [
+                                {
+                                    "seconds": 0.25,
+                                    "button": "cross",
+                                    "pressed": True,
+                                },
+                                {
+                                    "seconds": 0.35,
+                                    "button": "cross",
+                                    "pressed": False,
+                                },
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertEqual(
+                [
+                    (event.seconds, event.button, event.pressed)
+                    for event in manifest.cases[0].button_events
+                ],
+                [(0.25, "cross", True), (0.35, "cross", False)],
+            )
+
     def test_load_manifest_rejects_missing_game_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_manifest(
@@ -347,6 +388,102 @@ class ManifestTests(unittest.TestCase):
                     }
                 ),
                 "must be an integer",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "button events need IPC",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "buttonEvents": [
+                                    {
+                                        "seconds": 0.25,
+                                        "button": "cross",
+                                        "pressed": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                "buttonEvents requires useIpc",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "invalid button",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "buttonEvents": [
+                                    {
+                                        "seconds": 0.25,
+                                        "button": "start",
+                                        "pressed": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                "unsupported button",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "late button",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "buttonEvents": [
+                                    {
+                                        "seconds": 1,
+                                        "button": "options",
+                                        "pressed": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                "before timeoutSeconds",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "unordered buttons",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "buttonEvents": [
+                                    {
+                                        "seconds": 0.5,
+                                        "button": "cross",
+                                        "pressed": True,
+                                    },
+                                    {
+                                        "seconds": 0.25,
+                                        "button": "cross",
+                                        "pressed": False,
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                "in increasing time order",
             ),
         ]
         for content, expected in invalid_manifests:
@@ -589,6 +726,54 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(
                 observation["ipc_commands"],
                 ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
+            )
+
+    def test_run_case_interleaves_button_events_and_screenshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "automated visual survival",
+                    "timeoutSeconds": 0.3,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "buttonEvents": [
+                        {"seconds": 0.05, "button": "cross", "pressed": True},
+                        {"seconds": 0.15, "button": "cross", "pressed": False},
+                    ],
+                    "screenshotSeconds": [0.1, 0.2],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                [
+                    "RUN",
+                    "START",
+                    "GAMEPAD_BUTTON",
+                    "cross",
+                    "1",
+                    "SCREENSHOT",
+                    "GAMEPAD_BUTTON",
+                    "cross",
+                    "0",
+                    "SCREENSHOT",
+                    "STOP",
+                ],
             )
 
     def test_run_case_fails_when_requested_screenshot_is_missing(self) -> None:

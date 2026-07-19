@@ -16,6 +16,7 @@
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
 #include "core/libraries/audio/audioout.h"
+#include "input/controller_button.h"
 #include "input/input_handler.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
@@ -51,6 +52,7 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - ENABLE_MEMORY_PATCH: enables PATCH_MEMORY command
  *   - ENABLE_EMU_CONTROL: enables emulator control commands
  *   - ENABLE_SCREENSHOT: enables SCREENSHOT command
+ *   - ENABLE_GAMEPAD
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -64,6 +66,9 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - STOP: stop and quit the emulator
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
  *   - SCREENSHOT: capture the next game-only frame
+ *   - GAMEPAD_BUTTON
+ *     - button: player-one button name
+ *     - pressed: 1 to press, 0 to release
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -86,6 +91,7 @@ void IPC::Init() {
     std::cerr << ";ENABLE_MEMORY_PATCH\n";
     std::cerr << ";ENABLE_EMU_CONTROL\n";
     std::cerr << ";ENABLE_SCREENSHOT\n";
+    std::cerr << ";ENABLE_GAMEPAD\n";
     std::cerr << ";#IPC_END\n";
     std::cerr.flush();
 
@@ -157,6 +163,21 @@ void IPC::InputLoop() {
             SDL_PushEvent(&event);
         } else if (cmd == "SCREENSHOT") {
             VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+        } else if (cmd == "GAMEPAD_BUTTON") {
+            const std::string name = next_str();
+            const auto button = Input::ParseControllerButton(name);
+            const bool pressed = next_u64() != 0;
+            if (!button) {
+                std::cerr << ";INVALID GAMEPAD BUTTON: " << name << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_BUTTON;
+            event.user.code = static_cast<Sint32>(*button);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(pressed));
+            SDL_PushEvent(&event);
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());
             bool is_game_specific = next_u64() != 0;

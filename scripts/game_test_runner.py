@@ -25,10 +25,35 @@ import zlib
 REPORT_SCHEMA_VERSION = 1
 DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 VALID_OUTCOMES = frozenset({"exited_zero", "exited_nonzero", "timed_out"})
+SUPPORTED_BUTTONS = frozenset(
+    {
+        "circle",
+        "cross",
+        "dpad_down",
+        "dpad_left",
+        "dpad_right",
+        "dpad_up",
+        "l1",
+        "l3",
+        "options",
+        "r1",
+        "r3",
+        "square",
+        "touchpad",
+        "triangle",
+    }
+)
 
 
 class ManifestError(ValueError):
     """Raised when a game test manifest is invalid."""
+
+
+@dataclass(frozen=True)
+class ButtonEvent:
+    seconds: float
+    button: str
+    pressed: bool
 
 
 @dataclass(frozen=True)
@@ -39,6 +64,7 @@ class GameCase:
     use_ipc: bool = False
     screenshot_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
+    button_events: tuple[ButtonEvent, ...] = ()
     args: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ("exited_zero",)
     required_log_patterns: tuple[str, ...] = ()
@@ -147,6 +173,51 @@ def _require_minimum_distinct_screenshots(
     return raw
 
 
+def _require_button_events(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+) -> tuple[ButtonEvent, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ManifestError(f"{case_name}: buttonEvents must be an array")
+    events: list[ButtonEvent] = []
+    for index, item in enumerate(raw):
+        field = f"{case_name}: buttonEvents[{index}]"
+        if not isinstance(item, dict):
+            raise ManifestError(f"{field} must be an object")
+        seconds = item.get("seconds")
+        if (
+            not isinstance(seconds, (int, float))
+            or isinstance(seconds, bool)
+            or not math.isfinite(seconds)
+            or seconds <= 0
+            or seconds >= timeout
+        ):
+            raise ManifestError(
+                f"{field}.seconds must be a finite positive number before timeoutSeconds"
+            )
+        button = item.get("button")
+        if button not in SUPPORTED_BUTTONS:
+            raise ManifestError(
+                f"{field} has unsupported button {button!r}; expected one of "
+                f"{sorted(SUPPORTED_BUTTONS)}"
+            )
+        pressed = item.get("pressed")
+        if not isinstance(pressed, bool):
+            raise ManifestError(f"{field}.pressed must be a boolean")
+        events.append(ButtonEvent(float(seconds), button, pressed))
+    if any(
+        later.seconds <= earlier.seconds
+        for earlier, later in zip(events, events[1:])
+    ):
+        raise ManifestError(
+            f"{case_name}: buttonEvents must be in increasing time order"
+        )
+    if events and not use_ipc:
+        raise ManifestError(f"{case_name}: buttonEvents requires useIpc")
+    return tuple(events)
+
+
 def _resolve_existing_path(root: Path, raw: Any, field: str) -> Path:
     if not isinstance(raw, str) or not raw:
         raise ManifestError(f"{field} must be a non-empty string")
@@ -218,6 +289,12 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=float(timeout),
             use_ipc=use_ipc,
         )
+        button_events = _require_button_events(
+            raw_case.get("buttonEvents"),
+            case_name=name,
+            timeout=float(timeout),
+            use_ipc=use_ipc,
+        )
         cases.append(
             GameCase(
                 name=name,
@@ -232,6 +309,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                     case_name=name,
                     screenshot_count=len(screenshot_seconds),
                 ),
+                button_events=button_events,
                 args=args,
                 allowed_outcomes=outcomes,
                 required_log_patterns=_require_string_list(
@@ -444,16 +522,34 @@ def run_case(
     timed_out = False
     try:
         process_exited = False
-        for screenshot_second in case.screenshot_seconds:
+        timeline = [
+            (seconds, "screenshot", None)
+            for seconds in case.screenshot_seconds
+        ] + [
+            (event.seconds, "button", event)
+            for event in case.button_events
+        ]
+        timeline.sort(key=lambda entry: entry[0])
+        for event_second, event_type, payload in timeline:
             try:
                 process.wait(
-                    timeout=max(0, started + screenshot_second - time.monotonic())
+                    timeout=max(0, started + event_second - time.monotonic())
                 )
                 process_exited = True
                 break
             except subprocess.TimeoutExpired:
                 assert process.stdin is not None
-                process.stdin.write(b"SCREENSHOT\n")
+                if event_type == "screenshot":
+                    process.stdin.write(b"SCREENSHOT\n")
+                else:
+                    assert isinstance(payload, ButtonEvent)
+                    process.stdin.write(
+                        (
+                            "GAMEPAD_BUTTON\n"
+                            f"{payload.button}\n"
+                            f"{int(payload.pressed)}\n"
+                        ).encode("ascii")
+                    )
                 process.stdin.flush()
         if not process_exited:
             process.wait(
