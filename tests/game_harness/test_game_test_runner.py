@@ -128,6 +128,30 @@ class ManifestTests(unittest.TestCase):
 
             self.assertTrue(manifest.cases[0].use_ipc)
 
+    def test_load_manifest_accepts_scheduled_screenshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "visual boot",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSeconds": [0.25, 1.5],
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
+
     def test_load_manifest_rejects_missing_game_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_manifest(
@@ -218,6 +242,73 @@ class ManifestTests(unittest.TestCase):
                     }
                 ),
                 "useIpc",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "screenshots need IPC",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "screenshotSeconds": [0.5],
+                            }
+                        ],
+                    }
+                ),
+                "screenshotSeconds requires useIpc",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "late screenshot",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "screenshotSeconds": [1],
+                            }
+                        ],
+                    }
+                ),
+                "before timeoutSeconds",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "non-finite screenshot",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "screenshotSeconds": [float("nan")],
+                            }
+                        ],
+                    }
+                ),
+                "finite numbers",
+            ),
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "duplicate screenshots",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "useIpc": True,
+                                "screenshotSeconds": [0.25, 0.25],
+                            }
+                        ],
+                    }
+                ),
+                "unique and increasing",
             ),
         ]
         for content, expected in invalid_manifests:
@@ -418,6 +509,101 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(observation["ipc_commands"], ["RUN", "START", "STOP"])
             self.assertEqual(observation["ipc_enabled"], "true")
+
+    def test_run_case_schedules_and_requires_screenshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "visual survival",
+                    "timeoutSeconds": 0.25,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05, 0.1],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+            manifest = load_manifest(manifest_path)
+
+            result = run_case(
+                manifest.cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(len(result.screenshots), 2)
+            self.assertTrue(all(path.suffix == ".png" for path in result.screenshots))
+            self.assertEqual(
+                result.to_report()["screenshots"],
+                [str(path) for path in result.screenshots],
+            )
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
+            )
+
+    def test_run_case_fails_when_requested_screenshot_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "missing visual",
+                    "timeoutSeconds": 0.15,
+                    "args": ["--expect-ipc", "--ignore-screenshots"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertTrue(
+                any(
+                    "captured 0 valid screenshots" in failure
+                    for failure in result.failures
+                )
+            )
+
+    def test_run_case_rejects_malformed_screenshot_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "malformed visual",
+                    "timeoutSeconds": 0.15,
+                    "args": ["--expect-ipc", "--malformed-screenshots"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(
+                list((result.artifact_directory / "user" / "screenshots").glob("*.png"))
+            )
+            self.assertEqual(result.screenshots, [])
+            self.assertIn("captured 0 valid screenshots; expected 1", result.failures)
 
     def test_run_case_caps_output_and_marks_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

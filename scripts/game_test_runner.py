@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 from typing import Any, BinaryIO, Sequence
+import zlib
 
 
 REPORT_SCHEMA_VERSION = 1
@@ -34,6 +36,7 @@ class GameCase:
     game_path: Path
     timeout_seconds: float
     use_ipc: bool = False
+    screenshot_seconds: tuple[float, ...] = ()
     args: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ("exited_zero",)
     required_log_patterns: tuple[str, ...] = ()
@@ -56,11 +59,13 @@ class CaseResult:
     duration_seconds: float
     artifact_directory: Path
     output_truncated: bool
+    screenshots: list[Path]
     failures: list[str]
 
     def to_report(self) -> dict[str, Any]:
         report = asdict(self)
         report["artifact_directory"] = str(self.artifact_directory)
+        report["screenshots"] = [str(path) for path in self.screenshots]
         return report
 
 
@@ -89,6 +94,36 @@ def _require_bool(raw: Any, field: str, case_name: str) -> bool:
     if not isinstance(raw, bool):
         raise ManifestError(f"{case_name}: {field} must be a boolean")
     return raw
+
+
+def _require_screenshot_schedule(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+) -> tuple[float, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or any(
+        not isinstance(item, (int, float)) or isinstance(item, bool) for item in raw
+    ):
+        raise ManifestError(
+            f"{case_name}: screenshotSeconds must be an array of numbers"
+        )
+    schedule = tuple(float(item) for item in raw)
+    if any(not math.isfinite(item) for item in schedule):
+        raise ManifestError(
+            f"{case_name}: screenshotSeconds entries must be finite numbers"
+        )
+    if any(item <= 0 or item >= timeout for item in schedule):
+        raise ManifestError(
+            f"{case_name}: screenshotSeconds entries must be positive and before "
+            "timeoutSeconds"
+        )
+    if tuple(sorted(set(schedule))) != schedule:
+        raise ManifestError(
+            f"{case_name}: screenshotSeconds must be unique and increasing"
+        )
+    if schedule and not use_ipc:
+        raise ManifestError(f"{case_name}: screenshotSeconds requires useIpc")
+    return schedule
 
 
 def _resolve_existing_path(root: Path, raw: Any, field: str) -> Path:
@@ -155,6 +190,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 f"{name}: allowedOutcomes must contain only {sorted(VALID_OUTCOMES)}"
             )
 
+        use_ipc = _require_bool(raw_case.get("useIpc", False), "useIpc", name)
         cases.append(
             GameCase(
                 name=name,
@@ -162,7 +198,13 @@ def load_manifest(path: str | Path) -> GameManifest:
                     root, raw_case.get("gamePath"), f"{name}: gamePath"
                 ),
                 timeout_seconds=float(timeout),
-                use_ipc=_require_bool(raw_case.get("useIpc", False), "useIpc", name),
+                use_ipc=use_ipc,
+                screenshot_seconds=_require_screenshot_schedule(
+                    raw_case.get("screenshotSeconds"),
+                    case_name=name,
+                    timeout=float(timeout),
+                    use_ipc=use_ipc,
+                ),
                 args=args,
                 allowed_outcomes=outcomes,
                 required_log_patterns=_require_string_list(
@@ -233,6 +275,51 @@ def _read_capped(path: Path, limit: int) -> tuple[str, bool]:
     return content[:limit].decode("utf-8", errors="replace"), len(content) > limit
 
 
+def _is_valid_png(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+                return False
+            saw_ihdr = False
+            saw_idat = False
+            while True:
+                length_bytes = stream.read(4)
+                if len(length_bytes) != 4:
+                    return False
+                length = int.from_bytes(length_bytes, "big")
+                chunk_type = stream.read(4)
+                chunk_data = stream.read(length)
+                checksum = stream.read(4)
+                if (
+                    len(chunk_type) != 4
+                    or len(chunk_data) != length
+                    or len(checksum) != 4
+                    or zlib.crc32(chunk_type + chunk_data)
+                    != int.from_bytes(checksum, "big")
+                ):
+                    return False
+                if not saw_ihdr:
+                    if (
+                        chunk_type != b"IHDR"
+                        or length != 13
+                        or int.from_bytes(chunk_data[:4], "big") == 0
+                        or int.from_bytes(chunk_data[4:8], "big") == 0
+                    ):
+                        return False
+                    saw_ihdr = True
+                elif chunk_type == b"IDAT":
+                    saw_idat = True
+                elif chunk_type == b"IEND":
+                    return length == 0 and saw_idat and stream.read(1) == b""
+    except OSError:
+        return False
+
+
+def _find_valid_screenshots(artifact_directory: Path) -> list[Path]:
+    screenshots = sorted((artifact_directory / "user" / "screenshots").glob("*.png"))
+    return [screenshot for screenshot in screenshots if _is_valid_png(screenshot)]
+
+
 def run_case(
     case: GameCase,
     *,
@@ -284,6 +371,7 @@ def run_case(
             duration_seconds=time.monotonic() - started,
             artifact_directory=artifact_directory,
             output_truncated=False,
+            screenshots=[],
             failures=[failure],
         )
     assert process.stdout is not None
@@ -319,7 +407,22 @@ def run_case(
 
     timed_out = False
     try:
-        process.wait(timeout=case.timeout_seconds)
+        process_exited = False
+        for screenshot_second in case.screenshot_seconds:
+            try:
+                process.wait(
+                    timeout=max(0, started + screenshot_second - time.monotonic())
+                )
+                process_exited = True
+                break
+            except subprocess.TimeoutExpired:
+                assert process.stdin is not None
+                process.stdin.write(b"SCREENSHOT\n")
+                process.stdin.flush()
+        if not process_exited:
+            process.wait(
+                timeout=max(0, started + case.timeout_seconds - time.monotonic())
+            )
     except subprocess.TimeoutExpired:
         timed_out = True
         if case.use_ipc:
@@ -361,6 +464,7 @@ def run_case(
         output_limit_bytes,
     )
     combined_log = "\n".join((stdout, stderr, emulator_log))
+    screenshots = _find_valid_screenshots(artifact_directory)
 
     failures: list[str] = []
     if outcome not in case.allowed_outcomes:
@@ -374,6 +478,11 @@ def run_case(
     for pattern in case.forbidden_log_patterns:
         if pattern in combined_log:
             failures.append(f"forbidden log pattern found: {pattern!r}")
+    if len(screenshots) < len(case.screenshot_seconds):
+        failures.append(
+            f"captured {len(screenshots)} valid screenshots; expected "
+            f"{len(case.screenshot_seconds)}"
+        )
 
     return CaseResult(
         name=case.name,
@@ -385,6 +494,7 @@ def run_case(
         output_truncated=(
             truncated.is_set() or stdout_truncated or stderr_truncated or log_truncated
         ),
+        screenshots=screenshots,
         failures=failures,
     )
 

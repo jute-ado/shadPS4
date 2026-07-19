@@ -12,6 +12,23 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import zlib
+
+
+def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    checksum = zlib.crc32(chunk_type + data).to_bytes(4, "big")
+    return len(data).to_bytes(4, "big") + chunk_type + data + checksum
+
+
+def one_pixel_png() -> bytes:
+    ihdr = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+    scanline = b"\x00\x00\x00\x00\xff"
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(scanline))
+        + png_chunk(b"IEND", b"")
+    )
 
 
 def main() -> int:
@@ -24,6 +41,8 @@ def main() -> int:
     parser.add_argument("--emit-bytes", type=int, default=0)
     parser.add_argument("--spawn-child", action="store_true")
     parser.add_argument("--expect-ipc", action="store_true")
+    parser.add_argument("--ignore-screenshots", action="store_true")
+    parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("game")
     args = parser.parse_args()
 
@@ -40,7 +59,21 @@ def main() -> int:
         time.sleep(args.sleep)
 
     if args.expect_ipc:
-        ipc_commands.append(sys.stdin.readline().strip())
+        while True:
+            command = sys.stdin.readline().strip()
+            ipc_commands.append(command)
+            if command == "SCREENSHOT" and not args.ignore_screenshots:
+                screenshots = Path("user") / "screenshots"
+                screenshots.mkdir(parents=True, exist_ok=True)
+                index = len(list(screenshots.iterdir()))
+                png = (
+                    b"\x89PNG\r\n\x1a\nmalformed"
+                    if args.malformed_screenshots
+                    else one_pixel_png()
+                )
+                (screenshots / f"fake_{index}.png").write_bytes(png)
+            if command == "STOP" or not command:
+                break
 
     if args.stdout:
         print(args.stdout)

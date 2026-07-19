@@ -22,6 +22,9 @@ Each case supports:
 - `gamePath`: installed game directory or ELF path.
 - `timeoutSeconds`: positive hard process timeout.
 - `useIpc`: enable shadPS4 IPC start/stop control for graceful log flushing.
+- `screenshotSeconds`: optional increasing list of times, in seconds after
+  launch, at which to capture game-only frames. Requires `useIpc`; every
+  requested capture must produce a valid PNG for the case to pass.
 - `args`: arguments inserted before the game path.
 - `allowedOutcomes`: any of `exited_zero`, `exited_nonzero`, or `timed_out`.
 - `requiredLogPatterns`: literal strings that must occur in stdout, stderr, or
@@ -34,8 +37,8 @@ The optional top-level `emulator` path can be overridden with `--emulator`.
 
 ```powershell
 python scripts/game_test_runner.py `
-  --manifest F:\private\shadps4-games.json `
-  --artifacts F:\private\results\2026-07-19
+  --manifest path\to\private-games.json `
+  --artifacts artifacts\game-tests\local-run
 ```
 
 Alternatively, set `SHADPS4_GAME_TEST_MANIFEST` and omit `--manifest`.
@@ -44,7 +47,8 @@ directory and empty `user` directory, which activates shadPS4's portable-user
 mode. The runner writes capped stdout and stderr logs, preserves the emulator
 log, and writes `game-test-report.json`. With `useIpc` enabled it sends `RUN`
 and `START`, then requests a graceful `STOP` at the deadline before falling
-back to complete process-tree termination.
+back to complete process-tree termination. Scheduled screenshot paths are
+included in the report.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
@@ -65,4 +69,4 @@ python -m coverage report -m --include="scripts/game_test_runner.py"
 The synthetic tests cover manifest validation, relative paths, working
 directory isolation, allowed outcomes, required and forbidden log markers,
 bounded output, JSON reports, safe artifact names, IPC-controlled shutdown,
-and hard timeout behavior.
+scheduled screenshot capture and validation, and hard timeout behavior.
