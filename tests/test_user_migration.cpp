@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <gtest/gtest.h>
 
 #include "core/user_migration.h"
@@ -13,7 +14,9 @@ namespace fs = std::filesystem;
 class UserMigrationTest : public testing::Test {
 protected:
     void SetUp() override {
-        root = fs::temp_directory_path() / "shadps4-user-migration-test";
+        const auto* test_info = testing::UnitTest::GetInstance()->current_test_info();
+        root = fs::temp_directory_path() /
+               ("shadps4-user-migration-test-" + std::string(test_info->name()));
         fs::remove_all(root);
         fs::create_directories(root);
     }
