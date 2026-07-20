@@ -477,6 +477,14 @@ struct Sampler {
         return static_cast<float>(max_lod.Value()) / 256.0f;
     }
 
+    float EffectiveMinLod() const noexcept {
+        return mip_filter.Value() == MipFilter::None ? 0.0f : MinLod();
+    }
+
+    float EffectiveMaxLod() const noexcept {
+        return mip_filter.Value() == MipFilter::None ? 0.0f : MaxLod();
+    }
+
     float MaxAniso() const {
         switch (max_aniso.Value()) {
         case AnisoRatio::One:
