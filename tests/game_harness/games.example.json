@@ -8,9 +8,23 @@
       "timeoutSeconds": 30,
       "useIpc": true,
       "screenshotSeconds": [
-        10
+        10,
+        12,
+        16
       ],
-      "minimumDistinctScreenshots": 1,
+      "minimumDistinctScreenshots": 2,
+      "screenshotComparisons": [
+        {
+          "firstScreenshot": 0,
+          "secondScreenshot": 1,
+          "maximumDifference": 0.01
+        },
+        {
+          "firstScreenshot": 1,
+          "secondScreenshot": 2,
+          "minimumDifference": 0.02
+        }
+      ],
       "buttonEvents": [
         {
           "seconds": 5,
@@ -25,13 +39,13 @@
       ],
       "axisEvents": [
         {
-          "seconds": 6,
-          "axis": "left_x",
+          "seconds": 13,
+          "axis": "right_x",
           "value": 255
         },
         {
-          "seconds": 7,
-          "axis": "left_x",
+          "seconds": 14,
+          "axis": "right_x",
           "value": 128
         }
       ],

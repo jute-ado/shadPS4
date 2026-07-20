@@ -32,6 +32,14 @@ Each case supports:
 - `minimumDistinctScreenshots`: optional minimum number of unique screenshot
   contents required for the case to pass. This detects frozen or repeatedly
   blank output when multiple frames are scheduled.
+- `screenshotComparisons`: optional pixel-level relationships between captures,
+  referenced by their zero-based positions in `screenshotSeconds`. Each entry
+  names `firstScreenshot` and `secondScreenshot` and supplies
+  `minimumDifference`, `maximumDifference`, or both. Difference is the mean
+  absolute RGB-channel change normalized from 0 (identical) to 1 (maximum
+  change); alpha is ignored. A low maximum before input establishes a stable
+  baseline, while a meaningful minimum after input proves a visual response.
+  Choose thresholds from repeat runs of the particular game and scene.
 - `buttonEvents`: optional increasing list of player-one button transitions.
   Each entry has `seconds`, a supported `button` name, and a Boolean `pressed`
   state. Requires `useIpc`. Model a tap with a press followed by a release.
@@ -75,9 +83,10 @@ IPC capability handshake, sends `RUN` and `START`, then requests a graceful
 termination. The hard timeout remains relative to process launch, while
 scheduled actions are relative to acknowledged IPC startup. Scheduled
 screenshot paths are included in the report together with their SHA-256
-content hashes. Button, axis, and touch events plus screenshot requests share
-the same monotonic post-handshake timeline, allowing deterministic navigation,
-movement, gestures, and visual checkpoints.
+content hashes and requested pixel-difference measurements. Button, axis, and
+touch events plus screenshot requests share the same monotonic post-handshake
+timeline, allowing deterministic navigation, movement, gestures, and causal
+visual assertions.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
@@ -99,4 +108,5 @@ The synthetic tests cover manifest validation, relative paths, working
 directory isolation, allowed outcomes, required and forbidden log markers,
 bounded output, JSON reports, safe artifact names, IPC handshake and controlled
 shutdown, scheduled digital, analog, and touchpad controller input, screenshot
-capture and validation, and hard timeout behavior.
+capture and validation, pixel-level stable/change relationships, and hard
+timeout behavior.
