@@ -44,6 +44,11 @@ Each case supports:
   `right_x`, `right_y`, `l2`, and `r2`. Stick axes are centered at 128;
   triggers are released at 0. Schedule a return-to-center or release event
   explicitly when an action should end.
+- `touchEvents`: optional increasing list of player-one touchpad updates. Each
+  entry has `seconds`, a `finger` index of 0 or 1, a Boolean `down` state, and
+  native PS4 `x`/`y` coordinates. Valid coordinates are 0 through 1919
+  horizontally and 0 through 941 vertically. Requires `useIpc`; model a tap
+  with a down event followed by an up event at the same coordinates.
 - `args`: arguments inserted before the game path.
 - `allowedOutcomes`: any of `exited_zero`, `exited_nonzero`, or `timed_out`.
 - `requiredLogPatterns`: literal strings that must occur in stdout, stderr, or
@@ -70,9 +75,9 @@ IPC capability handshake, sends `RUN` and `START`, then requests a graceful
 termination. The hard timeout remains relative to process launch, while
 scheduled actions are relative to acknowledged IPC startup. Scheduled
 screenshot paths are included in the report together with their SHA-256
-content hashes. Button events, axis events, and screenshot requests share the
-same monotonic post-handshake timeline, allowing deterministic navigation,
-movement, and visual checkpoints.
+content hashes. Button, axis, and touch events plus screenshot requests share
+the same monotonic post-handshake timeline, allowing deterministic navigation,
+movement, gestures, and visual checkpoints.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
@@ -92,6 +97,6 @@ python -m coverage report -m --include="scripts/game_test_runner.py"
 
 The synthetic tests cover manifest validation, relative paths, working
 directory isolation, allowed outcomes, required and forbidden log markers,
-bounded output, JSON reports, safe artifact names, IPC handshake and controlled shutdown,
-scheduled digital and analog controller input, screenshot capture and
-validation, and hard timeout behavior.
+bounded output, JSON reports, safe artifact names, IPC handshake and controlled
+shutdown, scheduled digital, analog, and touchpad controller input, screenshot
+capture and validation, and hard timeout behavior.

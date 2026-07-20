@@ -65,6 +65,15 @@ class AxisEvent:
 
 
 @dataclass(frozen=True)
+class TouchEvent:
+    seconds: float
+    finger: int
+    down: bool
+    x: int
+    y: int
+
+
+@dataclass(frozen=True)
 class GameCase:
     name: str
     game_path: Path
@@ -74,6 +83,7 @@ class GameCase:
     minimum_distinct_screenshots: int = 0
     button_events: tuple[ButtonEvent, ...] = ()
     axis_events: tuple[AxisEvent, ...] = ()
+    touch_events: tuple[TouchEvent, ...] = ()
     args: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ("exited_zero",)
     required_log_patterns: tuple[str, ...] = ()
@@ -270,6 +280,59 @@ def _require_axis_events(
     return tuple(events)
 
 
+def _require_touch_events(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+) -> tuple[TouchEvent, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ManifestError(f"{case_name}: touchEvents must be an array")
+    events: list[TouchEvent] = []
+    for index, item in enumerate(raw):
+        field = f"{case_name}: touchEvents[{index}]"
+        if not isinstance(item, dict):
+            raise ManifestError(f"{field} must be an object")
+        seconds = item.get("seconds")
+        if (
+            not isinstance(seconds, (int, float))
+            or isinstance(seconds, bool)
+            or not math.isfinite(seconds)
+            or seconds <= 0
+            or seconds >= timeout
+        ):
+            raise ManifestError(
+                f"{field}.seconds must be a finite positive number before timeoutSeconds"
+            )
+        finger = item.get("finger")
+        if not isinstance(finger, int) or isinstance(finger, bool):
+            raise ManifestError(f"{field}.finger must be an integer")
+        if finger not in (0, 1):
+            raise ManifestError(f"{field}.finger must be 0 or 1")
+        down = item.get("down")
+        if not isinstance(down, bool):
+            raise ManifestError(f"{field}.down must be a boolean")
+        coordinates: list[int] = []
+        for name, maximum in (("x", 1919), ("y", 941)):
+            value = item.get(name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ManifestError(f"{field}.{name} must be an integer")
+            if value < 0 or value > maximum:
+                raise ManifestError(f"{field}.{name} must be between 0 and {maximum}")
+            coordinates.append(value)
+        events.append(
+            TouchEvent(float(seconds), finger, down, coordinates[0], coordinates[1])
+        )
+    if any(
+        later.seconds <= earlier.seconds for earlier, later in zip(events, events[1:])
+    ):
+        raise ManifestError(
+            f"{case_name}: touchEvents must be in increasing time order"
+        )
+    if events and not use_ipc:
+        raise ManifestError(f"{case_name}: touchEvents requires useIpc")
+    return tuple(events)
+
+
 def _resolve_existing_path(root: Path, raw: Any, field: str) -> Path:
     if not isinstance(raw, str) or not raw:
         raise ManifestError(f"{field} must be a non-empty string")
@@ -353,6 +416,12 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=float(timeout),
             use_ipc=use_ipc,
         )
+        touch_events = _require_touch_events(
+            raw_case.get("touchEvents"),
+            case_name=name,
+            timeout=float(timeout),
+            use_ipc=use_ipc,
+        )
         cases.append(
             GameCase(
                 name=name,
@@ -369,6 +438,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ),
                 button_events=button_events,
                 axis_events=axis_events,
+                touch_events=touch_events,
                 args=args,
                 allowed_outcomes=outcomes,
                 required_log_patterns=_require_string_list(
@@ -614,7 +684,7 @@ def run_case(
         required_capabilities = ["ENABLE_EMU_CONTROL"]
         if case.screenshot_seconds:
             required_capabilities.append("ENABLE_SCREENSHOT")
-        if case.button_events or case.axis_events:
+        if case.button_events or case.axis_events or case.touch_events:
             required_capabilities.append("ENABLE_GAMEPAD")
         missing_ipc_capabilities = tuple(
             capability
@@ -635,6 +705,7 @@ def run_case(
             [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]
             + [(event.seconds, "button", event) for event in case.button_events]
             + [(event.seconds, "axis", event) for event in case.axis_events]
+            + [(event.seconds, "touch", event) for event in case.touch_events]
         )
         timeline.sort(key=lambda entry: entry[0])
         for event_second, event_type, payload in timeline:
@@ -657,12 +728,23 @@ def run_case(
                             f"{int(payload.pressed)}\n"
                         ).encode("ascii")
                     )
-                else:
+                elif event_type == "axis":
                     assert isinstance(payload, AxisEvent)
                     process.stdin.write(
                         (f"GAMEPAD_AXIS\n{payload.axis}\n{payload.value}\n").encode(
                             "ascii"
                         )
+                    )
+                else:
+                    assert isinstance(payload, TouchEvent)
+                    process.stdin.write(
+                        (
+                            "GAMEPAD_TOUCH\n"
+                            f"{payload.finger}\n"
+                            f"{int(payload.down)}\n"
+                            f"{payload.x}\n"
+                            f"{payload.y}\n"
+                        ).encode("ascii")
                     )
                 process.stdin.flush()
         if not process_exited:

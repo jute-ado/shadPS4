@@ -25,6 +25,7 @@
 #include "imgui/friends_layer.h"
 #include "imgui/renderer/imgui_core.h"
 #include "input/controller.h"
+#include "input/controller_touch.h"
 #include "input/input_handler.h"
 #include "input/input_mouse.h"
 #include "sdl_window.h"
@@ -353,6 +354,13 @@ void WindowSDL::WaitEvent() {
                              static_cast<int>(reinterpret_cast<uintptr_t>(event.user.data1)),
                              false);
         break;
+    case SDL_EVENT_INJECT_GAMEPAD_TOUCH: {
+        const auto touch = Input::UnpackControllerTouch(
+            static_cast<u8>(event.user.code),
+            static_cast<u64>(reinterpret_cast<uintptr_t>(event.user.data1)));
+        controllers[0]->SetTouchpadStateNative(touch.finger, touch.down, touch.x, touch.y);
+        break;
+    }
     default:
         break;
     }

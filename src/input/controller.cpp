@@ -56,9 +56,13 @@ void State::OnAxis(Axis axis, int value, bool smooth) {
 }
 
 void State::OnTouchpad(int touchIndex, bool isDown, float x, float y) {
+    OnTouchpadNative(touchIndex, isDown, static_cast<u16>(x * 1920), static_cast<u16>(y * 941));
+}
+
+void State::OnTouchpadNative(int touchIndex, bool isDown, u16 x, u16 y) {
     touchpad[touchIndex].state = isDown;
-    touchpad[touchIndex].x = static_cast<u16>(x * 1920);
-    touchpad[touchIndex].y = static_cast<u16>(y * 941);
+    touchpad[touchIndex].x = x;
+    touchpad[touchIndex].y = y;
 }
 
 void State::OnGyro(const float gyro[3]) {
@@ -199,9 +203,14 @@ bool GameController::SetVibration(u8 smallMotor, u8 largeMotor) {
 }
 
 void GameController::SetTouchpadState(int touchIndex, bool touchDown, float x, float y) {
+    SetTouchpadStateNative(touchIndex, touchDown, static_cast<u16>(x * 1920),
+                           static_cast<u16>(y * 941));
+}
+
+void GameController::SetTouchpadStateNative(int touchIndex, bool touchDown, u16 x, u16 y) {
     if (touchIndex < 2) {
         bool was_pressed = m_state.touchpad[0].state || m_state.touchpad[1].state;
-        m_state.OnTouchpad(touchIndex, touchDown, x, y);
+        m_state.OnTouchpadNative(touchIndex, touchDown, x, y);
         PushState();
         if (!m_state.touchpad[0].state && !m_state.touchpad[1].state && was_pressed) {
             last_touch_down_timestamp = 0;
