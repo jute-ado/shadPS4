@@ -81,6 +81,85 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(manifest.emulator, emulator.resolve())
             self.assertEqual(manifest.cases[0].game_path, game.resolve())
 
+    def test_load_manifest_resolves_portable_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            config = root / "profiles" / "config.json"
+            config.parent.mkdir()
+            config.write_text('{"GPU":{"readbackLinearImages":true}}', encoding="utf-8")
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "configured boot",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "userConfig": "profiles/config.json",
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(load_manifest(path).cases[0].user_config, config.resolve())
+
+    def test_load_manifest_rejects_invalid_portable_user_config(self) -> None:
+        for content in ("not json", "[]"):
+            with (
+                self.subTest(content=content),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                (root / "config.json").write_text(content, encoding="utf-8")
+                path = self.write_manifest(
+                    root,
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "bad config",
+                                "gamePath": "game",
+                                "timeoutSeconds": 1,
+                                "userConfig": "config.json",
+                            }
+                        ],
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    ManifestError, "userConfig must contain a JSON object"
+                ):
+                    load_manifest(path)
+
+    def test_load_manifest_rejects_config_ignored_by_clean_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            (root / "config.json").write_text("{}", encoding="utf-8")
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "ignored config",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "userConfig": "config.json",
+                            "args": ["--config-clean"],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "userConfig cannot be combined with --config-clean"
+            ):
+                load_manifest(path)
+
     def test_load_manifest_rejects_unsupported_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_manifest(
@@ -1015,6 +1094,38 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(observation["user_directory_exists"])
             self.assertEqual(Path(observation["cwd"]), result.artifact_directory)
             self.assertEqual(Path(observation["game"]), (root / "game").resolve())
+
+    def test_run_case_installs_private_config_in_portable_user_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "profile.json"
+            expected = {"GPU": {"readbackLinearImages": True}}
+            config.write_text(json.dumps(expected), encoding="utf-8")
+            manifest = load_manifest(
+                self.make_manifest(
+                    root,
+                    case={
+                        "name": "configured boot",
+                        "userConfig": "profile.json",
+                    },
+                )
+            )
+
+            result = run_case(
+                manifest.cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            copied = result.artifact_directory / "user" / "config.json"
+            self.assertEqual(json.loads(copied.read_text(encoding="utf-8")), expected)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(observation["user_config"], expected)
 
     def test_run_case_reports_nonzero_exit_when_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
