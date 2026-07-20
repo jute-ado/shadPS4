@@ -839,6 +839,68 @@ class RunnerTests(unittest.TestCase):
                 ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
             )
 
+    def test_run_case_starts_action_timeline_after_ipc_handshake(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "delayed IPC startup",
+                    "timeoutSeconds": 0.35,
+                    "args": [
+                        "--expect-ipc",
+                        "--ipc-handshake-delay",
+                        "0.1",
+                    ],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            commands = observation["ipc_commands"]
+            command_seconds = observation["ipc_command_seconds"]
+            screenshot = commands.index("SCREENSHOT")
+            start = commands.index("START")
+            self.assertGreaterEqual(
+                command_seconds[screenshot] - command_seconds[start], 0.04
+            )
+
+    def test_run_case_fails_when_ipc_handshake_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "missing IPC handshake",
+                    "timeoutSeconds": 0.15,
+                    "args": ["--expect-ipc", "--omit-ipc-handshake"],
+                    "useIpc": True,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn("IPC handshake was not observed", result.failures)
+
     def test_run_case_interleaves_button_events_and_screenshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
