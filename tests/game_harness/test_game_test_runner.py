@@ -330,6 +330,7 @@ class ManifestTests(unittest.TestCase):
                                     "firstScreenshot": 1,
                                     "secondScreenshot": 2,
                                     "minimumDifference": 0.2,
+                                    "differenceMode": "cosine",
                                 },
                             ],
                         }
@@ -346,11 +347,49 @@ class ManifestTests(unittest.TestCase):
                         comparison.second_screenshot,
                         comparison.minimum_difference,
                         comparison.maximum_difference,
+                        comparison.difference_mode,
                     )
                     for comparison in case.screenshot_comparisons
                 ],
-                [(0, 1, None, 0.01), (1, 2, 0.2, None)],
+                [
+                    (0, 1, None, 0.01, "mean_absolute"),
+                    (1, 2, 0.2, None, "cosine"),
+                ],
             )
+
+    def test_load_manifest_rejects_unknown_screenshot_difference_mode(self) -> None:
+        for value in ("unknown", []):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "game").mkdir()
+                path = self.write_manifest(
+                    root,
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "bad comparison mode",
+                                "gamePath": "game",
+                                "timeoutSeconds": 2,
+                                "useIpc": True,
+                                "screenshotSeconds": [0.25, 0.5],
+                                "screenshotComparisons": [
+                                    {
+                                        "firstScreenshot": 0,
+                                        "secondScreenshot": 1,
+                                        "minimumDifference": 0.1,
+                                        "differenceMode": value,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    ManifestError, "differenceMode must be one of"
+                ):
+                    load_manifest(path)
 
     def test_load_manifest_rejects_screenshot_comparison_out_of_range(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1085,6 +1124,32 @@ class PngComparisonTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "different dimensions"):
                 _screenshot_difference(first, second)
+
+    def test_cosine_screenshot_difference_detects_moved_dark_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(
+                test_png(4, 1, 2, bytes((0, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+            )
+            second.write_bytes(
+                test_png(4, 1, 2, bytes((0, *([0] * 9), 8, 8, 8)))
+            )
+
+            self.assertLess(_screenshot_difference(first, second), 0.02)
+            self.assertEqual(_screenshot_difference(first, second, mode="cosine"), 1.0)
+
+    def test_cosine_screenshot_difference_handles_black_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            black = root / "black.png"
+            detail = root / "detail.png"
+            black.write_bytes(test_png(1, 1, 2, bytes((0, 0, 0, 0))))
+            detail.write_bytes(test_png(1, 1, 2, bytes((0, 1, 1, 1))))
+
+            self.assertEqual(_screenshot_difference(black, black, mode="cosine"), 0.0)
+            self.assertEqual(_screenshot_difference(black, detail, mode="cosine"), 1.0)
 
 
 class RunnerTests(unittest.TestCase):
@@ -1864,6 +1929,38 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(len(result.screenshot_differences), 2)
             self.assertEqual(result.screenshot_differences[0], 0.0)
             self.assertGreaterEqual(result.screenshot_differences[1], 0.001)
+
+    def test_run_case_uses_cosine_difference_for_dark_movement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "dark causal visual",
+                    "timeoutSeconds": 0.2,
+                    "args": ["--expect-ipc", "--dark-movement-screenshots"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05, 0.1],
+                    "screenshotComparisons": [
+                        {
+                            "firstScreenshot": 0,
+                            "secondScreenshot": 1,
+                            "minimumDifference": 0.9,
+                            "differenceMode": "cosine",
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertGreaterEqual(result.screenshot_differences[0], 0.9)
 
     def test_run_case_rejects_unmet_screenshot_relationship(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

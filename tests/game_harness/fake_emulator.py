@@ -31,6 +31,20 @@ def one_pixel_png(red: int = 0) -> bytes:
     )
 
 
+def dark_movement_png(index: int) -> bytes:
+    ihdr = b"\x00\x00\x00\x04\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+    pixels = bytearray((0, 0, 0, 255) * 4)
+    detail = 0 if index == 0 else 12
+    pixels[detail : detail + 3] = bytes((8, 8, 8))
+    scanline = b"\x00" + bytes(pixels)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(scanline))
+        + png_chunk(b"IEND", b"")
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exit-code", type=int, default=0)
@@ -52,6 +66,7 @@ def main() -> int:
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots-after", type=int)
+    parser.add_argument("--dark-movement-screenshots", action="store_true")
     parser.add_argument("game")
     args = parser.parse_args()
 
@@ -94,10 +109,12 @@ def main() -> int:
                 screenshots = Path("user") / "screenshots"
                 screenshots.mkdir(parents=True, exist_ok=True)
                 index = len(list(screenshots.iterdir()))
-                png = (
-                    b"\x89PNG\r\n\x1a\nmalformed"
-                    if args.malformed_screenshots
-                    else one_pixel_png(
+                if args.malformed_screenshots:
+                    png = b"\x89PNG\r\n\x1a\nmalformed"
+                elif args.dark_movement_screenshots:
+                    png = dark_movement_png(index)
+                else:
+                    png = one_pixel_png(
                         index
                         if args.vary_screenshots
                         or (
@@ -106,7 +123,6 @@ def main() -> int:
                         )
                         else 0
                     )
-                )
                 (screenshots / f"fake_{index}.png").write_bytes(png)
             if command == "RENDERDOC_CAPTURE" and not args.ignore_renderdoc_captures:
                 captures = Path("user") / "captures"
