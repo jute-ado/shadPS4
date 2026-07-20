@@ -306,6 +306,113 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "axisEvents requires useIpc"):
                 load_manifest(path)
 
+    def test_load_manifest_accepts_scheduled_touch_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "touch gesture",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "touchEvents": [
+                                {
+                                    "seconds": 0.25,
+                                    "finger": 0,
+                                    "down": True,
+                                    "x": 960,
+                                    "y": 470,
+                                },
+                                {
+                                    "seconds": 0.75,
+                                    "finger": 0,
+                                    "down": False,
+                                    "x": 960,
+                                    "y": 470,
+                                },
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertEqual(
+                [
+                    (event.seconds, event.finger, event.down, event.x, event.y)
+                    for event in manifest.cases[0].touch_events
+                ],
+                [(0.25, 0, True, 960, 470), (0.75, 0, False, 960, 470)],
+            )
+
+    def test_load_manifest_rejects_invalid_touch_events(self) -> None:
+        valid = {"seconds": 0.25, "finger": 0, "down": True, "x": 960, "y": 470}
+        invalid_events = (
+            ("not-an-array", "touchEvents must be an array"),
+            (["not-an-object"], "must be an object"),
+            ([{**valid, "seconds": True}], "before timeoutSeconds"),
+            ([{**valid, "finger": True}], "finger must be an integer"),
+            ([{**valid, "finger": 2}], "finger must be 0 or 1"),
+            ([{**valid, "down": 1}], "down must be a boolean"),
+            ([{**valid, "x": True}], "x must be an integer"),
+            ([{**valid, "x": 1920}], "x must be between 0 and 1919"),
+            ([{**valid, "y": -1}], "y must be between 0 and 941"),
+            (
+                [{**valid, "seconds": 0.5}, {**valid, "seconds": 0.25}],
+                "in increasing time order",
+            ),
+        )
+        for events, expected in invalid_events:
+            with (
+                self.subTest(expected=expected),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                path = self.write_manifest(
+                    root,
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "invalid touch input",
+                                "gamePath": "game",
+                                "timeoutSeconds": 2,
+                                "useIpc": True,
+                                "touchEvents": events,
+                            }
+                        ],
+                    },
+                )
+                with self.assertRaisesRegex(ManifestError, expected):
+                    load_manifest(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "touch input needs IPC",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "touchEvents": [valid],
+                        }
+                    ],
+                },
+            )
+            with self.assertRaisesRegex(ManifestError, "touchEvents requires useIpc"):
+                load_manifest(path)
+
     def test_load_manifest_rejects_missing_game_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_manifest(
@@ -1054,6 +1161,70 @@ class RunnerTests(unittest.TestCase):
                     "GAMEPAD_AXIS",
                     "left_y",
                     "128",
+                    "SCREENSHOT",
+                    "STOP",
+                ],
+            )
+
+    def test_run_case_interleaves_touch_events_with_visual_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "touch visual survival",
+                    "timeoutSeconds": 0.3,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "touchEvents": [
+                        {
+                            "seconds": 0.05,
+                            "finger": 0,
+                            "down": True,
+                            "x": 960,
+                            "y": 470,
+                        },
+                        {
+                            "seconds": 0.2,
+                            "finger": 0,
+                            "down": False,
+                            "x": 960,
+                            "y": 470,
+                        },
+                    ],
+                    "screenshotSeconds": [0.1, 0.25],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                [
+                    "RUN",
+                    "START",
+                    "GAMEPAD_TOUCH",
+                    "0",
+                    "1",
+                    "960",
+                    "470",
+                    "SCREENSHOT",
+                    "GAMEPAD_TOUCH",
+                    "0",
+                    "0",
+                    "960",
+                    "470",
                     "SCREENSHOT",
                     "STOP",
                 ],

@@ -55,6 +55,7 @@ public:
     void OnButton(Libraries::Pad::OrbisPadButtonDataOffset, bool);
     void OnAxis(Axis, int, bool smooth = true);
     void OnTouchpad(int touchIndex, bool isDown, float x, float y);
+    void OnTouchpadNative(int touchIndex, bool isDown, u16 x, u16 y);
     void OnGyro(const float[3]);
     void OnAccel(const float[3]);
     void UpdateAxisSmoothing();
@@ -98,6 +99,7 @@ public:
     void PollLightColour();
     bool SetVibration(u8 smallMotor, u8 largeMotor);
     void SetTouchpadState(int touchIndex, bool touchDown, float x, float y);
+    void SetTouchpadStateNative(int touchIndex, bool touchDown, u16 x, u16 y);
 
     u8 GetTouchCount();
     void SetTouchCount(u8 touchCount);

@@ -35,6 +35,22 @@
           "value": 128
         }
       ],
+      "touchEvents": [
+        {
+          "seconds": 8,
+          "finger": 0,
+          "down": true,
+          "x": 960,
+          "y": 470
+        },
+        {
+          "seconds": 8.5,
+          "finger": 0,
+          "down": false,
+          "x": 960,
+          "y": 470
+        }
+      ],
       "args": [
         "--config-clean"
       ],

@@ -18,6 +18,7 @@
 #include "core/libraries/audio/audioout.h"
 #include "input/controller_axis.h"
 #include "input/controller_button.h"
+#include "input/controller_touch.h"
 #include "input/input_handler.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
@@ -73,8 +74,14 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *release
  *   - GAMEPAD_AXIS
  *     - axis: player-one axis name
- *     - value: exact PS4 byte
- *value from 0 through 255
+ *     - value: exact PS4 byte (0-255)
+ *  -
+ * GAMEPAD_TOUCH
+ *     - finger: touch index, 0 or 1
+ *     - down: touch state (0 or 1)
+ *     -
+ * x: native PS4 coordinate (0-1919)
+ *     - y: native PS4 coordinate (0-941)
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -198,6 +205,24 @@ void IPC::InputLoop() {
             event.type = SDL_EVENT_INJECT_GAMEPAD_AXIS;
             event.user.code = static_cast<Sint32>(*axis);
             event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(value));
+            SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_TOUCH") {
+            const u64 finger = next_u64();
+            const u64 down = next_u64();
+            const u64 x = next_u64();
+            const u64 y = next_u64();
+            if (down > 1 || !Input::IsValidControllerTouch(finger, x, y)) {
+                std::cerr << ";INVALID GAMEPAD TOUCH: " << finger << ' ' << down << ' ' << x << ' '
+                          << y << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_TOUCH;
+            event.user.code = static_cast<Sint32>(finger);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(
+                Input::PackControllerTouch(static_cast<u16>(x), static_cast<u16>(y), down != 0)));
             SDL_PushEvent(&event);
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());
