@@ -46,7 +46,9 @@ def main() -> int:
     parser.add_argument("--omit-control-capability", action="store_true")
     parser.add_argument("--omit-gamepad-capability", action="store_true")
     parser.add_argument("--omit-screenshot-capability", action="store_true")
+    parser.add_argument("--omit-renderdoc-capability", action="store_true")
     parser.add_argument("--ignore-screenshots", action="store_true")
+    parser.add_argument("--ignore-renderdoc-captures", action="store_true")
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots-after", type=int)
@@ -66,6 +68,8 @@ def main() -> int:
                 capabilities.append(";ENABLE_GAMEPAD")
             if not args.omit_screenshot_capability:
                 capabilities.append(";ENABLE_SCREENSHOT")
+            if not args.omit_renderdoc_capability:
+                capabilities.append(";ENABLE_RENDERDOC_CAPTURE")
             print(
                 "\n".join((";#IPC_ENABLED", *capabilities, ";#IPC_END")),
                 file=sys.stderr,
@@ -104,6 +108,13 @@ def main() -> int:
                     )
                 )
                 (screenshots / f"fake_{index}.png").write_bytes(png)
+            if command == "RENDERDOC_CAPTURE" and not args.ignore_renderdoc_captures:
+                captures = Path("user") / "captures"
+                captures.mkdir(parents=True, exist_ok=True)
+                index = len(list(captures.iterdir()))
+                (captures / f"fake_{index}.rdc").write_bytes(
+                    b"synthetic RenderDoc capture"
+                )
             if command == "STOP" or not command:
                 break
 

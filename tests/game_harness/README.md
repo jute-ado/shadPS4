@@ -31,10 +31,19 @@ Each case supports:
   The emulator's IPC capability handshake is required before the runner sends
   `RUN` and `START`; a missing handshake or required capability fails the case.
   All IPC cases require `ENABLE_EMU_CONTROL`, scheduled screenshots require
-  `ENABLE_SCREENSHOT`, and controller events require `ENABLE_GAMEPAD`.
+  `ENABLE_SCREENSHOT`, scheduled RenderDoc captures require
+  `ENABLE_RENDERDOC_CAPTURE`, and controller events require `ENABLE_GAMEPAD`.
 - `screenshotSeconds`: optional increasing list of times, in seconds after the
   IPC handshake, at which to capture game-only frames. Requires `useIpc`; every
   requested capture must produce a valid PNG for the case to pass.
+- `renderdocCaptureSeconds`: optional increasing list of times, in seconds after
+  the IPC handshake, at which to capture a complete RenderDoc frame. Requires
+  `useIpc` and a process launched with RenderDoc loaded; every requested capture
+  must produce a non-empty `.rdc` file for the case to pass.
+  Vulkan runs must also have `VK_LAYER_RENDERDOC_Capture` active. A portable
+  setup can point `VK_LAYER_PATH` or `VK_ADD_LAYER_PATH` at the directory that
+  contains `renderdoc.json`, set `VK_INSTANCE_LAYERS` to that layer name, and
+  set `ENABLE_VULKAN_RENDERDOC_CAPTURE=1` before launching the runner.
 - `minimumDistinctScreenshots`: optional minimum number of unique screenshot
   contents required for the case to pass. This detects frozen or repeatedly
   blank output when multiple frames are scheduled.
@@ -90,10 +99,11 @@ IPC capability handshake, sends `RUN` and `START`, then requests a graceful
 termination. The hard timeout remains relative to process launch, while
 scheduled actions are relative to acknowledged IPC startup. Scheduled
 screenshot paths are included in the report together with their SHA-256
-content hashes and requested pixel-difference measurements. Button, axis, and
-touch events plus screenshot requests share the same monotonic post-handshake
-timeline, allowing deterministic navigation, movement, gestures, and causal
-visual assertions.
+content hashes and requested pixel-difference measurements. RenderDoc capture
+paths and hashes are included as well. Button, axis, touch, screenshot, and
+RenderDoc events share the same monotonic post-handshake timeline, allowing
+deterministic navigation, movement, gestures, causal visual assertions, and
+frame-level GPU diagnosis.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
@@ -115,5 +125,5 @@ The synthetic tests cover manifest validation, relative paths, working
 directory isolation, allowed outcomes, required and forbidden log markers,
 bounded output, JSON reports, safe artifact names, IPC handshake and controlled
 shutdown, scheduled digital, analog, and touchpad controller input, screenshot
-capture and validation, pixel-level stable/change relationships, and hard
-timeout behavior.
+and RenderDoc capture validation, pixel-level stable/change relationships, and
+hard timeout behavior.

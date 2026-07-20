@@ -90,6 +90,7 @@ class GameCase:
     user_config: Path | None = None
     use_ipc: bool = False
     screenshot_seconds: tuple[float, ...] = ()
+    renderdoc_capture_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
     screenshot_comparisons: tuple[ScreenshotComparison, ...] = ()
     button_events: tuple[ButtonEvent, ...] = ()
@@ -120,12 +121,17 @@ class CaseResult:
     screenshots: list[Path]
     screenshot_hashes: list[str]
     screenshot_differences: list[float]
+    renderdoc_captures: list[Path]
+    renderdoc_capture_hashes: list[str]
     failures: list[str]
 
     def to_report(self) -> dict[str, Any]:
         report = asdict(self)
         report["artifact_directory"] = str(self.artifact_directory)
         report["screenshots"] = [str(path) for path in self.screenshots]
+        report["renderdoc_captures"] = [
+            str(path) for path in self.renderdoc_captures
+        ]
         return report
 
 
@@ -156,34 +162,56 @@ def _require_bool(raw: Any, field: str, case_name: str) -> bool:
     return raw
 
 
-def _require_screenshot_schedule(
-    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+def _require_ipc_schedule(
+    raw: Any, *, field: str, case_name: str, timeout: float, use_ipc: bool
 ) -> tuple[float, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list) or any(
         not isinstance(item, (int, float)) or isinstance(item, bool) for item in raw
     ):
-        raise ManifestError(
-            f"{case_name}: screenshotSeconds must be an array of numbers"
-        )
+        raise ManifestError(f"{case_name}: {field} must be an array of numbers")
     schedule = tuple(float(item) for item in raw)
     if any(not math.isfinite(item) for item in schedule):
         raise ManifestError(
-            f"{case_name}: screenshotSeconds entries must be finite numbers"
+            f"{case_name}: {field} entries must be finite numbers"
         )
     if any(item <= 0 or item >= timeout for item in schedule):
         raise ManifestError(
-            f"{case_name}: screenshotSeconds entries must be positive and before "
+            f"{case_name}: {field} entries must be positive and before "
             "timeoutSeconds"
         )
     if tuple(sorted(set(schedule))) != schedule:
         raise ManifestError(
-            f"{case_name}: screenshotSeconds must be unique and increasing"
+            f"{case_name}: {field} must be unique and increasing"
         )
     if schedule and not use_ipc:
-        raise ManifestError(f"{case_name}: screenshotSeconds requires useIpc")
+        raise ManifestError(f"{case_name}: {field} requires useIpc")
     return schedule
+
+
+def _require_screenshot_schedule(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+) -> tuple[float, ...]:
+    return _require_ipc_schedule(
+        raw,
+        field="screenshotSeconds",
+        case_name=case_name,
+        timeout=timeout,
+        use_ipc=use_ipc,
+    )
+
+
+def _require_renderdoc_capture_schedule(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+) -> tuple[float, ...]:
+    return _require_ipc_schedule(
+        raw,
+        field="renderdocCaptureSeconds",
+        case_name=case_name,
+        timeout=timeout,
+        use_ipc=use_ipc,
+    )
 
 
 def _require_minimum_distinct_screenshots(
@@ -508,6 +536,12 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=float(timeout),
             use_ipc=use_ipc,
         )
+        renderdoc_capture_seconds = _require_renderdoc_capture_schedule(
+            raw_case.get("renderdocCaptureSeconds"),
+            case_name=name,
+            timeout=float(timeout),
+            use_ipc=use_ipc,
+        )
         button_events = _require_button_events(
             raw_case.get("buttonEvents"),
             case_name=name,
@@ -536,6 +570,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 user_config=user_config,
                 use_ipc=use_ipc,
                 screenshot_seconds=screenshot_seconds,
+                renderdoc_capture_seconds=renderdoc_capture_seconds,
                 minimum_distinct_screenshots=_require_minimum_distinct_screenshots(
                     raw_case.get("minimumDistinctScreenshots", 0),
                     case_name=name,
@@ -674,7 +709,12 @@ def _find_valid_screenshots(artifact_directory: Path) -> list[Path]:
     return [screenshot for screenshot in screenshots if _is_valid_png(screenshot)]
 
 
-def _hash_screenshot(path: Path) -> str:
+def _find_renderdoc_captures(artifact_directory: Path) -> list[Path]:
+    captures = sorted((artifact_directory / "user" / "captures").glob("*.rdc"))
+    return [capture for capture in captures if capture.is_file() and capture.stat().st_size]
+
+
+def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
@@ -850,6 +890,8 @@ def run_case(
             screenshots=[],
             screenshot_hashes=[],
             screenshot_differences=[],
+            renderdoc_captures=[],
+            renderdoc_capture_hashes=[],
             failures=[failure],
         )
     assert process.stdout is not None
@@ -861,6 +903,7 @@ def run_case(
         for capability in (
             "ENABLE_EMU_CONTROL",
             "ENABLE_GAMEPAD",
+            "ENABLE_RENDERDOC_CAPTURE",
             "ENABLE_SCREENSHOT",
         )
     }
@@ -909,6 +952,8 @@ def run_case(
         required_capabilities = ["ENABLE_EMU_CONTROL"]
         if case.screenshot_seconds:
             required_capabilities.append("ENABLE_SCREENSHOT")
+        if case.renderdoc_capture_seconds:
+            required_capabilities.append("ENABLE_RENDERDOC_CAPTURE")
         if case.button_events or case.axis_events or case.touch_events:
             required_capabilities.append("ENABLE_GAMEPAD")
         missing_ipc_capabilities = tuple(
@@ -928,6 +973,10 @@ def run_case(
         process_exited = False
         timeline = (
             [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]
+            + [
+                (seconds, "renderdoc_capture", None)
+                for seconds in case.renderdoc_capture_seconds
+            ]
             + [(event.seconds, "button", event) for event in case.button_events]
             + [(event.seconds, "axis", event) for event in case.axis_events]
             + [(event.seconds, "touch", event) for event in case.touch_events]
@@ -944,6 +993,8 @@ def run_case(
                 assert process.stdin is not None
                 if event_type == "screenshot":
                     process.stdin.write(b"SCREENSHOT\n")
+                elif event_type == "renderdoc_capture":
+                    process.stdin.write(b"RENDERDOC_CAPTURE\n")
                 elif event_type == "button":
                     assert isinstance(payload, ButtonEvent)
                     process.stdin.write(
@@ -1016,7 +1067,11 @@ def run_case(
     )
     combined_log = "\n".join((stdout, stderr, emulator_log))
     screenshots = _find_valid_screenshots(artifact_directory)
-    screenshot_hashes = [_hash_screenshot(path) for path in screenshots]
+    screenshot_hashes = [_hash_file(path) for path in screenshots]
+    renderdoc_captures = _find_renderdoc_captures(artifact_directory)
+    renderdoc_capture_hashes = [
+        _hash_file(path) for path in renderdoc_captures
+    ]
 
     failures: list[str] = []
     if not ipc_handshake_seen:
@@ -1041,6 +1096,11 @@ def run_case(
         failures.append(
             f"captured {len(screenshots)} valid screenshots; expected "
             f"{len(case.screenshot_seconds)}"
+        )
+    if len(renderdoc_captures) < len(case.renderdoc_capture_seconds):
+        failures.append(
+            f"captured {len(renderdoc_captures)} valid RenderDoc frames; expected "
+            f"{len(case.renderdoc_capture_seconds)}"
         )
     distinct_screenshots = len(set(screenshot_hashes))
     if distinct_screenshots < case.minimum_distinct_screenshots:
@@ -1090,6 +1150,8 @@ def run_case(
         screenshots=screenshots,
         screenshot_hashes=screenshot_hashes,
         screenshot_differences=screenshot_differences,
+        renderdoc_captures=renderdoc_captures,
+        renderdoc_capture_hashes=renderdoc_capture_hashes,
         failures=failures,
     )
 

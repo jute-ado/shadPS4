@@ -255,6 +255,56 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
             self.assertEqual(manifest.cases[0].minimum_distinct_screenshots, 2)
 
+    def test_load_manifest_accepts_scheduled_renderdoc_captures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "frame diagnosis",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "renderdocCaptureSeconds": [0.25, 1.5],
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertEqual(
+                manifest.cases[0].renderdoc_capture_seconds, (0.25, 1.5)
+            )
+
+    def test_load_manifest_rejects_renderdoc_captures_without_ipc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "manual capture",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "renderdocCaptureSeconds": [0.25],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "renderdocCaptureSeconds requires useIpc"
+            ):
+                load_manifest(path)
+
     def test_load_manifest_accepts_screenshot_comparisons(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1300,6 +1350,53 @@ class RunnerTests(unittest.TestCase):
                 ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
             )
 
+    def test_run_case_schedules_and_requires_renderdoc_captures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "frame diagnosis",
+                    "timeoutSeconds": 0.25,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "renderdocCaptureSeconds": [0.05, 0.1],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(len(result.renderdoc_captures), 2)
+            self.assertTrue(
+                all(path.suffix == ".rdc" for path in result.renderdoc_captures)
+            )
+            self.assertEqual(
+                result.to_report()["renderdoc_captures"],
+                [str(path) for path in result.renderdoc_captures],
+            )
+            self.assertEqual(len(result.renderdoc_capture_hashes), 2)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                [
+                    "RUN",
+                    "START",
+                    "RENDERDOC_CAPTURE",
+                    "RENDERDOC_CAPTURE",
+                    "STOP",
+                ],
+            )
+
     def test_run_case_starts_action_timeline_after_ipc_handshake(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1370,6 +1467,12 @@ class RunnerTests(unittest.TestCase):
                 "--omit-screenshot-capability",
                 {"screenshotSeconds": [0.05]},
                 "ENABLE_SCREENSHOT",
+            ),
+            (
+                "renderdoc",
+                "--omit-renderdoc-capability",
+                {"renderdocCaptureSeconds": [0.05]},
+                "ENABLE_RENDERDOC_CAPTURE",
             ),
             (
                 "button",
@@ -1611,6 +1714,32 @@ class RunnerTests(unittest.TestCase):
                     "captured 0 valid screenshots" in failure
                     for failure in result.failures
                 )
+            )
+
+    def test_run_case_fails_when_requested_renderdoc_capture_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "missing frame capture",
+                    "timeoutSeconds": 1.0,
+                    "args": ["--expect-ipc", "--ignore-renderdoc-captures"],
+                    "useIpc": True,
+                    "renderdocCaptureSeconds": [0.05],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "captured 0 valid RenderDoc frames; expected 1", result.failures
             )
 
     def test_run_case_rejects_malformed_screenshot_artifacts(self) -> None:
