@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/texture_cache/tile.h"
 #include "video_core/texture_cache/types.h"
 
 namespace {
@@ -13,6 +14,7 @@ namespace {
 using VideoCore::ApplyCompressedMipCompatibility;
 using VideoCore::SubresourceExtent;
 using VideoCore::SubresourceRange;
+using VideoCore::TilingWorkgroupCount;
 
 static_assert(std::equality_comparable<SubresourceExtent>);
 static_assert(!std::totally_ordered<SubresourceExtent>);
@@ -157,6 +159,18 @@ TEST(CompressedMipCompatibility, IsInactiveByDefault) {
     };
 
     EXPECT_EQ(ApplyCompressedMipCompatibility(range, true, false, false), range);
+}
+
+TEST(TilingDispatch, CoversACompressedBlockTailSmallerThanOneWorkgroup) {
+    EXPECT_EQ(TilingWorkgroupCount(256, 64), 1u);
+}
+
+TEST(TilingDispatch, CoversACompressedBlockTailAfterFullWorkgroups) {
+    EXPECT_EQ(TilingWorkgroupCount(1280, 128), 2u);
+}
+
+TEST(TilingDispatch, DoesNotDispatchForAnEmptySurface) {
+    EXPECT_EQ(TilingWorkgroupCount(0, 64), 0u);
 }
 
 } // namespace

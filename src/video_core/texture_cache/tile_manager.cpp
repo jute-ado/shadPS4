@@ -8,6 +8,7 @@
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
+#include "video_core/texture_cache/tile.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 #include "video_core/host_shaders/tiling_comp.h"
@@ -21,6 +22,7 @@ struct TilingInfo {
     u32 bank_swizzle;
     u32 num_slices;
     u32 num_mips;
+    u32 num_elements;
     std::array<ImageInfo::MipInfo, 16> mips;
 };
 
@@ -171,6 +173,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     params.bank_swizzle = info.bank_swizzle;
     params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
     params.num_mips = info.resources.levels;
+    params.num_elements = TilingElementCount(info.guest_size, info.num_bits);
     for (u32 mip = 0; mip < params.num_mips; ++mip) {
         auto& mip_info = params.mips[mip];
         mip_info = info.mips_layout[mip];
@@ -236,7 +239,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     }};
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
-    const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
+    const auto dim_x = TilingWorkgroupCount(info.guest_size, info.num_bits);
     cmdbuf.dispatch(dim_x, 1, 1);
     return {out_buffer, 0};
 }
@@ -256,6 +259,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     params.bank_swizzle = info.bank_swizzle;
     params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
     params.num_mips = static_cast<u32>(buffer_copies.size());
+    params.num_elements = TilingElementCount(copy_size, info.num_bits);
     for (u32 mip = 0; mip < params.num_mips; ++mip) {
         auto& mip_info = params.mips[mip];
         mip_info = info.mips_layout[mip];
@@ -321,7 +325,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     }};
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
-    const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
+    const auto dim_x = TilingWorkgroupCount(copy_size, info.num_bits);
     cmdbuf.dispatch(dim_x, 1, 1);
 }
 
