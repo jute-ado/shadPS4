@@ -41,6 +41,8 @@ def main() -> int:
     parser.add_argument("--emit-bytes", type=int, default=0)
     parser.add_argument("--spawn-child", action="store_true")
     parser.add_argument("--expect-ipc", action="store_true")
+    parser.add_argument("--ipc-handshake-delay", type=float, default=0)
+    parser.add_argument("--omit-ipc-handshake", action="store_true")
     parser.add_argument("--ignore-screenshots", action="store_true")
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
@@ -48,10 +50,16 @@ def main() -> int:
     args = parser.parse_args()
 
     ipc_commands: list[str] = []
+    ipc_command_seconds: list[float] = []
+    launched = time.monotonic()
     if args.expect_ipc:
-        ipc_commands.extend(
-            (sys.stdin.readline().strip(), sys.stdin.readline().strip())
-        )
+        time.sleep(args.ipc_handshake_delay)
+        if not args.omit_ipc_handshake:
+            print(";#IPC_ENABLED\n;ENABLE_EMU_CONTROL\n;#IPC_END", file=sys.stderr)
+            sys.stderr.flush()
+        for _ in range(2):
+            ipc_commands.append(sys.stdin.readline().strip())
+            ipc_command_seconds.append(time.monotonic() - launched)
 
     if args.spawn_child:
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -63,6 +71,7 @@ def main() -> int:
         while True:
             command = sys.stdin.readline().strip()
             ipc_commands.append(command)
+            ipc_command_seconds.append(time.monotonic() - launched)
             if command == "SCREENSHOT" and not args.ignore_screenshots:
                 screenshots = Path("user") / "screenshots"
                 screenshots.mkdir(parents=True, exist_ok=True)
@@ -92,6 +101,7 @@ def main() -> int:
         "game": args.game,
         "user_directory_exists": (Path.cwd() / "user").is_dir(),
         "ipc_commands": ipc_commands,
+        "ipc_command_seconds": ipc_command_seconds,
         "ipc_enabled": os.environ.get("SHADPS4_ENABLE_IPC"),
     }
     (Path.cwd() / "observation.json").write_text(

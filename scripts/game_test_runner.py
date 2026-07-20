@@ -397,10 +397,19 @@ def _drain_stream(
     destination: Path,
     limit: int,
     truncated: threading.Event,
+    observed_pattern: bytes | None = None,
+    observed: threading.Event | None = None,
 ) -> None:
     written = 0
+    search_tail = b""
+    read_chunk = getattr(stream, "read1", stream.read)
     with destination.open("wb") as output:
-        while chunk := stream.read(64 * 1024):
+        while chunk := read_chunk(64 * 1024):
+            if observed_pattern is not None and observed is not None:
+                searchable = search_tail + chunk
+                if observed_pattern in searchable:
+                    observed.set()
+                search_tail = searchable[-max(0, len(observed_pattern) - 1) :]
             remaining = max(0, limit - written)
             if remaining:
                 kept = chunk[:remaining]
@@ -549,12 +558,8 @@ def run_case(
         )
     assert process.stdout is not None
     assert process.stderr is not None
-    if case.use_ipc:
-        assert process.stdin is not None
-        process.stdin.write(b"RUN\nSTART\n")
-        process.stdin.flush()
-
     truncated = threading.Event()
+    ipc_handshake = threading.Event()
     readers = [
         threading.Thread(
             target=_drain_stream,
@@ -563,6 +568,8 @@ def run_case(
                 artifact_directory / "stdout.log",
                 output_limit_bytes,
                 truncated,
+                b";#IPC_END" if case.use_ipc else None,
+                ipc_handshake if case.use_ipc else None,
             ),
         ),
         threading.Thread(
@@ -572,11 +579,27 @@ def run_case(
                 artifact_directory / "stderr.log",
                 output_limit_bytes,
                 truncated,
+                b";#IPC_END" if case.use_ipc else None,
+                ipc_handshake if case.use_ipc else None,
             ),
         ),
     ]
     for reader in readers:
         reader.start()
+
+    ipc_ready = not case.use_ipc
+    hard_deadline = started + case.timeout_seconds
+    if case.use_ipc:
+        while process.poll() is None:
+            remaining = hard_deadline - time.monotonic()
+            if remaining <= 0 or ipc_handshake.wait(min(0.05, remaining)):
+                break
+        ipc_ready = ipc_handshake.is_set()
+        if ipc_ready:
+            assert process.stdin is not None
+            process.stdin.write(b"RUN\nSTART\n")
+            process.stdin.flush()
+    timeline_started = time.monotonic()
 
     timed_out = False
     try:
@@ -589,7 +612,9 @@ def run_case(
         timeline.sort(key=lambda entry: entry[0])
         for event_second, event_type, payload in timeline:
             try:
-                process.wait(timeout=max(0, started + event_second - time.monotonic()))
+                process.wait(
+                    timeout=max(0, timeline_started + event_second - time.monotonic())
+                )
                 process_exited = True
                 break
             except subprocess.TimeoutExpired:
@@ -614,12 +639,10 @@ def run_case(
                     )
                 process.stdin.flush()
         if not process_exited:
-            process.wait(
-                timeout=max(0, started + case.timeout_seconds - time.monotonic())
-            )
+            process.wait(timeout=max(0, hard_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         timed_out = True
-        if case.use_ipc:
+        if case.use_ipc and ipc_ready:
             assert process.stdin is not None
             try:
                 process.stdin.write(b"STOP\n")
@@ -662,6 +685,8 @@ def run_case(
     screenshot_hashes = [_hash_screenshot(path) for path in screenshots]
 
     failures: list[str] = []
+    if not ipc_ready:
+        failures.append("IPC handshake was not observed")
     if outcome not in case.allowed_outcomes:
         failures.append(
             f"outcome {outcome!r} is not allowed; expected "

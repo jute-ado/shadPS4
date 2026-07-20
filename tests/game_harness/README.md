@@ -22,8 +22,10 @@ Each case supports:
 - `gamePath`: installed game directory or ELF path.
 - `timeoutSeconds`: positive hard process timeout.
 - `useIpc`: enable shadPS4 IPC start/stop control for graceful log flushing.
-- `screenshotSeconds`: optional increasing list of times, in seconds after
-  launch, at which to capture game-only frames. Requires `useIpc`; every
+  The emulator's IPC capability handshake is required before the runner sends
+  `RUN` and `START`; a missing handshake fails the case.
+- `screenshotSeconds`: optional increasing list of times, in seconds after the
+  IPC handshake, at which to capture game-only frames. Requires `useIpc`; every
   requested capture must produce a valid PNG for the case to pass.
 - `minimumDistinctScreenshots`: optional minimum number of unique screenshot
   contents required for the case to pass. This detects frozen or repeatedly
@@ -60,13 +62,15 @@ Alternatively, set `SHADPS4_GAME_TEST_MANIFEST` and omit `--manifest`.
 Use a fresh artifact directory for each run. Every case gets its own working
 directory and empty `user` directory, which activates shadPS4's portable-user
 mode. The runner writes capped stdout and stderr logs, preserves the emulator
-log, and writes `game-test-report.json`. With `useIpc` enabled it sends `RUN`
-and `START`, then requests a graceful `STOP` at the deadline before falling
-back to complete process-tree termination. Scheduled screenshot paths are
-included in the report together with their SHA-256 content hashes. Button
-Button events, axis events, and screenshot requests share the same monotonic
-launch-relative timeline, allowing deterministic navigation, movement, and
-visual checkpoints.
+log, and writes `game-test-report.json`. With `useIpc` enabled it waits for the
+IPC capability handshake, sends `RUN` and `START`, then requests a graceful
+`STOP` at the deadline before falling back to complete process-tree
+termination. The hard timeout remains relative to process launch, while
+scheduled actions are relative to acknowledged IPC startup. Scheduled
+screenshot paths are included in the report together with their SHA-256
+content hashes. Button events, axis events, and screenshot requests share the
+same monotonic post-handshake timeline, allowing deterministic navigation,
+movement, and visual checkpoints.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
@@ -86,6 +90,6 @@ python -m coverage report -m --include="scripts/game_test_runner.py"
 
 The synthetic tests cover manifest validation, relative paths, working
 directory isolation, allowed outcomes, required and forbidden log markers,
-bounded output, JSON reports, safe artifact names, IPC-controlled shutdown,
+bounded output, JSON reports, safe artifact names, IPC handshake and controlled shutdown,
 scheduled digital and analog controller input, screenshot capture and
 validation, and hard timeout behavior.
