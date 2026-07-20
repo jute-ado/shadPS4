@@ -12,9 +12,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 from scripts.game_test_runner import (
     ManifestError,
+    _decode_png_rgb,
+    _screenshot_difference,
     load_manifest,
     main,
     run_case,
@@ -23,6 +26,25 @@ from scripts.game_test_runner import (
 
 
 FIXTURE = Path(__file__).with_name("fake_emulator.py")
+
+
+def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    checksum = zlib.crc32(chunk_type + data).to_bytes(4, "big")
+    return len(data).to_bytes(4, "big") + chunk_type + data + checksum
+
+
+def test_png(width: int, height: int, color_type: int, scanlines: bytes) -> bytes:
+    header = (
+        width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + bytes((8, color_type, 0, 0, 0))
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", header)
+        + png_chunk(b"IDAT", zlib.compress(scanlines))
+        + png_chunk(b"IEND", b"")
+    )
 
 
 class ManifestTests(unittest.TestCase):
@@ -153,6 +175,155 @@ class ManifestTests(unittest.TestCase):
 
             self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
             self.assertEqual(manifest.cases[0].minimum_distinct_screenshots, 2)
+
+    def test_load_manifest_accepts_screenshot_comparisons(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "causal visual",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSeconds": [0.25, 0.5, 1.0],
+                            "screenshotComparisons": [
+                                {
+                                    "firstScreenshot": 0,
+                                    "secondScreenshot": 1,
+                                    "maximumDifference": 0.01,
+                                },
+                                {
+                                    "firstScreenshot": 1,
+                                    "secondScreenshot": 2,
+                                    "minimumDifference": 0.2,
+                                },
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            case = load_manifest(path).cases[0]
+
+            self.assertEqual(
+                [
+                    (
+                        comparison.first_screenshot,
+                        comparison.second_screenshot,
+                        comparison.minimum_difference,
+                        comparison.maximum_difference,
+                    )
+                    for comparison in case.screenshot_comparisons
+                ],
+                [(0, 1, None, 0.01), (1, 2, 0.2, None)],
+            )
+
+    def test_load_manifest_rejects_screenshot_comparison_out_of_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "bad comparison",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSeconds": [0.25],
+                            "screenshotComparisons": [
+                                {
+                                    "firstScreenshot": 0,
+                                    "secondScreenshot": 1,
+                                    "minimumDifference": 0.1,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "secondScreenshot must index screenshotSeconds"
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_invalid_screenshot_comparisons(self) -> None:
+        invalid_values = (
+            ({"screenshotComparisons": {}}, "must be an array"),
+            ({"screenshotComparisons": ["bad"]}, "must be an object"),
+            (
+                {
+                    "screenshotComparisons": [
+                        {
+                            "firstScreenshot": 0,
+                            "secondScreenshot": 0,
+                            "minimumDifference": 0.1,
+                        }
+                    ]
+                },
+                "must compare two different screenshots",
+            ),
+            (
+                {
+                    "screenshotComparisons": [
+                        {
+                            "firstScreenshot": 0,
+                            "secondScreenshot": 1,
+                            "minimumDifference": -0.1,
+                        }
+                    ]
+                },
+                "minimumDifference must be between 0 and 1",
+            ),
+            (
+                {
+                    "screenshotComparisons": [
+                        {"firstScreenshot": 0, "secondScreenshot": 1}
+                    ]
+                },
+                "must specify minimumDifference or maximumDifference",
+            ),
+            (
+                {
+                    "screenshotComparisons": [
+                        {
+                            "firstScreenshot": 0,
+                            "secondScreenshot": 1,
+                            "minimumDifference": 0.8,
+                            "maximumDifference": 0.2,
+                        }
+                    ]
+                },
+                "minimumDifference cannot exceed maximumDifference",
+            ),
+        )
+        for fields, message in invalid_values:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                case = {
+                    "name": "bad comparison",
+                    "gamePath": "game",
+                    "timeoutSeconds": 2,
+                    "useIpc": True,
+                    "screenshotSeconds": [0.25, 0.5],
+                    **fields,
+                }
+                path = self.write_manifest(root, {"schemaVersion": 1, "cases": [case]})
+
+                with self.assertRaisesRegex(ManifestError, message):
+                    load_manifest(path)
 
     def test_load_manifest_accepts_scheduled_button_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -713,6 +884,78 @@ class ManifestTests(unittest.TestCase):
                     path.write_text(content, encoding="utf-8")
                     with self.assertRaisesRegex(ManifestError, expected):
                         load_manifest(path)
+
+
+class PngComparisonTests(unittest.TestCase):
+    def test_decode_png_supports_all_standard_scanline_filters(self) -> None:
+        rows = (
+            bytes((0, 10, 20, 30, 40, 50, 60))
+            + bytes((1, 20, 30, 40, 40, 40, 40))
+            + bytes((2, 10, 10, 10, 10, 10, 10))
+            + bytes((3, 25, 30, 35, 25, 25, 25))
+            + bytes((4, 10, 10, 10, 10, 10, 10))
+        )
+        expected = bytes(
+            (
+                10,
+                20,
+                30,
+                40,
+                50,
+                60,
+                20,
+                30,
+                40,
+                60,
+                70,
+                80,
+                30,
+                40,
+                50,
+                70,
+                80,
+                90,
+                40,
+                50,
+                60,
+                80,
+                90,
+                100,
+                50,
+                60,
+                70,
+                90,
+                100,
+                110,
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "filtered.png"
+            path.write_bytes(test_png(2, 5, 2, rows))
+
+            self.assertEqual(_decode_png_rgb(path), (2, 5, expected))
+
+    def test_decode_png_expands_grayscale_and_ignores_alpha(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            grayscale = root / "grayscale.png"
+            grayscale.write_bytes(test_png(1, 1, 4, bytes((0, 42, 7))))
+            rgba = root / "rgba.png"
+            rgba.write_bytes(test_png(1, 1, 6, bytes((0, 1, 2, 3, 4))))
+
+            self.assertEqual(_decode_png_rgb(grayscale), (1, 1, bytes((42, 42, 42))))
+            self.assertEqual(_decode_png_rgb(rgba), (1, 1, bytes((1, 2, 3))))
+
+    def test_screenshot_difference_rejects_different_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(test_png(1, 1, 2, bytes((0, 0, 0, 0))))
+            second.write_bytes(test_png(2, 1, 2, bytes((0, 0, 0, 0, 0, 0, 0))))
+
+            with self.assertRaisesRegex(ValueError, "different dimensions"):
+                _screenshot_difference(first, second)
 
 
 class RunnerTests(unittest.TestCase):
@@ -1341,6 +1584,81 @@ class RunnerTests(unittest.TestCase):
 
             self.assertTrue(result.passed, result.failures)
             self.assertEqual(len(set(result.screenshot_hashes)), 2)
+
+    def test_run_case_accepts_stable_then_changed_screenshot_relationships(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "causal visual",
+                    "timeoutSeconds": 0.25,
+                    "args": ["--expect-ipc", "--vary-screenshots-after", "2"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05, 0.1, 0.15],
+                    "screenshotComparisons": [
+                        {
+                            "firstScreenshot": 0,
+                            "secondScreenshot": 1,
+                            "maximumDifference": 0.0,
+                        },
+                        {
+                            "firstScreenshot": 1,
+                            "secondScreenshot": 2,
+                            "minimumDifference": 0.001,
+                        },
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(len(result.screenshot_differences), 2)
+            self.assertEqual(result.screenshot_differences[0], 0.0)
+            self.assertGreaterEqual(result.screenshot_differences[1], 0.001)
+
+    def test_run_case_rejects_unmet_screenshot_relationship(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "false visual claim",
+                    "timeoutSeconds": 0.2,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05, 0.1],
+                    "screenshotComparisons": [
+                        {
+                            "firstScreenshot": 0,
+                            "secondScreenshot": 1,
+                            "minimumDifference": 0.1,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(result.screenshot_differences, [0.0])
+            self.assertIn(
+                "screenshot comparison 0 difference 0.000000 is below minimum 0.100000",
+                result.failures,
+            )
 
     def test_run_case_caps_output_and_marks_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

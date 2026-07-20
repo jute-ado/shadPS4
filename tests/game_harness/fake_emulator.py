@@ -49,6 +49,7 @@ def main() -> int:
     parser.add_argument("--ignore-screenshots", action="store_true")
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
+    parser.add_argument("--vary-screenshots-after", type=int)
     parser.add_argument("game")
     args = parser.parse_args()
 
@@ -92,7 +93,15 @@ def main() -> int:
                 png = (
                     b"\x89PNG\r\n\x1a\nmalformed"
                     if args.malformed_screenshots
-                    else one_pixel_png(index if args.vary_screenshots else 0)
+                    else one_pixel_png(
+                        index
+                        if args.vary_screenshots
+                        or (
+                            args.vary_screenshots_after is not None
+                            and index >= args.vary_screenshots_after
+                        )
+                        else 0
+                    )
                 )
                 (screenshots / f"fake_{index}.png").write_bytes(png)
             if command == "STOP" or not command:

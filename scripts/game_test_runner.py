@@ -74,6 +74,14 @@ class TouchEvent:
 
 
 @dataclass(frozen=True)
+class ScreenshotComparison:
+    first_screenshot: int
+    second_screenshot: int
+    minimum_difference: float | None = None
+    maximum_difference: float | None = None
+
+
+@dataclass(frozen=True)
 class GameCase:
     name: str
     game_path: Path
@@ -81,6 +89,7 @@ class GameCase:
     use_ipc: bool = False
     screenshot_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
+    screenshot_comparisons: tuple[ScreenshotComparison, ...] = ()
     button_events: tuple[ButtonEvent, ...] = ()
     axis_events: tuple[AxisEvent, ...] = ()
     touch_events: tuple[TouchEvent, ...] = ()
@@ -108,6 +117,7 @@ class CaseResult:
     output_truncated: bool
     screenshots: list[Path]
     screenshot_hashes: list[str]
+    screenshot_differences: list[float]
     failures: list[str]
 
     def to_report(self) -> dict[str, Any]:
@@ -190,6 +200,71 @@ def _require_minimum_distinct_screenshots(
             f"{case_name}: minimumDistinctScreenshots cannot exceed screenshotSeconds"
         )
     return raw
+
+
+def _require_screenshot_comparisons(
+    raw: Any, *, case_name: str, screenshot_count: int
+) -> tuple[ScreenshotComparison, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ManifestError(f"{case_name}: screenshotComparisons must be an array")
+
+    comparisons: list[ScreenshotComparison] = []
+    for index, item in enumerate(raw):
+        field = f"{case_name}: screenshotComparisons[{index}]"
+        if not isinstance(item, dict):
+            raise ManifestError(f"{field} must be an object")
+
+        screenshot_indexes: list[int] = []
+        for json_field in ("firstScreenshot", "secondScreenshot"):
+            value = item.get(json_field)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value >= screenshot_count
+            ):
+                raise ManifestError(
+                    f"{field}.{json_field} must index screenshotSeconds"
+                )
+            screenshot_indexes.append(value)
+        if screenshot_indexes[0] == screenshot_indexes[1]:
+            raise ManifestError(f"{field} must compare two different screenshots")
+
+        bounds: list[float | None] = []
+        for json_field in ("minimumDifference", "maximumDifference"):
+            value = item.get(json_field)
+            if value is None:
+                bounds.append(None)
+                continue
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+                or value > 1
+            ):
+                raise ManifestError(f"{field}.{json_field} must be between 0 and 1")
+            bounds.append(float(value))
+        minimum, maximum = bounds
+        if minimum is None and maximum is None:
+            raise ManifestError(
+                f"{field} must specify minimumDifference or maximumDifference"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ManifestError(
+                f"{field}.minimumDifference cannot exceed maximumDifference"
+            )
+        comparisons.append(
+            ScreenshotComparison(
+                first_screenshot=screenshot_indexes[0],
+                second_screenshot=screenshot_indexes[1],
+                minimum_difference=minimum,
+                maximum_difference=maximum,
+            )
+        )
+    return tuple(comparisons)
 
 
 def _require_button_events(
@@ -436,6 +511,11 @@ def load_manifest(path: str | Path) -> GameManifest:
                     case_name=name,
                     screenshot_count=len(screenshot_seconds),
                 ),
+                screenshot_comparisons=_require_screenshot_comparisons(
+                    raw_case.get("screenshotComparisons"),
+                    case_name=name,
+                    screenshot_count=len(screenshot_seconds),
+                ),
                 button_events=button_events,
                 axis_events=axis_events,
                 touch_events=touch_events,
@@ -572,6 +652,118 @@ def _hash_screenshot(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _paeth_predictor(left: int, above: int, upper_left: int) -> int:
+    estimate = left + above - upper_left
+    left_distance = abs(estimate - left)
+    above_distance = abs(estimate - above)
+    upper_left_distance = abs(estimate - upper_left)
+    if left_distance <= above_distance and left_distance <= upper_left_distance:
+        return left
+    if above_distance <= upper_left_distance:
+        return above
+    return upper_left
+
+
+def _decode_png_rgb(path: Path) -> tuple[int, int, bytes]:
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG image")
+
+    position = 8
+    header: bytes | None = None
+    compressed = bytearray()
+    while position < len(data):
+        if position + 12 > len(data):
+            raise ValueError("truncated PNG chunk")
+        length = int.from_bytes(data[position : position + 4], "big")
+        chunk_type = data[position + 4 : position + 8]
+        end = position + 12 + length
+        if end > len(data):
+            raise ValueError("truncated PNG chunk")
+        chunk_data = data[position + 8 : position + 8 + length]
+        if chunk_type == b"IHDR":
+            header = chunk_data
+        elif chunk_type == b"IDAT":
+            compressed.extend(chunk_data)
+        elif chunk_type == b"IEND":
+            break
+        position = end
+
+    if header is None or len(header) != 13 or not compressed:
+        raise ValueError("PNG is missing required image data")
+    width = int.from_bytes(header[:4], "big")
+    height = int.from_bytes(header[4:8], "big")
+    bit_depth, color_type, compression, filtering, interlace = header[8:13]
+    channels_by_color_type = {0: 1, 2: 3, 4: 2, 6: 4}
+    channels = channels_by_color_type.get(color_type)
+    if (
+        bit_depth != 8
+        or channels is None
+        or compression != 0
+        or filtering != 0
+        or interlace != 0
+    ):
+        raise ValueError("PNG must be non-interlaced 8-bit grayscale or RGB")
+
+    row_bytes = width * channels
+    try:
+        encoded = zlib.decompress(compressed)
+    except zlib.error as error:
+        raise ValueError(f"invalid compressed PNG data: {error}") from error
+    if len(encoded) != height * (row_bytes + 1):
+        raise ValueError("PNG scanline data has an unexpected size")
+
+    decoded = bytearray(height * row_bytes)
+    encoded_position = 0
+    for row in range(height):
+        filter_type = encoded[encoded_position]
+        encoded_position += 1
+        if filter_type > 4:
+            raise ValueError(f"unsupported PNG filter {filter_type}")
+        row_start = row * row_bytes
+        for column in range(row_bytes):
+            value = encoded[encoded_position]
+            encoded_position += 1
+            left = decoded[row_start + column - channels] if column >= channels else 0
+            above = decoded[row_start - row_bytes + column] if row else 0
+            upper_left = (
+                decoded[row_start - row_bytes + column - channels]
+                if row and column >= channels
+                else 0
+            )
+            if filter_type == 1:
+                value += left
+            elif filter_type == 2:
+                value += above
+            elif filter_type == 3:
+                value += (left + above) // 2
+            elif filter_type == 4:
+                value += _paeth_predictor(left, above, upper_left)
+            decoded[row_start + column] = value & 0xFF
+
+    if color_type == 2:
+        return width, height, bytes(decoded)
+    rgb = bytearray(width * height * 3)
+    output = 0
+    for source in range(0, len(decoded), channels):
+        if color_type in (0, 4):
+            rgb[output : output + 3] = bytes((decoded[source],)) * 3
+        else:
+            rgb[output : output + 3] = decoded[source : source + 3]
+        output += 3
+    return width, height, bytes(rgb)
+
+
+def _screenshot_difference(first: Path, second: Path) -> float:
+    first_width, first_height, first_pixels = _decode_png_rgb(first)
+    second_width, second_height, second_pixels = _decode_png_rgb(second)
+    if (first_width, first_height) != (second_width, second_height):
+        raise ValueError("screenshots have different dimensions")
+    return sum(
+        abs(left - right) for left, right in zip(first_pixels, second_pixels)
+    ) / (len(first_pixels) * 255)
+
+
 def run_case(
     case: GameCase,
     *,
@@ -625,6 +817,7 @@ def run_case(
             output_truncated=False,
             screenshots=[],
             screenshot_hashes=[],
+            screenshot_differences=[],
             failures=[failure],
         )
     assert process.stdout is not None
@@ -823,6 +1016,34 @@ def run_case(
             f"captured {distinct_screenshots} distinct screenshots; expected at least "
             f"{case.minimum_distinct_screenshots}"
         )
+    screenshot_differences: list[float] = []
+    if len(screenshots) >= len(case.screenshot_seconds):
+        for index, comparison in enumerate(case.screenshot_comparisons):
+            try:
+                difference = _screenshot_difference(
+                    screenshots[comparison.first_screenshot],
+                    screenshots[comparison.second_screenshot],
+                )
+            except (OSError, ValueError) as error:
+                failures.append(f"screenshot comparison {index} failed: {error}")
+                continue
+            screenshot_differences.append(difference)
+            if (
+                comparison.minimum_difference is not None
+                and difference < comparison.minimum_difference
+            ):
+                failures.append(
+                    f"screenshot comparison {index} difference {difference:.6f} is "
+                    f"below minimum {comparison.minimum_difference:.6f}"
+                )
+            if (
+                comparison.maximum_difference is not None
+                and difference > comparison.maximum_difference
+            ):
+                failures.append(
+                    f"screenshot comparison {index} difference {difference:.6f} is "
+                    f"above maximum {comparison.maximum_difference:.6f}"
+                )
 
     return CaseResult(
         name=case.name,
@@ -836,6 +1057,7 @@ def run_case(
         ),
         screenshots=screenshots,
         screenshot_hashes=screenshot_hashes,
+        screenshot_differences=screenshot_differences,
         failures=failures,
     )
 
