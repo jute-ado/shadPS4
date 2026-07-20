@@ -52,4 +52,22 @@ TEST(SubresourceExtent, ExpansionIsIndependentOfOperandOrder) {
     EXPECT_EQ(first.ExpandedToFit(second), second.ExpandedToFit(first));
 }
 
+TEST(SubresourceExtent, KeepsAvailableMipLevel) {
+    constexpr SubresourceExtent extent{.levels = 4, .layers = 1};
+
+    EXPECT_EQ(extent.ClampLevel(2), 2u);
+}
+
+TEST(SubresourceExtent, ClampsMipLevelToLastAvailableLevel) {
+    constexpr SubresourceExtent extent{.levels = 4, .layers = 1};
+
+    EXPECT_EQ(extent.ClampLevel(9), 3u);
+}
+
+TEST(SubresourceExtent, ClampsSingleMipImageToLevelZero) {
+    constexpr SubresourceExtent extent{.levels = 1, .layers = 1};
+
+    EXPECT_EQ(extent.ClampLevel(9), 0u);
+}
+
 } // namespace

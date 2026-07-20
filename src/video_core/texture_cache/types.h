@@ -74,6 +74,10 @@ struct SubresourceExtent {
         };
     }
 
+    constexpr u32 ClampLevel(u32 requested) const {
+        return levels == 0 ? 0 : (requested < levels ? requested : levels - 1);
+    }
+
     bool operator==(const SubresourceExtent&) const = default;
 };
 
