@@ -238,10 +238,19 @@ class ManifestTests(unittest.TestCase):
     def test_load_manifest_rejects_invalid_axis_events(self) -> None:
         invalid_events = [
             (None, "axisEvents must be an array"),
+            (["not-an-object"], "must be an object"),
+            (
+                [{"seconds": True, "axis": "left_x", "value": 128}],
+                "before timeoutSeconds",
+            ),
             ([{"seconds": 0.25, "axis": "left_z", "value": 128}], "unsupported axis"),
             ([{"seconds": 0.25, "axis": "left_x", "value": -1}], "between 0 and 255"),
             ([{"seconds": 0.25, "axis": "left_x", "value": 256}], "between 0 and 255"),
             ([{"seconds": 0.25, "axis": "left_x", "value": 1.5}], "must be an integer"),
+            (
+                [{"seconds": 0.25, "axis": "left_x", "value": True}],
+                "must be an integer",
+            ),
             ([{"seconds": 2, "axis": "left_x", "value": 128}], "before timeoutSeconds"),
             (
                 [
