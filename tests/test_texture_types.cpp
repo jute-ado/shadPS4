@@ -10,6 +10,7 @@
 
 namespace {
 
+using VideoCore::ApplyCompressedMipCompatibility;
 using VideoCore::SubresourceExtent;
 using VideoCore::SubresourceRange;
 
@@ -116,6 +117,46 @@ TEST(SubresourceRange, RejectsEmptyExtent) {
     };
 
     EXPECT_FALSE(range.FitsWithin(SubresourceExtent{.levels = 1, .layers = 1}));
+}
+
+TEST(CompressedMipCompatibility, LimitsSampledCompressedViewsToBaseMipWhenEnabled) {
+    constexpr SubresourceRange range{
+        .base = {.level = 2, .layer = 1},
+        .extent = {.levels = 5, .layers = 3},
+    };
+
+    EXPECT_EQ(ApplyCompressedMipCompatibility(range, true, false, true),
+              (SubresourceRange{
+                  .base = {.level = 2, .layer = 1},
+                  .extent = {.levels = 1, .layers = 3},
+              }));
+}
+
+TEST(CompressedMipCompatibility, PreservesUncompressedViews) {
+    constexpr SubresourceRange range{
+        .base = {.level = 1, .layer = 0},
+        .extent = {.levels = 4, .layers = 1},
+    };
+
+    EXPECT_EQ(ApplyCompressedMipCompatibility(range, false, false, true), range);
+}
+
+TEST(CompressedMipCompatibility, PreservesStorageViews) {
+    constexpr SubresourceRange range{
+        .base = {.level = 1, .layer = 0},
+        .extent = {.levels = 4, .layers = 1},
+    };
+
+    EXPECT_EQ(ApplyCompressedMipCompatibility(range, true, true, true), range);
+}
+
+TEST(CompressedMipCompatibility, IsInactiveByDefault) {
+    constexpr SubresourceRange range{
+        .base = {.level = 1, .layer = 0},
+        .extent = {.levels = 4, .layers = 1},
+    };
+
+    EXPECT_EQ(ApplyCompressedMipCompatibility(range, true, false, false), range);
 }
 
 } // namespace

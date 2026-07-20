@@ -715,6 +715,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 desc.view_info.range.extent.levels = 1;
             }
 
+            desc.view_info.range = VideoCore::ApplyCompressedMipCompatibility(
+                desc.view_info.range, desc.info.props.is_block, image_desc.is_written,
+                EmulatorSettings.IsCompressedTextureMipsDisabled());
+
             desc.initial_range = desc.view_info.range;
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);

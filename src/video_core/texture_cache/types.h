@@ -94,6 +94,15 @@ struct SubresourceRange {
     bool operator==(const SubresourceRange&) const = default;
 };
 
+constexpr SubresourceRange ApplyCompressedMipCompatibility(SubresourceRange range,
+                                                           bool is_compressed, bool is_storage,
+                                                           bool disable_compressed_mips) {
+    if (disable_compressed_mips && is_compressed && !is_storage) {
+        range.extent.levels = 1;
+    }
+    return range;
+}
+
 struct ImageCopy {
     SubresourceLayers src_subresource;
     SubresourceLayers dst_subresource;

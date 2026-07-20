@@ -156,6 +156,7 @@ private:
     // Experimental tab
     int readbacksModeSetting;
     bool readbackLinearImagesSetting;
+    bool disableCompressedTextureMipsSetting;
     bool directMemoryAccessSetting;
     bool devkitConsoleSetting;
     bool neoModeSetting;
