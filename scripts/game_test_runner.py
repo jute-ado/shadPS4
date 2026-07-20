@@ -397,19 +397,20 @@ def _drain_stream(
     destination: Path,
     limit: int,
     truncated: threading.Event,
-    observed_pattern: bytes | None = None,
-    observed: threading.Event | None = None,
+    observed_patterns: tuple[tuple[bytes, threading.Event], ...] = (),
 ) -> None:
     written = 0
     search_tail = b""
+    longest_pattern = max((len(pattern) for pattern, _ in observed_patterns), default=0)
     read_chunk = getattr(stream, "read1", stream.read)
     with destination.open("wb") as output:
         while chunk := read_chunk(64 * 1024):
-            if observed_pattern is not None and observed is not None:
+            if observed_patterns:
                 searchable = search_tail + chunk
-                if observed_pattern in searchable:
-                    observed.set()
-                search_tail = searchable[-max(0, len(observed_pattern) - 1) :]
+                for pattern, observed in observed_patterns:
+                    if pattern in searchable:
+                        observed.set()
+                search_tail = searchable[-(longest_pattern - 1) :]
             remaining = max(0, limit - written)
             if remaining:
                 kept = chunk[:remaining]
@@ -560,6 +561,21 @@ def run_case(
     assert process.stderr is not None
     truncated = threading.Event()
     ipc_handshake = threading.Event()
+    ipc_capabilities = {
+        capability: threading.Event()
+        for capability in (
+            "ENABLE_EMU_CONTROL",
+            "ENABLE_GAMEPAD",
+            "ENABLE_SCREENSHOT",
+        )
+    }
+    ipc_observers = (
+        *(
+            (f";{capability}".encode("ascii"), observed)
+            for capability, observed in ipc_capabilities.items()
+        ),
+        (b";#IPC_END", ipc_handshake),
+    )
     readers = [
         threading.Thread(
             target=_drain_stream,
@@ -568,8 +584,7 @@ def run_case(
                 artifact_directory / "stdout.log",
                 output_limit_bytes,
                 truncated,
-                b";#IPC_END" if case.use_ipc else None,
-                ipc_handshake if case.use_ipc else None,
+                ipc_observers if case.use_ipc else (),
             ),
         ),
         threading.Thread(
@@ -579,14 +594,15 @@ def run_case(
                 artifact_directory / "stderr.log",
                 output_limit_bytes,
                 truncated,
-                b";#IPC_END" if case.use_ipc else None,
-                ipc_handshake if case.use_ipc else None,
+                ipc_observers if case.use_ipc else (),
             ),
         ),
     ]
     for reader in readers:
         reader.start()
 
+    ipc_handshake_seen = not case.use_ipc
+    missing_ipc_capabilities: tuple[str, ...] = ()
     ipc_ready = not case.use_ipc
     hard_deadline = started + case.timeout_seconds
     if case.use_ipc:
@@ -594,7 +610,18 @@ def run_case(
             remaining = hard_deadline - time.monotonic()
             if remaining <= 0 or ipc_handshake.wait(min(0.05, remaining)):
                 break
-        ipc_ready = ipc_handshake.is_set()
+        ipc_handshake_seen = ipc_handshake.is_set()
+        required_capabilities = ["ENABLE_EMU_CONTROL"]
+        if case.screenshot_seconds:
+            required_capabilities.append("ENABLE_SCREENSHOT")
+        if case.button_events or case.axis_events:
+            required_capabilities.append("ENABLE_GAMEPAD")
+        missing_ipc_capabilities = tuple(
+            capability
+            for capability in required_capabilities
+            if not ipc_capabilities[capability].is_set()
+        )
+        ipc_ready = ipc_handshake_seen and not missing_ipc_capabilities
         if ipc_ready:
             assert process.stdin is not None
             process.stdin.write(b"RUN\nSTART\n")
@@ -685,8 +712,13 @@ def run_case(
     screenshot_hashes = [_hash_screenshot(path) for path in screenshots]
 
     failures: list[str] = []
-    if not ipc_ready:
+    if not ipc_handshake_seen:
         failures.append("IPC handshake was not observed")
+    elif missing_ipc_capabilities:
+        failures.extend(
+            f"IPC capability {capability} was not advertised"
+            for capability in missing_ipc_capabilities
+        )
     if outcome not in case.allowed_outcomes:
         failures.append(
             f"outcome {outcome!r} is not allowed; expected "

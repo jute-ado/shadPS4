@@ -43,6 +43,9 @@ def main() -> int:
     parser.add_argument("--expect-ipc", action="store_true")
     parser.add_argument("--ipc-handshake-delay", type=float, default=0)
     parser.add_argument("--omit-ipc-handshake", action="store_true")
+    parser.add_argument("--omit-control-capability", action="store_true")
+    parser.add_argument("--omit-gamepad-capability", action="store_true")
+    parser.add_argument("--omit-screenshot-capability", action="store_true")
     parser.add_argument("--ignore-screenshots", action="store_true")
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
@@ -55,7 +58,17 @@ def main() -> int:
     if args.expect_ipc:
         time.sleep(args.ipc_handshake_delay)
         if not args.omit_ipc_handshake:
-            print(";#IPC_ENABLED\n;ENABLE_EMU_CONTROL\n;#IPC_END", file=sys.stderr)
+            capabilities = []
+            if not args.omit_control_capability:
+                capabilities.append(";ENABLE_EMU_CONTROL")
+            if not args.omit_gamepad_capability:
+                capabilities.append(";ENABLE_GAMEPAD")
+            if not args.omit_screenshot_capability:
+                capabilities.append(";ENABLE_SCREENSHOT")
+            print(
+                "\n".join((";#IPC_ENABLED", *capabilities, ";#IPC_END")),
+                file=sys.stderr,
+            )
             sys.stderr.flush()
         for _ in range(2):
             ipc_commands.append(sys.stdin.readline().strip())

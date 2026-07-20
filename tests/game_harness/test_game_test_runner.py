@@ -901,6 +901,62 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertIn("IPC handshake was not observed", result.failures)
 
+    def test_run_case_requires_advertised_ipc_capabilities(self) -> None:
+        scenarios = (
+            ("control", "--omit-control-capability", {}, "ENABLE_EMU_CONTROL"),
+            (
+                "screenshot",
+                "--omit-screenshot-capability",
+                {"screenshotSeconds": [0.05]},
+                "ENABLE_SCREENSHOT",
+            ),
+            (
+                "button",
+                "--omit-gamepad-capability",
+                {
+                    "buttonEvents": [
+                        {"seconds": 0.05, "button": "cross", "pressed": True}
+                    ]
+                },
+                "ENABLE_GAMEPAD",
+            ),
+            (
+                "axis",
+                "--omit-gamepad-capability",
+                {"axisEvents": [{"seconds": 0.05, "axis": "left_x", "value": 255}]},
+                "ENABLE_GAMEPAD",
+            ),
+        )
+        for action, omitted_flag, actions, capability in scenarios:
+            with (
+                self.subTest(action=action),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                manifest_path = self.make_manifest(
+                    root,
+                    case={
+                        "name": f"missing {capability}",
+                        "timeoutSeconds": 0.15,
+                        "args": ["--expect-ipc", omitted_flag],
+                        "useIpc": True,
+                        "allowedOutcomes": ["timed_out"],
+                        **actions,
+                    },
+                )
+
+                result = run_case(
+                    load_manifest(manifest_path).cases[0],
+                    emulator_command=[sys.executable, str(FIXTURE)],
+                    artifacts_root=root / "artifacts",
+                )
+
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    f"IPC capability {capability} was not advertised",
+                    result.failures,
+                )
+
     def test_run_case_interleaves_button_events_and_screenshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
