@@ -50,11 +50,14 @@ Each case supports:
 - `screenshotComparisons`: optional pixel-level relationships between captures,
   referenced by their zero-based positions in `screenshotSeconds`. Each entry
   names `firstScreenshot` and `secondScreenshot` and supplies
-  `minimumDifference`, `maximumDifference`, or both. Difference is the mean
-  absolute RGB-channel change normalized from 0 (identical) to 1 (maximum
-  change); alpha is ignored. A low maximum before input establishes a stable
-  baseline, while a meaningful minimum after input proves a visual response.
-  Choose thresholds from repeat runs of the particular game and scene.
+  `minimumDifference`, `maximumDifference`, or both. The optional
+  `differenceMode` is `mean_absolute` by default, which measures mean absolute
+  RGB-channel change from 0 (identical) to 1 (maximum change). Set it to
+  `cosine` to compare pixel-vector direction instead, making sparse movement in
+  very dark scenes observable without amplifying a uniform exposure change.
+  Alpha is ignored. A low maximum before input establishes a stable baseline,
+  while a meaningful minimum after input proves a visual response. Thresholds
+  are mode-specific and should come from repeat runs of the particular scene.
 - `buttonEvents`: optional increasing list of player-one button transitions.
   Each entry has `seconds`, a supported `button` name, and a Boolean `pressed`
   state. Requires `useIpc`. Model a tap with a press followed by a release.

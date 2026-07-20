@@ -26,6 +26,7 @@ import zlib
 REPORT_SCHEMA_VERSION = 1
 DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 VALID_OUTCOMES = frozenset({"exited_zero", "exited_nonzero", "timed_out"})
+VALID_SCREENSHOT_DIFFERENCE_MODES = frozenset({"cosine", "mean_absolute"})
 SUPPORTED_BUTTONS = frozenset(
     {
         "circle",
@@ -80,6 +81,7 @@ class ScreenshotComparison:
     second_screenshot: int
     minimum_difference: float | None = None
     maximum_difference: float | None = None
+    difference_mode: str = "mean_absolute"
 
 
 @dataclass(frozen=True)
@@ -286,12 +288,20 @@ def _require_screenshot_comparisons(
             raise ManifestError(
                 f"{field}.minimumDifference cannot exceed maximumDifference"
             )
+        difference_mode = item.get("differenceMode", "mean_absolute")
+        if (
+            not isinstance(difference_mode, str)
+            or difference_mode not in VALID_SCREENSHOT_DIFFERENCE_MODES
+        ):
+            supported = ", ".join(sorted(VALID_SCREENSHOT_DIFFERENCE_MODES))
+            raise ManifestError(f"{field}.differenceMode must be one of: {supported}")
         comparisons.append(
             ScreenshotComparison(
                 first_screenshot=screenshot_indexes[0],
                 second_screenshot=screenshot_indexes[1],
                 minimum_difference=minimum,
                 maximum_difference=maximum,
+                difference_mode=difference_mode,
             )
         )
     return tuple(comparisons)
@@ -824,14 +834,31 @@ def _decode_png_rgb(path: Path) -> tuple[int, int, bytes]:
     return width, height, bytes(rgb)
 
 
-def _screenshot_difference(first: Path, second: Path) -> float:
+def _screenshot_difference(
+    first: Path, second: Path, *, mode: str = "mean_absolute"
+) -> float:
     first_width, first_height, first_pixels = _decode_png_rgb(first)
     second_width, second_height, second_pixels = _decode_png_rgb(second)
     if (first_width, first_height) != (second_width, second_height):
         raise ValueError("screenshots have different dimensions")
-    return sum(
-        abs(left - right) for left, right in zip(first_pixels, second_pixels)
-    ) / (len(first_pixels) * 255)
+    if mode == "mean_absolute":
+        return sum(
+            abs(left - right) for left, right in zip(first_pixels, second_pixels)
+        ) / (len(first_pixels) * 255)
+    if mode != "cosine":
+        raise ValueError(f"unsupported screenshot difference mode: {mode}")
+
+    dot_product = sum(
+        left * right for left, right in zip(first_pixels, second_pixels)
+    )
+    first_squared = sum(value * value for value in first_pixels)
+    second_squared = sum(value * value for value in second_pixels)
+    if first_squared == 0 and second_squared == 0:
+        return 0.0
+    if first_squared == 0 or second_squared == 0:
+        return 1.0
+    similarity = dot_product / math.sqrt(first_squared * second_squared)
+    return max(0.0, min(1.0, 1.0 - similarity))
 
 
 def run_case(
@@ -1115,6 +1142,7 @@ def run_case(
                 difference = _screenshot_difference(
                     screenshots[comparison.first_screenshot],
                     screenshots[comparison.second_screenshot],
+                    mode=comparison.difference_mode,
                 )
             except (OSError, ValueError) as error:
                 failures.append(f"screenshot comparison {index} failed: {error}")
