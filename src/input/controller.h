@@ -13,6 +13,7 @@
 #include "common/ring_buffer_queue.h"
 #include "core/libraries/pad/pad.h"
 #include "core/libraries/system/userservice.h"
+#include "input/controller_axis.h"
 
 struct SDL_Gamepad;
 
@@ -20,17 +21,6 @@ namespace Input {
 
 enum class ControllerType {
     Standard,
-};
-
-enum class Axis {
-    LeftX = 0,
-    LeftY = 1,
-    RightX = 2,
-    RightY = 3,
-    TriggerLeft = 4,
-    TriggerRight = 5,
-
-    AxisMax
 };
 
 struct TouchpadEntry {

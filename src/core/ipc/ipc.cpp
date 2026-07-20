@@ -16,6 +16,7 @@
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
 #include "core/libraries/audio/audioout.h"
+#include "input/controller_axis.h"
 #include "input/controller_button.h"
 #include "input/input_handler.h"
 #include "sdl_window.h"
@@ -68,7 +69,12 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - SCREENSHOT: capture the next game-only frame
  *   - GAMEPAD_BUTTON
  *     - button: player-one button name
- *     - pressed: 1 to press, 0 to release
+ *     - pressed: 1 to press, 0 to
+ *release
+ *   - GAMEPAD_AXIS
+ *     - axis: player-one axis name
+ *     - value: exact PS4 byte
+ *value from 0 through 255
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -177,6 +183,21 @@ void IPC::InputLoop() {
             event.type = SDL_EVENT_INJECT_GAMEPAD_BUTTON;
             event.user.code = static_cast<Sint32>(*button);
             event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(pressed));
+            SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_AXIS") {
+            const std::string name = next_str();
+            const auto axis = Input::ParseControllerAxis(name);
+            const u64 value = next_u64();
+            if (!axis || value > 255) {
+                std::cerr << ";INVALID GAMEPAD AXIS: " << name << ' ' << value << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_AXIS;
+            event.user.code = static_cast<Sint32>(*axis);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(value));
             SDL_PushEvent(&event);
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());

@@ -43,6 +43,7 @@ SUPPORTED_BUTTONS = frozenset(
         "triangle",
     }
 )
+SUPPORTED_AXES = frozenset({"left_x", "left_y", "right_x", "right_y", "l2", "r2"})
 
 
 class ManifestError(ValueError):
@@ -57,6 +58,13 @@ class ButtonEvent:
 
 
 @dataclass(frozen=True)
+class AxisEvent:
+    seconds: float
+    axis: str
+    value: int
+
+
+@dataclass(frozen=True)
 class GameCase:
     name: str
     game_path: Path
@@ -65,6 +73,7 @@ class GameCase:
     screenshot_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
     button_events: tuple[ButtonEvent, ...] = ()
+    axis_events: tuple[AxisEvent, ...] = ()
     args: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ("exited_zero",)
     required_log_patterns: tuple[str, ...] = ()
@@ -207,14 +216,57 @@ def _require_button_events(
             raise ManifestError(f"{field}.pressed must be a boolean")
         events.append(ButtonEvent(float(seconds), button, pressed))
     if any(
-        later.seconds <= earlier.seconds
-        for earlier, later in zip(events, events[1:])
+        later.seconds <= earlier.seconds for earlier, later in zip(events, events[1:])
     ):
         raise ManifestError(
             f"{case_name}: buttonEvents must be in increasing time order"
         )
     if events and not use_ipc:
         raise ManifestError(f"{case_name}: buttonEvents requires useIpc")
+    return tuple(events)
+
+
+def _require_axis_events(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool
+) -> tuple[AxisEvent, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ManifestError(f"{case_name}: axisEvents must be an array")
+    events: list[AxisEvent] = []
+    for index, item in enumerate(raw):
+        field = f"{case_name}: axisEvents[{index}]"
+        if not isinstance(item, dict):
+            raise ManifestError(f"{field} must be an object")
+        seconds = item.get("seconds")
+        if (
+            not isinstance(seconds, (int, float))
+            or isinstance(seconds, bool)
+            or not math.isfinite(seconds)
+            or seconds <= 0
+            or seconds >= timeout
+        ):
+            raise ManifestError(
+                f"{field}.seconds must be a finite positive number before timeoutSeconds"
+            )
+        axis = item.get("axis")
+        if axis not in SUPPORTED_AXES:
+            raise ManifestError(
+                f"{field} has unsupported axis {axis!r}; expected one of "
+                f"{sorted(SUPPORTED_AXES)}"
+            )
+        value = item.get("value")
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ManifestError(f"{field}.value must be an integer")
+        if value < 0 or value > 255:
+            raise ManifestError(f"{field}.value must be between 0 and 255")
+        events.append(AxisEvent(float(seconds), axis, value))
+    if any(
+        later.seconds <= earlier.seconds for earlier, later in zip(events, events[1:])
+    ):
+        raise ManifestError(f"{case_name}: axisEvents must be in increasing time order")
+    if events and not use_ipc:
+        raise ManifestError(f"{case_name}: axisEvents requires useIpc")
     return tuple(events)
 
 
@@ -295,6 +347,12 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=float(timeout),
             use_ipc=use_ipc,
         )
+        axis_events = _require_axis_events(
+            raw_case.get("axisEvents"),
+            case_name=name,
+            timeout=float(timeout),
+            use_ipc=use_ipc,
+        )
         cases.append(
             GameCase(
                 name=name,
@@ -310,6 +368,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                     screenshot_count=len(screenshot_seconds),
                 ),
                 button_events=button_events,
+                axis_events=axis_events,
                 args=args,
                 allowed_outcomes=outcomes,
                 required_log_patterns=_require_string_list(
@@ -522,26 +581,22 @@ def run_case(
     timed_out = False
     try:
         process_exited = False
-        timeline = [
-            (seconds, "screenshot", None)
-            for seconds in case.screenshot_seconds
-        ] + [
-            (event.seconds, "button", event)
-            for event in case.button_events
-        ]
+        timeline = (
+            [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]
+            + [(event.seconds, "button", event) for event in case.button_events]
+            + [(event.seconds, "axis", event) for event in case.axis_events]
+        )
         timeline.sort(key=lambda entry: entry[0])
         for event_second, event_type, payload in timeline:
             try:
-                process.wait(
-                    timeout=max(0, started + event_second - time.monotonic())
-                )
+                process.wait(timeout=max(0, started + event_second - time.monotonic()))
                 process_exited = True
                 break
             except subprocess.TimeoutExpired:
                 assert process.stdin is not None
                 if event_type == "screenshot":
                     process.stdin.write(b"SCREENSHOT\n")
-                else:
+                elif event_type == "button":
                     assert isinstance(payload, ButtonEvent)
                     process.stdin.write(
                         (
@@ -549,6 +604,13 @@ def run_case(
                             f"{payload.button}\n"
                             f"{int(payload.pressed)}\n"
                         ).encode("ascii")
+                    )
+                else:
+                    assert isinstance(payload, AxisEvent)
+                    process.stdin.write(
+                        (f"GAMEPAD_AXIS\n{payload.axis}\n{payload.value}\n").encode(
+                            "ascii"
+                        )
                     )
                 process.stdin.flush()
         if not process_exited:

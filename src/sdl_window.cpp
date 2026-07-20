@@ -348,6 +348,11 @@ void WindowSDL::WaitEvent() {
             static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(event.user.code),
             reinterpret_cast<uintptr_t>(event.user.data1) != 0);
         break;
+    case SDL_EVENT_INJECT_GAMEPAD_AXIS:
+        controllers[0]->Axis(static_cast<Input::Axis>(event.user.code),
+                             static_cast<int>(reinterpret_cast<uintptr_t>(event.user.data1)),
+                             false);
+        break;
     default:
         break;
     }
