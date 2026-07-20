@@ -23,7 +23,9 @@ Each case supports:
 - `timeoutSeconds`: positive hard process timeout.
 - `useIpc`: enable shadPS4 IPC start/stop control for graceful log flushing.
   The emulator's IPC capability handshake is required before the runner sends
-  `RUN` and `START`; a missing handshake fails the case.
+  `RUN` and `START`; a missing handshake or required capability fails the case.
+  All IPC cases require `ENABLE_EMU_CONTROL`, scheduled screenshots require
+  `ENABLE_SCREENSHOT`, and controller events require `ENABLE_GAMEPAD`.
 - `screenshotSeconds`: optional increasing list of times, in seconds after the
   IPC handshake, at which to capture game-only frames. Requires `useIpc`; every
   requested capture must produce a valid PNG for the case to pass.
