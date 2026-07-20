@@ -67,14 +67,21 @@ struct SubresourceExtent {
         return levels >= requested.levels && layers >= requested.layers;
     }
 
-    auto operator<=>(const SubresourceExtent&) const = default;
+    constexpr SubresourceExtent ExpandedToFit(const SubresourceExtent& requested) const {
+        return {
+            .levels = levels >= requested.levels ? levels : requested.levels,
+            .layers = layers >= requested.layers ? layers : requested.layers,
+        };
+    }
+
+    bool operator==(const SubresourceExtent&) const = default;
 };
 
 struct SubresourceRange {
     SubresourceBase base;
     SubresourceExtent extent;
 
-    auto operator<=>(const SubresourceRange&) const = default;
+    bool operator==(const SubresourceRange&) const = default;
 };
 
 struct ImageCopy {
