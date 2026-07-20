@@ -51,6 +51,9 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  * - CAPABILITIES:
  *   - ENABLE_MEMORY_PATCH: enables PATCH_MEMORY command
  *   - ENABLE_EMU_CONTROL: enables PAUSE, RESUME, STOP, TOGGLE_FULLSCREEN commands
+ *   - ENABLE_SCREENSHOT: enables SCREENSHOT command
+ *   - ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
+ *   - ENABLE_GAMEPAD
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -63,6 +66,11 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - RESUME: resume the game execution
  *   - STOP: stop and quit the emulator
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
+ *   - SCREENSHOT: capture the next game-only frame
+ *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc when loaded
+ *   - GAMEPAD_BUTTON
+ *     - button: player-one button name
+ *     - pressed: 1 to press, 0 to release
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -84,6 +92,8 @@ void IPC::Init() {
     std::cerr << ";#IPC_ENABLED\n";
     std::cerr << ";ENABLE_MEMORY_PATCH\n";
     std::cerr << ";ENABLE_EMU_CONTROL\n";
+    std::cerr << ";ENABLE_SCREENSHOT\n";
+    std::cerr << ";ENABLE_RENDERDOC_CAPTURE\n";
     std::cerr << ";ENABLE_GAMEPAD\n";
     std::cerr << ";#IPC_END\n";
     std::cerr.flush();
@@ -154,6 +164,10 @@ void IPC::InputLoop() {
             SDL_memset(&event, 0, sizeof(event));
             event.type = SDL_EVENT_TOGGLE_FULLSCREEN;
             SDL_PushEvent(&event);
+        } else if (cmd == "SCREENSHOT") {
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+        } else if (cmd == "RENDERDOC_CAPTURE") {
+            VideoCore::TriggerCapture();
         } else if (cmd == "GAMEPAD_BUTTON") {
             const std::string name = next_str();
             const auto button = Input::ParseControllerButton(name);
