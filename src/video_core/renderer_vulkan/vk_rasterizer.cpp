@@ -707,6 +707,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
                 ASSERT(num_bindings == 1);
                 desc.view_info.range.base.level += image_desc.constant_mip_index;
+                desc.view_info.range.base.level =
+                    desc.info.resources.ClampLevel(desc.view_info.range.base.level);
                 desc.view_info.range.extent.levels = 1;
             } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
                 desc.view_info.range.base.level += i;
