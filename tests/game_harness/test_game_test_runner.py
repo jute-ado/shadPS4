@@ -195,6 +195,117 @@ class ManifestTests(unittest.TestCase):
                 [(0.25, "cross", True), (0.35, "cross", False)],
             )
 
+    def test_load_manifest_accepts_scheduled_axis_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "analog movement",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "axisEvents": [
+                                {"seconds": 0.25, "axis": "left_x", "value": 255},
+                                {"seconds": 0.75, "axis": "left_x", "value": 128},
+                                {"seconds": 1.25, "axis": "r2", "value": 255},
+                                {"seconds": 1.5, "axis": "r2", "value": 0},
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertEqual(
+                [
+                    (event.seconds, event.axis, event.value)
+                    for event in manifest.cases[0].axis_events
+                ],
+                [
+                    (0.25, "left_x", 255),
+                    (0.75, "left_x", 128),
+                    (1.25, "r2", 255),
+                    (1.5, "r2", 0),
+                ],
+            )
+
+    def test_load_manifest_rejects_invalid_axis_events(self) -> None:
+        invalid_events = [
+            (None, "axisEvents must be an array"),
+            (["not-an-object"], "must be an object"),
+            (
+                [{"seconds": True, "axis": "left_x", "value": 128}],
+                "before timeoutSeconds",
+            ),
+            ([{"seconds": 0.25, "axis": "left_z", "value": 128}], "unsupported axis"),
+            ([{"seconds": 0.25, "axis": "left_x", "value": -1}], "between 0 and 255"),
+            ([{"seconds": 0.25, "axis": "left_x", "value": 256}], "between 0 and 255"),
+            ([{"seconds": 0.25, "axis": "left_x", "value": 1.5}], "must be an integer"),
+            (
+                [{"seconds": 0.25, "axis": "left_x", "value": True}],
+                "must be an integer",
+            ),
+            ([{"seconds": 2, "axis": "left_x", "value": 128}], "before timeoutSeconds"),
+            (
+                [
+                    {"seconds": 0.5, "axis": "left_x", "value": 255},
+                    {"seconds": 0.25, "axis": "left_x", "value": 128},
+                ],
+                "in increasing time order",
+            ),
+        ]
+        for events, expected in invalid_events:
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "game").mkdir()
+                    axis_events = events if events is not None else "not-an-array"
+                    path = self.write_manifest(
+                        root,
+                        {
+                            "schemaVersion": 1,
+                            "cases": [
+                                {
+                                    "name": "invalid analog input",
+                                    "gamePath": "game",
+                                    "timeoutSeconds": 2,
+                                    "useIpc": True,
+                                    "axisEvents": axis_events,
+                                }
+                            ],
+                        },
+                    )
+                    with self.assertRaisesRegex(ManifestError, expected):
+                        load_manifest(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "analog input needs IPC",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "axisEvents": [
+                                {"seconds": 0.25, "axis": "left_x", "value": 255}
+                            ],
+                        }
+                    ],
+                },
+            )
+            with self.assertRaisesRegex(ManifestError, "axisEvents requires useIpc"):
+                load_manifest(path)
+
     def test_load_manifest_rejects_missing_game_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_manifest(
@@ -771,6 +882,60 @@ class RunnerTests(unittest.TestCase):
                     "GAMEPAD_BUTTON",
                     "cross",
                     "0",
+                    "SCREENSHOT",
+                    "STOP",
+                ],
+            )
+
+    def test_run_case_interleaves_axis_events_with_other_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "analog visual survival",
+                    "timeoutSeconds": 0.35,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "axisEvents": [
+                        {"seconds": 0.05, "axis": "left_y", "value": 255},
+                        {"seconds": 0.2, "axis": "left_y", "value": 128},
+                    ],
+                    "buttonEvents": [
+                        {"seconds": 0.15, "button": "cross", "pressed": True}
+                    ],
+                    "screenshotSeconds": [0.1, 0.25],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                [
+                    "RUN",
+                    "START",
+                    "GAMEPAD_AXIS",
+                    "left_y",
+                    "255",
+                    "SCREENSHOT",
+                    "GAMEPAD_BUTTON",
+                    "cross",
+                    "1",
+                    "GAMEPAD_AXIS",
+                    "left_y",
+                    "128",
                     "SCREENSHOT",
                     "STOP",
                 ],

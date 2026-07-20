@@ -23,6 +23,18 @@
           "pressed": false
         }
       ],
+      "axisEvents": [
+        {
+          "seconds": 6,
+          "axis": "left_x",
+          "value": 255
+        },
+        {
+          "seconds": 7,
+          "axis": "left_x",
+          "value": 128
+        }
+      ],
       "args": [
         "--config-clean"
       ],
