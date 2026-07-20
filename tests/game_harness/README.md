@@ -21,6 +21,12 @@ Each case supports:
 - `name`: unique, human-readable case name.
 - `gamePath`: installed game directory or ELF path.
 - `timeoutSeconds`: positive hard process timeout.
+- `userConfig`: optional path to a private shadPS4 `config.json`. The runner
+  validates it as a JSON object and copies it into the case's isolated portable
+  user directory before launch. This makes experimental settings and
+  game-specific workarounds reproducible without committing personal config.
+  It cannot be combined with `--config-clean`, which intentionally forces
+  factory defaults and would ignore every supplied value.
 - `useIpc`: enable shadPS4 IPC start/stop control for graceful log flushing.
   The emulator's IPC capability handshake is required before the runner sends
   `RUN` and `START`; a missing handshake or required capability fails the case.
@@ -76,8 +82,9 @@ python scripts/game_test_runner.py `
 Alternatively, set `SHADPS4_GAME_TEST_MANIFEST` and omit `--manifest`.
 Use a fresh artifact directory for each run. Every case gets its own working
 directory and empty `user` directory, which activates shadPS4's portable-user
-mode. The runner writes capped stdout and stderr logs, preserves the emulator
-log, and writes `game-test-report.json`. With `useIpc` enabled it waits for the
+mode. If `userConfig` is supplied, only that case receives the copied
+`config.json`. The runner writes capped stdout and stderr logs, preserves the
+emulator log, and writes `game-test-report.json`. With `useIpc` enabled it waits for the
 IPC capability handshake, sends `RUN` and `START`, then requests a graceful
 `STOP` at the deadline before falling back to complete process-tree
 termination. The hard timeout remains relative to process launch, while

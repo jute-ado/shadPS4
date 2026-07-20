@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -86,6 +87,7 @@ class GameCase:
     name: str
     game_path: Path
     timeout_seconds: float
+    user_config: Path | None = None
     use_ipc: bool = False
     screenshot_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
@@ -420,6 +422,24 @@ def _resolve_existing_path(root: Path, raw: Any, field: str) -> Path:
     return path
 
 
+def _resolve_existing_file(root: Path, raw: Any, field: str) -> Path:
+    path = _resolve_existing_path(root, raw, field)
+    if not path.is_file():
+        raise ManifestError(f"{field} must be a file: {path}")
+    return path
+
+
+def _resolve_user_config(root: Path, raw: Any, field: str) -> Path:
+    path = _resolve_existing_file(root, raw, field)
+    try:
+        content = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ManifestError(f"{field} must contain a JSON object: {error}") from error
+    if not isinstance(content, dict):
+        raise ManifestError(f"{field} must contain a JSON object")
+    return path
+
+
 def load_manifest(path: str | Path) -> GameManifest:
     source = Path(path).resolve()
     try:
@@ -462,6 +482,15 @@ def load_manifest(path: str | Path) -> GameManifest:
             raise ManifestError(f"{name}: timeoutSeconds must be positive")
 
         args = _require_string_list(raw_case.get("args"), "args", name)
+        user_config = (
+            _resolve_user_config(root, raw_case["userConfig"], f"{name}: userConfig")
+            if "userConfig" in raw_case
+            else None
+        )
+        if user_config is not None and "--config-clean" in args:
+            raise ManifestError(
+                f"{name}: userConfig cannot be combined with --config-clean"
+            )
         outcomes = _require_string_list(
             raw_case.get("allowedOutcomes", ["exited_zero"]),
             "allowedOutcomes",
@@ -504,6 +533,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                     root, raw_case.get("gamePath"), f"{name}: gamePath"
                 ),
                 timeout_seconds=float(timeout),
+                user_config=user_config,
                 use_ipc=use_ipc,
                 screenshot_seconds=screenshot_seconds,
                 minimum_distinct_screenshots=_require_minimum_distinct_screenshots(
@@ -782,6 +812,8 @@ def run_case(
     )
     artifact_directory.mkdir(parents=True, exist_ok=False)
     (artifact_directory / "user").mkdir()
+    if case.user_config is not None:
+        shutil.copyfile(case.user_config, artifact_directory / "user" / "config.json")
 
     command = [*map(str, emulator_command), *case.args, str(case.game_path)]
     creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0

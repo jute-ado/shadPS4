@@ -118,6 +118,7 @@ def main() -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(args.log, encoding="utf-8")
 
+    config_path = Path("user") / "config.json"
     observation = {
         "cwd": str(Path.cwd()),
         "game": args.game,
@@ -125,6 +126,11 @@ def main() -> int:
         "ipc_commands": ipc_commands,
         "ipc_command_seconds": ipc_command_seconds,
         "ipc_enabled": os.environ.get("SHADPS4_ENABLE_IPC"),
+        "user_config": (
+            json.loads(config_path.read_text(encoding="utf-8"))
+            if config_path.exists()
+            else None
+        ),
     }
     (Path.cwd() / "observation.json").write_text(
         json.dumps(observation), encoding="utf-8"
