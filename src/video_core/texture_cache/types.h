@@ -85,6 +85,12 @@ struct SubresourceRange {
     SubresourceBase base;
     SubresourceExtent extent;
 
+    constexpr bool FitsWithin(const SubresourceExtent& available) const {
+        return extent.levels != 0 && extent.layers != 0 && base.level < available.levels &&
+               base.layer < available.layers && extent.levels <= available.levels - base.level &&
+               extent.layers <= available.layers - base.layer;
+    }
+
     bool operator==(const SubresourceRange&) const = default;
 };
 

@@ -715,6 +715,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 desc.view_info.range.extent.levels = 1;
             }
 
+            desc.initial_range = desc.view_info.range;
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
@@ -740,9 +741,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         if (!image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         } else {
-            if (auto& old_image = texture_cache.GetImage(image_id);
-                old_image.binding.needs_rebind) {
-                old_image.binding = {};
+            auto& old_image = texture_cache.GetImage(image_id);
+            const bool needs_rebind = old_image.binding.needs_rebind;
+            const bool range_is_stale = !desc.view_info.range.FitsWithin(old_image.info.resources);
+            if (needs_rebind || range_is_stale) {
+                if (needs_rebind) {
+                    old_image.binding = {};
+                }
+                desc.view_info.range = desc.initial_range;
                 image_id = texture_cache.FindImage(desc);
             }
 

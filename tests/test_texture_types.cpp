@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <concepts>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -10,6 +11,7 @@
 namespace {
 
 using VideoCore::SubresourceExtent;
+using VideoCore::SubresourceRange;
 
 static_assert(std::equality_comparable<SubresourceExtent>);
 static_assert(!std::totally_ordered<SubresourceExtent>);
@@ -68,6 +70,52 @@ TEST(SubresourceExtent, ClampsSingleMipImageToLevelZero) {
     constexpr SubresourceExtent extent{.levels = 1, .layers = 1};
 
     EXPECT_EQ(extent.ClampLevel(9), 0u);
+}
+
+TEST(SubresourceRange, FitsAtExactMipAndLayerBoundary) {
+    constexpr SubresourceRange range{
+        .base = {.level = 1, .layer = 2},
+        .extent = {.levels = 2, .layers = 3},
+    };
+
+    EXPECT_TRUE(range.FitsWithin(SubresourceExtent{.levels = 3, .layers = 5}));
+}
+
+TEST(SubresourceRange, RejectsBaseOutsideAvailableMipLevels) {
+    constexpr SubresourceRange range{
+        .base = {.level = 3, .layer = 0},
+        .extent = {.levels = 1, .layers = 1},
+    };
+
+    EXPECT_FALSE(range.FitsWithin(SubresourceExtent{.levels = 3, .layers = 1}));
+}
+
+TEST(SubresourceRange, RejectsExtentCrossingAvailableLayers) {
+    constexpr SubresourceRange range{
+        .base = {.level = 0, .layer = 4},
+        .extent = {.levels = 1, .layers = 2},
+    };
+
+    EXPECT_FALSE(range.FitsWithin(SubresourceExtent{.levels = 1, .layers = 5}));
+}
+
+TEST(SubresourceRange, RejectsOverflowingRange) {
+    constexpr SubresourceRange range{
+        .base = {.level = std::numeric_limits<u32>::max(), .layer = 0},
+        .extent = {.levels = 2, .layers = 1},
+    };
+
+    EXPECT_FALSE(range.FitsWithin(
+        SubresourceExtent{.levels = std::numeric_limits<u32>::max(), .layers = 1}));
+}
+
+TEST(SubresourceRange, RejectsEmptyExtent) {
+    constexpr SubresourceRange range{
+        .base = {.level = 0, .layer = 0},
+        .extent = {.levels = 0, .layers = 1},
+    };
+
+    EXPECT_FALSE(range.FitsWithin(SubresourceExtent{.levels = 1, .layers = 1}));
 }
 
 } // namespace

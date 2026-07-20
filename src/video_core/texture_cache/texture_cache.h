@@ -58,6 +58,7 @@ public:
     struct ImageDesc {
         ImageInfo info;
         ImageViewInfo view_info;
+        SubresourceRange initial_range;
         BindingType type{BindingType::Texture};
 
         ImageDesc() = default;
