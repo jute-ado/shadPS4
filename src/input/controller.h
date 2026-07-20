@@ -14,6 +14,7 @@
 #include "core/libraries/pad/pad.h"
 #include "core/libraries/system/userservice.h"
 #include "input/controller_axis.h"
+#include "input/controller_connection.h"
 
 struct SDL_Gamepad;
 
@@ -81,6 +82,7 @@ public:
     GameController();
     virtual ~GameController() = default;
     void ConnectController(SDL_Gamepad* pad);
+    void ConnectVirtualController();
     void DisconnectController();
 
     void ReadState(State* state, bool* isConnected, int* connectedCount);
@@ -125,8 +127,7 @@ public:
 private:
     void PushState();
 
-    bool m_connected = false;
-    int m_connected_count = 0;
+    ControllerConnectionState m_connection;
     u8 m_touch_count = 0;
     u8 m_secondary_touch_count = 0;
     u8 m_previous_touchnum = 0;

@@ -345,16 +345,19 @@ void WindowSDL::WaitEvent() {
         VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
         break;
     case SDL_EVENT_INJECT_GAMEPAD_BUTTON:
+        controllers[0]->ConnectVirtualController();
         controllers[0]->Button(
             static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(event.user.code),
             reinterpret_cast<uintptr_t>(event.user.data1) != 0);
         break;
     case SDL_EVENT_INJECT_GAMEPAD_AXIS:
+        controllers[0]->ConnectVirtualController();
         controllers[0]->Axis(static_cast<Input::Axis>(event.user.code),
                              static_cast<int>(reinterpret_cast<uintptr_t>(event.user.data1)),
                              false);
         break;
     case SDL_EVENT_INJECT_GAMEPAD_TOUCH: {
+        controllers[0]->ConnectVirtualController();
         const auto touch = Input::UnpackControllerTouch(
             static_cast<u8>(event.user.code),
             static_cast<u64>(reinterpret_cast<uintptr_t>(event.user.data1)));

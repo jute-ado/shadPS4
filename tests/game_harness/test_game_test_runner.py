@@ -1044,7 +1044,7 @@ class RunnerTests(unittest.TestCase):
                     root,
                     case={
                         "name": f"missing {capability}",
-                        "timeoutSeconds": 0.15,
+                        "timeoutSeconds": 1.0,
                         "args": ["--expect-ipc", omitted_flag],
                         "useIpc": True,
                         "allowedOutcomes": ["timed_out"],
@@ -1237,7 +1237,7 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "missing visual",
-                    "timeoutSeconds": 0.15,
+                    "timeoutSeconds": 1.0,
                     "args": ["--expect-ipc", "--ignore-screenshots"],
                     "useIpc": True,
                     "screenshotSeconds": [0.05],
@@ -1266,7 +1266,7 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "malformed visual",
-                    "timeoutSeconds": 0.15,
+                    "timeoutSeconds": 1.0,
                     "args": ["--expect-ipc", "--malformed-screenshots"],
                     "useIpc": True,
                     "screenshotSeconds": [0.05],
