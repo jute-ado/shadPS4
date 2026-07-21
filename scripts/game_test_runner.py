@@ -27,6 +27,7 @@ REPORT_SCHEMA_VERSION = 1
 DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 VALID_OUTCOMES = frozenset({"exited_zero", "exited_nonzero", "timed_out"})
 VALID_SCREENSHOT_DIFFERENCE_MODES = frozenset({"cosine", "mean_absolute"})
+VALID_SCREENSHOT_SOURCES = frozenset({"game_frame", "presented_frame"})
 SUPPORTED_BUTTONS = frozenset(
     {
         "circle",
@@ -124,6 +125,7 @@ class GameCase:
     user_config: Path | None = None
     user_data_seed: Path | None = None
     use_ipc: bool = False
+    screenshot_source: str = "game_frame"
     screenshot_seconds: tuple[float, ...] = ()
     renderdoc_capture_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
@@ -712,6 +714,12 @@ def load_manifest(path: str | Path) -> GameManifest:
             )
 
         use_ipc = _require_bool(raw_case.get("useIpc", False), "useIpc", name)
+        screenshot_source = raw_case.get("screenshotSource", "game_frame")
+        if screenshot_source not in VALID_SCREENSHOT_SOURCES:
+            raise ManifestError(
+                f"{name}: screenshotSource must be one of "
+                f"{sorted(VALID_SCREENSHOT_SOURCES)}"
+            )
         screenshot_seconds = _require_screenshot_schedule(
             raw_case.get("screenshotSeconds"),
             case_name=name,
@@ -781,6 +789,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 user_config=user_config,
                 user_data_seed=user_data_seed,
                 use_ipc=use_ipc,
+                screenshot_source=screenshot_source,
                 screenshot_seconds=screenshot_seconds,
                 renderdoc_capture_seconds=renderdoc_capture_seconds,
                 minimum_distinct_screenshots=_require_minimum_distinct_screenshots(
@@ -1274,7 +1283,11 @@ def run_case(
                 known_screenshots = set(_find_valid_screenshots(artifact_directory))
                 while process.poll() is None and time.monotonic() < event_deadline:
                     request_started = time.monotonic()
-                    process.stdin.write(b"SCREENSHOT\n")
+                    process.stdin.write(
+                        b"SCREENSHOT_WITH_OVERLAYS\n"
+                        if case.screenshot_source == "presented_frame"
+                        else b"SCREENSHOT\n"
+                    )
                     process.stdin.flush()
 
                     screenshot: Path | None = None
@@ -1441,7 +1454,11 @@ def run_case(
             except subprocess.TimeoutExpired:
                 assert process.stdin is not None
                 if event_type == "screenshot":
-                    process.stdin.write(b"SCREENSHOT\n")
+                    process.stdin.write(
+                        b"SCREENSHOT_WITH_OVERLAYS\n"
+                        if case.screenshot_source == "presented_frame"
+                        else b"SCREENSHOT\n"
+                    )
                 elif event_type == "renderdoc_capture":
                     process.stdin.write(b"RENDERDOC_CAPTURE\n")
                 elif event_type == "button":

@@ -43,6 +43,11 @@ Each case supports:
 - `screenshotSeconds`: optional increasing list of times, in seconds after the
   IPC handshake, at which to capture game-only frames. Requires `useIpc`; every
   requested capture must produce a valid PNG for the case to pass.
+- `screenshotSource`: optional source for scheduled screenshots and visual
+  checkpoints. `game_frame` (the default) captures the next guest output before
+  host processing. `presented_frame` captures the composed swapchain image that
+  is actually shown, avoiding false black checkpoints when a title submits
+  intermediate buffers between visible frames.
 - `renderdocCaptureSeconds`: optional increasing list of times, in seconds after
   the IPC handshake, at which to capture a complete RenderDoc frame. Requires
   `useIpc` and a process launched with RenderDoc loaded; every requested capture

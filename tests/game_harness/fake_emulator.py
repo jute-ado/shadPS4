@@ -119,7 +119,10 @@ def main() -> int:
             command = sys.stdin.readline().strip()
             ipc_commands.append(command)
             ipc_command_seconds.append(time.monotonic() - launched)
-            if command == "SCREENSHOT" and not args.ignore_screenshots:
+            if (
+                command in {"SCREENSHOT", "SCREENSHOT_WITH_OVERLAYS"}
+                and not args.ignore_screenshots
+            ):
                 screenshots = Path("user") / "screenshots"
                 if args.single_screenshot and screenshots.exists():
                     continue
