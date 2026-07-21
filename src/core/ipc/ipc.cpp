@@ -53,8 +53,9 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  * - CAPABILITIES:
  *   - ENABLE_MEMORY_PATCH: enables PATCH_MEMORY command
  *   - ENABLE_EMU_CONTROL: enables emulator control commands
- *   - ENABLE_SCREENSHOT: enables SCREENSHOT command
- *   - ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
+ *   - ENABLE_SCREENSHOT: enables SCREENSHOT and SCREENSHOT_WITH_OVERLAYS commands
+ *   -
+ * ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
  *   - ENABLE_GAMEPAD
  * - INPUT CMD:
  *   - RUN: start the emulator execution
@@ -69,7 +70,10 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - STOP: stop and quit the emulator
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
  *   - SCREENSHOT: capture the next game-only frame
- *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc when loaded
+ *   - SCREENSHOT_WITH_OVERLAYS: capture the
+ * next frame as visibly presented
+ *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc
+ * when loaded
  *   - GAMEPAD_BUTTON
  *     - button: player-one button name
  *     - pressed: 1 to press, 0 to
@@ -179,6 +183,8 @@ void IPC::InputLoop() {
             SDL_PushEvent(&event);
         } else if (cmd == "SCREENSHOT") {
             VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+        } else if (cmd == "SCREENSHOT_WITH_OVERLAYS") {
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
         } else if (cmd == "RENDERDOC_CAPTURE") {
             VideoCore::TriggerCapture();
         } else if (cmd == "GAMEPAD_BUTTON") {

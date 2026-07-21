@@ -306,6 +306,53 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
             self.assertEqual(manifest.cases[0].minimum_distinct_screenshots, 2)
 
+    def test_load_manifest_accepts_presented_frame_screenshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "presented visual boot",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSource": "presented_frame",
+                            "screenshotSeconds": [0.25],
+                        }
+                    ],
+                },
+            )
+
+            manifest = load_manifest(path)
+
+            self.assertEqual(manifest.cases[0].screenshot_source, "presented_frame")
+
+    def test_load_manifest_rejects_unknown_screenshot_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "unknown visual source",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "screenshotSource": "front_buffer",
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ManifestError, "screenshotSource"):
+                load_manifest(path)
+
     def test_load_manifest_accepts_scheduled_renderdoc_captures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1789,6 +1836,39 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(
                 observation["ipc_commands"],
                 ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
+            )
+
+    def test_run_case_can_capture_presented_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "presented visual survival",
+                    "timeoutSeconds": 0.2,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotSource": "presented_frame",
+                    "screenshotSeconds": [0.05],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                ["RUN", "START", "SCREENSHOT_WITH_OVERLAYS", "STOP"],
             )
 
     def test_run_case_presses_button_only_after_reference_screenshot_matches(
