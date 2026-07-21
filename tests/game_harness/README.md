@@ -76,12 +76,17 @@ Each case supports:
   screenshot until either `screenshotSha256` matches exactly or the frame is
   within `maximumDifference` of `referenceScreenshot`, then taps `button`.
   Reference matching supports the same `differenceMode` values as screenshot
-  comparisons and tolerates harmless animation or encoding variation. Bound
-  each checkpoint with `timeoutSeconds`; `pollSeconds` defaults to 0.25 and
-  `holdSeconds` defaults to 0.1. Requires both screenshot and gamepad IPC
-  capabilities. These state-driven events cannot be combined with timed
-  screenshots, captures, or controller events in the same case. Keep hashes
-  and reference frames for owned games private, not in the repository.
+  comparisons and tolerates harmless animation or encoding variation. An
+  optional pixel `comparisonRegion` object (`left`, `top`, `width`, `height`)
+  limits reference comparison to a stable part of the frame, such as a menu
+  control, when unrelated animation or rendering defects should not block
+  navigation. The region must fit both equal-sized images and is not valid with
+  an exact hash. Bound each checkpoint with `timeoutSeconds`; `pollSeconds`
+  defaults to 0.25 and `holdSeconds` defaults to 0.1. Requires both screenshot
+  and gamepad IPC capabilities. These state-driven events cannot be combined
+  with timed screenshots, captures, or controller events in the same case.
+  Keep hashes and reference frames for owned games private, not in the
+  repository.
 - `axisEvents`: optional increasing list of player-one analog-axis updates.
   Each entry has `seconds`, an `axis` name, and an integer `value` from 0
   through 255. Requires `useIpc`. Supported names are `left_x`, `left_y`,

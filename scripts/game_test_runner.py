@@ -60,11 +60,20 @@ class ButtonEvent:
 
 
 @dataclass(frozen=True)
+class ScreenshotRegion:
+    left: int
+    top: int
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
 class ScreenshotButtonEvent:
     screenshot_sha256: str | None
     reference_screenshot: Path | None
     maximum_difference: float | None
     difference_mode: str
+    comparison_region: ScreenshotRegion | None
     button: str
     timeout_seconds: float
     poll_seconds: float = 0.25
@@ -396,7 +405,13 @@ def _require_screenshot_button_events(
         reference_screenshot: Path | None = None
         maximum_difference: float | None = None
         difference_mode = item.get("differenceMode", "mean_absolute")
+        comparison_region_value = item.get("comparisonRegion")
+        comparison_region: ScreenshotRegion | None = None
         if screenshot_sha256 is not None:
+            if comparison_region_value is not None:
+                raise ManifestError(
+                    f"{field}.comparisonRegion requires referenceScreenshot"
+                )
             if (
                 not isinstance(screenshot_sha256, str)
                 or re.fullmatch(r"[0-9a-fA-F]{64}", screenshot_sha256) is None
@@ -425,6 +440,26 @@ def _require_screenshot_button_events(
                     f"{field}.differenceMode must be one of "
                     f"{sorted(VALID_SCREENSHOT_DIFFERENCE_MODES)}"
                 )
+            if comparison_region_value is not None:
+                if not isinstance(comparison_region_value, dict):
+                    raise ManifestError(f"{field}.comparisonRegion must be an object")
+                region_values: dict[str, int] = {}
+                for component in ("left", "top", "width", "height"):
+                    value = comparison_region_value.get(component)
+                    if not isinstance(value, int) or isinstance(value, bool):
+                        raise ManifestError(
+                            f"{field}.comparisonRegion.{component} must be an integer"
+                        )
+                    region_values[component] = value
+                if region_values["left"] < 0 or region_values["top"] < 0:
+                    raise ManifestError(
+                        f"{field}.comparisonRegion left and top cannot be negative"
+                    )
+                if region_values["width"] <= 0 or region_values["height"] <= 0:
+                    raise ManifestError(
+                        f"{field}.comparisonRegion width and height must be positive"
+                    )
+                comparison_region = ScreenshotRegion(**region_values)
         button = item.get("button")
         if button not in SUPPORTED_BUTTONS:
             raise ManifestError(
@@ -457,6 +492,7 @@ def _require_screenshot_button_events(
                 reference_screenshot=reference_screenshot,
                 maximum_difference=maximum_difference,
                 difference_mode=difference_mode,
+                comparison_region=comparison_region,
                 button=button,
                 timeout_seconds=values["timeoutSeconds"],
                 poll_seconds=values["pollSeconds"],
@@ -993,12 +1029,41 @@ def _decode_png_rgb(path: Path) -> tuple[int, int, bytes]:
 
 
 def _screenshot_difference(
-    first: Path, second: Path, *, mode: str = "mean_absolute"
+    first: Path,
+    second: Path,
+    *,
+    mode: str = "mean_absolute",
+    region: ScreenshotRegion | None = None,
 ) -> float:
     first_width, first_height, first_pixels = _decode_png_rgb(first)
     second_width, second_height, second_pixels = _decode_png_rgb(second)
     if (first_width, first_height) != (second_width, second_height):
         raise ValueError("screenshots have different dimensions")
+    if region is not None:
+        if (
+            region.left < 0
+            or region.top < 0
+            or region.width <= 0
+            or region.height <= 0
+            or region.left + region.width > first_width
+            or region.top + region.height > first_height
+        ):
+            raise ValueError("screenshot comparison region is outside the image")
+
+        def crop(pixels: bytes) -> bytes:
+            row_bytes = region.width * 3
+            return b"".join(
+                pixels[
+                    ((region.top + row) * first_width + region.left)
+                    * 3 : ((region.top + row) * first_width + region.left)
+                    * 3
+                    + row_bytes
+                ]
+                for row in range(region.height)
+            )
+
+        first_pixels = crop(first_pixels)
+        second_pixels = crop(second_pixels)
     if mode == "mean_absolute":
         return sum(
             abs(left - right) for left, right in zip(first_pixels, second_pixels)
@@ -1190,8 +1255,8 @@ def run_case(
                     hard_deadline, time.monotonic() + event.timeout_seconds
                 )
                 matched = False
+                known_screenshots = set(_find_valid_screenshots(artifact_directory))
                 while process.poll() is None and time.monotonic() < event_deadline:
-                    existing = set(_find_valid_screenshots(artifact_directory))
                     request_started = time.monotonic()
                     process.stdin.write(b"SCREENSHOT\n")
                     process.stdin.flush()
@@ -1204,10 +1269,11 @@ def run_case(
                         candidates = [
                             path
                             for path in _find_valid_screenshots(artifact_directory)
-                            if path not in existing
+                            if path not in known_screenshots
                         ]
                         if candidates:
-                            screenshot = candidates[-1]
+                            screenshot = candidates[0]
+                            known_screenshots.add(screenshot)
                             break
                         time.sleep(min(0.01, max(0, poll_deadline - time.monotonic())))
 
@@ -1228,6 +1294,7 @@ def run_case(
                                     event.reference_screenshot,
                                     screenshot,
                                     mode=event.difference_mode,
+                                    region=event.comparison_region,
                                 )
                                 screenshot_matches = (
                                     screenshot_difference <= event.maximum_difference

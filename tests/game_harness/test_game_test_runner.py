@@ -17,6 +17,7 @@ import zlib
 
 from scripts.game_test_runner import (
     ManifestError,
+    ScreenshotRegion,
     _decode_png_rgb,
     _screenshot_difference,
     load_manifest,
@@ -619,6 +620,48 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(event.poll_seconds, 0.05)
             self.assertEqual(event.hold_seconds, 0.1)
 
+    def test_load_manifest_accepts_visual_checkpoint_comparison_region(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            (root / "reference.png").write_bytes(
+                test_png(2, 1, 2, bytes((0, 0, 0, 0, 0, 0, 0)))
+            )
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "stable controls",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "referenceScreenshot": "reference.png",
+                                    "comparisonRegion": {
+                                        "left": 1,
+                                        "top": 0,
+                                        "width": 1,
+                                        "height": 1,
+                                    },
+                                    "button": "cross",
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertEqual(
+                event.comparison_region,
+                ScreenshotRegion(left=1, top=0, width=1, height=1),
+            )
+
     def test_load_manifest_rejects_mixed_timed_and_screenshot_driven_events(
         self,
     ) -> None:
@@ -653,6 +696,58 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "cannot be combined"):
                 load_manifest(path)
 
+    def test_load_manifest_rejects_invalid_visual_checkpoint_regions(self) -> None:
+        scenarios = (
+            ([], "comparisonRegion must be an object"),
+            (
+                {"left": 0, "top": 0, "width": 1},
+                "comparisonRegion.height must be an integer",
+            ),
+            (
+                {"left": -1, "top": 0, "width": 1, "height": 1},
+                "left and top cannot be negative",
+            ),
+            (
+                {"left": 0, "top": 0, "width": 0, "height": 1},
+                "width and height must be positive",
+            ),
+        )
+        for region, message in scenarios:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                (root / "reference.png").write_bytes(
+                    test_png(1, 1, 2, bytes((0, 0, 0, 0)))
+                )
+                path = self.write_manifest(
+                    root,
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "invalid stable region",
+                                "gamePath": "game",
+                                "timeoutSeconds": 2,
+                                "useIpc": True,
+                                "screenshotButtonEvents": [
+                                    {
+                                        "referenceScreenshot": "reference.png",
+                                        "comparisonRegion": region,
+                                        "button": "cross",
+                                        "timeoutSeconds": 0.5,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+
+                with self.assertRaisesRegex(ManifestError, message):
+                    load_manifest(path)
+
     def test_load_manifest_rejects_invalid_screenshot_driven_button_events(
         self,
     ) -> None:
@@ -679,6 +774,14 @@ class ManifestTests(unittest.TestCase):
             (
                 {"screenshotButtonEvents": [{**valid, "pollSeconds": 1.0}]},
                 "pollSeconds cannot exceed timeoutSeconds",
+            ),
+            (
+                {
+                    "screenshotButtonEvents": [
+                        {**valid, "comparisonRegion": {"left": 0}}
+                    ]
+                },
+                "comparisonRegion requires referenceScreenshot",
             ),
             (
                 {"useIpc": False, "screenshotButtonEvents": [valid]},
@@ -1232,6 +1335,30 @@ class ManifestTests(unittest.TestCase):
 
 
 class PngComparisonTests(unittest.TestCase):
+    def test_screenshot_difference_can_ignore_pixels_outside_a_region(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(test_png(2, 1, 2, bytes((0, 255, 0, 0, 8, 8, 8))))
+            second.write_bytes(test_png(2, 1, 2, bytes((0, 0, 255, 0, 8, 8, 8))))
+
+            self.assertGreater(_screenshot_difference(first, second), 0)
+            self.assertEqual(
+                _screenshot_difference(
+                    first,
+                    second,
+                    region=ScreenshotRegion(left=1, top=0, width=1, height=1),
+                ),
+                0.0,
+            )
+            with self.assertRaisesRegex(ValueError, "outside the image"):
+                _screenshot_difference(
+                    first,
+                    second,
+                    region=ScreenshotRegion(left=2, top=0, width=1, height=1),
+                )
+
     def test_decode_png_supports_all_standard_scanline_filters(self) -> None:
         rows = (
             bytes((0, 10, 20, 30, 40, 50, 60))
@@ -1716,6 +1843,91 @@ class RunnerTests(unittest.TestCase):
             )
             json.dumps(result.to_report())
 
+    def test_run_case_matches_visual_checkpoint_inside_comparison_region(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "expected.png"
+            reference.write_bytes(test_png(2, 1, 2, bytes((0, 255, 0, 0, 8, 8, 8))))
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "stable control region",
+                    "timeoutSeconds": 1.0,
+                    "args": ["--expect-ipc", "--vary-left-pixel"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "comparisonRegion": {
+                                "left": 1,
+                                "top": 0,
+                                "width": 1,
+                                "height": 1,
+                            },
+                            "maximumDifference": 0,
+                            "button": "cross",
+                            "timeoutSeconds": 0.5,
+                            "pollSeconds": 0.1,
+                            "holdSeconds": 0.02,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(len(result.visual_checkpoint_attempts), 1)
+            self.assertTrue(result.visual_checkpoint_attempts[0].matched)
+
+    def test_run_case_attributes_screenshot_arriving_after_poll_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected_png = test_png(1, 1, 6, bytes((0, 0, 0, 0, 255)))
+            reference = root / "expected.png"
+            reference.write_bytes(expected_png)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "late visual response",
+                    "timeoutSeconds": 0.8,
+                    "args": [
+                        "--expect-ipc",
+                        "--screenshot-delay",
+                        "0.08",
+                        "--single-screenshot",
+                    ],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "button": "cross",
+                            "timeoutSeconds": 0.4,
+                            "pollSeconds": 0.02,
+                            "holdSeconds": 0.01,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertTrue(result.visual_checkpoint_attempts[-1].matched)
+
     def test_run_case_fails_without_pressing_when_screenshot_never_matches(
         self,
     ) -> None:
@@ -1725,15 +1937,15 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "missing visual state",
-                    "timeoutSeconds": 0.3,
+                    "timeoutSeconds": 0.8,
                     "args": ["--expect-ipc"],
                     "useIpc": True,
                     "screenshotButtonEvents": [
                         {
                             "screenshotSha256": "a" * 64,
                             "button": "cross",
-                            "timeoutSeconds": 0.1,
-                            "pollSeconds": 0.02,
+                            "timeoutSeconds": 0.4,
+                            "pollSeconds": 0.05,
                             "holdSeconds": 0.01,
                         }
                     ],
