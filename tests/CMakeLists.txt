@@ -100,6 +100,19 @@ target_compile_features(shadps4_vertex_input_binding_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_vertex_input_binding_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_vertex_input_binding_test)
 
+add_executable(shadps4_device_feature_policy_test
+    test_device_features.cpp
+)
+target_include_directories(shadps4_device_feature_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_device_feature_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_device_feature_policy_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_device_feature_policy_test)
+
 add_executable(shadps4_playgo_test
     test_playgo.cpp
 )

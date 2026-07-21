@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/device_feature_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -376,33 +377,7 @@ bool Instance::CreateDevice() {
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
         vk::PhysicalDeviceFeatures2{
-            .features{
-                .robustBufferAccess = features.robustBufferAccess,
-                .imageCubeArray = features.imageCubeArray,
-                .independentBlend = features.independentBlend,
-                .geometryShader = features.geometryShader,
-                .tessellationShader = features.tessellationShader,
-                .sampleRateShading = features.sampleRateShading,
-                .dualSrcBlend = features.dualSrcBlend,
-                .logicOp = features.logicOp,
-                .multiDrawIndirect = features.multiDrawIndirect,
-                .depthClamp = features.depthClamp,
-                .depthBiasClamp = features.depthBiasClamp,
-                .fillModeNonSolid = features.fillModeNonSolid,
-                .depthBounds = features.depthBounds,
-                .wideLines = features.wideLines,
-                .multiViewport = features.multiViewport,
-                .samplerAnisotropy = features.samplerAnisotropy,
-                .vertexPipelineStoresAndAtomics = features.vertexPipelineStoresAndAtomics,
-                .fragmentStoresAndAtomics = features.fragmentStoresAndAtomics,
-                .shaderImageGatherExtended = features.shaderImageGatherExtended,
-                .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
-                .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
-                .shaderClipDistance = features.shaderClipDistance,
-                .shaderFloat64 = features.shaderFloat64,
-                .shaderInt64 = features.shaderInt64,
-                .shaderInt16 = features.shaderInt16,
-            },
+            .features = BuildCoreDeviceFeatures(features),
         },
         vk::PhysicalDeviceVulkan11Features{
             .storageBuffer16BitAccess = vk11_features.storageBuffer16BitAccess,
