@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/buffer_barrier_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -598,6 +599,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
+    boost::container::small_vector<std::pair<VideoCore::Buffer*, vk::AccessFlags2>, 16>
+        buffer_accesses;
 
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
@@ -652,11 +655,15 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
-            if (auto barrier =
-                    vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
-                                                          : vk::AccessFlagBits2::eShaderRead,
-                                          vk::PipelineStageFlagBits2::eAllCommands)) {
-                buffer_barriers.emplace_back(*barrier);
+            const auto access = ShaderBufferAccess(desc.is_written);
+            const auto access_it =
+                std::ranges::find_if(buffer_accesses, [vk_buffer](const auto& entry) {
+                    return entry.first == vk_buffer;
+                });
+            if (access_it == buffer_accesses.end()) {
+                buffer_accesses.emplace_back(vk_buffer, access);
+            } else {
+                access_it->second = MergeShaderBufferAccess(access_it->second, desc.is_written);
             }
             if (desc.is_written && desc.is_formatted) {
                 texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
@@ -672,6 +679,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             is_storage ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer;
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
+    }
+
+    for (const auto& [buffer, access] : buffer_accesses) {
+        if (auto barrier = buffer->GetBarrier(access, vk::PipelineStageFlagBits2::eAllCommands)) {
+            buffer_barriers.emplace_back(*barrier);
+        }
     }
 }
 
