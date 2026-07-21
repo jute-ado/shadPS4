@@ -13,6 +13,14 @@ class SymbolsResolver;
 namespace Libraries::PlayGo {
 constexpr int shadMagic = 0x53484144;
 
+constexpr OrbisPlayGoLanguageMask ConvertLanguageToMask(s32 system_lang) {
+    constexpr s32 MaxSupportedSystemLanguage = 48;
+    if (system_lang < 0 || system_lang >= MaxSupportedSystemLanguage) {
+        return 0;
+    }
+    return OrbisPlayGoLanguageMask{1} << (63 - system_lang);
+}
+
 s32 PS4_SYSV_ABI sceDbgPlayGoRequestNextChunk();
 s32 PS4_SYSV_ABI sceDbgPlayGoSnapshot();
 s32 PS4_SYSV_ABI scePlayGoClose(OrbisPlayGoHandle handle);
