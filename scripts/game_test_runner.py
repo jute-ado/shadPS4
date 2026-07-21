@@ -61,6 +61,18 @@ class ButtonEvent:
 
 
 @dataclass(frozen=True)
+class ScreenshotButtonEvent:
+    screenshot_sha256: str | None
+    reference_screenshot: Path | None
+    maximum_difference: float | None
+    difference_mode: str
+    button: str
+    timeout_seconds: float
+    poll_seconds: float = 0.25
+    hold_seconds: float = 0.1
+
+
+@dataclass(frozen=True)
 class AxisEvent:
     seconds: float
     axis: str
@@ -98,6 +110,7 @@ class GameCase:
     minimum_distinct_screenshots: int = 0
     screenshot_comparisons: tuple[ScreenshotComparison, ...] = ()
     button_events: tuple[ButtonEvent, ...] = ()
+    screenshot_button_events: tuple[ScreenshotButtonEvent, ...] = ()
     axis_events: tuple[AxisEvent, ...] = ()
     touch_events: tuple[TouchEvent, ...] = ()
     args: tuple[str, ...] = ()
@@ -353,6 +366,98 @@ def _require_button_events(
     return tuple(events)
 
 
+def _require_screenshot_button_events(
+    raw: Any, *, case_name: str, timeout: float, use_ipc: bool, root: Path
+) -> tuple[ScreenshotButtonEvent, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ManifestError(f"{case_name}: screenshotButtonEvents must be an array")
+    events: list[ScreenshotButtonEvent] = []
+    for index, item in enumerate(raw):
+        field = f"{case_name}: screenshotButtonEvents[{index}]"
+        if not isinstance(item, dict):
+            raise ManifestError(f"{field} must be an object")
+        screenshot_sha256 = item.get("screenshotSha256")
+        reference_value = item.get("referenceScreenshot")
+        if (screenshot_sha256 is None) == (reference_value is None):
+            raise ManifestError(
+                f"{field} requires exactly one of screenshotSha256 or referenceScreenshot"
+            )
+        reference_screenshot: Path | None = None
+        maximum_difference: float | None = None
+        difference_mode = item.get("differenceMode", "mean_absolute")
+        if screenshot_sha256 is not None:
+            if not isinstance(screenshot_sha256, str) or re.fullmatch(
+                r"[0-9a-fA-F]{64}", screenshot_sha256
+            ) is None:
+                raise ManifestError(
+                    f"{field}.screenshotSha256 must be a SHA-256 hex digest"
+                )
+            screenshot_sha256 = screenshot_sha256.lower()
+        else:
+            reference_screenshot = _resolve_existing_path(
+                root, reference_value, f"{field}.referenceScreenshot"
+            )
+            maximum_difference = item.get("maximumDifference", 0.01)
+            if (
+                not isinstance(maximum_difference, (int, float))
+                or isinstance(maximum_difference, bool)
+                or not math.isfinite(maximum_difference)
+                or not 0 <= maximum_difference <= 1
+            ):
+                raise ManifestError(f"{field}.maximumDifference must be between 0 and 1")
+            maximum_difference = float(maximum_difference)
+            if difference_mode not in VALID_SCREENSHOT_DIFFERENCE_MODES:
+                raise ManifestError(
+                    f"{field}.differenceMode must be one of "
+                    f"{sorted(VALID_SCREENSHOT_DIFFERENCE_MODES)}"
+                )
+        button = item.get("button")
+        if button not in SUPPORTED_BUTTONS:
+            raise ManifestError(
+                f"{field} has unsupported button {button!r}; expected one of "
+                f"{sorted(SUPPORTED_BUTTONS)}"
+            )
+
+        values: dict[str, float] = {}
+        for json_field, default in (
+            ("timeoutSeconds", None),
+            ("pollSeconds", 0.25),
+            ("holdSeconds", 0.1),
+        ):
+            value = item.get(json_field, default)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ManifestError(f"{field}.{json_field} must be a finite positive number")
+            values[json_field] = float(value)
+        if values["pollSeconds"] > values["timeoutSeconds"]:
+            raise ManifestError(f"{field}.pollSeconds cannot exceed timeoutSeconds")
+        events.append(
+            ScreenshotButtonEvent(
+                screenshot_sha256=screenshot_sha256,
+                reference_screenshot=reference_screenshot,
+                maximum_difference=maximum_difference,
+                difference_mode=difference_mode,
+                button=button,
+                timeout_seconds=values["timeoutSeconds"],
+                poll_seconds=values["pollSeconds"],
+                hold_seconds=values["holdSeconds"],
+            )
+        )
+    if events and not use_ipc:
+        raise ManifestError(f"{case_name}: screenshotButtonEvents requires useIpc")
+    if sum(event.timeout_seconds + event.hold_seconds for event in events) >= timeout:
+        raise ManifestError(
+            f"{case_name}: screenshotButtonEvents must complete before timeoutSeconds"
+        )
+    return tuple(events)
+
+
 def _require_axis_events(
     raw: Any, *, case_name: str, timeout: float, use_ipc: bool
 ) -> tuple[AxisEvent, ...]:
@@ -574,6 +679,13 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=float(timeout),
             use_ipc=use_ipc,
         )
+        screenshot_button_events = _require_screenshot_button_events(
+            raw_case.get("screenshotButtonEvents"),
+            case_name=name,
+            timeout=float(timeout),
+            use_ipc=use_ipc,
+            root=root,
+        )
         axis_events = _require_axis_events(
             raw_case.get("axisEvents"),
             case_name=name,
@@ -586,6 +698,18 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=float(timeout),
             use_ipc=use_ipc,
         )
+        if screenshot_button_events and any(
+            (
+                screenshot_seconds,
+                renderdoc_capture_seconds,
+                button_events,
+                axis_events,
+                touch_events,
+            )
+        ):
+            raise ManifestError(
+                f"{name}: screenshotButtonEvents cannot be combined with timed events"
+            )
         cases.append(
             GameCase(
                 name=name,
@@ -609,6 +733,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                     screenshot_count=len(screenshot_seconds),
                 ),
                 button_events=button_events,
+                screenshot_button_events=screenshot_button_events,
                 axis_events=axis_events,
                 touch_events=touch_events,
                 args=args,
@@ -1005,11 +1130,16 @@ def run_case(
                 break
         ipc_handshake_seen = ipc_handshake.is_set()
         required_capabilities = ["ENABLE_EMU_CONTROL"]
-        if case.screenshot_seconds:
+        if case.screenshot_seconds or case.screenshot_button_events:
             required_capabilities.append("ENABLE_SCREENSHOT")
         if case.renderdoc_capture_seconds:
             required_capabilities.append("ENABLE_RENDERDOC_CAPTURE")
-        if case.button_events or case.axis_events or case.touch_events:
+        if (
+            case.button_events
+            or case.screenshot_button_events
+            or case.axis_events
+            or case.touch_events
+        ):
             required_capabilities.append("ENABLE_GAMEPAD")
         missing_ipc_capabilities = tuple(
             capability
@@ -1024,8 +1154,94 @@ def run_case(
     timeline_started = time.monotonic()
 
     timed_out = False
+    runtime_failures: list[str] = []
     try:
         process_exited = False
+        if case.screenshot_button_events and ipc_ready:
+            assert process.stdin is not None
+            for index, event in enumerate(case.screenshot_button_events):
+                event_deadline = min(
+                    hard_deadline, time.monotonic() + event.timeout_seconds
+                )
+                matched = False
+                while process.poll() is None and time.monotonic() < event_deadline:
+                    existing = set(_find_valid_screenshots(artifact_directory))
+                    request_started = time.monotonic()
+                    process.stdin.write(b"SCREENSHOT\n")
+                    process.stdin.flush()
+
+                    screenshot: Path | None = None
+                    poll_deadline = min(
+                        event_deadline, request_started + event.poll_seconds
+                    )
+                    while process.poll() is None and time.monotonic() < poll_deadline:
+                        candidates = [
+                            path
+                            for path in _find_valid_screenshots(artifact_directory)
+                            if path not in existing
+                        ]
+                        if candidates:
+                            screenshot = candidates[-1]
+                            break
+                        time.sleep(min(0.01, max(0, poll_deadline - time.monotonic())))
+
+                    screenshot_matches = False
+                    if screenshot is not None:
+                        if event.screenshot_sha256 is not None:
+                            screenshot_matches = (
+                                _hash_file(screenshot) == event.screenshot_sha256
+                            )
+                        else:
+                            assert event.reference_screenshot is not None
+                            assert event.maximum_difference is not None
+                            try:
+                                screenshot_matches = (
+                                    _screenshot_difference(
+                                        event.reference_screenshot,
+                                        screenshot,
+                                        mode=event.difference_mode,
+                                    )
+                                    <= event.maximum_difference
+                                )
+                            except (OSError, ValueError):
+                                screenshot_matches = False
+                    if not screenshot_matches:
+                        remaining_poll = min(
+                            event_deadline, request_started + event.poll_seconds
+                        ) - time.monotonic()
+                        if remaining_poll > 0:
+                            try:
+                                process.wait(timeout=remaining_poll)
+                                process_exited = True
+                                break
+                            except subprocess.TimeoutExpired:
+                                pass
+                        continue
+
+                    process.stdin.write(
+                        (f"GAMEPAD_BUTTON\n{event.button}\n1\n").encode("ascii")
+                    )
+                    process.stdin.flush()
+                    try:
+                        process.wait(timeout=event.hold_seconds)
+                        process_exited = True
+                    except subprocess.TimeoutExpired:
+                        process.stdin.write(
+                            (f"GAMEPAD_BUTTON\n{event.button}\n0\n").encode("ascii")
+                        )
+                        process.stdin.flush()
+                    matched = True
+                    break
+
+                if process_exited:
+                    break
+                if not matched:
+                    runtime_failures.append(
+                        f"screenshotButtonEvents[{index}] did not match "
+                        f"within {event.timeout_seconds:g} seconds"
+                    )
+                    break
+
         timeline = (
             [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]
             + [
@@ -1038,6 +1254,8 @@ def run_case(
         )
         timeline.sort(key=lambda entry: entry[0])
         for event_second, event_type, payload in timeline:
+            if process_exited:
+                break
             try:
                 process.wait(
                     timeout=max(0, timeline_started + event_second - time.monotonic())
@@ -1128,7 +1346,7 @@ def run_case(
         _hash_file(path) for path in renderdoc_captures
     ]
 
-    failures: list[str] = []
+    failures: list[str] = list(runtime_failures)
     if not ipc_handshake_seen:
         failures.append("IPC handshake was not observed")
     elif missing_ipc_capabilities:

@@ -71,6 +71,17 @@ Each case supports:
   Supported names are `cross`, `circle`, `square`, `triangle`, `options`,
   `dpad_up`, `dpad_right`, `dpad_down`, `dpad_left`, `l1`, `r1`, `l3`, `r3`,
   and `touchpad`.
+- `screenshotButtonEvents`: optional ordered visual checkpoints that avoid
+  racing variable startup and loading times. Each entry repeatedly requests a
+  screenshot until either `screenshotSha256` matches exactly or the frame is
+  within `maximumDifference` of `referenceScreenshot`, then taps `button`.
+  Reference matching supports the same `differenceMode` values as screenshot
+  comparisons and tolerates harmless animation or encoding variation. Bound
+  each checkpoint with `timeoutSeconds`; `pollSeconds` defaults to 0.25 and
+  `holdSeconds` defaults to 0.1. Requires both screenshot and gamepad IPC
+  capabilities. These state-driven events cannot be combined with timed
+  screenshots, captures, or controller events in the same case. Keep hashes
+  and reference frames for owned games private, not in the repository.
 - `axisEvents`: optional increasing list of player-one analog-axis updates.
   Each entry has `seconds`, an `axis` name, and an integer `value` from 0
   through 255. Requires `useIpc`. Supported names are `left_x`, `left_y`,
