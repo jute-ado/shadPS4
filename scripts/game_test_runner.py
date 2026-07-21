@@ -23,7 +23,6 @@ import time
 from typing import Any, BinaryIO, Sequence
 import zlib
 
-
 REPORT_SCHEMA_VERSION = 1
 DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 VALID_OUTCOMES = frozenset({"exited_zero", "exited_nonzero", "timed_out"})
@@ -70,6 +69,17 @@ class ScreenshotButtonEvent:
     timeout_seconds: float
     poll_seconds: float = 0.25
     hold_seconds: float = 0.1
+
+
+@dataclass(frozen=True)
+class VisualCheckpointAttempt:
+    event_index: int
+    screenshot: Path
+    screenshot_sha256: str
+    difference: float | None
+    mean_intensity: float | None
+    non_black_fraction: float | None
+    matched: bool
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,7 @@ class CaseResult:
     screenshots: list[Path]
     screenshot_hashes: list[str]
     screenshot_differences: list[float]
+    visual_checkpoint_attempts: list[VisualCheckpointAttempt]
     renderdoc_captures: list[Path]
     renderdoc_capture_hashes: list[str]
     failures: list[str]
@@ -146,9 +157,11 @@ class CaseResult:
         report = asdict(self)
         report["artifact_directory"] = str(self.artifact_directory)
         report["screenshots"] = [str(path) for path in self.screenshots]
-        report["renderdoc_captures"] = [
-            str(path) for path in self.renderdoc_captures
+        report["visual_checkpoint_attempts"] = [
+            {**asdict(attempt), "screenshot": str(attempt.screenshot)}
+            for attempt in self.visual_checkpoint_attempts
         ]
+        report["renderdoc_captures"] = [str(path) for path in self.renderdoc_captures]
         return report
 
 
@@ -190,18 +203,14 @@ def _require_ipc_schedule(
         raise ManifestError(f"{case_name}: {field} must be an array of numbers")
     schedule = tuple(float(item) for item in raw)
     if any(not math.isfinite(item) for item in schedule):
-        raise ManifestError(
-            f"{case_name}: {field} entries must be finite numbers"
-        )
+        raise ManifestError(f"{case_name}: {field} entries must be finite numbers")
     if any(item <= 0 or item >= timeout for item in schedule):
         raise ManifestError(
             f"{case_name}: {field} entries must be positive and before "
             "timeoutSeconds"
         )
     if tuple(sorted(set(schedule))) != schedule:
-        raise ManifestError(
-            f"{case_name}: {field} must be unique and increasing"
-        )
+        raise ManifestError(f"{case_name}: {field} must be unique and increasing")
     if schedule and not use_ipc:
         raise ManifestError(f"{case_name}: {field} requires useIpc")
     return schedule
@@ -388,9 +397,10 @@ def _require_screenshot_button_events(
         maximum_difference: float | None = None
         difference_mode = item.get("differenceMode", "mean_absolute")
         if screenshot_sha256 is not None:
-            if not isinstance(screenshot_sha256, str) or re.fullmatch(
-                r"[0-9a-fA-F]{64}", screenshot_sha256
-            ) is None:
+            if (
+                not isinstance(screenshot_sha256, str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", screenshot_sha256) is None
+            ):
                 raise ManifestError(
                     f"{field}.screenshotSha256 must be a SHA-256 hex digest"
                 )
@@ -406,7 +416,9 @@ def _require_screenshot_button_events(
                 or not math.isfinite(maximum_difference)
                 or not 0 <= maximum_difference <= 1
             ):
-                raise ManifestError(f"{field}.maximumDifference must be between 0 and 1")
+                raise ManifestError(
+                    f"{field}.maximumDifference must be between 0 and 1"
+                )
             maximum_difference = float(maximum_difference)
             if difference_mode not in VALID_SCREENSHOT_DIFFERENCE_MODES:
                 raise ManifestError(
@@ -433,7 +445,9 @@ def _require_screenshot_button_events(
                 or not math.isfinite(value)
                 or value <= 0
             ):
-                raise ManifestError(f"{field}.{json_field} must be a finite positive number")
+                raise ManifestError(
+                    f"{field}.{json_field} must be a finite positive number"
+                )
             values[json_field] = float(value)
         if values["pollSeconds"] > values["timeoutSeconds"]:
             raise ManifestError(f"{field}.pollSeconds cannot exceed timeoutSeconds")
@@ -863,7 +877,9 @@ def _find_valid_screenshots(artifact_directory: Path) -> list[Path]:
 
 def _find_renderdoc_captures(artifact_directory: Path) -> list[Path]:
     captures = sorted((artifact_directory / "user" / "captures").glob("*.rdc"))
-    return [capture for capture in captures if capture.is_file() and capture.stat().st_size]
+    return [
+        capture for capture in captures if capture.is_file() and capture.stat().st_size
+    ]
 
 
 def _hash_file(path: Path) -> str:
@@ -990,9 +1006,7 @@ def _screenshot_difference(
     if mode != "cosine":
         raise ValueError(f"unsupported screenshot difference mode: {mode}")
 
-    dot_product = sum(
-        left * right for left, right in zip(first_pixels, second_pixels)
-    )
+    dot_product = sum(left * right for left, right in zip(first_pixels, second_pixels))
     first_squared = sum(value * value for value in first_pixels)
     second_squared = sum(value * value for value in second_pixels)
     if first_squared == 0 and second_squared == 0:
@@ -1001,6 +1015,16 @@ def _screenshot_difference(
         return 1.0
     similarity = dot_product / math.sqrt(first_squared * second_squared)
     return max(0.0, min(1.0, 1.0 - similarity))
+
+
+def _screenshot_statistics(path: Path) -> tuple[float, float]:
+    _, _, pixels = _decode_png_rgb(path)
+    pixel_count = len(pixels) // 3
+    mean_intensity = sum(pixels) / (len(pixels) * 255)
+    non_black_pixels = sum(
+        any(pixels[offset : offset + 3]) for offset in range(0, len(pixels), 3)
+    )
+    return mean_intensity, non_black_pixels / pixel_count
 
 
 def _make_tree_owner_writable(root: Path) -> None:
@@ -1070,6 +1094,7 @@ def run_case(
             screenshots=[],
             screenshot_hashes=[],
             screenshot_differences=[],
+            visual_checkpoint_attempts=[],
             renderdoc_captures=[],
             renderdoc_capture_hashes=[],
             failures=[failure],
@@ -1155,6 +1180,7 @@ def run_case(
 
     timed_out = False
     runtime_failures: list[str] = []
+    visual_checkpoint_attempts: list[VisualCheckpointAttempt] = []
     try:
         process_exited = False
         if case.screenshot_button_events and ipc_ready:
@@ -1186,29 +1212,51 @@ def run_case(
                         time.sleep(min(0.01, max(0, poll_deadline - time.monotonic())))
 
                     screenshot_matches = False
+                    screenshot_hash: str | None = None
+                    screenshot_difference: float | None = None
                     if screenshot is not None:
+                        screenshot_hash = _hash_file(screenshot)
                         if event.screenshot_sha256 is not None:
                             screenshot_matches = (
-                                _hash_file(screenshot) == event.screenshot_sha256
+                                screenshot_hash == event.screenshot_sha256
                             )
                         else:
                             assert event.reference_screenshot is not None
                             assert event.maximum_difference is not None
                             try:
+                                screenshot_difference = _screenshot_difference(
+                                    event.reference_screenshot,
+                                    screenshot,
+                                    mode=event.difference_mode,
+                                )
                                 screenshot_matches = (
-                                    _screenshot_difference(
-                                        event.reference_screenshot,
-                                        screenshot,
-                                        mode=event.difference_mode,
-                                    )
-                                    <= event.maximum_difference
+                                    screenshot_difference <= event.maximum_difference
                                 )
                             except (OSError, ValueError):
                                 screenshot_matches = False
+                        try:
+                            mean_intensity, non_black_fraction = _screenshot_statistics(
+                                screenshot
+                            )
+                        except (OSError, ValueError):
+                            mean_intensity = None
+                            non_black_fraction = None
+                        visual_checkpoint_attempts.append(
+                            VisualCheckpointAttempt(
+                                event_index=index,
+                                screenshot=screenshot,
+                                screenshot_sha256=screenshot_hash,
+                                difference=screenshot_difference,
+                                mean_intensity=mean_intensity,
+                                non_black_fraction=non_black_fraction,
+                                matched=screenshot_matches,
+                            )
+                        )
                     if not screenshot_matches:
-                        remaining_poll = min(
-                            event_deadline, request_started + event.poll_seconds
-                        ) - time.monotonic()
+                        remaining_poll = (
+                            min(event_deadline, request_started + event.poll_seconds)
+                            - time.monotonic()
+                        )
                         if remaining_poll > 0:
                             try:
                                 process.wait(timeout=remaining_poll)
@@ -1342,9 +1390,7 @@ def run_case(
     screenshots = _find_valid_screenshots(artifact_directory)
     screenshot_hashes = [_hash_file(path) for path in screenshots]
     renderdoc_captures = _find_renderdoc_captures(artifact_directory)
-    renderdoc_capture_hashes = [
-        _hash_file(path) for path in renderdoc_captures
-    ]
+    renderdoc_capture_hashes = [_hash_file(path) for path in renderdoc_captures]
 
     failures: list[str] = list(runtime_failures)
     if not ipc_handshake_seen:
@@ -1424,6 +1470,7 @@ def run_case(
         screenshots=screenshots,
         screenshot_hashes=screenshot_hashes,
         screenshot_differences=screenshot_differences,
+        visual_checkpoint_attempts=visual_checkpoint_attempts,
         renderdoc_captures=renderdoc_captures,
         renderdoc_capture_hashes=renderdoc_capture_hashes,
         failures=failures,

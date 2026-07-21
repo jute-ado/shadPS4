@@ -25,7 +25,6 @@ from scripts.game_test_runner import (
     run_manifest,
 )
 
-
 FIXTURE = Path(__file__).with_name("fake_emulator.py")
 
 
@@ -328,9 +327,7 @@ class ManifestTests(unittest.TestCase):
 
             manifest = load_manifest(path)
 
-            self.assertEqual(
-                manifest.cases[0].renderdoc_capture_seconds, (0.25, 1.5)
-            )
+            self.assertEqual(manifest.cases[0].renderdoc_capture_seconds, (0.25, 1.5))
 
     def test_load_manifest_rejects_renderdoc_captures_without_ipc(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -680,11 +677,7 @@ class ManifestTests(unittest.TestCase):
                 "must be a finite positive number",
             ),
             (
-                {
-                    "screenshotButtonEvents": [
-                        {**valid, "pollSeconds": 1.0}
-                    ]
-                },
+                {"screenshotButtonEvents": [{**valid, "pollSeconds": 1.0}]},
                 "pollSeconds cannot exceed timeoutSeconds",
             ),
             (
@@ -713,9 +706,7 @@ class ManifestTests(unittest.TestCase):
                     "useIpc": True,
                     **fields,
                 }
-                path = self.write_manifest(
-                    root, {"schemaVersion": 1, "cases": [case]}
-                )
+                path = self.write_manifest(root, {"schemaVersion": 1, "cases": [case]})
 
                 with self.assertRaisesRegex(ManifestError, message):
                     load_manifest(path)
@@ -1319,9 +1310,7 @@ class PngComparisonTests(unittest.TestCase):
             first.write_bytes(
                 test_png(4, 1, 2, bytes((0, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
             )
-            second.write_bytes(
-                test_png(4, 1, 2, bytes((0, *([0] * 9), 8, 8, 8)))
-            )
+            second.write_bytes(test_png(4, 1, 2, bytes((0, *([0] * 9), 8, 8, 8))))
 
             self.assertLess(_screenshot_difference(first, second), 0.02)
             self.assertEqual(_screenshot_difference(first, second, mode="cosine"), 1.0)
@@ -1650,7 +1639,9 @@ class RunnerTests(unittest.TestCase):
                 ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
             )
 
-    def test_run_case_presses_button_only_after_reference_screenshot_matches(self) -> None:
+    def test_run_case_presses_button_only_after_reference_screenshot_matches(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             expected_png = test_png(1, 1, 6, bytes((0, 1, 0, 0, 255)))
@@ -1713,8 +1704,21 @@ class RunnerTests(unittest.TestCase):
                 if command == "SCREENSHOT"
             ]
             self.assertGreaterEqual(screenshot_times[1] - screenshot_times[0], 0.08)
+            self.assertEqual(
+                [attempt.matched for attempt in result.visual_checkpoint_attempts],
+                [False, True],
+            )
+            self.assertTrue(
+                all(
+                    attempt.difference is not None
+                    for attempt in result.visual_checkpoint_attempts
+                )
+            )
+            json.dumps(result.to_report())
 
-    def test_run_case_fails_without_pressing_when_screenshot_never_matches(self) -> None:
+    def test_run_case_fails_without_pressing_when_screenshot_never_matches(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest_path = self.make_manifest(
@@ -1757,6 +1761,18 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
+            self.assertGreaterEqual(len(result.visual_checkpoint_attempts), 1)
+            attempt = result.visual_checkpoint_attempts[0]
+            self.assertEqual(attempt.event_index, 0)
+            self.assertTrue(attempt.screenshot.is_file())
+            self.assertEqual(len(attempt.screenshot_sha256), 64)
+            self.assertIsNone(attempt.difference)
+            self.assertEqual(attempt.mean_intensity, 0.0)
+            self.assertEqual(attempt.non_black_fraction, 0.0)
+            self.assertFalse(attempt.matched)
+            report_attempt = result.to_report()["visual_checkpoint_attempts"][0]
+            self.assertEqual(report_attempt["screenshot"], str(attempt.screenshot))
+            self.assertNotIn("reference_screenshot", report_attempt)
 
     def test_run_case_schedules_and_requires_renderdoc_captures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
