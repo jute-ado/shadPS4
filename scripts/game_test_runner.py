@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -90,6 +91,7 @@ class GameCase:
     game_path: Path
     timeout_seconds: float
     user_config: Path | None = None
+    user_data_seed: Path | None = None
     use_ipc: bool = False
     screenshot_seconds: tuple[float, ...] = ()
     renderdoc_capture_seconds: tuple[float, ...] = ()
@@ -467,6 +469,13 @@ def _resolve_existing_file(root: Path, raw: Any, field: str) -> Path:
     return path
 
 
+def _resolve_existing_directory(root: Path, raw: Any, field: str) -> Path:
+    path = _resolve_existing_path(root, raw, field)
+    if not path.is_dir():
+        raise ManifestError(f"{field} must be a directory: {path}")
+    return path
+
+
 def _resolve_user_config(root: Path, raw: Any, field: str) -> Path:
     path = _resolve_existing_file(root, raw, field)
     try:
@@ -525,6 +534,13 @@ def load_manifest(path: str | Path) -> GameManifest:
             if "userConfig" in raw_case
             else None
         )
+        user_data_seed = (
+            _resolve_existing_directory(
+                root, raw_case["userDataSeed"], f"{name}: userDataSeed"
+            )
+            if "userDataSeed" in raw_case
+            else None
+        )
         if user_config is not None and "--config-clean" in args:
             raise ManifestError(
                 f"{name}: userConfig cannot be combined with --config-clean"
@@ -578,6 +594,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ),
                 timeout_seconds=float(timeout),
                 user_config=user_config,
+                user_data_seed=user_data_seed,
                 use_ipc=use_ipc,
                 screenshot_seconds=screenshot_seconds,
                 renderdoc_capture_seconds=renderdoc_capture_seconds,
@@ -861,6 +878,12 @@ def _screenshot_difference(
     return max(0.0, min(1.0, 1.0 - similarity))
 
 
+def _make_tree_owner_writable(root: Path) -> None:
+    root.chmod(root.stat().st_mode | stat.S_IWUSR)
+    for path in root.rglob("*"):
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)
+
+
 def run_case(
     case: GameCase,
     *,
@@ -878,9 +901,14 @@ def run_case(
         artifact_name or _safe_name(case.name)
     )
     artifact_directory.mkdir(parents=True, exist_ok=False)
-    (artifact_directory / "user").mkdir()
+    user_directory = artifact_directory / "user"
+    if case.user_data_seed is None:
+        user_directory.mkdir()
+    else:
+        shutil.copytree(case.user_data_seed, user_directory)
+        _make_tree_owner_writable(user_directory)
     if case.user_config is not None:
-        shutil.copyfile(case.user_config, artifact_directory / "user" / "config.json")
+        shutil.copyfile(case.user_config, user_directory / "config.json")
 
     command = [*map(str, emulator_command), *case.args, str(case.game_path)]
     creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0

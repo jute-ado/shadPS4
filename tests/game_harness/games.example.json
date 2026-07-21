@@ -5,6 +5,7 @@
     {
       "name": "CUSA00000 survives initial boot",
       "gamePath": "installed-games/CUSA00000",
+      "userDataSeed": "checkpoints/CUSA00000-ready",
       "timeoutSeconds": 30,
       "useIpc": true,
       "screenshotSeconds": [

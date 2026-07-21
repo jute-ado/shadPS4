@@ -27,6 +27,13 @@ Each case supports:
   game-specific workarounds reproducible without committing personal config.
   It cannot be combined with `--config-clean`, which intentionally forces
   factory defaults and would ignore every supplied value.
+- `userDataSeed`: optional path to a private shadPS4 portable user directory.
+  The runner copies the complete directory into the case's isolated workspace
+  before launch, allowing a known save/profile checkpoint to seed a repeatable
+  route without modifying the source checkpoint. Copied files are made writable
+  so the emulator can update its private copy even when the source is archived
+  read-only. If `userConfig` is also set, it replaces the copied `config.json`
+  after the seed is installed.
 - `useIpc`: enable shadPS4 IPC start/stop control for graceful log flushing.
   The emulator's IPC capability handshake is required before the runner sends
   `RUN` and `START`; a missing handshake or required capability fails the case.
