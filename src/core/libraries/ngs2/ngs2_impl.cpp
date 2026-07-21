@@ -206,6 +206,65 @@ s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
     return ORBIS_OK;
 }
 
+s32 RackCreate(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOption* option,
+               const OrbisNgs2ContextBufferInfo* bufferInfo, OrbisNgs2Handle* outHandle) {
+    if (!systemHandle) {
+        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    }
+    if (!bufferInfo) {
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO;
+    }
+    if (!outHandle) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+
+    OrbisNgs2ContextBufferInfo requiredInfo{};
+    const s32 result = RackQueryBufferSize(option, &requiredInfo);
+    if (result != ORBIS_OK) {
+        return result;
+    }
+    if (!bufferInfo->hostBuffer) {
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+    }
+    if (bufferInfo->hostBufferSize < requiredInfo.hostBufferSize) {
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE;
+    }
+
+    *outHandle = reinterpret_cast<OrbisNgs2Handle>(bufferInfo->hostBuffer);
+    return ORBIS_OK;
+}
+
+s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOption* option,
+                            const OrbisNgs2BufferAllocator* allocator, OrbisNgs2Handle* outHandle) {
+    if (!systemHandle) {
+        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    }
+    if (!allocator || !allocator->allocHandler) {
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR;
+    }
+    if (!outHandle) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+
+    OrbisNgs2ContextBufferInfo bufferInfo{};
+    const s32 queryResult = RackQueryBufferSize(option, &bufferInfo);
+    if (queryResult != ORBIS_OK) {
+        return queryResult;
+    }
+    bufferInfo.userData = allocator->userData;
+
+    const s32 allocationResult = allocator->allocHandler(&bufferInfo);
+    if (allocationResult != ORBIS_OK) {
+        return allocationResult;
+    }
+
+    const s32 createResult = RackCreate(systemHandle, option, &bufferInfo, outHandle);
+    if (createResult != ORBIS_OK && allocator->freeHandler) {
+        allocator->freeHandler(&bufferInfo);
+    }
+    return createResult;
+}
+
 s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize) {
     if (!voiceHandle) {
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;

@@ -51,24 +51,16 @@ s32 PS4_SYSV_ABI sceNgs2RackCreate(OrbisNgs2Handle systemHandle, u32 rackId,
                                    const OrbisNgs2RackOption* option,
                                    const OrbisNgs2ContextBufferInfo* bufferInfo,
                                    OrbisNgs2Handle* outHandle) {
-    LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
-    if (!systemHandle) {
-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    }
-    return ORBIS_OK;
+    LOG_DEBUG(Lib_Ngs2, "rackId = {}", rackId);
+    return RackCreate(systemHandle, option, bufferInfo, outHandle);
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u32 rackId,
                                                 const OrbisNgs2RackOption* option,
                                                 const OrbisNgs2BufferAllocator* allocator,
                                                 OrbisNgs2Handle* outHandle) {
-    LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
-    if (!systemHandle) {
-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    }
-    return ORBIS_OK;
+    LOG_DEBUG(Lib_Ngs2, "rackId = {}", rackId);
+    return RackCreateWithAllocator(systemHandle, option, allocator, outHandle);
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackDestroy(OrbisNgs2Handle rackHandle,
@@ -101,7 +93,7 @@ s32 PS4_SYSV_ABI sceNgs2RackLock(OrbisNgs2Handle rackHandle) {
 
 s32 PS4_SYSV_ABI sceNgs2RackQueryBufferSize(u32 rackId, const OrbisNgs2RackOption* option,
                                             OrbisNgs2ContextBufferInfo* outBufferInfo) {
-    LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
+    LOG_DEBUG(Lib_Ngs2, "rackId = {}", rackId);
     return RackQueryBufferSize(option, outBufferInfo);
 }
 

@@ -8,6 +8,7 @@
 namespace Libraries::Ngs2 {
 
 struct OrbisNgs2RackOption;
+struct OrbisNgs2BufferAllocator;
 
 static const int ORBIS_NGS2_SYSTEM_NAME_LENGTH = 16;
 static const int ORBIS_NGS2_RACK_NAME_LENGTH = 16;
@@ -179,6 +180,10 @@ s32 SystemSetup(const OrbisNgs2SystemOption* option, OrbisNgs2ContextBufferInfo*
                 OrbisNgs2BufferFreeHandler hostFree, OrbisNgs2Handle* outHandle);
 s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
                         OrbisNgs2ContextBufferInfo* outBufferInfo);
+s32 RackCreate(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOption* option,
+               const OrbisNgs2ContextBufferInfo* bufferInfo, OrbisNgs2Handle* outHandle);
+s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOption* option,
+                            const OrbisNgs2BufferAllocator* allocator, OrbisNgs2Handle* outHandle);
 s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize);
 
 } // namespace Libraries::Ngs2
