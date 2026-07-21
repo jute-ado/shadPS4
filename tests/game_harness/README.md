@@ -61,6 +61,8 @@ Each case supports:
   This keeps successful routes lightweight while preserving GPU evidence for
   intermittent blank, incomplete, or otherwise unexpected frames. It has the
   same RenderDoc loading and Vulkan-layer requirements as scheduled captures.
+  After the capture file stabilizes, the runner stops the failed route instead
+  of waiting out the case's remaining hard timeout.
 - `minimumDistinctScreenshots`: optional minimum number of unique screenshot
   contents required for the case to pass. This detects frozen or repeatedly
   blank output when multiple frames are scheduled.
