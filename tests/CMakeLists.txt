@@ -50,6 +50,19 @@ target_compile_features(shadps4_renderdoc_path_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
 
+add_executable(shadps4_presenter_sync_test
+    test_presenter_sync.cpp
+)
+target_include_directories(shadps4_presenter_sync_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_presenter_sync_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_presenter_sync_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_presenter_sync_test)
+
 add_executable(shadps4_playgo_test
     test_playgo.cpp
 )
