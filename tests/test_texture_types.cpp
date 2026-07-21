@@ -13,6 +13,8 @@
 namespace {
 
 using VideoCore::ApplyCompressedMipCompatibility;
+using VideoCore::BuildMicroTiledMipLayout;
+using VideoCore::MicroTiledMipLayoutParams;
 using VideoCore::SubresourceExtent;
 using VideoCore::SubresourceRange;
 using VideoCore::TilingWorkgroupCount;
@@ -172,6 +174,95 @@ TEST(TilingDispatch, CoversACompressedBlockTailAfterFullWorkgroups) {
 
 TEST(TilingDispatch, DoesNotDispatchForAnEmptySurface) {
     EXPECT_EQ(TilingWorkgroupCount(0, 64), 0u);
+}
+
+TEST(MicroTiledMipLayout, MatchesEightByteCompressedBlockReference) {
+    constexpr auto layout = BuildMicroTiledMipLayout(MicroTiledMipLayoutParams{
+        .pitch = 1024,
+        .height = 1024,
+        .depth = 1,
+        .levels = 9,
+        .layers = 1,
+        .bits_per_block = 64,
+        .block_compressed = true,
+        .pow2_padding = true,
+    });
+    constexpr std::array<size_t, 9> expected_offsets{
+        0x00000, 0x80000, 0xa0000, 0xa8000, 0xaa000, 0xaa800, 0xaaa00, 0xaac00, 0xaae00,
+    };
+    constexpr std::array<size_t, 9> expected_sizes{
+        0x80000, 0x20000, 0x08000, 0x02000, 0x00800, 0x00200, 0x00200, 0x00200, 0x00200,
+    };
+
+    for (u32 mip = 0; mip < layout.level_count; ++mip) {
+        EXPECT_EQ(layout.levels[mip].offset, expected_offsets[mip]);
+        EXPECT_EQ(layout.levels[mip].size, expected_sizes[mip]);
+    }
+    EXPECT_EQ(layout.total_size, 0xab000u);
+}
+
+TEST(MicroTiledMipLayout, MatchesSixteenByteCompressedBlockReference) {
+    constexpr auto layout = BuildMicroTiledMipLayout(MicroTiledMipLayoutParams{
+        .pitch = 1024,
+        .height = 1024,
+        .depth = 1,
+        .levels = 9,
+        .layers = 1,
+        .bits_per_block = 128,
+        .block_compressed = true,
+        .pow2_padding = true,
+    });
+    constexpr std::array<size_t, 9> expected_offsets{
+        0x000000, 0x100000, 0x140000, 0x150000, 0x154000, 0x155000, 0x155400, 0x155800, 0x155c00,
+    };
+    constexpr std::array<size_t, 9> expected_sizes{
+        0x100000, 0x040000, 0x010000, 0x004000, 0x001000, 0x000400, 0x000400, 0x000400, 0x000400,
+    };
+
+    for (u32 mip = 0; mip < layout.level_count; ++mip) {
+        EXPECT_EQ(layout.levels[mip].offset, expected_offsets[mip]);
+        EXPECT_EQ(layout.levels[mip].size, expected_sizes[mip]);
+    }
+    EXPECT_EQ(layout.total_size, 0x156000u);
+}
+
+TEST(MicroTiledMipLayout, PacksUncompressedArrayLayers) {
+    constexpr auto layout = BuildMicroTiledMipLayout(MicroTiledMipLayoutParams{
+        .pitch = 13,
+        .height = 9,
+        .depth = 1,
+        .levels = 3,
+        .layers = 2,
+        .bits_per_block = 32,
+    });
+
+    EXPECT_EQ(layout.levels[0].pitch, 16u);
+    EXPECT_EQ(layout.levels[0].height, 16u);
+    EXPECT_EQ(layout.levels[0].size, 2048u);
+    EXPECT_EQ(layout.levels[1].offset, 2048u);
+    EXPECT_EQ(layout.levels[1].size, 512u);
+    EXPECT_EQ(layout.levels[2].offset, 2560u);
+    EXPECT_EQ(layout.levels[2].size, 512u);
+    EXPECT_EQ(layout.total_size, 3072u);
+}
+
+TEST(MicroTiledMipLayout, AlignsThickMipDepth) {
+    constexpr auto layout = BuildMicroTiledMipLayout(MicroTiledMipLayoutParams{
+        .pitch = 9,
+        .height = 9,
+        .depth = 5,
+        .levels = 3,
+        .layers = 2,
+        .bits_per_block = 32,
+        .thickness = 4,
+    });
+
+    EXPECT_EQ(layout.levels[0].size, 16384u);
+    EXPECT_EQ(layout.levels[1].offset, 16384u);
+    EXPECT_EQ(layout.levels[1].size, 2048u);
+    EXPECT_EQ(layout.levels[2].offset, 18432u);
+    EXPECT_EQ(layout.levels[2].size, 2048u);
+    EXPECT_EQ(layout.total_size, 20480u);
 }
 
 TEST(SamplerLodRange, DisablesMipSelectionWhenMipFilteringIsDisabled) {

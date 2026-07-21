@@ -335,6 +335,65 @@ constexpr std::tuple<u32, u32, size_t> ImageSizeMicroTiled(u32 pitch, u32 height
     return {pitch_aligned, height_aligned, log_sz};
 }
 
+struct MicroTiledMipLayoutParams {
+    u32 pitch;
+    u32 height;
+    u32 depth;
+    u32 levels;
+    u32 layers;
+    u32 bits_per_block;
+    u32 num_samples = 1;
+    u32 thickness = 1;
+    bool block_compressed = false;
+    bool pow2_padding = false;
+};
+
+struct MicroTiledMipLayout {
+    struct Level {
+        size_t size;
+        u32 pitch;
+        u32 height;
+        size_t offset;
+    };
+
+    std::array<Level, 16> levels{};
+    u32 level_count{};
+    size_t total_size{};
+};
+
+constexpr MicroTiledMipLayout BuildMicroTiledMipLayout(const MicroTiledMipLayoutParams& params) {
+    MicroTiledMipLayout result{.level_count = params.levels};
+    ASSERT(params.levels <= result.levels.size());
+
+    for (u32 mip = 0; mip < params.levels; ++mip) {
+        u32 mip_pitch = std::max(params.pitch >> mip, 1u);
+        u32 mip_height = std::max(params.height >> mip, 1u);
+        u32 mip_depth = std::max(params.depth >> mip, 1u);
+        if (params.block_compressed) {
+            mip_pitch = std::max((mip_pitch + 3) / 4, 1u);
+            mip_height = std::max((mip_height + 3) / 4, 1u);
+        }
+        if (params.pow2_padding) {
+            mip_pitch = std::bit_ceil(mip_pitch);
+            mip_height = std::bit_ceil(mip_height);
+            mip_depth = std::bit_ceil(mip_depth);
+        }
+        mip_depth += (-mip_depth) & (params.thickness - 1);
+
+        auto& level = result.levels[mip];
+        std::tie(level.pitch, level.height, level.size) = ImageSizeMicroTiled(
+            mip_pitch, mip_height, params.thickness, params.bits_per_block, params.num_samples);
+        if (params.block_compressed) {
+            level.pitch = std::max(level.pitch * 4, 32u);
+            level.height = std::max(level.height * 4, 32u);
+        }
+        level.size *= mip_depth * params.layers;
+        level.offset = result.total_size;
+        result.total_size += level.size;
+    }
+    return result;
+}
+
 constexpr std::tuple<u32, u32, size_t> ImageSizeMacroTiled(u32 pitch, u32 height, u32 thickness,
                                                            u32 bpp, u32 num_samples,
                                                            AmdGpu::TileMode tile_mode, u32 mip_n,
