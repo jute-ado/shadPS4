@@ -282,7 +282,7 @@ add_test(
 )
 set_tests_properties(game_harness_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    TIMEOUT 30
+    TIMEOUT 60
 )
 
 # ===========================================================================

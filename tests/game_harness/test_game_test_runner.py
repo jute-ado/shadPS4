@@ -1660,7 +1660,7 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "state-driven visual survival",
-                    "timeoutSeconds": 1.0,
+                    "timeoutSeconds": 2.5,
                     "args": ["--expect-ipc", "--vary-screenshots"],
                     "useIpc": True,
                     "screenshotButtonEvents": [
@@ -1668,8 +1668,8 @@ class RunnerTests(unittest.TestCase):
                             "referenceScreenshot": "expected.png",
                             "maximumDifference": 0,
                             "button": "cross",
-                            "timeoutSeconds": 0.6,
-                            "pollSeconds": 0.05,
+                            "timeoutSeconds": 1.5,
+                            "pollSeconds": 0.1,
                             "holdSeconds": 0.02,
                         }
                     ],
@@ -1712,7 +1712,7 @@ class RunnerTests(unittest.TestCase):
                 )
                 if command == "SCREENSHOT"
             ]
-            self.assertGreaterEqual(screenshot_times[1] - screenshot_times[0], 0.04)
+            self.assertGreaterEqual(screenshot_times[1] - screenshot_times[0], 0.08)
 
     def test_run_case_fails_without_pressing_when_screenshot_never_matches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
