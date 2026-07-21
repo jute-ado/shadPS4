@@ -153,6 +153,33 @@ bool ImageInfo::IsCompatible(const ImageInfo& info) const {
 }
 
 void ImageInfo::UpdateSize() {
+    if (array_mode == AmdGpu::ArrayMode::Array1DTiledThin1 ||
+        array_mode == AmdGpu::ArrayMode::Array1DTiledThick) {
+        const auto layout = BuildMicroTiledMipLayout(MicroTiledMipLayoutParams{
+            .pitch = pitch,
+            .height = size.height,
+            .depth = size.depth,
+            .levels = resources.levels,
+            .layers = resources.layers,
+            .bits_per_block = num_bits,
+            .num_samples = num_samples,
+            .thickness = array_mode == AmdGpu::ArrayMode::Array1DTiledThick ? 4u : 1u,
+            .block_compressed = props.is_block != 0,
+            .pow2_padding = props.is_pow2 != 0,
+        });
+        for (u32 mip = 0; mip < resources.levels; ++mip) {
+            const auto& level = layout.levels[mip];
+            mips_layout[mip] = MipInfo{
+                .size = static_cast<u32>(level.size),
+                .pitch = level.pitch,
+                .height = level.height,
+                .offset = static_cast<u32>(level.offset),
+            };
+        }
+        guest_size = static_cast<u32>(layout.total_size);
+        return;
+    }
+
     guest_size = 0;
     for (s32 mip = 0; mip < resources.levels; ++mip) {
         u32 mip_w = pitch >> mip;
@@ -177,15 +204,6 @@ void ImageInfo::UpdateSize() {
         case AmdGpu::ArrayMode::ArrayLinearAligned: {
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
                 ImageSizeLinearAligned(mip_w, mip_h, num_bits, num_samples);
-            break;
-        }
-        case AmdGpu::ArrayMode::Array1DTiledThick:
-            thickness = 4;
-            mip_d += (-mip_d) & (thickness - 1);
-            [[fallthrough]];
-        case AmdGpu::ArrayMode::Array1DTiledThin1: {
-            std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
-                ImageSizeMicroTiled(mip_w, mip_h, thickness, num_bits, num_samples);
             break;
         }
         case AmdGpu::ArrayMode::Array2DTiledThick:
