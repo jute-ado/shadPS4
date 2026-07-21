@@ -15,6 +15,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/amdgpu/pm4_lod_stats.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -866,7 +867,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS");
+                const auto report =
+                    DecodeLodStatsReport(std::span<const u32, 3>{dcb.data() + 1, 3});
+                if (report.address != 0 && report.size != 0) {
+                    InitializeLodStatsReport(std::span<std::byte>{
+                        reinterpret_cast<std::byte*>(report.address), report.size});
+                }
+                LOG_DEBUG(Render_Vulkan,
+                          "IT_GET_LOD_STATS initialized empty report at {:#x}, size={:#x}, "
+                          "control={:#x} (STUBBED)",
+                          report.address, report.size, report.control);
                 break;
             }
             case PM4ItOpcode::CondExec: {
