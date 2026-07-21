@@ -31,6 +31,17 @@ def one_pixel_png(red: int = 0) -> bytes:
     )
 
 
+def varying_left_pixel_png(red: int) -> bytes:
+    ihdr = b"\x00\x00\x00\x02\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+    scanline = b"\x00" + bytes((red, 0, 0, 255, 8, 8, 8, 255))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(scanline))
+        + png_chunk(b"IEND", b"")
+    )
+
+
 def dark_movement_png(index: int) -> bytes:
     ihdr = b"\x00\x00\x00\x04\x00\x00\x00\x01\x08\x06\x00\x00\x00"
     pixels = bytearray((0, 0, 0, 255) * 4)
@@ -62,10 +73,13 @@ def main() -> int:
     parser.add_argument("--omit-screenshot-capability", action="store_true")
     parser.add_argument("--omit-renderdoc-capability", action="store_true")
     parser.add_argument("--ignore-screenshots", action="store_true")
+    parser.add_argument("--screenshot-delay", type=float, default=0)
+    parser.add_argument("--single-screenshot", action="store_true")
     parser.add_argument("--ignore-renderdoc-captures", action="store_true")
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots-after", type=int)
+    parser.add_argument("--vary-left-pixel", action="store_true")
     parser.add_argument("--dark-movement-screenshots", action="store_true")
     parser.add_argument("game")
     args = parser.parse_args()
@@ -107,12 +121,17 @@ def main() -> int:
             ipc_command_seconds.append(time.monotonic() - launched)
             if command == "SCREENSHOT" and not args.ignore_screenshots:
                 screenshots = Path("user") / "screenshots"
+                if args.single_screenshot and screenshots.exists():
+                    continue
+                time.sleep(args.screenshot_delay)
                 screenshots.mkdir(parents=True, exist_ok=True)
                 index = len(list(screenshots.iterdir()))
                 if args.malformed_screenshots:
                     png = b"\x89PNG\r\n\x1a\nmalformed"
                 elif args.dark_movement_screenshots:
                     png = dark_movement_png(index)
+                elif args.vary_left_pixel:
+                    png = varying_left_pixel_png(index)
                 else:
                     png = one_pixel_png(
                         index

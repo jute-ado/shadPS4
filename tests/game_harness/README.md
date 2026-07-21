@@ -76,12 +76,17 @@ Each case supports:
   screenshot until either `screenshotSha256` matches exactly or the frame is
   within `maximumDifference` of `referenceScreenshot`, then taps `button`.
   Reference matching supports the same `differenceMode` values as screenshot
-  comparisons and tolerates harmless animation or encoding variation. Bound
-  each checkpoint with `timeoutSeconds`; `pollSeconds` defaults to 0.25 and
-  `holdSeconds` defaults to 0.1. Requires both screenshot and gamepad IPC
-  capabilities. These state-driven events cannot be combined with timed
-  screenshots, captures, or controller events in the same case. Keep hashes
-  and reference frames for owned games private, not in the repository.
+  comparisons and tolerates harmless animation or encoding variation. An
+  optional pixel `comparisonRegion` object (`left`, `top`, `width`, `height`)
+  limits reference comparison to a stable part of the frame, such as a menu
+  control, when unrelated animation or rendering defects should not block
+  navigation. The region must fit both equal-sized images and is not valid with
+  an exact hash. Bound each checkpoint with `timeoutSeconds`; `pollSeconds`
+  defaults to 0.25 and `holdSeconds` defaults to 0.1. Requires both screenshot
+  and gamepad IPC capabilities. These state-driven events cannot be combined
+  with timed screenshots, captures, or controller events in the same case.
+  Keep hashes and reference frames for owned games private, not in the
+  repository.
 - `axisEvents`: optional increasing list of player-one analog-axis updates.
   Each entry has `seconds`, an `axis` name, and an integer `value` from 0
   through 255. Requires `useIpc`. Supported names are `left_x`, `left_y`,
@@ -121,10 +126,15 @@ termination. The hard timeout remains relative to process launch, while
 scheduled actions are relative to acknowledged IPC startup. Scheduled
 screenshot paths are included in the report together with their SHA-256
 content hashes and requested pixel-difference measurements. RenderDoc capture
-paths and hashes are included as well. Button, axis, touch, screenshot, and
-RenderDoc events share the same monotonic post-handshake timeline, allowing
-deterministic navigation, movement, gestures, causal visual assertions, and
-frame-level GPU diagnosis.
+paths and hashes are included as well. Each `screenshotButtonEvents` poll also
+adds a `visual_checkpoint_attempts` report entry with its event index, captured
+path and hash, measured reference difference, normalized mean intensity,
+non-black pixel fraction, and match result. These measurements make blank or
+uniform output visible in machine-readable failure evidence without embedding
+the private reference-image path. Button, axis, touch, screenshot, and RenderDoc
+events share the same monotonic post-handshake timeline, allowing deterministic
+navigation, movement, gestures, causal visual assertions, and frame-level GPU
+diagnosis.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
