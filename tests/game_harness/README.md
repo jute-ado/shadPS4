@@ -97,8 +97,10 @@ Each case supports:
   optional pixel `comparisonRegion` object (`left`, `top`, `width`, `height`)
   limits reference comparison to a stable part of the frame, such as a menu
   control, when unrelated animation or rendering defects should not block
-  navigation. The region must fit both equal-sized images and is not valid with
-  an exact hash. Bound each checkpoint with `timeoutSeconds`; `pollSeconds`
+  navigation. Set `scaleReferenceToCapture` to `true` to compare a reference
+  captured at another resolution with an equal-aspect-ratio frame. The region
+  uses capture coordinates after scaling. Neither option is valid with an
+  exact hash. Bound each checkpoint with `timeoutSeconds`; `pollSeconds`
   defaults to 0.25 and `holdSeconds` defaults to 0.1. Requires both screenshot
   and gamepad IPC capabilities. These state-driven events cannot be combined
   with timed screenshots, captures, or controller events in the same case.
