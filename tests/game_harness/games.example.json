@@ -79,6 +79,27 @@
         "Unhandled exception",
         "Assertion Failed"
       ]
+    },
+    {
+      "name": "CUSA00000 advances after a visual checkpoint",
+      "gamePath": "installed-games/CUSA00000",
+      "timeoutSeconds": 30,
+      "useIpc": true,
+      "screenshotButtonEvents": [
+        {
+          "screenshotSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "button": "cross",
+          "timeoutSeconds": 20,
+          "pollSeconds": 1,
+          "holdSeconds": 0.1
+        }
+      ],
+      "args": [
+        "--config-clean"
+      ],
+      "allowedOutcomes": [
+        "timed_out"
+      ]
     }
   ]
 }

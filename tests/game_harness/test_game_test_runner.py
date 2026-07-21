@@ -585,6 +585,141 @@ class ManifestTests(unittest.TestCase):
                 [(0.25, "cross", True), (0.35, "cross", False)],
             )
 
+    def test_load_manifest_accepts_screenshot_driven_button_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            expected_hash = "a" * 64
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "state-driven menu",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": expected_hash,
+                                    "button": "cross",
+                                    "timeoutSeconds": 0.75,
+                                    "pollSeconds": 0.05,
+                                    "holdSeconds": 0.1,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertEqual(event.screenshot_sha256, expected_hash)
+            self.assertEqual(event.button, "cross")
+            self.assertEqual(event.timeout_seconds, 0.75)
+            self.assertEqual(event.poll_seconds, 0.05)
+            self.assertEqual(event.hold_seconds, 0.1)
+
+    def test_load_manifest_rejects_mixed_timed_and_screenshot_driven_events(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "ambiguous menu",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "buttonEvents": [
+                                {"seconds": 0.25, "button": "cross", "pressed": True}
+                            ],
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "a" * 64,
+                                    "button": "cross",
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ManifestError, "cannot be combined"):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_invalid_screenshot_driven_button_events(
+        self,
+    ) -> None:
+        valid = {
+            "screenshotSha256": "a" * 64,
+            "button": "cross",
+            "timeoutSeconds": 0.75,
+        }
+        scenarios = (
+            ({"screenshotButtonEvents": {}}, "must be an array"),
+            ({"screenshotButtonEvents": ["bad"]}, "must be an object"),
+            (
+                {"screenshotButtonEvents": [{**valid, "screenshotSha256": "bad"}]},
+                "must be a SHA-256 hex digest",
+            ),
+            (
+                {"screenshotButtonEvents": [{**valid, "button": "start"}]},
+                "unsupported button",
+            ),
+            (
+                {"screenshotButtonEvents": [{**valid, "timeoutSeconds": 0}]},
+                "must be a finite positive number",
+            ),
+            (
+                {
+                    "screenshotButtonEvents": [
+                        {**valid, "pollSeconds": 1.0}
+                    ]
+                },
+                "pollSeconds cannot exceed timeoutSeconds",
+            ),
+            (
+                {"useIpc": False, "screenshotButtonEvents": [valid]},
+                "requires useIpc",
+            ),
+            (
+                {
+                    "timeoutSeconds": 0.8,
+                    "screenshotButtonEvents": [valid],
+                },
+                "must complete before timeoutSeconds",
+            ),
+        )
+        for fields, message in scenarios:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                case = {
+                    "name": "invalid state-driven menu",
+                    "gamePath": "game",
+                    "timeoutSeconds": 2,
+                    "useIpc": True,
+                    **fields,
+                }
+                path = self.write_manifest(
+                    root, {"schemaVersion": 1, "cases": [case]}
+                )
+
+                with self.assertRaisesRegex(ManifestError, message):
+                    load_manifest(path)
+
     def test_load_manifest_accepts_scheduled_axis_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1515,6 +1650,114 @@ class RunnerTests(unittest.TestCase):
                 ["RUN", "START", "SCREENSHOT", "SCREENSHOT", "STOP"],
             )
 
+    def test_run_case_presses_button_only_after_reference_screenshot_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected_png = test_png(1, 1, 6, bytes((0, 1, 0, 0, 255)))
+            reference = root / "expected.png"
+            reference.write_bytes(expected_png)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "state-driven visual survival",
+                    "timeoutSeconds": 1.0,
+                    "args": ["--expect-ipc", "--vary-screenshots"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "button": "cross",
+                            "timeoutSeconds": 0.6,
+                            "pollSeconds": 0.05,
+                            "holdSeconds": 0.02,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                observation["ipc_commands"],
+                [
+                    "RUN",
+                    "START",
+                    "SCREENSHOT",
+                    "SCREENSHOT",
+                    "GAMEPAD_BUTTON",
+                    "cross",
+                    "1",
+                    "GAMEPAD_BUTTON",
+                    "cross",
+                    "0",
+                    "STOP",
+                ],
+            )
+            screenshot_times = [
+                seconds
+                for command, seconds in zip(
+                    observation["ipc_commands"], observation["ipc_command_seconds"]
+                )
+                if command == "SCREENSHOT"
+            ]
+            self.assertGreaterEqual(screenshot_times[1] - screenshot_times[0], 0.04)
+
+    def test_run_case_fails_without_pressing_when_screenshot_never_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "missing visual state",
+                    "timeoutSeconds": 0.3,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "screenshotSha256": "a" * 64,
+                            "button": "cross",
+                            "timeoutSeconds": 0.1,
+                            "pollSeconds": 0.02,
+                            "holdSeconds": 0.01,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertTrue(
+                any(
+                    "screenshotButtonEvents[0] did not match" in failure
+                    for failure in result.failures
+                ),
+                result.failures,
+            )
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
+
     def test_run_case_schedules_and_requires_renderdoc_captures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1859,10 +2102,10 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "missing visual",
-                    "timeoutSeconds": 1.0,
+                    "timeoutSeconds": 2.0,
                     "args": ["--expect-ipc", "--ignore-screenshots"],
                     "useIpc": True,
-                    "screenshotSeconds": [0.05],
+                    "screenshotSeconds": [0.2],
                     "allowedOutcomes": ["timed_out"],
                 },
             )
@@ -1914,10 +2157,10 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "malformed visual",
-                    "timeoutSeconds": 1.0,
+                    "timeoutSeconds": 2.0,
                     "args": ["--expect-ipc", "--malformed-screenshots"],
                     "useIpc": True,
-                    "screenshotSeconds": [0.05],
+                    "screenshotSeconds": [0.2],
                     "allowedOutcomes": ["timed_out"],
                 },
             )
@@ -1943,10 +2186,10 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "stuck visual",
-                    "timeoutSeconds": 0.2,
+                    "timeoutSeconds": 0.8,
                     "args": ["--expect-ipc"],
                     "useIpc": True,
-                    "screenshotSeconds": [0.05, 0.1],
+                    "screenshotSeconds": [0.15, 0.35],
                     "minimumDistinctScreenshots": 2,
                     "allowedOutcomes": ["timed_out"],
                 },
@@ -1972,10 +2215,10 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "progressing visual",
-                    "timeoutSeconds": 0.2,
+                    "timeoutSeconds": 0.8,
                     "args": ["--expect-ipc", "--vary-screenshots"],
                     "useIpc": True,
-                    "screenshotSeconds": [0.05, 0.1],
+                    "screenshotSeconds": [0.15, 0.35],
                     "minimumDistinctScreenshots": 2,
                     "allowedOutcomes": ["timed_out"],
                 },
