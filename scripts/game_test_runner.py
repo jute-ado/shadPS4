@@ -1378,9 +1378,10 @@ def run_case(
                     process.stdin.flush()
 
                     screenshot: Path | None = None
-                    poll_deadline = min(
-                        event_deadline, request_started + event.poll_seconds
-                    )
+                    # Do not send another request until this one produces a file.
+                    # Slow guest frames can otherwise leave many screenshots queued,
+                    # delaying both the visual match and the input that follows it.
+                    poll_deadline = event_deadline
                     while process.poll() is None and time.monotonic() < poll_deadline:
                         candidates = [
                             path
