@@ -18,7 +18,8 @@ enum class AuxShaderType : u32 {
     PassthroughTES,
 };
 
+// fs_info is null when the graphics pipeline has no fragment stage.
 [[nodiscard]] std::vector<u32> EmitAuxilaryTessShader(AuxShaderType type,
-                                                      const FragmentRuntimeInfo& fs_info);
+                                                      const FragmentRuntimeInfo* fs_info);
 
 } // namespace Shader::Backend::SPIRV

@@ -194,7 +194,8 @@ GraphicsPipeline::GraphicsPipeline(
     } else if (is_rect_list || is_quad_list) {
         const auto type = is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
         if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::LogicalStage::Fragment)].fs_info;
+            const auto fs_stage = u32(Shader::LogicalStage::Fragment);
+            const auto* fs_info = infos[fs_stage] ? &runtime_infos[fs_stage].fs_info : nullptr;
             sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
@@ -212,7 +213,8 @@ GraphicsPipeline::GraphicsPipeline(
         });
     } else if (is_rect_list || is_quad_list) {
         if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::LogicalStage::Fragment)].fs_info;
+            const auto fs_stage = u32(Shader::LogicalStage::Fragment);
+            const auto* fs_info = infos[fs_stage] ? &runtime_infos[fs_stage].fs_info : nullptr;
             sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
                 AuxShaderType::PassthroughTES, fs_info);
         }

@@ -139,6 +139,22 @@ target_link_libraries(shadps4_image_copy_policy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_image_copy_policy_test)
 
+add_executable(shadps4_aux_tess_shader_test
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv_quad_rect.cpp
+    test_aux_tess_shader.cpp
+)
+target_include_directories(shadps4_aux_tess_shader_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_aux_tess_shader_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_aux_tess_shader_test PRIVATE
+    GTest::gtest_main
+    fmt::fmt
+    sirit
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_aux_tess_shader_test)
+
 add_executable(shadps4_playgo_test
     test_playgo.cpp
 )
