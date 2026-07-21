@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,56 @@ class ManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(load_manifest(path).cases[0].user_config, config.resolve())
+
+    def test_load_manifest_resolves_portable_user_data_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            seed = root / "profiles" / "checkpoint"
+            seed.mkdir(parents=True)
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "seeded boot",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "userDataSeed": "profiles/checkpoint",
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(
+                load_manifest(path).cases[0].user_data_seed, seed.resolve()
+            )
+
+    def test_load_manifest_rejects_user_data_seed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            (root / "checkpoint").write_bytes(b"not a directory")
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "bad seed",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "userDataSeed": "checkpoint",
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "userDataSeed must be a directory"
+            ):
+                load_manifest(path)
 
     def test_load_manifest_rejects_invalid_portable_user_config(self) -> None:
         for content in ("not json", "[]"):
@@ -1213,6 +1264,12 @@ class RunnerTests(unittest.TestCase):
     def test_run_case_installs_private_config_in_portable_user_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            seed = root / "checkpoint"
+            seed.mkdir()
+            (seed / "config.json").write_text(
+                json.dumps({"GPU": {"readbackLinearImages": False}}),
+                encoding="utf-8",
+            )
             config = root / "profile.json"
             expected = {"GPU": {"readbackLinearImages": True}}
             config.write_text(json.dumps(expected), encoding="utf-8")
@@ -1221,6 +1278,7 @@ class RunnerTests(unittest.TestCase):
                     root,
                     case={
                         "name": "configured boot",
+                        "userDataSeed": "checkpoint",
                         "userConfig": "profile.json",
                     },
                 )
@@ -1241,6 +1299,48 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             self.assertEqual(observation["user_config"], expected)
+
+    def test_run_case_copies_user_data_seed_without_mutating_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed = root / "checkpoint"
+            savedata = seed / "home" / "1000" / "savedata" / "CUSA00001"
+            savedata.mkdir(parents=True)
+            source_save = savedata / "state.bin"
+            source_save.write_bytes(b"known checkpoint")
+            source_save.chmod(stat.S_IREAD)
+            manifest = load_manifest(
+                self.make_manifest(
+                    root,
+                    case={
+                        "name": "seeded boot",
+                        "userDataSeed": "checkpoint",
+                    },
+                )
+            )
+
+            result = run_case(
+                manifest.cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            copied_save = (
+                result.artifact_directory
+                / "user"
+                / "home"
+                / "1000"
+                / "savedata"
+                / "CUSA00001"
+                / "state.bin"
+            )
+            self.assertEqual(copied_save.read_bytes(), b"known checkpoint")
+            self.assertEqual(source_save.read_bytes(), b"known checkpoint")
+            self.assertTrue(copied_save.stat().st_mode & stat.S_IWRITE)
+            self.assertFalse(source_save.stat().st_mode & stat.S_IWRITE)
+            self.assertFalse((seed / "log").exists())
+            source_save.chmod(stat.S_IWRITE)
 
     def test_run_case_reports_nonzero_exit_when_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
