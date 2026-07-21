@@ -2089,6 +2089,58 @@ class RunnerTests(unittest.TestCase):
                 [True],
             )
 
+    def test_visual_checkpoint_keeps_only_one_screenshot_request_in_flight(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "expected.png"
+            reference.write_bytes(test_png(1, 1, 6, bytes((0, 0, 0, 0, 255))))
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "delayed visual checkpoint",
+                    "timeoutSeconds": 0.8,
+                    "args": [
+                        "--expect-ipc",
+                        "--screenshot-delay",
+                        "0.1",
+                    ],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "button": "cross",
+                            "timeoutSeconds": 0.4,
+                            "pollSeconds": 0.02,
+                            "holdSeconds": 0.01,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            commands = observation["ipc_commands"]
+            press = commands.index("GAMEPAD_BUTTON")
+            self.assertEqual(commands[:press].count("SCREENSHOT"), 1)
+            self.assertEqual(
+                [attempt.matched for attempt in result.visual_checkpoint_attempts],
+                [True],
+            )
+
     def test_run_case_matches_visual_checkpoint_inside_comparison_region(
         self,
     ) -> None:
