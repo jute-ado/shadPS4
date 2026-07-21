@@ -1987,7 +1987,7 @@ class RunnerTests(unittest.TestCase):
 
             self.assertFalse(result.passed)
             self.assertEqual(result.outcome, "timed_out")
-            self.assertLess(result.duration_seconds, 2.0)
+            self.assertLess(result.duration_seconds, 2.75)
             self.assertTrue(
                 any(
                     "screenshotButtonEvents[0] did not match" in failure
@@ -2003,6 +2003,13 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
             self.assertIn("RENDERDOC_CAPTURE", observation["ipc_commands"])
             self.assertIn("STOP", observation["ipc_commands"])
+            capture_index = observation["ipc_commands"].index("RENDERDOC_CAPTURE")
+            stop_index = observation["ipc_commands"].index("STOP")
+            self.assertGreaterEqual(
+                observation["ipc_command_seconds"][stop_index]
+                - observation["ipc_command_seconds"][capture_index],
+                1.0,
+            )
             self.assertEqual(len(result.renderdoc_captures), 1)
             self.assertGreaterEqual(len(result.visual_checkpoint_attempts), 1)
             attempt = result.visual_checkpoint_attempts[0]

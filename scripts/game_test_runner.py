@@ -1398,15 +1398,24 @@ def run_case(
                     previous_sizes = sizes
                     time.sleep(0.05)
 
+                cooldown_seconds = min(2.0, max(0, hard_deadline - time.monotonic()))
+                if cooldown_seconds:
+                    try:
+                        process.wait(timeout=cooldown_seconds)
+                        process_exited = True
+                    except subprocess.TimeoutExpired:
+                        pass
+
             timed_out = True
-            assert process.stdin is not None
-            try:
-                process.stdin.write(b"STOP\n")
-                process.stdin.flush()
-                process.wait(timeout=5)
-            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                _kill_process_tree(process)
-                process.wait(timeout=5)
+            if not process_exited:
+                assert process.stdin is not None
+                try:
+                    process.stdin.write(b"STOP\n")
+                    process.stdin.flush()
+                    process.wait(timeout=5)
+                except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                    _kill_process_tree(process)
+                    process.wait(timeout=5)
             process_exited = True
 
         timeline = (
