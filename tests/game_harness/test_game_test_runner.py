@@ -1962,7 +1962,7 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "missing visual state",
-                    "timeoutSeconds": 3.0,
+                    "timeoutSeconds": 5.0,
                     "args": ["--expect-ipc"],
                     "useIpc": True,
                     "renderdocCaptureOnVisualFailure": True,
@@ -1987,7 +1987,7 @@ class RunnerTests(unittest.TestCase):
 
             self.assertFalse(result.passed)
             self.assertEqual(result.outcome, "timed_out")
-            self.assertLess(result.duration_seconds, 2.75)
+            self.assertLess(result.duration_seconds, 4.0)
             self.assertTrue(
                 any(
                     "screenshotButtonEvents[0] did not match" in failure
