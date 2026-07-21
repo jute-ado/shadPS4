@@ -148,12 +148,6 @@ void BufferCache::BindVertexBuffers(
     pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
-    if (instance.IsVertexInputDynamicState()) {
-        // Update current vertex inputs.
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.setVertexInputEXT(bindings, attributes);
-    }
-
     if (bindings.empty()) {
         // If there are no bindings, there is nothing further to do.
         return;
@@ -242,6 +236,21 @@ void BufferCache::BindVertexBuffers(
         cmdbuf.bindVertexBuffers2(0, num_buffers, host_buffers.data(), host_offsets.data(),
                                   host_sizes.data(), host_strides.data());
     }
+}
+
+void BufferCache::CommitVertexInputState(const Vulkan::GraphicsPipeline& pipeline) {
+    if (!instance.IsVertexInputDynamicState()) {
+        return;
+    }
+
+    const auto& regs = liverpool->regs;
+    Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
+    Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
+    Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
+    Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
+    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+                             regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
+    scheduler.CommandBuffer().setVertexInputEXT(bindings, attributes);
 }
 
 void BufferCache::BindIndexBuffer(

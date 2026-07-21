@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/vertex_input_binding.h"
 #include "video_core/renderer_vulkan/buffer_barrier_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -221,15 +222,19 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
-
-    if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
-                           s32(vertex_offset), instance_offset);
-    } else {
-        cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
-                    instance_offset);
-    }
+    VideoCore::IssueDrawWithVertexInputState(
+        instance.IsVertexInputDynamicState(),
+        [&] { cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle()); },
+        [&] { buffer_cache.CommitVertexInputState(*pipeline); },
+        [&] {
+            if (is_indexed) {
+                cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
+                                   s32(vertex_offset), instance_offset);
+            } else {
+                cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                            instance_offset);
+            }
+        });
 
     ResetBindings();
 }
@@ -288,27 +293,31 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    VideoCore::IssueDrawWithVertexInputState(
+        instance.IsVertexInputDynamicState(),
+        [&] { cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle()); },
+        [&] { buffer_cache.CommitVertexInputState(*pipeline); },
+        [&] {
+            if (is_indexed) {
+                ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
 
-    if (is_indexed) {
-        ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
+                if (count_address != 0) {
+                    cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
+                                                     count_base, max_count, stride);
+                } else {
+                    cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
+                }
+            } else {
+                ASSERT(sizeof(VkDrawIndirectCommand) == stride);
 
-        if (count_address != 0) {
-            cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
-                                            count_base, max_count, stride);
-        } else {
-            cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
-        }
-    } else {
-        ASSERT(sizeof(VkDrawIndirectCommand) == stride);
-
-        if (count_address != 0) {
-            cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(), count_base,
-                                     max_count, stride);
-        } else {
-            cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
-        }
-    }
+                if (count_address != 0) {
+                    cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
+                                             count_base, max_count, stride);
+                } else {
+                    cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
+                }
+            }
+        });
 
     ResetBindings();
 }
