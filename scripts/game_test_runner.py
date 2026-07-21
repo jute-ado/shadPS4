@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -75,6 +76,7 @@ class ScreenshotButtonEvent:
     maximum_difference: float | None
     difference_mode: str
     comparison_region: ScreenshotRegion | None
+    scale_reference_to_capture: bool
     button: str
     timeout_seconds: float
     poll_seconds: float = 0.25
@@ -410,7 +412,14 @@ def _require_screenshot_button_events(
         difference_mode = item.get("differenceMode", "mean_absolute")
         comparison_region_value = item.get("comparisonRegion")
         comparison_region: ScreenshotRegion | None = None
+        scale_reference_to_capture = item.get("scaleReferenceToCapture", False)
+        if not isinstance(scale_reference_to_capture, bool):
+            raise ManifestError(f"{field}.scaleReferenceToCapture must be a boolean")
         if screenshot_sha256 is not None:
+            if scale_reference_to_capture:
+                raise ManifestError(
+                    f"{field}.scaleReferenceToCapture requires referenceScreenshot"
+                )
             if comparison_region_value is not None:
                 raise ManifestError(
                     f"{field}.comparisonRegion requires referenceScreenshot"
@@ -496,6 +505,7 @@ def _require_screenshot_button_events(
                 maximum_difference=maximum_difference,
                 difference_mode=difference_mode,
                 comparison_region=comparison_region,
+                scale_reference_to_capture=scale_reference_to_capture,
                 button=button,
                 timeout_seconds=values["timeoutSeconds"],
                 poll_seconds=values["pollSeconds"],
@@ -1057,11 +1067,22 @@ def _screenshot_difference(
     *,
     mode: str = "mean_absolute",
     region: ScreenshotRegion | None = None,
+    scale_first_to_second: bool = False,
 ) -> float:
-    first_width, first_height, first_pixels = _decode_png_rgb(first)
     second_width, second_height, second_pixels = _decode_png_rgb(second)
-    if (first_width, first_height) != (second_width, second_height):
-        raise ValueError("screenshots have different dimensions")
+    if scale_first_to_second:
+        reference_stat = first.stat()
+        first_width, first_height, first_pixels = _scaled_reference_rgb(
+            str(first.resolve()),
+            reference_stat.st_mtime_ns,
+            reference_stat.st_size,
+            second_width,
+            second_height,
+        )
+    else:
+        first_width, first_height, first_pixels = _decode_png_rgb(first)
+        if (first_width, first_height) != (second_width, second_height):
+            raise ValueError("screenshots have different dimensions")
     if region is not None:
         if (
             region.left < 0
@@ -1103,6 +1124,72 @@ def _screenshot_difference(
         return 1.0
     similarity = dot_product / math.sqrt(first_squared * second_squared)
     return max(0.0, min(1.0, 1.0 - similarity))
+
+
+@lru_cache(maxsize=16)
+def _scaled_reference_rgb(
+    path: str,
+    modified_nanoseconds: int,
+    file_size: int,
+    target_width: int,
+    target_height: int,
+) -> tuple[int, int, bytes]:
+    del modified_nanoseconds, file_size
+    source_width, source_height, pixels = _decode_png_rgb(Path(path))
+    if (source_width, source_height) == (target_width, target_height):
+        return source_width, source_height, pixels
+    if source_width * target_height != target_width * source_height:
+        raise ValueError("screenshots have different aspect ratios")
+    return (
+        target_width,
+        target_height,
+        _resize_rgb_linear(
+            pixels,
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+        ),
+    )
+
+
+def _resize_rgb_linear(
+    pixels: bytes,
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+) -> bytes:
+    if (source_width, source_height) == (target_width, target_height):
+        return pixels
+    x_samples: list[tuple[int, int, float]] = []
+    for target_x in range(target_width):
+        source_x = (target_x + 0.5) * source_width / target_width - 0.5
+        first_x = max(0, min(source_width - 1, math.floor(source_x)))
+        second_x = min(source_width - 1, first_x + 1)
+        x_samples.append((first_x * 3, second_x * 3, source_x - first_x))
+    resized = bytearray(target_width * target_height * 3)
+    output = 0
+    for target_y in range(target_height):
+        source_y = (target_y + 0.5) * source_height / target_height - 0.5
+        first_y = max(0, min(source_height - 1, math.floor(source_y)))
+        second_y = min(source_height - 1, first_y + 1)
+        y_weight = source_y - first_y
+        first_row = first_y * source_width * 3
+        second_row = second_y * source_width * 3
+        for first_x, second_x, x_weight in x_samples:
+            for channel in range(3):
+                top = pixels[first_row + first_x + channel] * (1 - x_weight) + pixels[
+                    first_row + second_x + channel
+                ] * x_weight
+                bottom = pixels[
+                    second_row + first_x + channel
+                ] * (1 - x_weight) + pixels[
+                    second_row + second_x + channel
+                ] * x_weight
+                resized[output] = round(top * (1 - y_weight) + bottom * y_weight)
+                output += 1
+    return bytes(resized)
 
 
 def _screenshot_statistics(path: Path) -> tuple[float, float]:
@@ -1324,6 +1411,7 @@ def run_case(
                                     screenshot,
                                     mode=event.difference_mode,
                                     region=event.comparison_region,
+                                    scale_first_to_second=event.scale_reference_to_capture,
                                 )
                                 screenshot_matches = (
                                     screenshot_difference <= event.maximum_difference

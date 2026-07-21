@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zlib
 
 from scripts.game_test_runner import (
@@ -708,6 +709,40 @@ class ManifestTests(unittest.TestCase):
                 event.comparison_region,
                 ScreenshotRegion(left=1, top=0, width=1, height=1),
             )
+
+    def test_load_manifest_accepts_resolution_normalized_visual_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            (root / "reference.png").write_bytes(
+                test_png(1, 1, 2, bytes((0, 0, 0, 0)))
+            )
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "scaled checkpoint",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "referenceScreenshot": "reference.png",
+                                    "scaleReferenceToCapture": True,
+                                    "button": "cross",
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertTrue(event.scale_reference_to_capture)
 
     def test_load_manifest_rejects_mixed_timed_and_screenshot_driven_events(
         self,
@@ -1501,6 +1536,72 @@ class PngComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different dimensions"):
                 _screenshot_difference(first, second)
 
+    def test_screenshot_difference_scales_reference_to_capture_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            capture = root / "capture.png"
+            red_row = bytes((0, 255, 0, 0, 255, 0, 0))
+            reference.write_bytes(test_png(2, 2, 2, red_row + red_row))
+            capture.write_bytes(test_png(1, 1, 2, bytes((0, 255, 0, 0))))
+
+            self.assertEqual(
+                _screenshot_difference(
+                    reference,
+                    capture,
+                    scale_first_to_second=True,
+                ),
+                0.0,
+            )
+
+    def test_screenshot_difference_uses_linear_filter_when_scaling_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            capture = root / "capture.png"
+            reference.write_bytes(
+                test_png(
+                    2,
+                    2,
+                    2,
+                    bytes((0, 0, 0, 0, 255, 255, 255)) * 2,
+                )
+            )
+            capture.write_bytes(test_png(1, 1, 2, bytes((0, 128, 128, 128))))
+
+            self.assertEqual(
+                _screenshot_difference(
+                    reference,
+                    capture,
+                    scale_first_to_second=True,
+                ),
+                0.0,
+            )
+
+    def test_screenshot_difference_caches_scaled_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            capture = root / "capture.png"
+            black_row = bytes((0, 0, 0, 0, 0, 0, 0))
+            reference.write_bytes(test_png(2, 2, 2, black_row * 2))
+            capture.write_bytes(test_png(1, 1, 2, bytes((0, 0, 0, 0))))
+
+            with mock.patch(
+                "scripts.game_test_runner._resize_rgb_linear",
+                wraps=sys.modules[
+                    "scripts.game_test_runner"
+                ]._resize_rgb_linear,
+            ) as resize:
+                _screenshot_difference(
+                    reference, capture, scale_first_to_second=True
+                )
+                _screenshot_difference(
+                    reference, capture, scale_first_to_second=True
+                )
+
+            self.assertEqual(resize.call_count, 1)
+
     def test_cosine_screenshot_difference_detects_moved_dark_detail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1947,6 +2048,46 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             json.dumps(result.to_report())
+
+    def test_run_case_scales_reference_before_matching_visual_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "expected.png"
+            black_row = bytes((0, 0, 0, 0, 0, 0, 0))
+            reference.write_bytes(test_png(2, 2, 2, black_row * 2))
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "resolution-independent checkpoint",
+                    "timeoutSeconds": 1.0,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "scaleReferenceToCapture": True,
+                            "maximumDifference": 0,
+                            "button": "cross",
+                            "timeoutSeconds": 0.5,
+                            "pollSeconds": 0.05,
+                            "holdSeconds": 0.02,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(
+                [attempt.matched for attempt in result.visual_checkpoint_attempts],
+                [True],
+            )
 
     def test_run_case_matches_visual_checkpoint_inside_comparison_region(
         self,
