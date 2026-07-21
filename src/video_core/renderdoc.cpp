@@ -5,8 +5,10 @@
 #include "common/logging/formatter.h"
 #include "core/emulator_settings.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderdoc_path.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <renderdoc_app.h>
 
 #ifdef _WIN32
@@ -31,10 +33,22 @@ static std::atomic<u32> screenshot_with_overlays_count{0};
 RENDERDOC_API_1_6_0* rdoc_api{};
 
 void LoadRenderDoc() {
-#ifdef WIN32
+    if (rdoc_api) {
+        return;
+    }
+
+    const char* configured_path = std::getenv("SHADPS4_RENDERDOC_PATH");
+#ifdef _WIN32
 
     // Check if we are running by RDoc GUI
     HMODULE mod = GetModuleHandleA("renderdoc.dll");
+    if (!mod && configured_path) {
+        if (const auto path = ResolveRenderDocModulePath(configured_path)) {
+            mod = LoadLibraryW(path->c_str());
+        } else {
+            LOG_ERROR(Render, "SHADPS4_RENDERDOC_PATH does not contain a RenderDoc library");
+        }
+    }
     if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
         HKEY h_reg_key;
@@ -60,6 +74,10 @@ void LoadRenderDoc() {
     if (mod) {
         const auto RENDERDOC_GetAPI =
             reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+        if (!RENDERDOC_GetAPI) {
+            LOG_ERROR(Render, "Loaded RenderDoc library does not export RENDERDOC_GetAPI");
+            return;
+        }
         const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
         ASSERT(ret == 1);
     }
@@ -71,16 +89,32 @@ void LoadRenderDoc() {
 #endif
     // Check if we are running by RDoc GUI
     void* mod = dlopen(RENDERDOC_LIB, RTLD_NOW | RTLD_NOLOAD);
+    if (!mod && configured_path) {
+        if (const auto path = ResolveRenderDocModulePath(configured_path)) {
+            mod = dlopen(path->c_str(), RTLD_NOW);
+            if (!mod) {
+                LOG_ERROR(Render, "Cannot load RenderDoc from SHADPS4_RENDERDOC_PATH: {}",
+                          dlerror());
+            }
+        } else {
+            LOG_ERROR(Render, "SHADPS4_RENDERDOC_PATH does not contain a RenderDoc library");
+        }
+    }
     if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
-        if ((mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
-            const auto RENDERDOC_GetAPI =
-                reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
-            const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
-            ASSERT(ret == 1);
-        } else {
+        if (!(mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
             LOG_ERROR(Render, "Cannot load RenderDoc: {}", dlerror());
         }
+    }
+    if (mod) {
+        const auto RENDERDOC_GetAPI =
+            reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
+        if (!RENDERDOC_GetAPI) {
+            LOG_ERROR(Render, "Loaded RenderDoc library does not export RENDERDOC_GetAPI");
+            return;
+        }
+        const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
+        ASSERT(ret == 1);
     }
 #endif
     if (rdoc_api) {
