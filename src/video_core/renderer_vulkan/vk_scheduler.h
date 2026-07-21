@@ -13,6 +13,7 @@
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
+#include "video_core/renderer_vulkan/vk_submit_info.h"
 
 namespace tracy {
 class VkCtxScope;
@@ -51,30 +52,6 @@ struct RenderState {
     }
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
-
-struct SubmitInfo {
-    std::array<vk::Semaphore, 3> wait_semas;
-    std::array<u64, 3> wait_ticks;
-    std::array<vk::Semaphore, 3> signal_semas;
-    std::array<u64, 3> signal_ticks;
-    vk::Fence fence;
-    u32 num_wait_semas;
-    u32 num_signal_semas;
-
-    void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
-        wait_semas[num_wait_semas] = semaphore;
-        wait_ticks[num_wait_semas++] = tick;
-    }
-
-    void AddSignal(vk::Semaphore semaphore, u64 tick = 1) {
-        signal_semas[num_signal_semas] = semaphore;
-        signal_ticks[num_signal_semas++] = tick;
-    }
-
-    void AddSignal(vk::Fence fence) {
-        this->fence = fence;
-    }
-};
 
 using Viewports = boost::container::static_vector<vk::Viewport, AmdGpu::NUM_VIEWPORTS>;
 using Scissors = boost::container::static_vector<vk::Rect2D, AmdGpu::NUM_VIEWPORTS>;
