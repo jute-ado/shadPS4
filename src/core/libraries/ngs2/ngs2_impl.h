@@ -9,6 +9,7 @@ namespace Libraries::Ngs2 {
 
 struct OrbisNgs2RackOption;
 struct OrbisNgs2BufferAllocator;
+struct OrbisNgs2VoiceParamHeader;
 
 static const int ORBIS_NGS2_SYSTEM_NAME_LENGTH = 16;
 static const int ORBIS_NGS2_RACK_NAME_LENGTH = 16;
@@ -184,6 +185,8 @@ s32 RackCreate(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOption* option,
                const OrbisNgs2ContextBufferInfo* bufferInfo, OrbisNgs2Handle* outHandle);
 s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOption* option,
                             const OrbisNgs2BufferAllocator* allocator, OrbisNgs2Handle* outHandle);
+s32 ValidateVoiceControlRequest(OrbisNgs2Handle voiceHandle,
+                                const OrbisNgs2VoiceParamHeader* paramList);
 s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize);
 
 } // namespace Libraries::Ngs2

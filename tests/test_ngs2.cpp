@@ -128,5 +128,23 @@ TEST(Ngs2Test, VoiceGetStateRejectsInvalidArguments) {
               ORBIS_NGS2_ERROR_INVALID_VOICE_STATE_SIZE);
 }
 
+TEST(Ngs2Test, VoiceControlAcceptsWellFormedSingleParameter) {
+    OrbisNgs2VoiceParamHeader param{};
+    param.size = sizeof(param);
+
+    EXPECT_EQ(ValidateVoiceControlRequest(1, &param), ORBIS_OK);
+}
+
+TEST(Ngs2Test, VoiceControlRejectsInvalidArguments) {
+    OrbisNgs2VoiceParamHeader param{};
+    param.size = sizeof(param);
+
+    EXPECT_EQ(ValidateVoiceControlRequest(0, &param), ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE);
+    EXPECT_EQ(ValidateVoiceControlRequest(1, nullptr),
+              ORBIS_NGS2_ERROR_INVALID_VOICE_CONTROL_ADDRESS);
+    param.size = sizeof(param) - 1;
+    EXPECT_EQ(ValidateVoiceControlRequest(1, &param), ORBIS_NGS2_ERROR_INVALID_VOICE_CONTROL_SIZE);
+}
+
 } // namespace
 } // namespace Libraries::Ngs2

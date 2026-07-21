@@ -265,6 +265,20 @@ s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, const OrbisNgs2RackOpt
     return createResult;
 }
 
+s32 ValidateVoiceControlRequest(OrbisNgs2Handle voiceHandle,
+                                const OrbisNgs2VoiceParamHeader* paramList) {
+    if (!voiceHandle) {
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    }
+    if (!paramList) {
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_CONTROL_ADDRESS;
+    }
+    if (paramList->size < sizeof(OrbisNgs2VoiceParamHeader)) {
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_CONTROL_SIZE;
+    }
+    return ORBIS_OK;
+}
+
 s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize) {
     if (!voiceHandle) {
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
