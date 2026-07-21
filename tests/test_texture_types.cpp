@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/amdgpu/resource.h"
 #include "video_core/texture_cache/tile.h"
 #include "video_core/texture_cache/types.h"
 
@@ -171,6 +172,33 @@ TEST(TilingDispatch, CoversACompressedBlockTailAfterFullWorkgroups) {
 
 TEST(TilingDispatch, DoesNotDispatchForAnEmptySurface) {
     EXPECT_EQ(TilingWorkgroupCount(0, 64), 0u);
+}
+
+TEST(SamplerLodRange, DisablesMipSelectionWhenMipFilteringIsDisabled) {
+    AmdGpu::Sampler sampler{};
+    sampler.raw0 = u64{256} << 32 | u64{4095} << 44;
+    sampler.raw1 = static_cast<u64>(AmdGpu::MipFilter::None) << 26;
+
+    EXPECT_EQ(sampler.EffectiveMinLod(), 0.0f);
+    EXPECT_EQ(sampler.EffectiveMaxLod(), 0.0f);
+}
+
+TEST(SamplerLodRange, PreservesLodRangeForPointMipFiltering) {
+    AmdGpu::Sampler sampler{};
+    sampler.raw0 = u64{256} << 32 | u64{768} << 44;
+    sampler.raw1 = static_cast<u64>(AmdGpu::MipFilter::Point) << 26;
+
+    EXPECT_EQ(sampler.EffectiveMinLod(), 1.0f);
+    EXPECT_EQ(sampler.EffectiveMaxLod(), 3.0f);
+}
+
+TEST(SamplerLodRange, PreservesLodRangeForLinearMipFiltering) {
+    AmdGpu::Sampler sampler{};
+    sampler.raw0 = u64{512} << 32 | u64{1024} << 44;
+    sampler.raw1 = static_cast<u64>(AmdGpu::MipFilter::Linear) << 26;
+
+    EXPECT_EQ(sampler.EffectiveMinLod(), 2.0f);
+    EXPECT_EQ(sampler.EffectiveMaxLod(), 4.0f);
 }
 
 } // namespace
