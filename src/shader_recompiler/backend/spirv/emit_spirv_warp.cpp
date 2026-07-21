@@ -15,6 +15,10 @@ Id EmitWarpId(EmitContext& ctx) {
 }
 
 Id EmitLaneId(EmitContext& ctx) {
+    if (ctx.l_stage == LogicalStage::Compute && ctx.profile.subgroup_size != 64) {
+        const Id invocation_index = ctx.OpLoad(ctx.U32[1], ctx.local_invocation_index);
+        return ctx.OpBitwiseAnd(ctx.U32[1], invocation_index, ctx.ConstU32(63U));
+    }
     return ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id);
 }
 

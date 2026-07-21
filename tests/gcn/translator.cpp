@@ -24,10 +24,19 @@ void ResourceTrackingPassStub(IR::Program& program, const Profile& profile);
 }
 
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
-    return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1});
+    return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1}, TranslationEnvironment{});
 }
 
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
+    return TranslateToSpirv(raw_gcn_insts, TranslationEnvironment{});
+}
+
+std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst, const TranslationEnvironment& environment) {
+    return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1}, environment);
+}
+
+std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
+                                  const TranslationEnvironment& environment) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -67,12 +76,12 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 
     Profile profile{};
     profile.supported_spirv = 0x00010600;
-    profile.subgroup_size = 32;
+    profile.subgroup_size = environment.subgroup_size;
 
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);
     runtime_info.num_user_data = 4;
-    runtime_info.cs_info.workgroup_size = {1, 1, 1};
+    runtime_info.cs_info.workgroup_size = environment.workgroup_size;
 
     Gcn::Translator translator(program.info, runtime_info, profile);
     translator.EmitPrologue(block);

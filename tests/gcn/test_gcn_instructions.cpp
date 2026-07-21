@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +26,82 @@ struct F32x2 {
     float a;
     float b;
 };
+
+bool HasBuiltIn(std::span<const u32> spirv, spv::BuiltIn built_in) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u16 word_count = instruction >> 16;
+        const u16 opcode = instruction & 0xffff;
+        if (opcode == static_cast<u16>(spv::Op::OpDecorate) && word_count >= 4 &&
+            spirv[offset + 2] == static_cast<u32>(spv::DecorationBuiltIn) &&
+            spirv[offset + 3] == static_cast<u32>(built_in)) {
+            return true;
+        }
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+bool UsesMaskedBuiltIn(std::span<const u32> spirv, spv::BuiltIn built_in, u32 mask) {
+    u32 built_in_id{};
+    u32 mask_id{};
+    u32 loaded_id{};
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u16 word_count = instruction >> 16;
+        const u16 opcode = instruction & 0xffff;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if (opcode == static_cast<u16>(spv::Op::OpDecorate) && word_count >= 4 &&
+            spirv[offset + 2] == static_cast<u32>(spv::DecorationBuiltIn) &&
+            spirv[offset + 3] == static_cast<u32>(built_in)) {
+            built_in_id = spirv[offset + 1];
+        } else if (opcode == static_cast<u16>(spv::Op::OpConstant) && word_count == 4 &&
+                   spirv[offset + 3] == mask) {
+            mask_id = spirv[offset + 2];
+        } else if (opcode == static_cast<u16>(spv::Op::OpLoad) && word_count >= 4 &&
+                   spirv[offset + 3] == built_in_id) {
+            loaded_id = spirv[offset + 2];
+        } else if (opcode == static_cast<u16>(spv::Op::OpBitwiseAnd) && word_count == 5 &&
+                   ((spirv[offset + 3] == loaded_id && spirv[offset + 4] == mask_id) ||
+                    (spirv[offset + 4] == loaded_id && spirv[offset + 3] == mask_id))) {
+            return built_in_id != 0 && mask_id != 0 && loaded_id != 0;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+TEST_F(GcnTest, compute_wave64_lane_id_uses_local_invocation_index_on_subgroup32) {
+    TranslationEnvironment environment{};
+    environment.subgroup_size = 32;
+    environment.workgroup_size = {64, 1, 1};
+    const auto spirv = TranslateToSpirv(
+        VOP2(OpcodeVOP2::V_MBCNT_LO_U32_B32, VOperand8::V0, SOperand9::ConstNeg1, VOperand8::V0)
+            .Get(),
+        environment);
+
+    EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
+    EXPECT_FALSE(HasBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
+    EXPECT_TRUE(UsesMaskedBuiltIn(spirv, spv::BuiltInLocalInvocationIndex, 63));
+}
+
+TEST_F(GcnTest, compute_wave64_lane_id_preserves_native_subgroup_builtin) {
+    TranslationEnvironment environment{};
+    environment.subgroup_size = 64;
+    environment.workgroup_size = {64, 1, 1};
+    const auto spirv = TranslateToSpirv(
+        VOP2(OpcodeVOP2::V_MBCNT_LO_U32_B32, VOperand8::V0, SOperand9::ConstNeg1, VOperand8::V0)
+            .Get(),
+        environment);
+
+    EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
+    EXPECT_FALSE(HasBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
+}
 
 // Example
 // TEST_F(GcnTest, test_name) {

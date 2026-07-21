@@ -308,9 +308,15 @@ void EmitContext::DefineWorkgroupIndex() {
 
 void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
-        subgroup_local_invocation_id = DefineVariable(
-            U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (l_stage == LogicalStage::Compute && profile.subgroup_size != 64) {
+            local_invocation_index = DefineVariable(U32[1], spv::BuiltIn::LocalInvocationIndex,
+                                                    spv::StorageClass::Input);
+            Decorate(local_invocation_index, spv::Decoration::Flat);
+        } else {
+            subgroup_local_invocation_id = DefineVariable(
+                U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
