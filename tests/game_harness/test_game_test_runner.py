@@ -696,6 +696,31 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "cannot be combined"):
                 load_manifest(path)
 
+    def test_load_manifest_rejects_failure_capture_without_visual_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "missing visual event",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "useIpc": True,
+                            "renderdocCaptureOnVisualFailure": True,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "requires screenshotButtonEvents"
+            ):
+                load_manifest(path)
+
     def test_load_manifest_rejects_invalid_visual_checkpoint_regions(self) -> None:
         scenarios = (
             ([], "comparisonRegion must be an object"),
@@ -1940,6 +1965,7 @@ class RunnerTests(unittest.TestCase):
                     "timeoutSeconds": 0.8,
                     "args": ["--expect-ipc"],
                     "useIpc": True,
+                    "renderdocCaptureOnVisualFailure": True,
                     "screenshotButtonEvents": [
                         {
                             "screenshotSha256": "a" * 64,
@@ -1973,6 +1999,8 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
+            self.assertIn("RENDERDOC_CAPTURE", observation["ipc_commands"])
+            self.assertEqual(len(result.renderdoc_captures), 1)
             self.assertGreaterEqual(len(result.visual_checkpoint_attempts), 1)
             attempt = result.visual_checkpoint_attempts[0]
             self.assertEqual(attempt.event_index, 0)
@@ -2040,7 +2068,10 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "delayed IPC startup",
-                    "timeoutSeconds": 0.35,
+                    # Leave room for interpreter startup on slower CI hosts. The
+                    # assertion below measures the post-handshake timeline, not
+                    # total process startup time.
+                    "timeoutSeconds": 1.0,
                     "args": [
                         "--expect-ipc",
                         "--ipc-handshake-delay",
@@ -2108,6 +2139,21 @@ class RunnerTests(unittest.TestCase):
                 "renderdoc",
                 "--omit-renderdoc-capability",
                 {"renderdocCaptureSeconds": [0.05]},
+                "ENABLE_RENDERDOC_CAPTURE",
+            ),
+            (
+                "visual failure renderdoc",
+                "--omit-renderdoc-capability",
+                {
+                    "renderdocCaptureOnVisualFailure": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "screenshotSha256": "a" * 64,
+                            "button": "cross",
+                            "timeoutSeconds": 0.4,
+                        }
+                    ],
+                },
                 "ENABLE_RENDERDOC_CAPTURE",
             ),
             (
@@ -2363,6 +2409,40 @@ class RunnerTests(unittest.TestCase):
                     "args": ["--expect-ipc", "--ignore-renderdoc-captures"],
                     "useIpc": True,
                     "renderdocCaptureSeconds": [0.05],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "captured 0 valid RenderDoc frames; expected 1", result.failures
+            )
+
+    def test_run_case_requires_visual_failure_renderdoc_capture_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "missing visual failure capture",
+                    "timeoutSeconds": 0.8,
+                    "args": ["--expect-ipc", "--ignore-renderdoc-captures"],
+                    "useIpc": True,
+                    "renderdocCaptureOnVisualFailure": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "screenshotSha256": "a" * 64,
+                            "button": "cross",
+                            "timeoutSeconds": 0.4,
+                            "pollSeconds": 0.05,
+                        }
+                    ],
                     "allowedOutcomes": ["timed_out"],
                 },
             )

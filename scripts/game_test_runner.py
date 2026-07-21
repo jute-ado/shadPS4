@@ -128,6 +128,7 @@ class GameCase:
     renderdoc_capture_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
     screenshot_comparisons: tuple[ScreenshotComparison, ...] = ()
+    renderdoc_capture_on_visual_failure: bool = False
     button_events: tuple[ButtonEvent, ...] = ()
     screenshot_button_events: tuple[ScreenshotButtonEvent, ...] = ()
     axis_events: tuple[AxisEvent, ...] = ()
@@ -736,6 +737,16 @@ def load_manifest(path: str | Path) -> GameManifest:
             use_ipc=use_ipc,
             root=root,
         )
+        renderdoc_capture_on_visual_failure = _require_bool(
+            raw_case.get("renderdocCaptureOnVisualFailure", False),
+            "renderdocCaptureOnVisualFailure",
+            name,
+        )
+        if renderdoc_capture_on_visual_failure and not screenshot_button_events:
+            raise ManifestError(
+                f"{name}: renderdocCaptureOnVisualFailure requires "
+                "screenshotButtonEvents"
+            )
         axis_events = _require_axis_events(
             raw_case.get("axisEvents"),
             case_name=name,
@@ -781,6 +792,9 @@ def load_manifest(path: str | Path) -> GameManifest:
                     raw_case.get("screenshotComparisons"),
                     case_name=name,
                     screenshot_count=len(screenshot_seconds),
+                ),
+                renderdoc_capture_on_visual_failure=(
+                    renderdoc_capture_on_visual_failure
                 ),
                 button_events=button_events,
                 screenshot_button_events=screenshot_button_events,
@@ -1222,7 +1236,7 @@ def run_case(
         required_capabilities = ["ENABLE_EMU_CONTROL"]
         if case.screenshot_seconds or case.screenshot_button_events:
             required_capabilities.append("ENABLE_SCREENSHOT")
-        if case.renderdoc_capture_seconds:
+        if case.renderdoc_capture_seconds or case.renderdoc_capture_on_visual_failure:
             required_capabilities.append("ENABLE_RENDERDOC_CAPTURE")
         if (
             case.button_events
@@ -1246,6 +1260,7 @@ def run_case(
     timed_out = False
     runtime_failures: list[str] = []
     visual_checkpoint_attempts: list[VisualCheckpointAttempt] = []
+    visual_failure_capture_requests = 0
     try:
         process_exited = False
         if case.screenshot_button_events and ipc_ready:
@@ -1351,6 +1366,10 @@ def run_case(
                 if process_exited:
                     break
                 if not matched:
+                    if case.renderdoc_capture_on_visual_failure:
+                        process.stdin.write(b"RENDERDOC_CAPTURE\n")
+                        process.stdin.flush()
+                        visual_failure_capture_requests += 1
                     runtime_failures.append(
                         f"screenshotButtonEvents[{index}] did not match "
                         f"within {event.timeout_seconds:g} seconds"
@@ -1483,10 +1502,13 @@ def run_case(
             f"captured {len(screenshots)} valid screenshots; expected "
             f"{len(case.screenshot_seconds)}"
         )
-    if len(renderdoc_captures) < len(case.renderdoc_capture_seconds):
+    expected_renderdoc_captures = (
+        len(case.renderdoc_capture_seconds) + visual_failure_capture_requests
+    )
+    if len(renderdoc_captures) < expected_renderdoc_captures:
         failures.append(
             f"captured {len(renderdoc_captures)} valid RenderDoc frames; expected "
-            f"{len(case.renderdoc_capture_seconds)}"
+            f"{expected_renderdoc_captures}"
         )
     distinct_screenshots = len(set(screenshot_hashes))
     if distinct_screenshots < case.minimum_distinct_screenshots:

@@ -50,7 +50,17 @@ Each case supports:
   Vulkan runs must also have `VK_LAYER_RENDERDOC_Capture` active. A portable
   setup can point `VK_LAYER_PATH` or `VK_ADD_LAYER_PATH` at the directory that
   contains `renderdoc.json`, set `VK_INSTANCE_LAYERS` to that layer name, and
-  set `ENABLE_VULKAN_RENDERDOC_CAPTURE=1` before launching the runner.
+  set `ENABLE_VULKAN_RENDERDOC_CAPTURE=1` before launching the runner. Set
+  `SHADPS4_RENDERDOC_PATH` to the RenderDoc library or its containing directory
+  when RenderDoc is installed outside the operating system's standard lookup
+  locations. This loads the capture API without wrapping the emulator process,
+  so IPC remains available to the runner.
+- `renderdocCaptureOnVisualFailure`: optional Boolean for a case with
+  `screenshotButtonEvents`. When enabled, a checkpoint timeout requests one
+  RenderDoc frame before shutdown and requires a non-empty capture artifact.
+  This keeps successful routes lightweight while preserving GPU evidence for
+  intermittent blank, incomplete, or otherwise unexpected frames. It has the
+  same RenderDoc loading and Vulkan-layer requirements as scheduled captures.
 - `minimumDistinctScreenshots`: optional minimum number of unique screenshot
   contents required for the case to pass. This detects frozen or repeatedly
   blank output when multiple frames are scheduled.
