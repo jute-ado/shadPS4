@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstring>
 
 #include <gtest/gtest.h>
@@ -35,6 +36,24 @@ TEST(Ngs2Test, RackQueryBufferSizeRejectsInvalidArguments) {
     option.size = sizeof(option) - 1;
     OrbisNgs2ContextBufferInfo info{};
     EXPECT_EQ(RackQueryBufferSize(&option, &info), ORBIS_NGS2_ERROR_INVALID_OPTION_SIZE);
+}
+
+TEST(Ngs2Test, VoiceGetStateInitializesEntireCallerBuffer) {
+    std::array<u8, 48> state;
+    state.fill(0xA5);
+
+    EXPECT_EQ(VoiceGetState(1, state.data(), state.size()), ORBIS_OK);
+    for (const auto value : state) {
+        EXPECT_EQ(value, 0);
+    }
+}
+
+TEST(Ngs2Test, VoiceGetStateRejectsInvalidArguments) {
+    OrbisNgs2VoiceState state{};
+    EXPECT_EQ(VoiceGetState(0, &state, sizeof(state)), ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE);
+    EXPECT_EQ(VoiceGetState(1, nullptr, sizeof(state)), ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS);
+    EXPECT_EQ(VoiceGetState(1, &state, sizeof(state) - 1),
+              ORBIS_NGS2_ERROR_INVALID_VOICE_STATE_SIZE);
 }
 
 } // namespace

@@ -179,5 +179,6 @@ s32 SystemSetup(const OrbisNgs2SystemOption* option, OrbisNgs2ContextBufferInfo*
                 OrbisNgs2BufferFreeHandler hostFree, OrbisNgs2Handle* outHandle);
 s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
                         OrbisNgs2ContextBufferInfo* outBufferInfo);
+s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize);
 
 } // namespace Libraries::Ngs2

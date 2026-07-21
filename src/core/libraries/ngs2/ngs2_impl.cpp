@@ -206,4 +206,19 @@ s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
     return ORBIS_OK;
 }
 
+s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize) {
+    if (!voiceHandle) {
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    }
+    if (!outState) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+    if (stateSize < sizeof(OrbisNgs2VoiceState)) {
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_STATE_SIZE;
+    }
+
+    MemoryClear(outState, stateSize);
+    return ORBIS_OK;
+}
+
 } // namespace Libraries::Ngs2
