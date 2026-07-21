@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <vulkan/vulkan.hpp>
+#include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
 
