@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 import zlib
 
+import scripts.game_test_runner as game_test_runner
 from scripts.game_test_runner import (
     ManifestError,
     ScreenshotRegion,
@@ -1628,6 +1629,16 @@ class PngComparisonTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_process_stream_cleanup_survives_stdin_close_error(self) -> None:
+        process = mock.Mock()
+        process.stdin.close.side_effect = OSError(22, "Invalid argument")
+
+        game_test_runner._close_process_streams(process)
+
+        process.stdin.close.assert_called_once_with()
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+
     def make_manifest(
         self, root: Path, *, case: dict, emulator: str | None = None
     ) -> Path:

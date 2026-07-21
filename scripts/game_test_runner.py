@@ -891,6 +891,17 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
+def _close_process_streams(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            # Windows pipes may already be invalid after an abrupt child exit.
+            pass
+
+
 def _read_capped(path: Path, limit: int) -> tuple[str, bool]:
     if not path.exists():
         return "", False
@@ -1595,12 +1606,9 @@ def run_case(
             _kill_process_tree(process)
             process.wait(timeout=5)
     finally:
-        if process.stdin is not None:
-            process.stdin.close()
         for reader in readers:
             reader.join(timeout=5)
-        process.stdout.close()
-        process.stderr.close()
+        _close_process_streams(process)
     duration = time.monotonic() - started
 
     if timed_out:
