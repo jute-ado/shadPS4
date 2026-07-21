@@ -4,6 +4,7 @@
 #include "common/div_ceil.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/buffer_cache/fault_range.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -163,8 +164,12 @@ void FaultManager::ProcessFaultBuffer() {
             LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", fault_buf[i]);
         }
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
-            ASSERT_MSG((end - start) <= std::numeric_limits<u32>::max(),
-                       "Buffer size is too large");
+            if (!IsCacheableFaultRange(
+                    start, end, BufferCache::CACHING_NUMPAGES << BufferCache::CACHING_PAGEBITS)) {
+                LOG_WARNING(Render_Vulkan, "Ignoring invalid GPU fault range {:#x}-{:#x}", start,
+                            end);
+                return;
+            }
             buffer_cache.FindBuffer(start, static_cast<u32>(end - start));
         });
         fault_areas[area] = 0;
