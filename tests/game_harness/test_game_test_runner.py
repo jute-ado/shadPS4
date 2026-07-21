@@ -2068,7 +2068,10 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "delayed IPC startup",
-                    "timeoutSeconds": 0.35,
+                    # Leave room for interpreter startup on slower CI hosts. The
+                    # assertion below measures the post-handshake timeline, not
+                    # total process startup time.
+                    "timeoutSeconds": 1.0,
                     "args": [
                         "--expect-ipc",
                         "--ipc-handshake-delay",

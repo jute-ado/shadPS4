@@ -39,6 +39,17 @@ target_link_libraries(shadps4_texture_types_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_texture_types_test)
 
+add_executable(shadps4_renderdoc_path_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
+    test_renderdoc_path.cpp
+)
+target_include_directories(shadps4_renderdoc_path_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_renderdoc_path_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
+
 add_executable(shadps4_playgo_test
     test_playgo.cpp
 )
