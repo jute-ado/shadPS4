@@ -1,0 +1,14 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#pragma once
+
+#include <vulkan/vulkan.hpp>
+
+namespace Vulkan {
+
+constexpr vk::DescriptorType ImageDescriptorType(bool is_written) {
+    return is_written ? vk::DescriptorType::eStorageImage : vk::DescriptorType::eSampledImage;
+}
+
+} // namespace Vulkan

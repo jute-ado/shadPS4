@@ -113,6 +113,19 @@ target_link_libraries(shadps4_device_feature_policy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_device_feature_policy_test)
 
+add_executable(shadps4_descriptor_type_test
+    test_descriptor_type.cpp
+)
+target_include_directories(shadps4_descriptor_type_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_descriptor_type_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_descriptor_type_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_descriptor_type_test)
+
 add_executable(shadps4_playgo_test
     test_playgo.cpp
 )
