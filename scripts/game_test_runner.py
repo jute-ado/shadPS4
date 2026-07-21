@@ -1261,6 +1261,7 @@ def run_case(
     runtime_failures: list[str] = []
     visual_checkpoint_attempts: list[VisualCheckpointAttempt] = []
     visual_failure_capture_requests = 0
+    visual_checkpoint_failed = False
     try:
         process_exited = False
         if case.screenshot_button_events and ipc_ready:
@@ -1374,7 +1375,39 @@ def run_case(
                         f"screenshotButtonEvents[{index}] did not match "
                         f"within {event.timeout_seconds:g} seconds"
                     )
+                    visual_checkpoint_failed = True
                     break
+
+        if visual_checkpoint_failed and not process_exited:
+            if visual_failure_capture_requests:
+                capture_deadline = min(hard_deadline, time.monotonic() + 15.0)
+                previous_sizes: tuple[tuple[Path, int], ...] = ()
+                stable_since: float | None = None
+                while process.poll() is None and time.monotonic() < capture_deadline:
+                    captures = _find_renderdoc_captures(artifact_directory)
+                    sizes = tuple((path, path.stat().st_size) for path in captures)
+                    if len(captures) >= visual_failure_capture_requests:
+                        if sizes == previous_sizes:
+                            if (
+                                stable_since is not None
+                                and time.monotonic() - stable_since >= 0.25
+                            ):
+                                break
+                        else:
+                            stable_since = time.monotonic()
+                    previous_sizes = sizes
+                    time.sleep(0.05)
+
+            timed_out = True
+            assert process.stdin is not None
+            try:
+                process.stdin.write(b"STOP\n")
+                process.stdin.flush()
+                process.wait(timeout=5)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                _kill_process_tree(process)
+                process.wait(timeout=5)
+            process_exited = True
 
         timeline = (
             [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]

@@ -1962,7 +1962,7 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "missing visual state",
-                    "timeoutSeconds": 0.8,
+                    "timeoutSeconds": 3.0,
                     "args": ["--expect-ipc"],
                     "useIpc": True,
                     "renderdocCaptureOnVisualFailure": True,
@@ -1970,7 +1970,7 @@ class RunnerTests(unittest.TestCase):
                         {
                             "screenshotSha256": "a" * 64,
                             "button": "cross",
-                            "timeoutSeconds": 0.4,
+                            "timeoutSeconds": 0.25,
                             "pollSeconds": 0.05,
                             "holdSeconds": 0.01,
                         }
@@ -1986,6 +1986,8 @@ class RunnerTests(unittest.TestCase):
             )
 
             self.assertFalse(result.passed)
+            self.assertEqual(result.outcome, "timed_out")
+            self.assertLess(result.duration_seconds, 2.0)
             self.assertTrue(
                 any(
                     "screenshotButtonEvents[0] did not match" in failure
@@ -2000,6 +2002,7 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
             self.assertIn("RENDERDOC_CAPTURE", observation["ipc_commands"])
+            self.assertIn("STOP", observation["ipc_commands"])
             self.assertEqual(len(result.renderdoc_captures), 1)
             self.assertGreaterEqual(len(result.visual_checkpoint_attempts), 1)
             attempt = result.visual_checkpoint_attempts[0]
