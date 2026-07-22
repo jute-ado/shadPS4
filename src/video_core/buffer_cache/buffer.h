@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/stream_buffer_copy.h"
 #include "video_core/renderer_vulkan/buffer_barrier_policy.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -184,13 +185,7 @@ public:
     /// Maps and commits a memory region with user provided data
     u64 Copy(auto src, size_t size, size_t alignment = 0) {
         const auto [data, offset] = Map(size, alignment);
-        auto* memory = Core::Memory::Instance();
-        const VAddr src_vaddr = reinterpret_cast<const VAddr>(src);
-        if (memory->IsValidGpuMapping(src_vaddr, size)) {
-            memory->CopySparseMemory(src_vaddr, data, size);
-        } else {
-            std::memcpy(data, reinterpret_cast<const void*>(src), size);
-        }
+        CopyStreamBufferSource(*Core::Memory::Instance(), src, data, size);
         Commit();
         return offset;
     }
