@@ -79,6 +79,10 @@ Each case supports:
   meet. Combining this with the mean-intensity threshold prevents sparse noise
   from making a blank frame look valid. Both visibility thresholds require
   `screenshotSeconds`.
+- `minimumVisibleScreenshots`: optional positive count of scheduled screenshots
+  that must meet every configured visibility threshold. Use a short sampling
+  window with this field when legitimate fades or loading transitions can be
+  black; without it, every scheduled screenshot must still meet the thresholds.
 - `screenshotComparisons`: optional pixel-level relationships between captures,
   referenced by their zero-based positions in `screenshotSeconds`. Each entry
   names `firstScreenshot` and `secondScreenshot` and supplies
