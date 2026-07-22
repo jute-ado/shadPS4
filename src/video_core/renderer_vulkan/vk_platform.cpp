@@ -314,8 +314,10 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     const char* pending_dump_mode = CrashDiagnosticPendingDumpMode;
     const char* all_dump_mode = CrashDiagnosticAllDumpMode;
     vk::Bool32 enable_command_instrumentation = vk::True;
-    vk::Bool32 synchronize_commands =
-        CrashDiagnosticSynchronizeCommands ? vk::True : vk::False;
+    vk::Bool32 synchronize_commands = CrashDiagnosticSynchronizeCommands(
+                                           EmulatorSettings.IsVkCrashDiagnosticSyncAfterCommands())
+                                           ? vk::True
+                                           : vk::False;
 
     const std::array layer_setings = {
         vk::LayerSettingEXT{
