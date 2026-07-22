@@ -11,6 +11,7 @@
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/eop_flip_completion.h"
 #include "video_core/amdgpu/submission_boundary.h"
+#include "video_core/amdgpu/submission_boundary_queue.h"
 
 namespace {
 
@@ -124,4 +125,23 @@ TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
     gpu_completions[1]();
     EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit", "fence",
                                                     "interrupt", "boundary"}));
+}
+
+TEST(SubmissionBoundaryQueue, PreservesConsecutiveCallbacksInFifoOrder) {
+    AmdGpu::SubmissionBoundaryQueue queue;
+    std::vector<int> order;
+
+    queue.Push([&] { order.push_back(1); });
+    queue.Push([&] { order.push_back(2); });
+
+    EXPECT_FALSE(queue.Empty());
+    auto first = queue.Pop();
+    first();
+
+    EXPECT_FALSE(queue.Empty());
+    auto second = queue.Pop();
+    second();
+
+    EXPECT_TRUE(queue.Empty());
+    EXPECT_EQ(order, (std::vector<int>{1, 2}));
 }

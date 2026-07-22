@@ -100,8 +100,9 @@ void Liverpool::Process(std::stop_token stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(submit_cv, lk, stoken,
-                                [this] { return num_commands || num_submits || submit_done; });
+            Common::CondvarWait(submit_cv, lk, stoken, [this] {
+                return num_commands || num_submits || !submit_done_queue.Empty();
+            });
         }
         if (stoken.stop_requested()) {
             break;
@@ -144,10 +145,9 @@ void Liverpool::Process(std::stop_token stoken) {
         bool has_submit_done{};
         {
             std::scoped_lock lk{submit_mutex};
-            if (submit_done) {
-                submit_done = false;
+            if (!submit_done_queue.Empty()) {
                 has_submit_done = true;
-                submit_done_callback = std::move(submit_done_completion);
+                submit_done_callback = submit_done_queue.Pop();
             }
         }
         if (has_submit_done) {

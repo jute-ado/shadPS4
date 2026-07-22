@@ -20,6 +20,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/regs.h"
+#include "video_core/amdgpu/submission_boundary_queue.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -77,8 +78,7 @@ public:
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
-        submit_done_completion = std::move(completion);
-        submit_done = true;
+        submit_done_queue.Push(std::move(completion));
         submit_cv.notify_one();
     }
 
@@ -231,11 +231,10 @@ private:
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
     std::atomic<u32> num_commands{};
-    std::atomic<bool> submit_done{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
-    Common::UniqueFunction<void> submit_done_completion{};
+    SubmissionBoundaryQueue submit_done_queue{};
     std::thread::id gpu_id;
     s32 curr_qid{-1};
 };
