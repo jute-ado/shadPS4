@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
+#include "core/libraries/kernel/threads/condvar_wait_state.h"
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/kernel/threads/sleepq.h"
 #include "core/libraries/kernel/threads/thread_state.h"
@@ -127,22 +128,26 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
         //_thr_cancel_leave(curthread, 0);
 
         SleepqLock(this);
-        if (curthread->wchan == nullptr) {
+        const auto decision = DecideCondWait(curthread->wchan != nullptr,
+                                             curthread->ShouldCancel(),
+                                             error == POSIX_ETIMEDOUT);
+        if (decision == CondWaitDecision::Woken) {
             error = 0;
             break;
-        } else if (curthread->ShouldCancel()) {
+        } else if (decision == CondWaitDecision::Canceled) {
             SleepQueue* sq = SleepqLookup(this);
             has_user_waiters = SleepqRemove(sq, curthread);
             SleepqUnlock(this);
             curthread->mutex_obj = nullptr;
             mp->CvLock(recurse);
             return 0;
-        } else if (error == POSIX_ETIMEDOUT) {
+        } else if (decision == CondWaitDecision::TimedOut) {
             SleepQueue* sq = SleepqLookup(this);
             has_user_waiters = SleepqRemove(sq, curthread);
             break;
         }
-        UNREACHABLE();
+        // A deferred or otherwise stale wake can arrive after ClearWake(). The thread still
+        // belongs to this condition's sleep queue, so consume the wake and continue waiting.
     }
     SleepqUnlock(this);
     curthread->mutex_obj = nullptr;
@@ -196,7 +201,11 @@ int PthreadCond::Signal(Pthread* thread) {
         return 0;
     }
 
-    Pthread* td = thread ? thread : sq->sq_blocked.front();
+    Pthread* td = SelectSleepqWaiter(sq, thread);
+    if (td == nullptr) {
+        SleepqUnlock(this);
+        return 0;
+    }
 
     PthreadMutex* mp = td->mutex_obj;
     has_user_waiters = SleepqRemove(sq, td);

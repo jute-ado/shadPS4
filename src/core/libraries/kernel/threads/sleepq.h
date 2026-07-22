@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <forward_list>
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/list_hook.hpp>
@@ -21,6 +22,17 @@ struct SleepQueue : public ListBaseHook {
     void* sq_wchan;
     int sq_type;
 };
+
+[[nodiscard]] inline Pthread* SelectSleepqWaiter(SleepQueue* sq, Pthread* requested) {
+    if (sq == nullptr || sq->sq_blocked.empty()) {
+        return nullptr;
+    }
+    if (requested == nullptr) {
+        return sq->sq_blocked.front();
+    }
+    const auto it = std::find(sq->sq_blocked.begin(), sq->sq_blocked.end(), requested);
+    return it != sq->sq_blocked.end() ? requested : nullptr;
+}
 
 void SleepqLock(void* wchan);
 
