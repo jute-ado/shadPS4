@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/image_copy_policy.h"
+#include "video_core/texture_cache/image_download_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -627,7 +628,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+        if (ShouldQueueImageDownload(readback_linear_images, image.info.props.is_tiled,
+                                     image.info.size.width) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
@@ -640,7 +642,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    if (ShouldQueueImageDownload(readback_linear_images, image.info.props.is_tiled,
+                                 image.info.size.width)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
