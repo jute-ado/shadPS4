@@ -448,6 +448,7 @@ struct VulkanSettings {
     Setting<bool> vkcrash_diagnostic_enabled{false};
     Setting<bool> vkcrash_diagnostic_shader_dump_on_bind{false};
     Setting<bool> vkcrash_diagnostic_native_checkpoints{false};
+    Setting<bool> vkcrash_diagnostic_sync_after_commands{false};
     Setting<bool> vkhost_markers{false};
     Setting<bool> vkguest_markers{false};
     Setting<bool> pipeline_cache_enabled{false};
@@ -470,6 +471,8 @@ struct VulkanSettings {
                                           &VulkanSettings::vkcrash_diagnostic_shader_dump_on_bind),
             make_override<VulkanSettings>("vkcrash_diagnostic_native_checkpoints",
                                           &VulkanSettings::vkcrash_diagnostic_native_checkpoints),
+            make_override<VulkanSettings>("vkcrash_diagnostic_sync_after_commands",
+                                          &VulkanSettings::vkcrash_diagnostic_sync_after_commands),
             make_override<VulkanSettings>("vkhost_markers", &VulkanSettings::vkhost_markers),
             make_override<VulkanSettings>("vkguest_markers", &VulkanSettings::vkguest_markers),
             make_override<VulkanSettings>("pipeline_cache_enabled",
@@ -483,7 +486,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VulkanSettings, gpu_id, renderdoc_enabled, vk
                                    vkvalidation_core_enabled, vkvalidation_sync_enabled,
                                    vkvalidation_gpu_enabled, vkcrash_diagnostic_enabled,
                                    vkcrash_diagnostic_shader_dump_on_bind,
-                                   vkcrash_diagnostic_native_checkpoints, vkhost_markers,
+                                   vkcrash_diagnostic_native_checkpoints,
+                                   vkcrash_diagnostic_sync_after_commands, vkhost_markers,
                                    vkguest_markers, pipeline_cache_enabled, pipeline_cache_archived)
 
 // -------------------------------
@@ -753,6 +757,8 @@ public:
                          vkcrash_diagnostic_shader_dump_on_bind)
     SETTING_FORWARD_BOOL(m_vulkan, VkCrashDiagnosticNativeCheckpoints,
                          vkcrash_diagnostic_native_checkpoints)
+    SETTING_FORWARD_BOOL(m_vulkan, VkCrashDiagnosticSyncAfterCommands,
+                         vkcrash_diagnostic_sync_after_commands)
     SETTING_FORWARD_BOOL(m_vulkan, VkHostMarkersEnabled, vkhost_markers)
     SETTING_FORWARD_BOOL(m_vulkan, VkGuestMarkersEnabled, vkguest_markers)
     SETTING_FORWARD_BOOL(m_vulkan, PipelineCacheEnabled, pipeline_cache_enabled)

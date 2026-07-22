@@ -624,6 +624,8 @@ bool EmulatorSettingsImpl::TransferSettings() {
                     "crashDiagnosticShaderDumpOnBind");
         setFromToml(s.vkcrash_diagnostic_native_checkpoints, vk,
                     "crashDiagnosticNativeCheckpoints");
+        setFromToml(s.vkcrash_diagnostic_sync_after_commands, vk,
+                    "crashDiagnosticSyncAfterCommands");
         setFromToml(s.vkhost_markers, vk, "hostMarkers");
         setFromToml(s.vkguest_markers, vk, "guestMarkers");
         setFromToml(s.renderdoc_enabled, vk, "rdocEnable");

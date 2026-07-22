@@ -32,7 +32,9 @@ inline constexpr const char* CrashDiagnosticAllDumpMode = "all";
 constexpr const char* CrashDiagnosticShaderDumpMode(bool dump_on_bind) {
     return dump_on_bind ? "on_bind" : "on_crash";
 }
-inline constexpr bool CrashDiagnosticSynchronizeCommands = false;
+constexpr bool CrashDiagnosticSynchronizeCommands(bool requested) {
+    return requested;
+}
 
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
 

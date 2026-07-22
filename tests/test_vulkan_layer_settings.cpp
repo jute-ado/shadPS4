@@ -19,7 +19,6 @@ TEST(VulkanLayerSettings, CrashDiagnosticSettingsUseRegisteredLayerName) {
     EXPECT_STREQ(Vulkan::CrashDiagnosticAllDumpMode, "all");
     EXPECT_STREQ(Vulkan::CrashDiagnosticShaderDumpMode(false), "on_crash");
     EXPECT_STREQ(Vulkan::CrashDiagnosticShaderDumpMode(true), "on_bind");
-    EXPECT_FALSE(Vulkan::CrashDiagnosticSynchronizeCommands);
 }
 
 TEST(VulkanLayerSettings, ShaderDumpOnBindIsOptInAndSerializable) {
@@ -42,4 +41,20 @@ TEST(VulkanLayerSettings, NativeCheckpointsAreOptInAndSerializable) {
     const auto restored = serialized.get<VulkanSettings>();
 
     EXPECT_TRUE(restored.vkcrash_diagnostic_native_checkpoints.value);
+}
+
+TEST(VulkanLayerSettings, CommandSynchronizationIsOptInAndSerializable) {
+    VulkanSettings settings{};
+    EXPECT_FALSE(settings.vkcrash_diagnostic_sync_after_commands.value);
+
+    settings.vkcrash_diagnostic_sync_after_commands.set(true);
+    const nlohmann::json serialized = settings;
+    const auto restored = serialized.get<VulkanSettings>();
+
+    EXPECT_TRUE(restored.vkcrash_diagnostic_sync_after_commands.value);
+}
+
+TEST(VulkanLayerSettings, CommandSynchronizationFollowsExplicitRequest) {
+    EXPECT_FALSE(Vulkan::CrashDiagnosticSynchronizeCommands(false));
+    EXPECT_TRUE(Vulkan::CrashDiagnosticSynchronizeCommands(true));
 }
