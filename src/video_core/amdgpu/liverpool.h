@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <semaphore>
 #include <span>
@@ -29,6 +30,8 @@ struct VideoOutPort;
 }
 
 namespace AmdGpu {
+
+class EopFlipCompletion;
 
 struct Liverpool {
     static constexpr u32 GfxQueueId = 0u;
@@ -201,6 +204,7 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    std::shared_ptr<EopFlipCompletion> last_eop_completion;
 
     struct ConstantEngine {
         void Reset() {

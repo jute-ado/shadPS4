@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <string>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
+#include "video_core/amdgpu/eop_flip_completion.h"
 
 namespace {
 
@@ -56,4 +57,45 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_TRUE(interrupt_signalled);
     EXPECT_EQ(operations,
               (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
+}
+
+TEST(EventWriteEop, DefersFlipUntilThePrecedingEopCompletes) {
+    bool flip_signalled = false;
+    AmdGpu::EopFlipCompletion completion;
+
+    completion.AttachFlip([&] { flip_signalled = true; });
+    EXPECT_FALSE(flip_signalled);
+
+    completion.CompleteEop();
+    EXPECT_TRUE(flip_signalled);
+}
+
+TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopAlreadyCompleted) {
+    bool flip_signalled = false;
+    AmdGpu::EopFlipCompletion completion;
+
+    completion.CompleteEop();
+    completion.AttachFlip([&] { flip_signalled = true; });
+
+    EXPECT_TRUE(flip_signalled);
+}
+
+TEST(EventWriteEop, CompletesEopAfterFenceWriteAndInterrupt) {
+    std::vector<std::string> operations;
+    std::function<void()> gpu_completion;
+    AmdGpu::EopFlipCompletion completion;
+    completion.AttachFlip([&] { operations.emplace_back("flip"); });
+
+    AmdGpu::SubmitEop(
+        TestEopPacket{.data = 1},
+        [&](auto&& callback) { gpu_completion = std::forward<decltype(callback)>(callback); },
+        [] {}, [&](u32) { operations.emplace_back("fence"); },
+        [&] { operations.emplace_back("interrupt"); },
+        [&] { completion.CompleteEop(); });
+
+    EXPECT_TRUE(operations.empty());
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"fence", "interrupt", "flip"}));
 }
