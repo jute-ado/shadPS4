@@ -455,6 +455,7 @@ class ManifestTests(unittest.TestCase):
                             "gamePath": "game",
                             "timeoutSeconds": 1,
                             "useIpc": True,
+                            "ipcHandshakeTimeoutSeconds": 2,
                         }
                     ],
                 },
@@ -463,6 +464,67 @@ class ManifestTests(unittest.TestCase):
             manifest = load_manifest(path)
 
             self.assertTrue(manifest.cases[0].use_ipc)
+            self.assertEqual(manifest.cases[0].ipc_handshake_timeout_seconds, 2)
+
+    def test_load_manifest_rejects_ipc_handshake_timeout_without_ipc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "uncontrolled boot",
+                            "gamePath": "game",
+                            "timeoutSeconds": 1,
+                            "ipcHandshakeTimeoutSeconds": 2,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "ipcHandshakeTimeoutSeconds requires useIpc"
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_invalid_ipc_handshake_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            for timeout in (
+                0,
+                -1,
+                True,
+                "slow",
+                float("nan"),
+                float("inf"),
+                10**400,
+            ):
+                with self.subTest(timeout=timeout):
+                    path = self.write_manifest(
+                        root,
+                        {
+                            "schemaVersion": 1,
+                            "cases": [
+                                {
+                                    "name": "invalid startup",
+                                    "gamePath": "game",
+                                    "timeoutSeconds": 1,
+                                    "useIpc": True,
+                                    "ipcHandshakeTimeoutSeconds": timeout,
+                                }
+                            ],
+                        },
+                    )
+
+                    with self.assertRaisesRegex(
+                        ManifestError,
+                        "ipcHandshakeTimeoutSeconds must be finite and positive",
+                    ):
+                        load_manifest(path)
 
     def test_load_manifest_accepts_scheduled_screenshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2211,9 +2273,15 @@ class RunnerTests(unittest.TestCase):
     ) -> Path:
         game = root / "game"
         game.mkdir()
+        case_content = {"gamePath": "game", "timeoutSeconds": 2, **case}
+        if (
+            case_content.get("useIpc")
+            and "ipcHandshakeTimeoutSeconds" not in case_content
+        ):
+            case_content["ipcHandshakeTimeoutSeconds"] = 2
         content = {
             "schemaVersion": 1,
-            "cases": [{"gamePath": "game", "timeoutSeconds": 2, **case}],
+            "cases": [case_content],
         }
         if emulator is not None:
             content["emulator"] = emulator
@@ -3057,14 +3125,12 @@ class RunnerTests(unittest.TestCase):
                 root,
                 case={
                     "name": "delayed IPC startup",
-                    # Leave room for interpreter startup on slower CI hosts. The
-                    # assertion below measures the post-handshake timeline, not
-                    # total process startup time.
-                    "timeoutSeconds": 1.0,
+                    "timeoutSeconds": 0.2,
+                    "ipcHandshakeTimeoutSeconds": 1.0,
                     "args": [
                         "--expect-ipc",
                         "--ipc-handshake-delay",
-                        "0.1",
+                        "0.3",
                     ],
                     "useIpc": True,
                     "screenshotSeconds": [0.05],
@@ -3102,6 +3168,7 @@ class RunnerTests(unittest.TestCase):
                     "timeoutSeconds": 0.15,
                     "args": ["--expect-ipc", "--omit-ipc-handshake"],
                     "useIpc": True,
+                    "ipcHandshakeTimeoutSeconds": 0.3,
                     "allowedOutcomes": ["timed_out"],
                 },
             )

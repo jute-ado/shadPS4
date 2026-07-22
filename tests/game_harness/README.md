@@ -20,7 +20,9 @@ Each case supports:
 
 - `name`: unique, human-readable case name.
 - `gamePath`: installed game directory or ELF path.
-- `timeoutSeconds`: positive hard process timeout.
+- `timeoutSeconds`: positive hard process timeout. By default it starts at
+  process launch; with `ipcHandshakeTimeoutSeconds`, it starts after successful
+  IPC negotiation and bounds the controlled test window.
 - `userConfig`: optional path to a private shadPS4 `config.json`. The runner
   validates it as a JSON object and copies it into the case's isolated portable
   user directory before launch. This makes experimental settings and
@@ -42,6 +44,9 @@ Each case supports:
   All IPC cases require `ENABLE_EMU_CONTROL`, scheduled screenshots require
   `ENABLE_SCREENSHOT`, scheduled RenderDoc captures require
   `ENABLE_RENDERDOC_CAPTURE`, and controller events require `ENABLE_GAMEPAD`.
+- `ipcHandshakeTimeoutSeconds`: optional positive startup deadline for IPC
+  negotiation. It requires `useIpc` and separates variable process startup from
+  the post-handshake `timeoutSeconds` test window.
 - `screenshotSeconds`: optional increasing list of times, in seconds after the
   IPC handshake, at which to capture game-only frames. Requires `useIpc`; every
   requested capture must produce a valid PNG for the case to pass.
@@ -165,8 +170,9 @@ mode. If `userConfig` is supplied, only that case receives the copied
 emulator log, and writes `game-test-report.json`. With `useIpc` enabled it waits for the
 IPC capability handshake, sends `RUN` and `START`, then requests a graceful
 `STOP` at the deadline before falling back to complete process-tree
-termination. The hard timeout remains relative to process launch, while
-scheduled actions are relative to acknowledged IPC startup. Scheduled
+termination. Unless an IPC handshake timeout is configured, the hard timeout
+remains relative to process launch; scheduled actions are always relative to
+acknowledged IPC startup. Scheduled
 screenshot paths are included in the report together with their SHA-256
 content hashes and requested pixel-difference measurements. RenderDoc capture
 paths and hashes are included as well. Each `screenshotButtonEvents` poll also
