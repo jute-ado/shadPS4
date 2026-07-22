@@ -106,6 +106,9 @@ Each case supports:
   defaults to 0.25 and `holdSeconds` defaults to 0.1 when a button is present.
   Set `delaySeconds` to a non-negative duration to wait after the preceding
   checkpoint before beginning this checkpoint's screenshot polling.
+  Set `screenshotSource` on an individual checkpoint to override the case-level
+  source, for example to observe a system overlay with `presented_frame` while
+  keeping other checkpoints on `game_frame`.
   Requires screenshot IPC capability and, for button checkpoints, gamepad IPC
   capability. These state-driven events cannot be combined
   with timed screenshots, captures, or controller events in the same case.

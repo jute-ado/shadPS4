@@ -77,6 +77,7 @@ class ScreenshotButtonEvent:
     difference_mode: str
     comparison_region: ScreenshotRegion | None
     scale_reference_to_capture: bool
+    screenshot_source: str | None
     button: str | None
     timeout_seconds: float
     delay_seconds: float = 0.0
@@ -480,6 +481,16 @@ def _require_screenshot_button_events(
                 f"{sorted(SUPPORTED_BUTTONS)}"
             )
 
+        screenshot_source = item.get("screenshotSource")
+        if (
+            screenshot_source is not None
+            and screenshot_source not in VALID_SCREENSHOT_SOURCES
+        ):
+            raise ManifestError(
+                f"{field}.screenshotSource must be one of "
+                f"{sorted(VALID_SCREENSHOT_SOURCES)}"
+            )
+
         delay_seconds = item.get("delaySeconds", 0)
         if (
             not isinstance(delay_seconds, (int, float))
@@ -518,6 +529,7 @@ def _require_screenshot_button_events(
                 difference_mode=difference_mode,
                 comparison_region=comparison_region,
                 scale_reference_to_capture=scale_reference_to_capture,
+                screenshot_source=screenshot_source,
                 button=button,
                 timeout_seconds=values["timeoutSeconds"],
                 delay_seconds=float(delay_seconds),
@@ -1411,7 +1423,8 @@ def run_case(
                     request_started = time.monotonic()
                     process.stdin.write(
                         b"SCREENSHOT_WITH_OVERLAYS\n"
-                        if case.screenshot_source == "presented_frame"
+                        if (event.screenshot_source or case.screenshot_source)
+                        == "presented_frame"
                         else b"SCREENSHOT\n"
                     )
                     process.stdin.flush()
