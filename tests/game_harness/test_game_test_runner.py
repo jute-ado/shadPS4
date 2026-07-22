@@ -222,6 +222,175 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "schemaVersion"):
                 load_manifest(path)
 
+    def test_load_manifest_rejects_unknown_fields_at_every_schema_level(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            (root / "reference.png").touch()
+            base_case = {
+                "name": "boot",
+                "gamePath": "game",
+                "timeoutSeconds": 5,
+            }
+            manifests = (
+                (
+                    "manifest root",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [base_case],
+                        "schemaVerison": 1,
+                    },
+                    "schemaVerison",
+                ),
+                (
+                    "case",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [{**base_case, "timeoutSecond": 5}],
+                    },
+                    "timeoutSecond",
+                ),
+                (
+                    "screenshot comparison",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                **base_case,
+                                "useIpc": True,
+                                "screenshotSeconds": [1, 2],
+                                "screenshotComparisons": [
+                                    {
+                                        "firstScreenshot": 0,
+                                        "secondScreenshot": 1,
+                                        "minimumDifference": 0.1,
+                                        "minimumDiffrence": 0.1,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "minimumDiffrence",
+                ),
+                (
+                    "button event",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                **base_case,
+                                "useIpc": True,
+                                "buttonEvents": [
+                                    {
+                                        "seconds": 1,
+                                        "button": "cross",
+                                        "pressed": True,
+                                        "presssed": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "presssed",
+                ),
+                (
+                    "visual checkpoint",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                **base_case,
+                                "useIpc": True,
+                                "screenshotButtonEvents": [
+                                    {
+                                        "screenshotSha256": "0" * 64,
+                                        "timeoutSeconds": 1,
+                                        "timeoutSecond": 1,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "timeoutSecond",
+                ),
+                (
+                    "comparison region",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                **base_case,
+                                "useIpc": True,
+                                "screenshotButtonEvents": [
+                                    {
+                                        "referenceScreenshot": "reference.png",
+                                        "timeoutSeconds": 1,
+                                        "comparisonRegion": {
+                                            "left": 0,
+                                            "top": 0,
+                                            "width": 1,
+                                            "height": 1,
+                                            "widht": 1,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "widht",
+                ),
+                (
+                    "axis event",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                **base_case,
+                                "useIpc": True,
+                                "axisEvents": [
+                                    {
+                                        "seconds": 1,
+                                        "axis": "left_x",
+                                        "value": 128,
+                                        "valeu": 128,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "valeu",
+                ),
+                (
+                    "touch event",
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                **base_case,
+                                "useIpc": True,
+                                "touchEvents": [
+                                    {
+                                        "seconds": 1,
+                                        "finger": 0,
+                                        "down": True,
+                                        "x": 1,
+                                        "y": 1,
+                                        "figner": 0,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "figner",
+                ),
+            )
+
+            for label, content, unknown_field in manifests:
+                with self.subTest(level=label):
+                    path = self.write_manifest(root, content)
+                    with self.assertRaisesRegex(ManifestError, unknown_field):
+                        load_manifest(path)
+
     def test_load_manifest_rejects_duplicate_case_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
