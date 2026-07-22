@@ -8,6 +8,21 @@
 using Vulkan::PipelineBindHistory;
 using Vulkan::PipelineBindRecord;
 using Vulkan::PipelineBindType;
+using Vulkan::PipelineCommandInfo;
+using Vulkan::PipelineCommandType;
+
+TEST(PipelineBindHistory, RetainsDispatchKindAndDimensions) {
+    constexpr std::array program_hashes{0x11ull};
+    constexpr PipelineCommandInfo command{
+        .type = PipelineCommandType::Dispatch,
+        .arguments = {64, 32, 1},
+    };
+
+    const auto record =
+        Vulkan::MakePipelineBindRecord(PipelineBindType::Compute, 0x55, program_hashes, command);
+
+    EXPECT_EQ(record.command, command);
+}
 
 TEST(PipelineBindHistory, MakesRecordFromProgramHashesAndPadsUnusedStages) {
     constexpr std::array program_hashes{0x11ull, 0x22ull, 0ull, 0x44ull};

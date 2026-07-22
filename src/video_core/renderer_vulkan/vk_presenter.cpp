@@ -657,11 +657,14 @@ Frame* Presenter::PrepareLastFrame() {
                 LOG_CRITICAL(
                     Render_Vulkan,
                     "Recent {} pipeline bind: pipeline={:#018x}, shaders=[{:#018x}, {:#018x}, "
-                    "{:#018x}, {:#018x}, {:#018x}, {:#018x}]",
+                    "{:#018x}, {:#018x}, {:#018x}, {:#018x}], command={}, args=[{:#x}, {:#x}, "
+                    "{:#x}]",
                     bind.type == PipelineBindType::Graphics ? "graphics" : "compute",
                     bind.pipeline_hash, bind.shader_hashes[0], bind.shader_hashes[1],
                     bind.shader_hashes[2], bind.shader_hashes[3], bind.shader_hashes[4],
-                    bind.shader_hashes[5]);
+                    bind.shader_hashes[5], PipelineCommandName(bind.command.type),
+                    bind.command.arguments[0], bind.command.arguments[1],
+                    bind.command.arguments[2]);
             }
             ASSERT_MSG(false, "Device lost during waiting for a frame");
         }
