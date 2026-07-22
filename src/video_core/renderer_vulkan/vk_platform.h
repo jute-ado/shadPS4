@@ -19,6 +19,9 @@ class WindowSDL;
 namespace Vulkan {
 
 constexpr u32 TargetVulkanApiVersion = VK_API_VERSION_1_3;
+inline constexpr const char* CrashDiagnosticLayerName = "VK_LAYER_LUNARG_crash_diagnostic";
+inline constexpr const char* CrashDiagnosticSettingLayerName = CrashDiagnosticLayerName;
+inline constexpr const char* CrashDiagnosticProgressSettingName = "instrument_all_commands";
 
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
 

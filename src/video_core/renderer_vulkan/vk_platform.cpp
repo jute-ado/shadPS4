@@ -30,7 +30,6 @@
 namespace Vulkan {
 
 static const char* const VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
-static const char* const CRASH_DIAGNOSTIC_LAYER_NAME = "VK_LAYER_LUNARG_crash_diagnostic";
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT severity, vk::DebugUtilsMessageTypeFlagsEXT type,
@@ -236,7 +235,7 @@ std::vector<const char*> GetInstanceLayers(bool enable_validation, bool enable_c
         layers.push_back(VALIDATION_LAYER_NAME);
     }
     if (enable_crash_diagnostic) {
-        layers.push_back(CRASH_DIAGNOSTIC_LAYER_NAME);
+        layers.push_back(CrashDiagnosticLayerName);
     }
 
     // Sanitize layer list
@@ -310,7 +309,7 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     static const auto crash_diagnostic_path =
         Common::FS::GetUserPathString(Common::FS::PathType::LogDir);
     const char* log_path = crash_diagnostic_path.c_str();
-    vk::Bool32 enable_force_barriers = vk::True;
+    vk::Bool32 enable_command_instrumentation = vk::True;
 
     const std::array layer_setings = {
         vk::LayerSettingEXT{
@@ -384,18 +383,18 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
             .pValues = &enable_gpuav,
         },
         vk::LayerSettingEXT{
-            .pLayerName = "lunarg_crash_diagnostic",
+            .pLayerName = CrashDiagnosticSettingLayerName,
             .pSettingName = "output_path",
             .type = vk::LayerSettingTypeEXT::eString,
             .valueCount = 1,
             .pValues = &log_path,
         },
         vk::LayerSettingEXT{
-            .pLayerName = "lunarg_crash_diagnostic",
-            .pSettingName = "sync_after_commands",
+            .pLayerName = CrashDiagnosticSettingLayerName,
+            .pSettingName = CrashDiagnosticProgressSettingName,
             .type = vk::LayerSettingTypeEXT::eBool32,
             .valueCount = 1,
-            .pValues = &enable_force_barriers,
+            .pValues = &enable_command_instrumentation,
         },
     };
 
