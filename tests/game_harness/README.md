@@ -37,6 +37,8 @@ Each case supports:
 - `useIpc`: enable shadPS4 IPC start/stop control for graceful log flushing.
   The emulator's IPC capability handshake is required before the runner sends
   `RUN` and `START`; a missing handshake or required capability fails the case.
+  Capability negotiation fails closed: the runner terminates the case without
+  sending scheduled actions when any required capability is unavailable.
   All IPC cases require `ENABLE_EMU_CONTROL`, scheduled screenshots require
   `ENABLE_SCREENSHOT`, scheduled RenderDoc captures require
   `ENABLE_RENDERDOC_CAPTURE`, and controller events require `ENABLE_GAMEPAD`.

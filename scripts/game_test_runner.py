@@ -1565,11 +1565,15 @@ def run_case(
     ipc_handshake_seen = not case.use_ipc
     missing_ipc_capabilities: tuple[str, ...] = ()
     ipc_ready = not case.use_ipc
+    ipc_negotiation_timed_out = False
     hard_deadline = started + case.timeout_seconds
     if case.use_ipc:
         while process.poll() is None:
             remaining = hard_deadline - time.monotonic()
-            if remaining <= 0 or ipc_handshake.wait(min(0.05, remaining)):
+            if remaining <= 0:
+                ipc_negotiation_timed_out = True
+                break
+            if ipc_handshake.wait(min(0.05, remaining)):
                 break
         ipc_handshake_seen = ipc_handshake.is_set()
         required_capabilities = ["ENABLE_EMU_CONTROL"]
@@ -1594,15 +1598,21 @@ def run_case(
             assert process.stdin is not None
             process.stdin.write(b"RUN\nSTART\n")
             process.stdin.flush()
+        elif process.poll() is None:
+            # A partial or missing handshake is a terminal infrastructure
+            # failure. Sending scheduled commands after negotiation failed can
+            # feed action payloads into the emulator's startup-command slots.
+            _kill_process_tree(process)
+            process.wait(timeout=5)
     timeline_started = time.monotonic()
 
-    timed_out = False
+    timed_out = ipc_negotiation_timed_out
     runtime_failures: list[str] = []
     visual_checkpoint_attempts: list[VisualCheckpointAttempt] = []
     visual_failure_capture_requests = 0
     visual_checkpoint_failed = False
     try:
-        process_exited = False
+        process_exited = process.poll() is not None
         if case.screenshot_button_events and ipc_ready:
             assert process.stdin is not None
             for index, event in enumerate(case.screenshot_button_events):
