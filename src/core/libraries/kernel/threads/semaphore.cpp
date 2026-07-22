@@ -14,6 +14,7 @@
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
+#include "core/libraries/kernel/threads/semaphore_policy.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
 
@@ -37,6 +38,9 @@ public:
 
     s32 Wait(bool can_block, s32 need_count, u32* timeout) {
         std::unique_lock lk{mutex};
+        if (!IsValidSemaphoreWaitCount(need_count, max_count)) {
+            return ORBIS_KERNEL_ERROR_EINVAL;
+        }
         if (token_count >= need_count) {
             token_count -= need_count;
             return ORBIS_OK;
@@ -63,7 +67,8 @@ public:
 
     bool Signal(s32 signal_count) {
         std::scoped_lock lk{mutex};
-        if (token_count + signal_count > max_count) {
+        const s32 current_count = token_count.load(std::memory_order_relaxed);
+        if (!IsValidSemaphoreSignalCount(signal_count, current_count, max_count)) {
             return false;
         }
         token_count += signal_count;
@@ -86,6 +91,9 @@ public:
 
     s32 Cancel(s32 set_count, s32* num_waiters) {
         std::scoped_lock lk{mutex};
+        if (!IsValidSemaphoreCancelCount(set_count, max_count)) {
+            return ORBIS_KERNEL_ERROR_EINVAL;
+        }
         if (num_waiters) {
             *num_waiters = static_cast<s32>(wait_list.size());
         }
@@ -148,14 +156,14 @@ public:
                 lk.lock();
             } else {
                 // Wait until timeout runs out, recording how much remaining time there was.
-                const auto start = std::chrono::high_resolution_clock::now();
+                const auto start = std::chrono::steady_clock::now();
                 sem.try_acquire_for(std::chrono::microseconds(*timeout));
-                const auto end = std::chrono::high_resolution_clock::now();
-                const auto time =
-                    std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+                const auto end = std::chrono::steady_clock::now();
+                const auto elapsed = static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
                 lk.lock();
                 if (was_signaled) {
-                    *timeout -= time;
+                    *timeout = RemainingSemaphoreTimeout(*timeout, elapsed);
                 } else {
                     *timeout = 0;
                 }
