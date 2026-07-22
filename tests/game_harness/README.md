@@ -181,7 +181,9 @@ diagnosis.
 
 The artifact size cap only limits retained log files. Required and forbidden
 patterns are evaluated across complete stdout, stderr, and emulator logs, so a
-late failure marker cannot be hidden by earlier noisy output.
+late failure marker cannot be hidden by earlier noisy output. A stdout or
+stderr capture failure also fails the case and identifies the affected artifact
+instead of allowing a result without trustworthy evidence.
 
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested

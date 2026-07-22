@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import signal
 import shutil
@@ -1064,6 +1065,26 @@ def _drain_stream(
                 truncated.set()
 
 
+def _drain_stream_reporting_errors(
+    stream: BinaryIO,
+    destination: Path,
+    limit: int,
+    truncated: threading.Event,
+    observed_patterns: tuple[tuple[bytes, threading.Event], ...],
+    errors: queue.SimpleQueue[str],
+) -> None:
+    try:
+        _drain_stream(
+            stream,
+            destination,
+            limit,
+            truncated,
+            observed_patterns,
+        )
+    except Exception as error:
+        errors.put(f"output reader failed for {destination.name}: {error}")
+
+
 def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
@@ -1537,25 +1558,28 @@ def run_case(
         *(ipc_observers if case.use_ipc else ()),
         *log_pattern_observers,
     )
+    reader_errors: queue.SimpleQueue[str] = queue.SimpleQueue()
     readers = [
         threading.Thread(
-            target=_drain_stream,
+            target=_drain_stream_reporting_errors,
             args=(
                 process.stdout,
                 artifact_directory / "stdout.log",
                 output_limit_bytes,
                 truncated,
                 stream_observers,
+                reader_errors,
             ),
         ),
         threading.Thread(
-            target=_drain_stream,
+            target=_drain_stream_reporting_errors,
             args=(
                 process.stderr,
                 artifact_directory / "stderr.log",
                 output_limit_bytes,
                 truncated,
                 stream_observers,
+                reader_errors,
             ),
         ),
     ]
@@ -1863,6 +1887,8 @@ def run_case(
         for reader in readers:
             reader.join(timeout=5)
         _close_process_streams(process)
+    while not reader_errors.empty():
+        runtime_failures.append(reader_errors.get())
     duration = time.monotonic() - started
 
     if timed_out:
