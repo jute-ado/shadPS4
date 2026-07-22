@@ -19,6 +19,8 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#include <cstring>
+
 #ifdef MemoryBarrier
 #undef MemoryBarrier
 #endif
@@ -698,10 +700,20 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         }
         buffer_bindings.emplace_back(buffer_id, vsharp, bound_size);
         if (diagnostic_buffer_bindings.size() < diagnostic_buffer_bindings.capacity()) {
-            diagnostic_buffer_bindings.emplace_back(vsharp.base_address, vsharp.GetSize(),
-                                                    bound_size, vsharp.GetStride(),
-                                                    vsharp.num_records, desc.is_written,
-                                                    desc.is_formatted);
+            auto& diagnostic = diagnostic_buffer_bindings.emplace_back(
+                vsharp.base_address, vsharp.GetSize(), bound_size, vsharp.GetStride(),
+                vsharp.num_records, std::array<u32, PipelineBufferInfo::MaxSampleDwords>{}, 0,
+                desc.is_written, desc.is_formatted);
+            const bool diagnostics_enabled = EmulatorSettings.IsVkCrashDiagnosticEnabled() ||
+                                             EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints();
+            const size_t sample_count = static_cast<size_t>(std::min<u64>(
+                bound_size / sizeof(u32), PipelineBufferInfo::MaxSampleDwords));
+            const u64 sample_size = sample_count * sizeof(u32);
+            if (diagnostics_enabled && !desc.is_written && sample_count != 0 &&
+                memory->IsValidMapping(vsharp.base_address, sample_size)) {
+                const auto* sample = reinterpret_cast<const u32*>(vsharp.base_address);
+                CapturePipelineBufferSample(diagnostic, {sample, sample_count});
+            }
         }
     }
 

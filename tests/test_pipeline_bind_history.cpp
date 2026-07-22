@@ -44,6 +44,8 @@ TEST(PipelineBindHistory, RetainsBoundBufferAddressSizesAndAccess) {
             .bound_size = 0x4000,
             .stride = 16,
             .num_records = 0x400,
+            .sample_dwords = {128, 0, 0x3f800000, 17},
+            .sample_count = 4,
             .is_written = true,
             .is_formatted = true,
         },
@@ -55,6 +57,9 @@ TEST(PipelineBindHistory, RetainsBoundBufferAddressSizesAndAccess) {
     EXPECT_EQ(record.buffer_count, buffers.size());
     EXPECT_EQ(record.buffers[0], buffers[0]);
     EXPECT_EQ(record.buffers[1], buffers[1]);
+    EXPECT_EQ(record.buffers[1].sample_count, 4);
+    EXPECT_EQ(record.buffers[1].sample_dwords[0], 128);
+    EXPECT_EQ(record.buffers[1].sample_dwords[3], 17);
 }
 
 TEST(PipelineBindHistory, RetainsBoundImageDimensionsFormatAndAccess) {
@@ -77,6 +82,20 @@ TEST(PipelineBindHistory, RetainsBoundImageDimensionsFormatAndAccess) {
 
     EXPECT_EQ(record.image_count, images.size());
     EXPECT_EQ(record.images[0], images[0]);
+}
+
+TEST(PipelineBindHistory, CapturesOnlyBoundedBufferSample) {
+    Vulkan::PipelineBufferInfo buffer{};
+    std::array<u32, Vulkan::PipelineBufferInfo::MaxSampleDwords + 3> words{};
+    for (u32 index = 0; index < words.size(); ++index) {
+        words[index] = index + 1;
+    }
+
+    Vulkan::CapturePipelineBufferSample(buffer, words);
+
+    EXPECT_EQ(buffer.sample_count, Vulkan::PipelineBufferInfo::MaxSampleDwords);
+    EXPECT_EQ(buffer.sample_dwords.front(), 1);
+    EXPECT_EQ(buffer.sample_dwords.back(), Vulkan::PipelineBufferInfo::MaxSampleDwords);
 }
 
 TEST(PipelineBindHistory, MakesRecordFromProgramHashesAndPadsUnusedStages) {

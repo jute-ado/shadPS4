@@ -673,6 +673,11 @@ Frame* Presenter::PrepareLastFrame() {
                                  index, buffer.base_address, buffer.requested_size,
                                  buffer.bound_size, buffer.stride, buffer.num_records,
                                  buffer.is_written, buffer.is_formatted);
+                    for (size_t sample_index = 0; sample_index < buffer.sample_count;
+                         ++sample_index) {
+                        LOG_CRITICAL(Render_Vulkan, "    dword[{}]={:#x}", sample_index,
+                                     buffer.sample_dwords[sample_index]);
+                    }
                 }
                 for (size_t index = 0; index < bind.image_count; ++index) {
                     const auto& image = bind.images[index];
