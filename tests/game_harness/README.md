@@ -71,6 +71,14 @@ Each case supports:
 - `minimumDistinctScreenshots`: optional minimum number of unique screenshot
   contents required for the case to pass. This detects frozen or repeatedly
   blank output when multiple frames are scheduled.
+- `minimumScreenshotMeanIntensity`: optional normalized RGB intensity from 0
+  to 1 that every scheduled screenshot must meet. Use a small positive value
+  to reject uniformly black or nearly black captures.
+- `minimumScreenshotNonBlackFraction`: optional fraction from 0 to 1 of pixels
+  with at least one nonzero RGB channel that every scheduled screenshot must
+  meet. Combining this with the mean-intensity threshold prevents sparse noise
+  from making a blank frame look valid. Both visibility thresholds require
+  `screenshotSeconds`.
 - `screenshotComparisons`: optional pixel-level relationships between captures,
   referenced by their zero-based positions in `screenshotSeconds`. Each entry
   names `firstScreenshot` and `secondScreenshot` and supplies
