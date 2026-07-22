@@ -48,6 +48,60 @@ SUPPORTED_BUTTONS = frozenset(
     }
 )
 SUPPORTED_AXES = frozenset({"left_x", "left_y", "right_x", "right_y", "l2", "r2"})
+MANIFEST_FIELDS = frozenset({"schemaVersion", "emulator", "cases"})
+CASE_FIELDS = frozenset(
+    {
+        "name",
+        "gamePath",
+        "timeoutSeconds",
+        "userConfig",
+        "userDataSeed",
+        "useIpc",
+        "screenshotSource",
+        "screenshotSeconds",
+        "renderdocCaptureSeconds",
+        "minimumDistinctScreenshots",
+        "screenshotComparisons",
+        "renderdocCaptureOnVisualFailure",
+        "buttonEvents",
+        "screenshotButtonEvents",
+        "axisEvents",
+        "touchEvents",
+        "args",
+        "allowedOutcomes",
+        "requiredLogPatterns",
+        "forbiddenLogPatterns",
+    }
+)
+SCREENSHOT_COMPARISON_FIELDS = frozenset(
+    {
+        "firstScreenshot",
+        "secondScreenshot",
+        "minimumDifference",
+        "maximumDifference",
+        "differenceMode",
+    }
+)
+BUTTON_EVENT_FIELDS = frozenset({"seconds", "button", "pressed"})
+SCREENSHOT_BUTTON_EVENT_FIELDS = frozenset(
+    {
+        "screenshotSha256",
+        "referenceScreenshot",
+        "maximumDifference",
+        "differenceMode",
+        "comparisonRegion",
+        "scaleReferenceToCapture",
+        "screenshotSource",
+        "button",
+        "timeoutSeconds",
+        "delaySeconds",
+        "pollSeconds",
+        "holdSeconds",
+    }
+)
+SCREENSHOT_REGION_FIELDS = frozenset({"left", "top", "width", "height"})
+AXIS_EVENT_FIELDS = frozenset({"seconds", "axis", "value"})
+TOUCH_EVENT_FIELDS = frozenset({"seconds", "finger", "down", "x", "y"})
 
 
 class ManifestError(ValueError):
@@ -194,6 +248,16 @@ class RunSummary:
         return len(self.cases) - self.failed
 
 
+def _reject_unknown_fields(
+    raw: dict[str, Any], allowed: frozenset[str], field: str
+) -> None:
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        noun = "field" if len(unknown) == 1 else "fields"
+        names = ", ".join(repr(name) for name in unknown)
+        raise ManifestError(f"{field}: unknown {noun}: {names}")
+
+
 def _require_string_list(raw: Any, field: str, case_name: str) -> tuple[str, ...]:
     if raw is None:
         return ()
@@ -287,6 +351,7 @@ def _require_screenshot_comparisons(
         field = f"{case_name}: screenshotComparisons[{index}]"
         if not isinstance(item, dict):
             raise ManifestError(f"{field} must be an object")
+        _reject_unknown_fields(item, SCREENSHOT_COMPARISON_FIELDS, field)
 
         screenshot_indexes: list[int] = []
         for json_field in ("firstScreenshot", "secondScreenshot"):
@@ -359,6 +424,7 @@ def _require_button_events(
         field = f"{case_name}: buttonEvents[{index}]"
         if not isinstance(item, dict):
             raise ManifestError(f"{field} must be an object")
+        _reject_unknown_fields(item, BUTTON_EVENT_FIELDS, field)
         seconds = item.get("seconds")
         if (
             not isinstance(seconds, (int, float))
@@ -403,6 +469,7 @@ def _require_screenshot_button_events(
         field = f"{case_name}: screenshotButtonEvents[{index}]"
         if not isinstance(item, dict):
             raise ManifestError(f"{field} must be an object")
+        _reject_unknown_fields(item, SCREENSHOT_BUTTON_EVENT_FIELDS, field)
         screenshot_sha256 = item.get("screenshotSha256")
         reference_value = item.get("referenceScreenshot")
         if (screenshot_sha256 is None) == (reference_value is None):
@@ -457,6 +524,11 @@ def _require_screenshot_button_events(
             if comparison_region_value is not None:
                 if not isinstance(comparison_region_value, dict):
                     raise ManifestError(f"{field}.comparisonRegion must be an object")
+                _reject_unknown_fields(
+                    comparison_region_value,
+                    SCREENSHOT_REGION_FIELDS,
+                    f"{field}.comparisonRegion",
+                )
                 region_values: dict[str, int] = {}
                 for component in ("left", "top", "width", "height"):
                     value = comparison_region_value.get(component)
@@ -563,6 +635,7 @@ def _require_axis_events(
         field = f"{case_name}: axisEvents[{index}]"
         if not isinstance(item, dict):
             raise ManifestError(f"{field} must be an object")
+        _reject_unknown_fields(item, AXIS_EVENT_FIELDS, field)
         seconds = item.get("seconds")
         if (
             not isinstance(seconds, (int, float))
@@ -607,6 +680,7 @@ def _require_touch_events(
         field = f"{case_name}: touchEvents[{index}]"
         if not isinstance(item, dict):
             raise ManifestError(f"{field} must be an object")
+        _reject_unknown_fields(item, TOUCH_EVENT_FIELDS, field)
         seconds = item.get("seconds")
         if (
             not isinstance(seconds, (int, float))
@@ -694,6 +768,7 @@ def load_manifest(path: str | Path) -> GameManifest:
 
     if not isinstance(raw, dict):
         raise ManifestError("manifest root must be an object")
+    _reject_unknown_fields(raw, MANIFEST_FIELDS, "manifest")
     if raw.get("schemaVersion") != REPORT_SCHEMA_VERSION:
         raise ManifestError(f"schemaVersion must be {REPORT_SCHEMA_VERSION}")
 
@@ -711,6 +786,7 @@ def load_manifest(path: str | Path) -> GameManifest:
     for index, raw_case in enumerate(raw_cases):
         if not isinstance(raw_case, dict):
             raise ManifestError(f"case {index}: must be an object")
+        _reject_unknown_fields(raw_case, CASE_FIELDS, f"case {index}")
         name = raw_case.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ManifestError(f"case {index}: name must be a non-empty string")

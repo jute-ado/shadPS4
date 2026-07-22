@@ -132,6 +132,8 @@ Each case supports:
 - `forbiddenLogPatterns`: literal strings that must not occur in those logs.
 
 The optional top-level `emulator` path can be overridden with `--emulator`.
+Unknown fields are rejected at every manifest level so misspelled controls or
+assertions cannot be silently ignored.
 
 ## Run
 
