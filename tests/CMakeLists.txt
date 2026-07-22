@@ -205,6 +205,16 @@ target_compile_features(shadps4_equeue_event_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_equeue_event_test PRIVATE GTest::gtest_main Boost::headers)
 list(APPEND TEST_TARGETS shadps4_equeue_event_test)
 
+add_executable(shadps4_flip_queue_capacity_test
+    test_flip_queue_capacity.cpp
+)
+target_include_directories(shadps4_flip_queue_capacity_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_flip_queue_capacity_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_flip_queue_capacity_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_flip_queue_capacity_test)
+
 add_executable(shadps4_fault_range_test
     test_fault_range.cpp
 )

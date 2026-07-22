@@ -8,6 +8,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+#include "core/libraries/videoout/flip_queue_capacity.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -293,7 +294,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
     {
         std::unique_lock lock{port->port_mutex};
-        if (index != -1 && port->flip_status.flip_pending_num > 16) {
+        if (!CanQueueFlip(port->flip_status.flip_pending_num, index)) {
             LOG_ERROR(Lib_VideoOut, "Flip queue is full");
             return false;
         }
