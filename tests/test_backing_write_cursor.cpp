@@ -13,11 +13,10 @@ TEST(BackingWriteCursor, AdvancesSourceAcrossFragmentedBackingRanges) {
     std::array<u8, 3> first{};
     std::array<u8, 4> second{};
     std::array<u8, 3> third{};
+    std::array<std::span<u8>, 3> destinations{first, second, third};
 
     Core::BackingWriteCursor cursor{Source};
-    EXPECT_EQ(cursor.Write(first), first.size());
-    EXPECT_EQ(cursor.Write(second), second.size());
-    EXPECT_EQ(cursor.Write(third), third.size());
+    EXPECT_TRUE(cursor.TryWrite(destinations));
 
     EXPECT_EQ(first, (std::array<u8, 3>{0, 1, 2}));
     EXPECT_EQ(second, (std::array<u8, 4>{3, 4, 5, 6}));
@@ -35,4 +34,18 @@ TEST(BackingWriteCursor, StopsAtTheEndOfTheSource) {
     EXPECT_EQ(destination, (std::array<u8, 5>{0x12, 0x34, 0x56, 0, 0}));
     EXPECT_EQ(cursor.Remaining(), 0u);
     EXPECT_TRUE(cursor.IsComplete());
+}
+
+TEST(BackingWriteCursor, RejectsIncompleteBackingWithoutModifyingAValidPrefix) {
+    constexpr std::array<u8, 6> Source{0, 1, 2, 3, 4, 5};
+    std::array<u8, 2> first{0xAA, 0xAA};
+    std::array<u8, 3> second{0xBB, 0xBB, 0xBB};
+    std::array<std::span<u8>, 2> destinations{first, second};
+
+    Core::BackingWriteCursor cursor{Source};
+    EXPECT_FALSE(cursor.TryWrite(destinations));
+
+    EXPECT_EQ(first, (std::array<u8, 2>{0xAA, 0xAA}));
+    EXPECT_EQ(second, (std::array<u8, 3>{0xBB, 0xBB, 0xBB}));
+    EXPECT_EQ(cursor.Remaining(), Source.size());
 }

@@ -22,6 +22,28 @@ public:
         return copy_size;
     }
 
+    bool TryWrite(std::span<const std::span<u8>> destinations) {
+        size_t uncovered = Remaining();
+        for (const auto destination : destinations) {
+            if (destination.size() >= uncovered) {
+                uncovered = 0;
+                break;
+            }
+            uncovered -= destination.size();
+        }
+        if (uncovered != 0) {
+            return false;
+        }
+
+        for (const auto destination : destinations) {
+            if (IsComplete()) {
+                break;
+            }
+            Write(destination);
+        }
+        return true;
+    }
+
     [[nodiscard]] size_t Remaining() const {
         return source.size() - offset;
     }

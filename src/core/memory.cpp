@@ -175,23 +175,26 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
         return false;
     }
 
+    std::vector<std::span<u8>> backing_ranges;
+    u64 remaining_size = size;
     for (auto& vma : vmas_to_write) {
         auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
         auto phys_handle = std::prev(vma.phys_areas.upper_bound(start_in_vma));
         for (; phys_handle != vma.phys_areas.end(); phys_handle++) {
-            if (writer.IsComplete()) {
+            if (remaining_size == 0) {
                 break;
             }
             const u64 start_in_dma =
                 std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
             u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
             const u64 copy_size =
-                std::min<u64>(writer.Remaining(), phys_handle->second.size - start_in_dma);
-            writer.Write(std::span{backing, static_cast<size_t>(copy_size)});
+                std::min<u64>(remaining_size, phys_handle->second.size - start_in_dma);
+            backing_ranges.emplace_back(backing, static_cast<size_t>(copy_size));
+            remaining_size -= copy_size;
         }
     }
 
-    return writer.IsComplete();
+    return writer.TryWrite(backing_ranges);
 }
 
 PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment) {
