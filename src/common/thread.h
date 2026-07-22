@@ -22,6 +22,8 @@ void SetCurrentThreadRealtime(std::chrono::nanoseconds period_ns);
 
 void SetCurrentThreadPriority(ThreadPriority new_priority);
 
+void SetThreadPriority(void* thread, ThreadPriority new_priority);
+
 void SetCurrentThreadName(const char* name);
 
 void SetThreadName(void* thread, const char* name);
