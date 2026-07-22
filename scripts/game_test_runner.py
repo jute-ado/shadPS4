@@ -966,7 +966,11 @@ def _drain_stream(
                 for pattern, observed in observed_patterns:
                     if pattern in searchable:
                         observed.set()
-                search_tail = searchable[-(longest_pattern - 1) :]
+                search_tail = (
+                    searchable[-(longest_pattern - 1) :]
+                    if longest_pattern > 1
+                    else b""
+                )
             remaining = max(0, limit - written)
             if remaining:
                 kept = chunk[:remaining]
@@ -1014,6 +1018,26 @@ def _read_capped(path: Path, limit: int) -> tuple[str, bool]:
     with path.open("rb") as stream:
         content = stream.read(limit + 1)
     return content[:limit].decode("utf-8", errors="replace"), len(content) > limit
+
+
+def _observe_file_patterns(
+    path: Path, observed_patterns: tuple[tuple[bytes, threading.Event], ...]
+) -> None:
+    if not observed_patterns or not path.exists():
+        return
+    search_tail = b""
+    longest_pattern = max(len(pattern) for pattern, _ in observed_patterns)
+    with path.open("rb") as stream:
+        while chunk := stream.read(64 * 1024):
+            searchable = search_tail + chunk
+            for pattern, observed in observed_patterns:
+                if pattern in searchable:
+                    observed.set()
+            search_tail = (
+                searchable[-(longest_pattern - 1) :]
+                if longest_pattern > 1
+                else b""
+            )
 
 
 def _is_valid_png(path: Path) -> bool:
@@ -1411,6 +1435,24 @@ def run_case(
         ),
         (b";#IPC_END", ipc_handshake),
     )
+    log_pattern_events = {
+        pattern: threading.Event()
+        for pattern in set(
+            (*case.required_log_patterns, *case.forbidden_log_patterns)
+        )
+    }
+    for pattern, observed in log_pattern_events.items():
+        if not pattern:
+            observed.set()
+    log_pattern_observers = tuple(
+        (pattern.encode("utf-8"), observed)
+        for pattern, observed in log_pattern_events.items()
+        if pattern
+    )
+    stream_observers = (
+        *(ipc_observers if case.use_ipc else ()),
+        *log_pattern_observers,
+    )
     readers = [
         threading.Thread(
             target=_drain_stream,
@@ -1419,7 +1461,7 @@ def run_case(
                 artifact_directory / "stdout.log",
                 output_limit_bytes,
                 truncated,
-                ipc_observers if case.use_ipc else (),
+                stream_observers,
             ),
         ),
         threading.Thread(
@@ -1429,7 +1471,7 @@ def run_case(
                 artifact_directory / "stderr.log",
                 output_limit_bytes,
                 truncated,
-                ipc_observers if case.use_ipc else (),
+                stream_observers,
             ),
         ),
     ]
@@ -1742,10 +1784,9 @@ def run_case(
     stderr, stderr_truncated = _read_capped(
         artifact_directory / "stderr.log", output_limit_bytes
     )
-    emulator_log, log_truncated = _read_capped(
-        artifact_directory / "user" / "log" / "shad_log.txt",
-        output_limit_bytes,
-    )
+    emulator_log_path = artifact_directory / "user" / "log" / "shad_log.txt"
+    _observe_file_patterns(emulator_log_path, log_pattern_observers)
+    emulator_log, log_truncated = _read_capped(emulator_log_path, output_limit_bytes)
     combined_log = "\n".join((stdout, stderr, emulator_log))
     screenshots = _find_valid_screenshots(artifact_directory)
     screenshot_hashes = [_hash_file(path) for path in screenshots]
@@ -1766,10 +1807,10 @@ def run_case(
             f"{list(case.allowed_outcomes)!r}"
         )
     for pattern in case.required_log_patterns:
-        if pattern not in combined_log:
+        if pattern not in combined_log and not log_pattern_events[pattern].is_set():
             failures.append(f"required log pattern not found: {pattern!r}")
     for pattern in case.forbidden_log_patterns:
-        if pattern in combined_log:
+        if pattern in combined_log or log_pattern_events[pattern].is_set():
             failures.append(f"forbidden log pattern found: {pattern!r}")
     if len(screenshots) < len(case.screenshot_seconds):
         failures.append(

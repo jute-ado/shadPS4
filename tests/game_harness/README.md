@@ -165,6 +165,10 @@ events share the same monotonic post-handshake timeline, allowing deterministic
 navigation, movement, gestures, causal visual assertions, and frame-level GPU
 diagnosis.
 
+The artifact size cap only limits retained log files. Required and forbidden
+patterns are evaluated across complete stdout, stderr, and emulator logs, so a
+late failure marker cannot be hidden by earlier noisy output.
+
 An initial smoke milestone can intentionally allow `timed_out`: reaching the
 deadline without a forbidden crash marker proves the game survived the tested
 boot window. Tighten the outcome and log expectations as compatibility
