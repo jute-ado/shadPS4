@@ -5,6 +5,7 @@
 
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
@@ -67,6 +68,7 @@ public:
     void UnmapMemory(VAddr addr, u64 size);
 
     void CpSync();
+    void DeferGpuCompletion(Common::UniqueFunction<void>&& completion);
     u64 Flush();
     void Finish();
     void OnSubmit();

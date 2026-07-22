@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <string>
+#include <functional>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -22,13 +23,19 @@ struct TestEopPacket {
 
 } // namespace
 
-TEST(EventWriteEop, SubmitsGpuWorkBeforeFenceWriteAndInterrupt) {
+TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) {
     u32 fence = 0;
     bool interrupt_signalled = false;
     std::vector<std::string> operations;
+    std::function<void()> gpu_completion;
 
     AmdGpu::SubmitEop(
-        TestEopPacket{.data = 0x12345678}, [&] { operations.emplace_back("submit"); },
+        TestEopPacket{.data = 0x12345678},
+        [&](auto&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::forward<decltype(completion)>(completion);
+        },
+        [&] { operations.emplace_back("submit"); },
         [&](u32 data) {
             operations.emplace_back("fence");
             fence = data;
@@ -38,7 +45,15 @@ TEST(EventWriteEop, SubmitsGpuWorkBeforeFenceWriteAndInterrupt) {
             interrupt_signalled = true;
         });
 
+    EXPECT_EQ(fence, 0u);
+    EXPECT_FALSE(interrupt_signalled);
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit"}));
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+
     EXPECT_EQ(fence, 0x12345678u);
     EXPECT_TRUE(interrupt_signalled);
-    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "fence", "interrupt"}));
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
