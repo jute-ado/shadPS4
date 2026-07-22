@@ -26,7 +26,9 @@
 namespace Vulkan {
 
 static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbuf,
-                               const GraphicsPipeline& pipeline, PipelineCommandInfo command) {
+                               const GraphicsPipeline& pipeline, PipelineCommandInfo command,
+                               std::span<const PipelineBufferInfo> buffers,
+                               std::span<const PipelineImageInfo> images) {
     if (!EmulatorSettings.IsVkCrashDiagnosticEnabled() &&
         !EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints()) {
         return;
@@ -39,15 +41,18 @@ static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbu
             program_hashes[index] = stages[index]->pgm_hash;
         }
     }
-    GetPipelineBindHistory().Record(
-        MakePipelineBindRecord(PipelineBindType::Graphics, pipeline_hash, program_hashes, command));
+    GetPipelineBindHistory().Record(MakePipelineBindRecord(PipelineBindType::Graphics,
+                                                           pipeline_hash, program_hashes, command,
+                                                           buffers, images));
     if (instance.SupportsDiagnosticCheckpoints()) {
         cmdbuf.setCheckpointNV(EncodeDiagnosticCheckpoint(pipeline_hash));
     }
 }
 
 static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbuf,
-                               const ComputePipeline& pipeline, PipelineCommandInfo command) {
+                               const ComputePipeline& pipeline, PipelineCommandInfo command,
+                               std::span<const PipelineBufferInfo> buffers,
+                               std::span<const PipelineImageInfo> images) {
     if (!EmulatorSettings.IsVkCrashDiagnosticEnabled() &&
         !EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints()) {
         return;
@@ -55,8 +60,9 @@ static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbu
     const u64 pipeline_hash = std::hash<ComputePipelineKey>{}(pipeline.GetComputeKey());
     const auto& compute = pipeline.GetStage(Shader::LogicalStage::Compute);
     const std::array program_hashes{compute.pgm_hash};
-    GetPipelineBindHistory().Record(
-        MakePipelineBindRecord(PipelineBindType::Compute, pipeline_hash, program_hashes, command));
+    GetPipelineBindHistory().Record(MakePipelineBindRecord(PipelineBindType::Compute, pipeline_hash,
+                                                           program_hashes, command, buffers,
+                                                           images));
     if (instance.SupportsDiagnosticCheckpoints()) {
         cmdbuf.setCheckpointNV(EncodeDiagnosticCheckpoint(pipeline_hash));
     }
@@ -269,7 +275,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     VideoCore::IssueDrawWithVertexInputState(
         instance.IsVertexInputDynamicState(),
         [&] {
-            RecordPipelineBind(instance, cmdbuf, *pipeline, command);
+            RecordPipelineBind(instance, cmdbuf, *pipeline, command, diagnostic_buffer_bindings,
+                               diagnostic_image_bindings);
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
         },
         [&] { buffer_cache.CommitVertexInputState(*pipeline); },
@@ -348,7 +355,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     VideoCore::IssueDrawWithVertexInputState(
         instance.IsVertexInputDynamicState(),
         [&] {
-            RecordPipelineBind(instance, cmdbuf, *pipeline, command);
+            RecordPipelineBind(instance, cmdbuf, *pipeline, command, diagnostic_buffer_bindings,
+                               diagnostic_image_bindings);
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
         },
         [&] { buffer_cache.CommitVertexInputState(*pipeline); },
@@ -405,7 +413,8 @@ void Rasterizer::DispatchDirect() {
         .type = PipelineCommandType::Dispatch,
         .arguments = {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
     };
-    RecordPipelineBind(instance, cmdbuf, *pipeline, command);
+    RecordPipelineBind(instance, cmdbuf, *pipeline, command, diagnostic_buffer_bindings,
+                       diagnostic_image_bindings);
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
@@ -442,7 +451,8 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         .type = PipelineCommandType::DispatchIndirect,
         .arguments = {address + offset, size},
     };
-    RecordPipelineBind(instance, cmdbuf, *pipeline, command);
+    RecordPipelineBind(instance, cmdbuf, *pipeline, command, diagnostic_buffer_bindings,
+                       diagnostic_image_bindings);
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
@@ -481,6 +491,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    diagnostic_buffer_bindings.clear();
+    diagnostic_image_bindings.clear();
 
     bool uses_dma = false;
 
@@ -678,12 +690,18 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
 
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
+        u64 bound_size{};
+        VideoCore::BufferId buffer_id{};
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
-            const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
-            const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
-            buffer_bindings.emplace_back(buffer_id, vsharp, size);
-        } else {
-            buffer_bindings.emplace_back(VideoCore::BufferId{}, vsharp, 0);
+            bound_size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+            buffer_id = buffer_cache.FindBuffer(vsharp.base_address, bound_size);
+        }
+        buffer_bindings.emplace_back(buffer_id, vsharp, bound_size);
+        if (diagnostic_buffer_bindings.size() < diagnostic_buffer_bindings.capacity()) {
+            diagnostic_buffer_bindings.emplace_back(vsharp.base_address, vsharp.GetSize(),
+                                                    bound_size, vsharp.GetStride(),
+                                                    vsharp.num_records, desc.is_written,
+                                                    desc.is_formatted);
         }
     }
 
@@ -775,6 +793,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
+        if (diagnostic_image_bindings.size() < diagnostic_image_bindings.capacity()) {
+            diagnostic_image_bindings.emplace_back(
+                tsharp.Address(), tsharp.width + 1, tsharp.height + 1, tsharp.depth + 1,
+                tsharp.pitch + 1, static_cast<u32>(tsharp.data_format),
+                static_cast<u32>(tsharp.type), image_desc.is_written);
+        }
         image_descriptor_types.push_back(ImageDescriptorType(image_desc.is_written));
         if (texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");

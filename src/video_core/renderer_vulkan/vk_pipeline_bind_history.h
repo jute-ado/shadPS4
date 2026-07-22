@@ -36,6 +36,31 @@ struct PipelineCommandInfo {
     bool operator==(const PipelineCommandInfo&) const = default;
 };
 
+struct PipelineBufferInfo {
+    VAddr base_address{};
+    u64 requested_size{};
+    u64 bound_size{};
+    u32 stride{};
+    u32 num_records{};
+    bool is_written{};
+    bool is_formatted{};
+
+    bool operator==(const PipelineBufferInfo&) const = default;
+};
+
+struct PipelineImageInfo {
+    VAddr base_address{};
+    u32 width{};
+    u32 height{};
+    u32 depth{};
+    u32 pitch{};
+    u32 data_format{};
+    u32 type{};
+    bool is_written{};
+
+    bool operator==(const PipelineImageInfo&) const = default;
+};
+
 constexpr std::string_view PipelineCommandName(PipelineCommandType type) {
     switch (type) {
     case PipelineCommandType::Draw:
@@ -57,18 +82,26 @@ constexpr std::string_view PipelineCommandName(PipelineCommandType type) {
 
 struct PipelineBindRecord {
     static constexpr size_t MaxShaderHashes = 6;
+    static constexpr size_t MaxBufferBindings = 40;
+    static constexpr size_t MaxImageBindings = 64;
 
     PipelineBindType type{};
     u64 pipeline_hash{};
     std::array<u64, MaxShaderHashes> shader_hashes{};
     PipelineCommandInfo command{};
+    std::array<PipelineBufferInfo, MaxBufferBindings> buffers{};
+    size_t buffer_count{};
+    std::array<PipelineImageInfo, MaxImageBindings> images{};
+    size_t image_count{};
 
     bool operator==(const PipelineBindRecord&) const = default;
 };
 
 inline PipelineBindRecord MakePipelineBindRecord(PipelineBindType type, u64 pipeline_hash,
                                                  std::span<const u64> shader_hashes,
-                                                 PipelineCommandInfo command = {}) {
+                                                 PipelineCommandInfo command = {},
+                                                 std::span<const PipelineBufferInfo> buffers = {},
+                                                 std::span<const PipelineImageInfo> images = {}) {
     PipelineBindRecord record{
         .type = type,
         .pipeline_hash = pipeline_hash,
@@ -77,6 +110,10 @@ inline PipelineBindRecord MakePipelineBindRecord(PipelineBindType type, u64 pipe
     std::ranges::copy(
         shader_hashes.first(std::min(shader_hashes.size(), record.shader_hashes.size())),
         record.shader_hashes.begin());
+    record.buffer_count = std::min(buffers.size(), record.buffers.size());
+    std::ranges::copy(buffers.first(record.buffer_count), record.buffers.begin());
+    record.image_count = std::min(images.size(), record.images.size());
+    std::ranges::copy(images.first(record.image_count), record.images.begin());
     return record;
 }
 
