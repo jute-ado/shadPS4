@@ -58,6 +58,7 @@ CASE_FIELDS = frozenset(
         "userConfig",
         "userDataSeed",
         "useIpc",
+        "ipcHandshakeTimeoutSeconds",
         "screenshotSource",
         "screenshotSeconds",
         "renderdocCaptureSeconds",
@@ -187,6 +188,7 @@ class GameCase:
     user_config: Path | None = None
     user_data_seed: Path | None = None
     use_ipc: bool = False
+    ipc_handshake_timeout_seconds: float | None = None
     screenshot_source: str = "game_frame"
     screenshot_seconds: tuple[float, ...] = ()
     renderdoc_capture_seconds: tuple[float, ...] = ()
@@ -886,6 +888,28 @@ def load_manifest(path: str | Path) -> GameManifest:
             )
 
         use_ipc = _require_bool(raw_case.get("useIpc", False), "useIpc", name)
+        ipc_handshake_timeout_seconds: float | None = None
+        if "ipcHandshakeTimeoutSeconds" in raw_case:
+            value = raw_case["ipcHandshakeTimeoutSeconds"]
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ManifestError(
+                    f"{name}: ipcHandshakeTimeoutSeconds must be finite and positive"
+                )
+            try:
+                normalized_value = float(value)
+            except OverflowError as error:
+                raise ManifestError(
+                    f"{name}: ipcHandshakeTimeoutSeconds must be finite and positive"
+                ) from error
+            if not math.isfinite(normalized_value) or normalized_value <= 0:
+                raise ManifestError(
+                    f"{name}: ipcHandshakeTimeoutSeconds must be finite and positive"
+                )
+            if not use_ipc:
+                raise ManifestError(
+                    f"{name}: ipcHandshakeTimeoutSeconds requires useIpc"
+                )
+            ipc_handshake_timeout_seconds = normalized_value
         screenshot_source = raw_case.get("screenshotSource", "game_frame")
         if screenshot_source not in VALID_SCREENSHOT_SOURCES:
             raise ManifestError(
@@ -987,6 +1011,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 user_config=user_config,
                 user_data_seed=user_data_seed,
                 use_ipc=use_ipc,
+                ipc_handshake_timeout_seconds=ipc_handshake_timeout_seconds,
                 screenshot_source=screenshot_source,
                 screenshot_seconds=screenshot_seconds,
                 renderdoc_capture_seconds=renderdoc_capture_seconds,
@@ -1592,8 +1617,11 @@ def run_case(
     ipc_negotiation_timed_out = False
     hard_deadline = started + case.timeout_seconds
     if case.use_ipc:
+        ipc_handshake_deadline = started + (
+            case.ipc_handshake_timeout_seconds or case.timeout_seconds
+        )
         while process.poll() is None:
-            remaining = hard_deadline - time.monotonic()
+            remaining = ipc_handshake_deadline - time.monotonic()
             if remaining <= 0:
                 ipc_negotiation_timed_out = True
                 break
@@ -1629,6 +1657,8 @@ def run_case(
             _kill_process_tree(process)
             process.wait(timeout=5)
     timeline_started = time.monotonic()
+    if ipc_ready and case.ipc_handshake_timeout_seconds is not None:
+        hard_deadline = timeline_started + case.timeout_seconds
 
     timed_out = ipc_negotiation_timed_out
     runtime_failures: list[str] = []
