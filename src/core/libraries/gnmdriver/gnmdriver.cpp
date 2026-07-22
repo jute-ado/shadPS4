@@ -14,6 +14,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
+#include "core/libraries/gnmdriver/submission_gate.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/libs.h"
@@ -63,10 +64,8 @@ static constexpr std::array indirect_sgpr_offsets{0u, 0u, 0x4cu, 0u, 0xccu, 0u, 
 // this flag in case we need it in the future.
 static constexpr bool UseNeoCompatSequences = false;
 
-// In case if `submitDone` is issued we need to block submissions until GPU idle
-static u32 submission_lock{};
-std::condition_variable cv_lock{};
-std::mutex m_submission{};
+// Keep frame submissions out until the command processor acknowledges the matching SubmitDone.
+static SubmissionGate submission_gate{};
 static u64 frames_submitted{};      // frame counter
 static bool send_init_packet{true}; // initialize HW state before first game's submit in a frame
 static s32 sdk_version{0};
@@ -76,18 +75,6 @@ static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
-
-static void ResetSubmissionLock(Platform::InterruptId irq) {
-    std::unique_lock lock{m_submission};
-    submission_lock = 0;
-    cv_lock.notify_all();
-}
-
-static void WaitGpuIdle() {
-    HLE_TRACE;
-    std::unique_lock lock{m_submission};
-    cv_lock.wait(lock, [] { return submission_lock == 0; });
-}
 
 // Write a special ending NOP packet with N DWs data block
 static inline u32* WriteTrailingNop(u32* cmdbuf, u32 data_block_size) {
@@ -161,7 +148,7 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
 
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed() {
     LOG_TRACE(Lib_GnmDriver, "called");
-    return submission_lock == 0;
+    return submission_gate.IsOpen();
 }
 
 int PS4_SYSV_ABI sceGnmBeginWorkload(u32 workload_stream, u64* workload) {
@@ -297,7 +284,7 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         return;
     }
 
-    WaitGpuIdle();
+    auto submission = submission_gate.Enter();
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -2227,7 +2214,7 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
-    WaitGpuIdle();
+    auto submission = submission_gate.Enter();
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -2313,11 +2300,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 int PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    WaitGpuIdle();
-    if (!liverpool->IsGpuIdle()) {
-        submission_lock = true;
-    }
-    liverpool->SubmitDone();
+    auto complete_boundary = submission_gate.BeginBoundary();
+    liverpool->SubmitDone(std::move(complete_boundary));
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
@@ -2887,9 +2871,6 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     if (EmulatorSettings.IsCopyGpuBuffers()) {
         liverpool->ReserveCopyBufferSpace();
     }
-
-    Platform::IrqC::Instance()->Register(Platform::InterruptId::GpuIdle, ResetSubmissionLock,
-                                         nullptr);
 
     LIB_FUNCTION("b0xyllnVY-I", "libSceGnmDriver", 1, "libSceGnmDriver", sceGnmAddEqEvent);
     LIB_FUNCTION("b08AgtPlHPg", "libSceGnmDriver", 1, "libSceGnmDriver", sceGnmAreSubmitsAllowed);

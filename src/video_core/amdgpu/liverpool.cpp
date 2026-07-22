@@ -139,13 +139,25 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
-        if (submit_done) {
+        Common::UniqueFunction<void> submit_done_callback{};
+        bool has_submit_done{};
+        {
+            std::scoped_lock lk{submit_mutex};
+            if (submit_done) {
+                submit_done = false;
+                has_submit_done = true;
+                submit_done_callback = std::move(submit_done_completion);
+            }
+        }
+        if (has_submit_done) {
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
-            submit_done = false;
+            if (submit_done_callback) {
+                submit_done_callback();
+            }
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);

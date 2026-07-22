@@ -73,10 +73,11 @@ public:
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
-    void SubmitDone() noexcept {
+    void SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
+        submit_done_completion = std::move(completion);
         submit_done = true;
         submit_cv.notify_one();
     }
@@ -234,6 +235,7 @@ private:
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
+    Common::UniqueFunction<void> submit_done_completion{};
     std::thread::id gpu_id;
     s32 curr_qid{-1};
 };
