@@ -665,6 +665,23 @@ Frame* Presenter::PrepareLastFrame() {
                     bind.shader_hashes[5], PipelineCommandName(bind.command.type),
                     bind.command.arguments[0], bind.command.arguments[1],
                     bind.command.arguments[2]);
+                for (size_t index = 0; index < bind.buffer_count; ++index) {
+                    const auto& buffer = bind.buffers[index];
+                    LOG_CRITICAL(Render_Vulkan,
+                                 "  buffer[{}]: addr={:#x}, requested={:#x}, bound={:#x}, "
+                                 "stride={:#x}, records={:#x}, written={}, formatted={}",
+                                 index, buffer.base_address, buffer.requested_size,
+                                 buffer.bound_size, buffer.stride, buffer.num_records,
+                                 buffer.is_written, buffer.is_formatted);
+                }
+                for (size_t index = 0; index < bind.image_count; ++index) {
+                    const auto& image = bind.images[index];
+                    LOG_CRITICAL(Render_Vulkan,
+                                 "  image[{}]: addr={:#x}, extent={}x{}x{}, pitch={}, "
+                                 "format={:#x}, type={:#x}, written={}",
+                                 index, image.base_address, image.width, image.height, image.depth,
+                                 image.pitch, image.data_format, image.type, image.is_written);
+                }
             }
             ASSERT_MSG(false, "Device lost during waiting for a frame");
         }

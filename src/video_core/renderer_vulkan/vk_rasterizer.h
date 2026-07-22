@@ -7,6 +7,7 @@
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -143,6 +144,10 @@ private:
 
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
+    boost::container::static_vector<PipelineBufferInfo, PipelineBindRecord::MaxBufferBindings>
+        diagnostic_buffer_bindings;
+    boost::container::static_vector<PipelineImageInfo, PipelineBindRecord::MaxImageBindings>
+        diagnostic_image_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};

@@ -8,8 +8,10 @@
 using Vulkan::PipelineBindHistory;
 using Vulkan::PipelineBindRecord;
 using Vulkan::PipelineBindType;
+using Vulkan::PipelineBufferInfo;
 using Vulkan::PipelineCommandInfo;
 using Vulkan::PipelineCommandType;
+using Vulkan::PipelineImageInfo;
 
 TEST(PipelineBindHistory, RetainsDispatchKindAndDimensions) {
     constexpr std::array program_hashes{0x11ull};
@@ -22,6 +24,59 @@ TEST(PipelineBindHistory, RetainsDispatchKindAndDimensions) {
         Vulkan::MakePipelineBindRecord(PipelineBindType::Compute, 0x55, program_hashes, command);
 
     EXPECT_EQ(record.command, command);
+}
+
+TEST(PipelineBindHistory, RetainsBoundBufferAddressSizesAndAccess) {
+    constexpr std::array program_hashes{0x11ull};
+    constexpr std::array buffers{
+        PipelineBufferInfo{
+            .base_address = 0x119eda8d00,
+            .requested_size = 0x3fffffffc,
+            .bound_size = 0x1be57300,
+            .stride = 4,
+            .num_records = 0xffffffff,
+            .is_written = false,
+            .is_formatted = false,
+        },
+        PipelineBufferInfo{
+            .base_address = 0x11005e8000,
+            .requested_size = 0x4000,
+            .bound_size = 0x4000,
+            .stride = 16,
+            .num_records = 0x400,
+            .is_written = true,
+            .is_formatted = true,
+        },
+    };
+
+    const auto record = Vulkan::MakePipelineBindRecord(
+        PipelineBindType::Compute, 0x55, program_hashes, {}, buffers);
+
+    EXPECT_EQ(record.buffer_count, buffers.size());
+    EXPECT_EQ(record.buffers[0], buffers[0]);
+    EXPECT_EQ(record.buffers[1], buffers[1]);
+}
+
+TEST(PipelineBindHistory, RetainsBoundImageDimensionsFormatAndAccess) {
+    constexpr std::array program_hashes{0x11ull};
+    constexpr std::array images{
+        PipelineImageInfo{
+            .base_address = 0x119de0ec00,
+            .width = 128,
+            .height = 128,
+            .depth = 1,
+            .pitch = 128,
+            .data_format = 10,
+            .type = 9,
+            .is_written = true,
+        },
+    };
+
+    const auto record = Vulkan::MakePipelineBindRecord(
+        PipelineBindType::Compute, 0x55, program_hashes, {}, {}, images);
+
+    EXPECT_EQ(record.image_count, images.size());
+    EXPECT_EQ(record.images[0], images[0]);
 }
 
 TEST(PipelineBindHistory, MakesRecordFromProgramHashesAndPadsUnusedStages) {
