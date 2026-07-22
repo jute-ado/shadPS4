@@ -63,6 +63,7 @@ CASE_FIELDS = frozenset(
         "minimumDistinctScreenshots",
         "minimumScreenshotMeanIntensity",
         "minimumScreenshotNonBlackFraction",
+        "minimumVisibleScreenshots",
         "screenshotComparisons",
         "renderdocCaptureOnVisualFailure",
         "buttonEvents",
@@ -191,6 +192,7 @@ class GameCase:
     minimum_distinct_screenshots: int = 0
     minimum_screenshot_mean_intensity: float | None = None
     minimum_screenshot_non_black_fraction: float | None = None
+    minimum_visible_screenshots: int | None = None
     screenshot_comparisons: tuple[ScreenshotComparison, ...] = ()
     renderdoc_capture_on_visual_failure: bool = False
     button_events: tuple[ButtonEvent, ...] = ()
@@ -356,6 +358,35 @@ def _require_optional_unit_interval(
     ):
         raise ManifestError(f"{case_name}: {field} must be between 0 and 1")
     return float(raw)
+
+
+def _require_minimum_visible_screenshots(
+    raw: Any,
+    *,
+    case_name: str,
+    screenshot_count: int,
+    has_visibility_threshold: bool,
+) -> int | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise ManifestError(
+            f"{case_name}: minimumVisibleScreenshots must be an integer"
+        )
+    if raw < 1:
+        raise ManifestError(
+            f"{case_name}: minimumVisibleScreenshots must be positive"
+        )
+    if not has_visibility_threshold:
+        raise ManifestError(
+            f"{case_name}: minimumVisibleScreenshots requires a screenshot "
+            "visibility threshold"
+        )
+    if raw > screenshot_count:
+        raise ManifestError(
+            f"{case_name}: minimumVisibleScreenshots cannot exceed screenshotSeconds"
+        )
+    return raw
 
 
 def _require_screenshot_comparisons(
@@ -883,6 +914,15 @@ def load_manifest(path: str | Path) -> GameManifest:
             raise ManifestError(
                 f"{name}: screenshot visibility thresholds require screenshotSeconds"
             )
+        minimum_visible_screenshots = _require_minimum_visible_screenshots(
+            raw_case.get("minimumVisibleScreenshots"),
+            case_name=name,
+            screenshot_count=len(screenshot_seconds),
+            has_visibility_threshold=(
+                minimum_screenshot_mean_intensity is not None
+                or minimum_screenshot_non_black_fraction is not None
+            ),
+        )
         renderdoc_capture_seconds = _require_renderdoc_capture_schedule(
             raw_case.get("renderdocCaptureSeconds"),
             case_name=name,
@@ -956,6 +996,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ),
                 minimum_screenshot_mean_intensity=minimum_screenshot_mean_intensity,
                 minimum_screenshot_non_black_fraction=minimum_screenshot_non_black_fraction,
+                minimum_visible_screenshots=minimum_visible_screenshots,
                 screenshot_comparisons=_require_screenshot_comparisons(
                     raw_case.get("screenshotComparisons"),
                     case_name=name,
@@ -1878,24 +1919,42 @@ def run_case(
         case.minimum_screenshot_mean_intensity is not None
         or case.minimum_screenshot_non_black_fraction is not None
     ):
+        visible_screenshots = 0
         for index, screenshot in enumerate(screenshots):
             mean_intensity, non_black_fraction = _screenshot_statistics(screenshot)
-            if (
-                case.minimum_screenshot_mean_intensity is not None
-                and mean_intensity < case.minimum_screenshot_mean_intensity
-            ):
+            meets_mean_threshold = (
+                case.minimum_screenshot_mean_intensity is None
+                or mean_intensity >= case.minimum_screenshot_mean_intensity
+            )
+            meets_non_black_threshold = (
+                case.minimum_screenshot_non_black_fraction is None
+                or non_black_fraction
+                >= case.minimum_screenshot_non_black_fraction
+            )
+            if meets_mean_threshold and meets_non_black_threshold:
+                visible_screenshots += 1
+            if case.minimum_visible_screenshots is not None:
+                continue
+            if not meets_mean_threshold:
+                assert case.minimum_screenshot_mean_intensity is not None
                 failures.append(
                     f"screenshot {index} mean intensity {mean_intensity:.6f} is below "
                     f"minimum {case.minimum_screenshot_mean_intensity:.6f}"
                 )
-            if (
-                case.minimum_screenshot_non_black_fraction is not None
-                and non_black_fraction < case.minimum_screenshot_non_black_fraction
-            ):
+            if not meets_non_black_threshold:
+                assert case.minimum_screenshot_non_black_fraction is not None
                 failures.append(
                     f"screenshot {index} non-black fraction {non_black_fraction:.6f} is below "
                     f"minimum {case.minimum_screenshot_non_black_fraction:.6f}"
                 )
+        if (
+            case.minimum_visible_screenshots is not None
+            and visible_screenshots < case.minimum_visible_screenshots
+        ):
+            failures.append(
+                f"captured {visible_screenshots} visible screenshots; expected at least "
+                f"{case.minimum_visible_screenshots}"
+            )
     screenshot_differences: list[float] = []
     if len(screenshots) >= len(case.screenshot_seconds):
         for index, comparison in enumerate(case.screenshot_comparisons):

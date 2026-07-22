@@ -16,6 +16,7 @@
       "minimumDistinctScreenshots": 2,
       "minimumScreenshotMeanIntensity": 0.01,
       "minimumScreenshotNonBlackFraction": 0.01,
+      "minimumVisibleScreenshots": 2,
       "screenshotComparisons": [
         {
           "firstScreenshot": 0,

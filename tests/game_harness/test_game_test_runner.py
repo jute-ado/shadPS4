@@ -517,6 +517,125 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(case.minimum_screenshot_mean_intensity, 0.01)
             self.assertEqual(case.minimum_screenshot_non_black_fraction, 0.02)
 
+    def test_load_manifest_accepts_minimum_visible_screenshot_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "visible sample window",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSeconds": [0.25, 0.5, 0.75],
+                            "minimumScreenshotNonBlackFraction": 0.02,
+                            "minimumVisibleScreenshots": 2,
+                        }
+                    ],
+                },
+            )
+
+            case = load_manifest(path).cases[0]
+
+            self.assertEqual(case.minimum_visible_screenshots, 2)
+
+    def test_load_manifest_rejects_minimum_visible_screenshots_without_thresholds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "undefined visibility",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSeconds": [0.25],
+                            "minimumVisibleScreenshots": 1,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "minimumVisibleScreenshots requires a screenshot visibility threshold",
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_minimum_visible_screenshots_above_schedule(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "impossible visibility",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotSeconds": [0.25],
+                            "minimumScreenshotNonBlackFraction": 0.02,
+                            "minimumVisibleScreenshots": 2,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "minimumVisibleScreenshots cannot exceed screenshotSeconds",
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_invalid_minimum_visible_screenshot_counts(
+        self,
+    ) -> None:
+        for value, message in (
+            (True, "must be an integer"),
+            (0, "must be positive"),
+        ):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                path = self.write_manifest(
+                    root,
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "invalid visible count",
+                                "gamePath": "game",
+                                "timeoutSeconds": 2,
+                                "useIpc": True,
+                                "screenshotSeconds": [0.25],
+                                "minimumScreenshotNonBlackFraction": 0.02,
+                                "minimumVisibleScreenshots": value,
+                            }
+                        ],
+                    },
+                )
+
+                with self.assertRaisesRegex(ManifestError, message):
+                    load_manifest(path)
+
     def test_load_manifest_rejects_invalid_screenshot_visibility_thresholds(self) -> None:
         for field, value in (
             ("minimumScreenshotMeanIntensity", True),
@@ -3419,6 +3538,64 @@ class RunnerTests(unittest.TestCase):
             )
 
             self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_accepts_visible_sample_window_with_a_blank_transition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "transitioning frame",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--vary-screenshots-after", "1"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.15, 0.3],
+                    "minimumScreenshotMeanIntensity": 0.001,
+                    "minimumScreenshotNonBlackFraction": 0.9,
+                    "minimumVisibleScreenshots": 1,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_rejects_visible_sample_window_below_required_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "mostly blank transition",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--vary-screenshots-after", "1"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.15, 0.3],
+                    "minimumScreenshotMeanIntensity": 0.001,
+                    "minimumScreenshotNonBlackFraction": 0.9,
+                    "minimumVisibleScreenshots": 2,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "captured 1 visible screenshots; expected at least 2",
+                result.failures,
+            )
 
     def test_run_case_accepts_required_visual_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
