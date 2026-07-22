@@ -3164,6 +3164,43 @@ class RunnerTests(unittest.TestCase):
                     result.failures,
                 )
 
+    def test_run_case_sends_no_actions_after_capability_negotiation_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "unsupported screenshots",
+                    "timeoutSeconds": 2.0,
+                    "args": [
+                        "--expect-ipc",
+                        "--echo-ipc-commands",
+                        "--omit-screenshot-capability",
+                    ],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            stdout = (result.artifact_directory / "stdout.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "IPC capability ENABLE_SCREENSHOT was not advertised",
+                result.failures,
+            )
+            self.assertNotIn("IPC_COMMAND:", stdout)
+            self.assertLess(result.duration_seconds, 1.5)
+
     def test_run_case_interleaves_button_events_and_screenshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

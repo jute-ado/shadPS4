@@ -66,6 +66,7 @@ def main() -> int:
     parser.add_argument("--emit-bytes", type=int, default=0)
     parser.add_argument("--spawn-child", action="store_true")
     parser.add_argument("--expect-ipc", action="store_true")
+    parser.add_argument("--echo-ipc-commands", action="store_true")
     parser.add_argument("--ipc-handshake-delay", type=float, default=0)
     parser.add_argument("--omit-ipc-handshake", action="store_true")
     parser.add_argument("--omit-control-capability", action="store_true")
@@ -88,6 +89,13 @@ def main() -> int:
     ipc_commands: list[str] = []
     ipc_command_seconds: list[float] = []
     launched = time.monotonic()
+
+    def record_ipc_command(command: str) -> None:
+        ipc_commands.append(command)
+        ipc_command_seconds.append(time.monotonic() - launched)
+        if args.echo_ipc_commands:
+            print(f"IPC_COMMAND:{command}", flush=True)
+
     if args.expect_ipc:
         time.sleep(args.ipc_handshake_delay)
         if not args.omit_ipc_handshake:
@@ -106,8 +114,7 @@ def main() -> int:
             )
             sys.stderr.flush()
         for _ in range(2):
-            ipc_commands.append(sys.stdin.readline().strip())
-            ipc_command_seconds.append(time.monotonic() - launched)
+            record_ipc_command(sys.stdin.readline().strip())
 
     if args.spawn_child:
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -118,8 +125,7 @@ def main() -> int:
     if args.expect_ipc:
         while True:
             command = sys.stdin.readline().strip()
-            ipc_commands.append(command)
-            ipc_command_seconds.append(time.monotonic() - launched)
+            record_ipc_command(command)
             if (
                 command in {"SCREENSHOT", "SCREENSHOT_WITH_OVERLAYS"}
                 and not args.ignore_screenshots
