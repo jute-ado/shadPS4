@@ -37,16 +37,26 @@ struct PipelineCommandInfo {
 };
 
 struct PipelineBufferInfo {
+    static constexpr size_t MaxSampleDwords = 24;
+
     VAddr base_address{};
     u64 requested_size{};
     u64 bound_size{};
     u32 stride{};
     u32 num_records{};
+    std::array<u32, MaxSampleDwords> sample_dwords{};
+    size_t sample_count{};
     bool is_written{};
     bool is_formatted{};
 
     bool operator==(const PipelineBufferInfo&) const = default;
 };
+
+inline void CapturePipelineBufferSample(PipelineBufferInfo& buffer,
+                                        std::span<const u32> dwords) {
+    buffer.sample_count = std::min(dwords.size(), buffer.sample_dwords.size());
+    std::ranges::copy(dwords.first(buffer.sample_count), buffer.sample_dwords.begin());
+}
 
 struct PipelineImageInfo {
     VAddr base_address{};
