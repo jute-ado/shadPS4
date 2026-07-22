@@ -11,13 +11,13 @@
 
 namespace AmdGpu {
 
-class EopFlipCompletion {
+class EopFlipSubmission {
 public:
     void AttachFlip(Common::UniqueFunction<void>&& callback) {
         bool run_immediately;
         {
             std::scoped_lock lock{mutex};
-            run_immediately = completed;
+            run_immediately = submitted;
             if (!run_immediately) {
                 pending_flips.emplace_back(std::move(callback));
             }
@@ -27,14 +27,14 @@ public:
         }
     }
 
-    void CompleteEop() {
+    void CompleteSubmission() {
         std::vector<Common::UniqueFunction<void>> callbacks;
         {
             std::scoped_lock lock{mutex};
-            if (completed) {
+            if (submitted) {
                 return;
             }
-            completed = true;
+            submitted = true;
             callbacks = std::move(pending_flips);
         }
         for (auto& callback : callbacks) {
@@ -45,7 +45,7 @@ public:
 private:
     std::mutex mutex;
     std::vector<Common::UniqueFunction<void>> pending_flips;
-    bool completed{};
+    bool submitted{};
 };
 
 } // namespace AmdGpu
