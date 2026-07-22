@@ -116,6 +116,9 @@ public:
     }
 
     bool is_allocated(SlotId id) const {
+        if (!id || id.index / 64 >= stored_bitset.size()) {
+            return false;
+        }
         return ReadStorageBit(id.index);
     }
 
