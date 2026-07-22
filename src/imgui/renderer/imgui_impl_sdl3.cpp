@@ -10,6 +10,7 @@
 #include "imgui_impl_sdl3.h"
 #include "input/controller.h"
 #include "input/input_handler.h"
+#include "input/virtual_gamepad.h"
 #include "sdl_window.h"
 
 // SDL
@@ -50,6 +51,9 @@ struct SdlData {
     ImVector<SDL_Gamepad*> gamepads{};
     GamepadMode gamepad_mode{};
     bool want_update_gamepads_list{};
+    std::atomic_bool virtual_gamepad_enabled{};
+    std::array<Input::VirtualGamepadButtonState, SDL_GAMEPAD_BUTTON_COUNT>
+        virtual_gamepad_buttons{};
 
     // Framerate counting (based on ImGui impl)
     std::array<float, 60> framerateSecPerFrame;
@@ -713,10 +717,19 @@ void SetGamepadMode(GamepadMode mode, SDL_Gamepad** manual_gamepads_array,
 
 static void UpdateGamepadButton(SdlData* bd, ImGuiIO& io, ImGuiKey key,
                                 SDL_GamepadButton button_no) {
-    bool merged_value = false;
+    bool physical_pressed = false;
     for (SDL_Gamepad* gamepad : bd->gamepads)
-        merged_value |= SDL_GetGamepadButton(gamepad, button_no) != 0;
-    io.AddKeyEvent(key, merged_value);
+        physical_pressed |= SDL_GetGamepadButton(gamepad, button_no) != 0;
+    io.AddKeyEvent(key, bd->virtual_gamepad_buttons[button_no].Sample(physical_pressed));
+}
+
+void SetVirtualGamepadButton(SDL_GamepadButton button, bool pressed) {
+    SdlData* bd = GetBackendData();
+    if (bd == nullptr || button < 0 || button >= SDL_GAMEPAD_BUTTON_COUNT) {
+        return;
+    }
+    bd->virtual_gamepad_enabled.store(true, std::memory_order_relaxed);
+    bd->virtual_gamepad_buttons[button].SetPressed(pressed);
 }
 
 static inline float Saturate(float v) {
@@ -762,7 +775,7 @@ static void UpdateGamepads() {
     if ((io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) == 0)
         return;
     io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
-    if (bd->gamepads.Size == 0)
+    if (bd->gamepads.Size == 0 && !bd->virtual_gamepad_enabled.load(std::memory_order_relaxed))
         return;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 

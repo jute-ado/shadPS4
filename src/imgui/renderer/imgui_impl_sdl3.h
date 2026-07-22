@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <SDL3/SDL_gamepad.h>
+
 struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Gamepad;
@@ -17,6 +19,7 @@ void Shutdown();
 void NewFrame(bool is_reusing);
 bool ProcessEvent(const SDL_Event* event);
 void OnResize();
+void SetVirtualGamepadButton(SDL_GamepadButton button, bool pressed);
 
 // Gamepad selection automatically starts in AutoFirst mode, picking first available SDL_Gamepad.
 // You may override this. When using manual mode, caller is responsible for opening/closing gamepad.
