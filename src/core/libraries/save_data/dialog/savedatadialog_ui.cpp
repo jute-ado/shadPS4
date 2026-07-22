@@ -12,6 +12,7 @@
 #include "core/file_sys/fs.h"
 #include "core/libraries/save_data/save_instance.h"
 #include "imgui/imgui_std.h"
+#include "savedatadialog_navigation.h"
 #include "savedatadialog_ui.h"
 
 using namespace ImGui;
@@ -580,13 +581,16 @@ void SaveDialogUi::DrawList() {
     for (const auto& item : state->save_list) {
         DrawItem(i++, item);
     }
-    if (first_render) { // Make the initial focus
+    const auto focus_action = ChooseListFocusAction(first_render, GetCurrentContext()->NavId != 0,
+                                                    IsKeyPressed(ImGuiKey_GamepadFaceDown, false));
+    if (focus_action != ListFocusAction::None) {
+        ImGuiID focus_id = GetID(0);
         if (std::holds_alternative<FocusPos>(state->focus_pos)) {
             auto pos = std::get<FocusPos>(state->focus_pos);
             if (pos == FocusPos::LISTHEAD || pos == FocusPos::DATAHEAD) {
-                SetItemCurrentNavFocus(GetID(0));
+                focus_id = GetID(0);
             } else if (pos == FocusPos::LISTTAIL || pos == FocusPos::DATATAIL) {
-                SetItemCurrentNavFocus(GetID(std::max(i - 1, 0)));
+                focus_id = GetID(std::max(i - 1, 0));
             } else { // Date
                 int idx = 0;
                 int max_idx = 0;
@@ -602,28 +606,32 @@ void SaveDialogUi::DrawList() {
                     }
                     idx++;
                 }
-                SetItemCurrentNavFocus(GetID(max_idx));
+                focus_id = GetID(max_idx);
             }
         } else if (std::holds_alternative<std::string>(state->focus_pos)) {
             auto dir_name = std::get<std::string>(state->focus_pos);
             if (dir_name.empty()) {
-                SetItemCurrentNavFocus(GetID(0));
+                focus_id = GetID(0);
             } else {
                 int idx = 0;
                 if (state->new_item.has_value()) {
                     if (dir_name == state->new_item->dir_name) {
-                        SetItemCurrentNavFocus(GetID(idx));
+                        focus_id = GetID(idx);
                     }
                     idx++;
                 }
                 for (const auto& item : state->save_list) {
                     if (item.dir_name == dir_name) {
-                        SetItemCurrentNavFocus(GetID(idx));
+                        focus_id = GetID(idx);
                         break;
                     }
                     idx++;
                 }
             }
+        }
+        SetItemCurrentNavFocus(focus_id);
+        if (focus_action == ListFocusAction::RestoreAndActivate) {
+            ActivateItemByID(focus_id);
         }
     }
     EndChild();
