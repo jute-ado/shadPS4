@@ -312,6 +312,16 @@ target_compile_features(shadps4_kernel_semaphore_policy_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_kernel_semaphore_policy_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_kernel_semaphore_policy_test)
 
+add_executable(shadps4_event_flag_policy_test
+    test_event_flag_policy.cpp
+)
+target_include_directories(shadps4_event_flag_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_event_flag_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_event_flag_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_event_flag_policy_test)
+
 add_executable(shadps4_shared_slot_registry_test
     test_shared_slot_registry.cpp
 )
