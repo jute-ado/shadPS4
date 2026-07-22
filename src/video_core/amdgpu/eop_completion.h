@@ -8,18 +8,19 @@
 namespace AmdGpu {
 
 template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,
-          typename SignalInterrupt, typename NotifySubmission>
+          typename SignalInterrupt, typename NotifyCompletion>
 void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&& submit_gpu_work,
                WriteMemory&& write_memory, SignalInterrupt&& signal_interrupt,
-               NotifySubmission&& notify_submission) {
+               NotifyCompletion&& notify_completion) {
     auto completion = [packet, write_memory = std::forward<WriteMemory>(write_memory),
-                       signal_interrupt =
-                           std::forward<SignalInterrupt>(signal_interrupt)]() mutable {
+                       signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+                       notify_completion =
+                           std::forward<NotifyCompletion>(notify_completion)]() mutable {
         packet.SignalFence(write_memory, signal_interrupt);
+        notify_completion();
     };
     std::forward<DeferCompletion>(defer_completion)(std::move(completion));
     std::forward<SubmitGpuWork>(submit_gpu_work)();
-    std::forward<NotifySubmission>(notify_submission)();
 }
 
 template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,

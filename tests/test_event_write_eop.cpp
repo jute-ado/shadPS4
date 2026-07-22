@@ -9,7 +9,7 @@
 
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
-#include "video_core/amdgpu/eop_flip_submission.h"
+#include "video_core/amdgpu/eop_flip_completion.h"
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
 
@@ -60,44 +60,45 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
-TEST(EventWriteEop, DefersFlipUntilThePrecedingEopIsSubmitted) {
+TEST(EventWriteEop, DefersFlipUntilThePrecedingEopCompletes) {
     bool flip_signalled = false;
-    AmdGpu::EopFlipSubmission submission;
+    AmdGpu::EopFlipCompletion completion;
 
-    submission.AttachFlip([&] { flip_signalled = true; });
+    completion.AttachFlip([&] { flip_signalled = true; });
     EXPECT_FALSE(flip_signalled);
 
-    submission.CompleteSubmission();
+    completion.CompleteEop();
     EXPECT_TRUE(flip_signalled);
 }
 
-TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopWasAlreadySubmitted) {
+TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopAlreadyCompleted) {
     bool flip_signalled = false;
-    AmdGpu::EopFlipSubmission submission;
+    AmdGpu::EopFlipCompletion completion;
 
-    submission.CompleteSubmission();
-    submission.AttachFlip([&] { flip_signalled = true; });
+    completion.CompleteEop();
+    completion.AttachFlip([&] { flip_signalled = true; });
 
     EXPECT_TRUE(flip_signalled);
 }
 
-TEST(EventWriteEop, MakesFlipEligibleAfterSubmissionBeforeGpuCompletion) {
+TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {
     std::vector<std::string> operations;
     std::function<void()> gpu_completion;
-    AmdGpu::EopFlipSubmission submission;
-    submission.AttachFlip([&] { operations.emplace_back("flip"); });
+    AmdGpu::EopFlipCompletion completion;
+    completion.AttachFlip([&] { operations.emplace_back("flip"); });
 
     AmdGpu::SubmitEop(
         TestEopPacket{.data = 1},
         [&](auto&& callback) { gpu_completion = std::forward<decltype(callback)>(callback); },
         [&] { operations.emplace_back("submit"); }, [&](u32) { operations.emplace_back("fence"); },
-        [&] { operations.emplace_back("interrupt"); }, [&] { submission.CompleteSubmission(); });
+        [&] { operations.emplace_back("interrupt"); }, [&] { completion.CompleteEop(); });
 
-    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "flip"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
     ASSERT_TRUE(gpu_completion);
     gpu_completion();
 
-    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "flip", "fence", "interrupt"}));
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
 }
 
 TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
