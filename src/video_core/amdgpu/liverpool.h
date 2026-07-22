@@ -32,7 +32,7 @@ struct VideoOutPort;
 
 namespace AmdGpu {
 
-class EopFlipSubmission;
+class EopFlipCompletion;
 
 struct Liverpool {
     static constexpr u32 GfxQueueId = 0u;
@@ -206,7 +206,7 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     bool predicate_skip{};
-    std::shared_ptr<EopFlipSubmission> last_eop_submission;
+    std::shared_ptr<EopFlipCompletion> last_eop_completion;
 
     struct ConstantEngine {
         void Reset() {
