@@ -17,6 +17,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/amdgpu/pm4_lod_stats.h"
+#include "video_core/amdgpu/pm4_predication.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -256,6 +257,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            if (ShouldSkipPm4Packet(header->type3.predicate.Value() == PM4Predicate::PredEnable,
+                                    predicate_skip)) {
+                dcb = NextPacket(dcb, count + 1);
+                continue;
+            }
             switch (opcode) {
             case PM4ItOpcode::Nop: {
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -421,7 +427,36 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
-                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
+                const auto packet = DecodeSetPredication(dcb.subspan(1, count));
+                if (!packet) {
+                    LOG_WARNING(Render, "Ignoring truncated IT_SET_PREDICATION packet");
+                    break;
+                }
+
+                if (packet->wait_for_results && rasterizer) {
+                    rasterizer->Finish();
+                }
+
+                u64 value{};
+                if (packet->operation == 3) {
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->IsValidMapping(packet->address, sizeof(value))) {
+                        LOG_WARNING(Render,
+                                    "Ignoring IT_SET_PREDICATION with invalid address {:#x}",
+                                    packet->address);
+                        break;
+                    }
+                    value = *reinterpret_cast<const volatile u64*>(packet->address);
+                }
+
+                const auto skip = EvaluatePredication(*packet, value);
+                if (!skip) {
+                    LOG_WARNING(Render,
+                                "Ignoring unsupported IT_SET_PREDICATION operation {} condition {}",
+                                packet->operation, packet->condition);
+                    break;
+                }
+                predicate_skip = *skip;
                 break;
             }
             case PM4ItOpcode::IndexType: {
