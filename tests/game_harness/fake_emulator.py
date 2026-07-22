@@ -79,6 +79,7 @@ def main() -> int:
     parser.add_argument("--malformed-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots-after", type=int)
+    parser.add_argument("--screenshot-red", type=int)
     parser.add_argument("--vary-left-pixel", action="store_true")
     parser.add_argument("--dark-movement-screenshots", action="store_true")
     parser.add_argument("game")
@@ -137,13 +138,17 @@ def main() -> int:
                     png = varying_left_pixel_png(index)
                 else:
                     png = one_pixel_png(
-                        index
-                        if args.vary_screenshots
-                        or (
-                            args.vary_screenshots_after is not None
-                            and index >= args.vary_screenshots_after
+                        args.screenshot_red
+                        if args.screenshot_red is not None
+                        else (
+                            index
+                            if args.vary_screenshots
+                            or (
+                                args.vary_screenshots_after is not None
+                                and index >= args.vary_screenshots_after
+                            )
+                            else 0
                         )
-                        else 0
                     )
                 (screenshots / f"fake_{index}.png").write_bytes(png)
             if command == "RENDERDOC_CAPTURE" and not args.ignore_renderdoc_captures:
