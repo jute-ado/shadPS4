@@ -52,8 +52,8 @@ TEST(SharedMemoryBarrierPass, SynchronizesFullGuestWaveWorkgroups) {
     EXPECT_EQ(CountInsertedBarriers(64), 1);
 }
 
-TEST(SharedMemoryBarrierPass, LeavesMultiWaveWorkgroupsUnchanged) {
-    EXPECT_EQ(CountInsertedBarriers(128), 0);
+TEST(SharedMemoryBarrierPass, SynchronizesMultiWaveWorkgroups) {
+    EXPECT_EQ(CountInsertedBarriers(128), 1);
 }
 
 TEST(SharedMemoryBarrierPass, SkipsSynchronizationWhenHostDoesNotNeedIt) {
@@ -62,6 +62,10 @@ TEST(SharedMemoryBarrierPass, SkipsSynchronizationWhenHostDoesNotNeedIt) {
 
 TEST(SharedMemoryBarrierPass, SkipsWorkgroupsWithoutSharedMemory) {
     EXPECT_EQ(CountInsertedBarriers(32, 0), 0);
+}
+
+TEST(SharedMemoryBarrierPass, SkipsInvalidEmptyWorkgroups) {
+    EXPECT_EQ(CountInsertedBarriers(0), 0);
 }
 
 } // namespace
