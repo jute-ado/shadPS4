@@ -669,6 +669,35 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(event.poll_seconds, 0.05)
             self.assertEqual(event.hold_seconds, 0.1)
 
+    def test_load_manifest_accepts_observation_only_visual_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "observe stable state",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "a" * 64,
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertIsNone(event.button)
+
     def test_load_manifest_accepts_visual_checkpoint_comparison_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2059,6 +2088,46 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             json.dumps(result.to_report())
+
+    def test_run_case_observation_only_checkpoint_does_not_press_button(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected_png = test_png(1, 1, 6, bytes((0, 0, 0, 0, 255)))
+            reference = root / "expected.png"
+            reference.write_bytes(expected_png)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "observe visual state",
+                    "timeoutSeconds": 0.5,
+                    "args": ["--expect-ipc", "--omit-gamepad-capability"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "timeoutSeconds": 0.2,
+                            "pollSeconds": 0.05,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertTrue(result.visual_checkpoint_attempts[-1].matched)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
 
     def test_run_case_scales_reference_before_matching_visual_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

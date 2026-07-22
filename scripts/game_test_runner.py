@@ -77,7 +77,7 @@ class ScreenshotButtonEvent:
     difference_mode: str
     comparison_region: ScreenshotRegion | None
     scale_reference_to_capture: bool
-    button: str
+    button: str | None
     timeout_seconds: float
     poll_seconds: float = 0.25
     hold_seconds: float = 0.1
@@ -473,7 +473,7 @@ def _require_screenshot_button_events(
                     )
                 comparison_region = ScreenshotRegion(**region_values)
         button = item.get("button")
-        if button not in SUPPORTED_BUTTONS:
+        if button is not None and button not in SUPPORTED_BUTTONS:
             raise ManifestError(
                 f"{field} has unsupported button {button!r}; expected one of "
                 f"{sorted(SUPPORTED_BUTTONS)}"
@@ -514,7 +514,10 @@ def _require_screenshot_button_events(
         )
     if events and not use_ipc:
         raise ManifestError(f"{case_name}: screenshotButtonEvents requires useIpc")
-    if sum(event.timeout_seconds + event.hold_seconds for event in events) >= timeout:
+    if sum(
+        event.timeout_seconds + (event.hold_seconds if event.button is not None else 0)
+        for event in events
+    ) >= timeout:
         raise ManifestError(
             f"{case_name}: screenshotButtonEvents must complete before timeoutSeconds"
         )
@@ -1347,7 +1350,7 @@ def run_case(
             required_capabilities.append("ENABLE_RENDERDOC_CAPTURE")
         if (
             case.button_events
-            or case.screenshot_button_events
+            or any(event.button is not None for event in case.screenshot_button_events)
             or case.axis_events
             or case.touch_events
         ):
@@ -1462,18 +1465,19 @@ def run_case(
                                 pass
                         continue
 
-                    process.stdin.write(
-                        (f"GAMEPAD_BUTTON\n{event.button}\n1\n").encode("ascii")
-                    )
-                    process.stdin.flush()
-                    try:
-                        process.wait(timeout=event.hold_seconds)
-                        process_exited = True
-                    except subprocess.TimeoutExpired:
+                    if event.button is not None:
                         process.stdin.write(
-                            (f"GAMEPAD_BUTTON\n{event.button}\n0\n").encode("ascii")
+                            (f"GAMEPAD_BUTTON\n{event.button}\n1\n").encode("ascii")
                         )
                         process.stdin.flush()
+                        try:
+                            process.wait(timeout=event.hold_seconds)
+                            process_exited = True
+                        except subprocess.TimeoutExpired:
+                            process.stdin.write(
+                                (f"GAMEPAD_BUTTON\n{event.button}\n0\n").encode("ascii")
+                            )
+                            process.stdin.flush()
                     matched = True
                     break
 

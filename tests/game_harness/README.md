@@ -91,7 +91,9 @@ Each case supports:
 - `screenshotButtonEvents`: optional ordered visual checkpoints that avoid
   racing variable startup and loading times. Each entry repeatedly requests a
   screenshot until either `screenshotSha256` matches exactly or the frame is
-  within `maximumDifference` of `referenceScreenshot`, then taps `button`.
+  within `maximumDifference` of `referenceScreenshot`. If `button` is present,
+  the runner taps it after a match; omit `button` for an observation-only
+  checkpoint that records the matched state without injecting controller input.
   Reference matching supports the same `differenceMode` values as screenshot
   comparisons and tolerates harmless animation or encoding variation. An
   optional pixel `comparisonRegion` object (`left`, `top`, `width`, `height`)
@@ -101,8 +103,9 @@ Each case supports:
   captured at another resolution with an equal-aspect-ratio frame. The region
   uses capture coordinates after scaling. Neither option is valid with an
   exact hash. Bound each checkpoint with `timeoutSeconds`; `pollSeconds`
-  defaults to 0.25 and `holdSeconds` defaults to 0.1. Requires both screenshot
-  and gamepad IPC capabilities. These state-driven events cannot be combined
+  defaults to 0.25 and `holdSeconds` defaults to 0.1 when a button is present.
+  Requires screenshot IPC capability and, for button checkpoints, gamepad IPC
+  capability. These state-driven events cannot be combined
   with timed screenshots, captures, or controller events in the same case.
   Keep hashes and reference frames for owned games private, not in the
   repository.
