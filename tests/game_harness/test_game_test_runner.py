@@ -2178,6 +2178,34 @@ class RunnerTests(unittest.TestCase):
         process.stdout.close.assert_called_once_with()
         process.stderr.close.assert_called_once_with()
 
+    def test_run_case_fails_when_output_readers_cannot_capture_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = load_manifest(
+                self.make_manifest(root, case={"name": "reader failure"})
+            )
+
+            with mock.patch.object(
+                game_test_runner,
+                "_drain_stream",
+                side_effect=OSError("synthetic reader failure"),
+            ):
+                result = run_case(
+                    manifest.cases[0],
+                    emulator_command=[sys.executable, str(FIXTURE)],
+                    artifacts_root=root / "artifacts",
+                )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "output reader failed for stdout.log: synthetic reader failure",
+                result.failures,
+            )
+            self.assertIn(
+                "output reader failed for stderr.log: synthetic reader failure",
+                result.failures,
+            )
+
     def make_manifest(
         self, root: Path, *, case: dict, emulator: str | None = None
     ) -> Path:
