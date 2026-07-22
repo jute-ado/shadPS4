@@ -9,6 +9,7 @@
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/flip_queue_capacity.h"
+#include "core/libraries/videoout/vblank_tick.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -387,23 +388,23 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             // Needs lock here as can be concurrently read by `sceVideoOutGetVblankStatus`
             std::scoped_lock lock{main_port.vo_mutex};
 
-            // Trigger flip events for the port
+            constexpr auto event_id = static_cast<u64>(OrbisVideoOutInternalEventId::Vblank);
+            const auto tick = PrepareVblankTick(vblank_status.count, event_id);
+
+            // Publish the completed vblank before waking any event consumer.
+            vblank_status.count = tick.count;
+            vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
+            vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
+
+            // Trigger vblank events for the port
             for (auto event : main_port.vblank_events) {
                 auto equeue = Kernel::GetEqueue(event);
                 if (equeue != nullptr) {
-                    equeue->TriggerEvent(
-                        static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
-                        Kernel::OrbisKernelEvent::Filter::VideoOut,
-                        reinterpret_cast<void*>(
-                            static_cast<u64>(OrbisVideoOutInternalEventId::Vblank) |
-                            (vblank_status.count << 16)));
+                    equeue->TriggerEvent(event_id, Kernel::OrbisKernelEvent::Filter::VideoOut,
+                                         reinterpret_cast<void*>(tick.event_data));
                 }
             }
 
-            // Update vblank status
-            vblank_status.count++;
-            vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
-            vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
             main_port.vblank_cv.notify_all();
         }
 

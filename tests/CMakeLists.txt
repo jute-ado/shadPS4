@@ -215,6 +215,16 @@ target_compile_features(shadps4_flip_queue_capacity_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_flip_queue_capacity_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_flip_queue_capacity_test)
 
+add_executable(shadps4_vblank_tick_test
+    test_vblank_tick.cpp
+)
+target_include_directories(shadps4_vblank_tick_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_vblank_tick_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_vblank_tick_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_vblank_tick_test)
+
 add_executable(shadps4_sleepq_waiter_selection_test
     test_sleepq_waiter_selection.cpp
 )
