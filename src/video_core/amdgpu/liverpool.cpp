@@ -17,6 +17,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/amdgpu/pm4_lod_stats.h"
+#include "video_core/amdgpu/pm4_memory_wait.h"
 #include "video_core/amdgpu/pm4_predication.h"
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/renderdoc.h"
@@ -905,7 +906,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
-                while (!wait_reg_mem->Test(regs.reg_array)) {
+                const auto wait_satisfied = [&] {
+                    if (!rasterizer ||
+                        wait_reg_mem->mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory) {
+                        return wait_reg_mem->Test(regs.reg_array);
+                    }
+                    return PollGpuMemoryWait([&] { return wait_reg_mem->Test(regs.reg_array); },
+                                             [&] {
+                                                 rasterizer->ReadMemory(
+                                                     wait_reg_mem->Address<VAddr>(), sizeof(u32));
+                                             });
+                };
+                while (!wait_satisfied()) {
                     YIELD_GFX();
                 }
                 break;
@@ -1227,7 +1239,16 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-            while (!wait_reg_mem->Test(regs.reg_array)) {
+            const auto wait_satisfied = [&] {
+                if (!rasterizer ||
+                    wait_reg_mem->mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory) {
+                    return wait_reg_mem->Test(regs.reg_array);
+                }
+                return PollGpuMemoryWait(
+                    [&] { return wait_reg_mem->Test(regs.reg_array); },
+                    [&] { rasterizer->ReadMemory(wait_reg_mem->Address<VAddr>(), sizeof(u32)); });
+            };
+            while (!wait_satisfied()) {
                 YIELD_ASC(vqid);
             }
             break;
