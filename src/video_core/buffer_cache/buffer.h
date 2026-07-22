@@ -8,7 +8,9 @@
 #include <utility>
 #include <vector>
 #include "common/types.h"
+#include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/stream_buffer_copy.h"
 #include "video_core/renderer_vulkan/buffer_barrier_policy.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -183,7 +185,7 @@ public:
     /// Maps and commits a memory region with user provided data
     u64 Copy(auto src, size_t size, size_t alignment = 0) {
         const auto [data, offset] = Map(size, alignment);
-        std::memcpy(data, reinterpret_cast<const void*>(src), size);
+        CopyStreamBufferSource(*Core::Memory::Instance(), src, data, size);
         Commit();
         return offset;
     }
