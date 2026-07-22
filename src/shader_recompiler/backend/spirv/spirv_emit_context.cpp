@@ -1171,6 +1171,7 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto invalid_label{OpLabel()};
     const auto fault_label{OpLabel()};
     const auto available_label{OpLabel()};
+    const auto lookup_merge_label{OpLabel()};
     const auto merge_label{OpLabel()};
 
     // Reject addresses outside the guest GPU address space before indexing the page table.
@@ -1192,7 +1193,7 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Check if page is GPU cached
     const auto is_fault{OpIEqual(U1[1], bda, u64_zero_value)};
-    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpSelectionMerge(lookup_merge_label, spv::SelectionControlMask::MaskNone);
     OpBranchConditional(is_fault, fault_label, available_label);
 
     // First access: atomically mark the page as faulted. Shader invocations can fault
@@ -1210,18 +1211,23 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Return null pointer
     const auto fallback_result{u64_zero_value};
-    OpBranch(merge_label);
+    OpBranch(lookup_merge_label);
 
     // Value is available, compute address
     AddLabel(available_label);
     const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
     const auto addr{OpIAdd(U64, bda, offset_in_bda)};
+    OpBranch(lookup_merge_label);
+
+    // Merge the page lookup before leaving the outer address-range selection.
+    AddLabel(lookup_merge_label);
+    const auto lookup_result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
     OpBranch(merge_label);
 
     // Merge
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label,
-                            fallback_result, invalid_label)};
+    const auto result{
+        OpPhi(U64, lookup_result, lookup_merge_label, fallback_result, invalid_label)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;
