@@ -309,8 +309,13 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     static const auto crash_diagnostic_path =
         Common::FS::GetUserPathString(Common::FS::PathType::LogDir);
     const char* log_path = crash_diagnostic_path.c_str();
-    const char* shader_dump_mode = CrashDiagnosticShaderDumpMode;
+    const char* shader_dump_mode = CrashDiagnosticShaderDumpMode(
+        EmulatorSettings.IsVkCrashDiagnosticShaderDumpOnBind());
+    const char* pending_dump_mode = CrashDiagnosticPendingDumpMode;
+    const char* all_dump_mode = CrashDiagnosticAllDumpMode;
     vk::Bool32 enable_command_instrumentation = vk::True;
+    vk::Bool32 synchronize_commands =
+        CrashDiagnosticSynchronizeCommands ? vk::True : vk::False;
 
     const std::array layer_setings = {
         vk::LayerSettingEXT{
@@ -396,6 +401,34 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
             .type = vk::LayerSettingTypeEXT::eBool32,
             .valueCount = 1,
             .pValues = &enable_command_instrumentation,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CrashDiagnosticSettingLayerName,
+            .pSettingName = CrashDiagnosticSyncSettingName,
+            .type = vk::LayerSettingTypeEXT::eBool32,
+            .valueCount = 1,
+            .pValues = &synchronize_commands,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CrashDiagnosticSettingLayerName,
+            .pSettingName = CrashDiagnosticQueueDumpSettingName,
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &pending_dump_mode,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CrashDiagnosticSettingLayerName,
+            .pSettingName = CrashDiagnosticCommandBufferDumpSettingName,
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &all_dump_mode,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CrashDiagnosticSettingLayerName,
+            .pSettingName = CrashDiagnosticCommandDumpSettingName,
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &all_dump_mode,
         },
         vk::LayerSettingEXT{
             .pLayerName = CrashDiagnosticSettingLayerName,

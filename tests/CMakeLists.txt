@@ -80,6 +80,7 @@ target_compile_features(shadps4_vulkan_layer_settings_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_vulkan_layer_settings_test PRIVATE
     GTest::gtest_main
     fmt::fmt
+    nlohmann_json::nlohmann_json
     spdlog::spdlog
     Vulkan::Headers
 )

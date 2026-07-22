@@ -446,6 +446,7 @@ struct VulkanSettings {
     Setting<bool> vkvalidation_sync_enabled{false};
     Setting<bool> vkvalidation_gpu_enabled{false};
     Setting<bool> vkcrash_diagnostic_enabled{false};
+    Setting<bool> vkcrash_diagnostic_shader_dump_on_bind{false};
     Setting<bool> vkhost_markers{false};
     Setting<bool> vkguest_markers{false};
     Setting<bool> pipeline_cache_enabled{false};
@@ -464,6 +465,8 @@ struct VulkanSettings {
                                           &VulkanSettings::vkvalidation_gpu_enabled),
             make_override<VulkanSettings>("vkcrash_diagnostic_enabled",
                                           &VulkanSettings::vkcrash_diagnostic_enabled),
+            make_override<VulkanSettings>("vkcrash_diagnostic_shader_dump_on_bind",
+                                          &VulkanSettings::vkcrash_diagnostic_shader_dump_on_bind),
             make_override<VulkanSettings>("vkhost_markers", &VulkanSettings::vkhost_markers),
             make_override<VulkanSettings>("vkguest_markers", &VulkanSettings::vkguest_markers),
             make_override<VulkanSettings>("pipeline_cache_enabled",
@@ -476,7 +479,8 @@ struct VulkanSettings {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VulkanSettings, gpu_id, renderdoc_enabled, vkvalidation_enabled,
                                    vkvalidation_core_enabled, vkvalidation_sync_enabled,
                                    vkvalidation_gpu_enabled, vkcrash_diagnostic_enabled,
-                                   vkhost_markers, vkguest_markers, pipeline_cache_enabled,
+                                   vkcrash_diagnostic_shader_dump_on_bind, vkhost_markers,
+                                   vkguest_markers, pipeline_cache_enabled,
                                    pipeline_cache_archived)
 
 // -------------------------------
@@ -742,6 +746,8 @@ public:
     SETTING_FORWARD_BOOL(m_vulkan, VkValidationSyncEnabled, vkvalidation_sync_enabled)
     SETTING_FORWARD_BOOL(m_vulkan, VkValidationGpuEnabled, vkvalidation_gpu_enabled)
     SETTING_FORWARD_BOOL(m_vulkan, VkCrashDiagnosticEnabled, vkcrash_diagnostic_enabled)
+    SETTING_FORWARD_BOOL(m_vulkan, VkCrashDiagnosticShaderDumpOnBind,
+                         vkcrash_diagnostic_shader_dump_on_bind)
     SETTING_FORWARD_BOOL(m_vulkan, VkHostMarkersEnabled, vkhost_markers)
     SETTING_FORWARD_BOOL(m_vulkan, VkGuestMarkersEnabled, vkguest_markers)
     SETTING_FORWARD_BOOL(m_vulkan, PipelineCacheEnabled, pipeline_cache_enabled)

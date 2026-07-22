@@ -342,6 +342,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "Vulkan vkValidationSync: {}", EmulatorSettings.IsVkValidationSyncEnabled());
     LOG_INFO(Config, "Vulkan vkValidationGpu: {}", EmulatorSettings.IsVkValidationGpuEnabled());
     LOG_INFO(Config, "Vulkan crashDiagnostics: {}", EmulatorSettings.IsVkCrashDiagnosticEnabled());
+    LOG_INFO(Config, "Vulkan crash diagnostic shader dumps on bind: {}",
+             EmulatorSettings.IsVkCrashDiagnosticShaderDumpOnBind());
     LOG_INFO(Config, "Vulkan hostMarkers: {}", EmulatorSettings.IsVkHostMarkersEnabled());
     LOG_INFO(Config, "Vulkan guestMarkers: {}", EmulatorSettings.IsVkGuestMarkersEnabled());
     LOG_INFO(Config, "Vulkan rdocEnable: {}", EmulatorSettings.IsRenderdocEnabled());

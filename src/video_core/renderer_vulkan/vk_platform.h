@@ -22,8 +22,17 @@ constexpr u32 TargetVulkanApiVersion = VK_API_VERSION_1_3;
 inline constexpr const char* CrashDiagnosticLayerName = "VK_LAYER_LUNARG_crash_diagnostic";
 inline constexpr const char* CrashDiagnosticSettingLayerName = CrashDiagnosticLayerName;
 inline constexpr const char* CrashDiagnosticProgressSettingName = "instrument_all_commands";
+inline constexpr const char* CrashDiagnosticSyncSettingName = "sync_after_commands";
+inline constexpr const char* CrashDiagnosticQueueDumpSettingName = "dump_queue_submits";
+inline constexpr const char* CrashDiagnosticCommandBufferDumpSettingName = "dump_command_buffers";
+inline constexpr const char* CrashDiagnosticCommandDumpSettingName = "dump_commands";
 inline constexpr const char* CrashDiagnosticShaderDumpSettingName = "dump_shaders";
-inline constexpr const char* CrashDiagnosticShaderDumpMode = "on_crash";
+inline constexpr const char* CrashDiagnosticPendingDumpMode = "pending";
+inline constexpr const char* CrashDiagnosticAllDumpMode = "all";
+constexpr const char* CrashDiagnosticShaderDumpMode(bool dump_on_bind) {
+    return dump_on_bind ? "on_bind" : "on_crash";
+}
+inline constexpr bool CrashDiagnosticSynchronizeCommands = false;
 
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
 

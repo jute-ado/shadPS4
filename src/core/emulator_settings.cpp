@@ -620,6 +620,8 @@ bool EmulatorSettingsImpl::TransferSettings() {
         setFromToml(s.vkvalidation_sync_enabled, vk, "validation_sync");
         setFromToml(s.vkvalidation_gpu_enabled, vk, "validation_gpu");
         setFromToml(s.vkcrash_diagnostic_enabled, vk, "crashDiagnostic");
+        setFromToml(s.vkcrash_diagnostic_shader_dump_on_bind, vk,
+                    "crashDiagnosticShaderDumpOnBind");
         setFromToml(s.vkhost_markers, vk, "hostMarkers");
         setFromToml(s.vkguest_markers, vk, "guestMarkers");
         setFromToml(s.renderdoc_enabled, vk, "rdocEnable");
