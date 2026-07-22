@@ -9,6 +9,15 @@ include(FetchContent)
 )
 FetchContent_MakeAvailable(googletest)
 
+# GoogleTest 1.17 enables /WX for its own targets under clang-cl. Clang 22 diagnoses a
+# char8_t-to-char32_t conversion in gtest-printers.h, so keep the third-party target buildable
+# without weakening warnings for shadPS4's test targets.
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    foreach(googletest_target gtest gtest_main gmock gmock_main)
+        target_compile_options(${googletest_target} PRIVATE -Wno-character-conversion)
+    endforeach()
+endif()
+
 set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
