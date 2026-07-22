@@ -698,6 +698,67 @@ class ManifestTests(unittest.TestCase):
 
             self.assertIsNone(event.button)
 
+    def test_load_manifest_accepts_visual_checkpoint_delay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "wait for stable state",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "a" * 64,
+                                    "delaySeconds": 0.25,
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertEqual(event.delay_seconds, 0.25)
+
+    def test_load_manifest_rejects_negative_visual_checkpoint_delay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "invalid checkpoint delay",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "a" * 64,
+                                    "delaySeconds": -0.1,
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError, "delaySeconds must be a finite non-negative number"
+            ):
+                load_manifest(path)
+
     def test_load_manifest_accepts_visual_checkpoint_comparison_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2128,6 +2189,52 @@ class RunnerTests(unittest.TestCase):
                 )
             )
             self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
+
+    def test_run_case_delays_visual_checkpoint_before_first_screenshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected_png = test_png(1, 1, 6, bytes((0, 0, 0, 0, 255)))
+            reference = root / "expected.png"
+            reference.write_bytes(expected_png)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "delayed observation",
+                    "timeoutSeconds": 0.6,
+                    "args": ["--expect-ipc", "--omit-gamepad-capability"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "delaySeconds": 0.1,
+                            "timeoutSeconds": 0.2,
+                            "pollSeconds": 0.05,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            commands = observation["ipc_commands"]
+            command_seconds = observation["ipc_command_seconds"]
+            screenshot = commands.index("SCREENSHOT")
+            start = commands.index("START")
+            self.assertGreaterEqual(
+                command_seconds[screenshot] - command_seconds[start], 0.08
+            )
 
     def test_run_case_scales_reference_before_matching_visual_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

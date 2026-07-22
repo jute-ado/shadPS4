@@ -104,6 +104,8 @@ Each case supports:
   uses capture coordinates after scaling. Neither option is valid with an
   exact hash. Bound each checkpoint with `timeoutSeconds`; `pollSeconds`
   defaults to 0.25 and `holdSeconds` defaults to 0.1 when a button is present.
+  Set `delaySeconds` to a non-negative duration to wait after the preceding
+  checkpoint before beginning this checkpoint's screenshot polling.
   Requires screenshot IPC capability and, for button checkpoints, gamepad IPC
   capability. These state-driven events cannot be combined
   with timed screenshots, captures, or controller events in the same case.

@@ -79,6 +79,7 @@ class ScreenshotButtonEvent:
     scale_reference_to_capture: bool
     button: str | None
     timeout_seconds: float
+    delay_seconds: float = 0.0
     poll_seconds: float = 0.25
     hold_seconds: float = 0.1
 
@@ -479,6 +480,17 @@ def _require_screenshot_button_events(
                 f"{sorted(SUPPORTED_BUTTONS)}"
             )
 
+        delay_seconds = item.get("delaySeconds", 0)
+        if (
+            not isinstance(delay_seconds, (int, float))
+            or isinstance(delay_seconds, bool)
+            or not math.isfinite(delay_seconds)
+            or delay_seconds < 0
+        ):
+            raise ManifestError(
+                f"{field}.delaySeconds must be a finite non-negative number"
+            )
+
         values: dict[str, float] = {}
         for json_field, default in (
             ("timeoutSeconds", None),
@@ -508,6 +520,7 @@ def _require_screenshot_button_events(
                 scale_reference_to_capture=scale_reference_to_capture,
                 button=button,
                 timeout_seconds=values["timeoutSeconds"],
+                delay_seconds=float(delay_seconds),
                 poll_seconds=values["pollSeconds"],
                 hold_seconds=values["holdSeconds"],
             )
@@ -515,7 +528,9 @@ def _require_screenshot_button_events(
     if events and not use_ipc:
         raise ManifestError(f"{case_name}: screenshotButtonEvents requires useIpc")
     if sum(
-        event.timeout_seconds + (event.hold_seconds if event.button is not None else 0)
+        event.delay_seconds
+        + event.timeout_seconds
+        + (event.hold_seconds if event.button is not None else 0)
         for event in events
     ) >= timeout:
         raise ManifestError(
@@ -1377,6 +1392,16 @@ def run_case(
         if case.screenshot_button_events and ipc_ready:
             assert process.stdin is not None
             for index, event in enumerate(case.screenshot_button_events):
+                if event.delay_seconds:
+                    remaining_delay = min(
+                        event.delay_seconds, max(0, hard_deadline - time.monotonic())
+                    )
+                    try:
+                        process.wait(timeout=remaining_delay)
+                        process_exited = True
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
                 event_deadline = min(
                     hard_deadline, time.monotonic() + event.timeout_seconds
                 )
