@@ -235,7 +235,7 @@ int EqueueInternal::GetTriggeredEvents(OrbisKernelEvent* ev, int num) {
         if (it->IsTriggered()) {
             ev[count++] = it->event;
             if (it->event.flags & OrbisKernelEvent::Flags::Clear) {
-                it->Clear();
+                it->ConsumeTrigger();
             }
             if (it->event.flags & OrbisKernelEvent::Flags::OneShot) {
                 it = m_events.erase(it);
