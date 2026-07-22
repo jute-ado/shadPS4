@@ -15,6 +15,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include "core/windows_sparse_backing.h"
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -193,9 +194,9 @@ struct AddressSpace::Impl {
         BackingSize += EmulatorSettings.GetExtraDmemInMBytes() * 1_MB;
 
         // Allocate backing file that represents the total physical memory.
-        backing_handle = CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_ALL_ACCESS,
-                                            PAGE_EXECUTE_READWRITE, SEC_COMMIT, BackingSize,
-                                            nullptr, nullptr, 0);
+        backing_handle = CreateFileMapping2(
+            INVALID_HANDLE_VALUE, nullptr, FILE_MAP_ALL_ACCESS, PAGE_EXECUTE_READWRITE,
+            WindowsSparseBacking::SectionAllocationType, BackingSize, nullptr, nullptr, 0);
 
         ASSERT_MSG(backing_handle, "{}", Common::GetLastErrorMsg());
         // Allocate a virtual memory for the backing file map as placeholder
@@ -240,6 +241,12 @@ struct AddressSpace::Impl {
         void* ptr = nullptr;
         if (phys_addr != -1) {
             HANDLE backing = fd != -1 ? reinterpret_cast<HANDLE>(fd) : backing_handle;
+            if (backing == backing_handle) {
+                void* committed = WindowsSparseBacking::CommitRange(backing_base, phys_addr, size,
+                                                                    PAGE_EXECUTE_READWRITE);
+                ASSERT_MSG(committed == backing_base + phys_addr,
+                           "Failed to commit backing range: {}", Common::GetLastErrorMsg());
+            }
             if (fd != -1 && prot == PAGE_READONLY) {
                 // Allocate the memory for the mapping
                 DWORD resultvar;
