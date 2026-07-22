@@ -10,6 +10,7 @@
 #include "video_core/renderer_vulkan/buffer_barrier_policy.h"
 #include "video_core/renderer_vulkan/descriptor_type.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -24,10 +25,13 @@
 
 namespace Vulkan {
 
-static void RecordPipelineBind(const GraphicsPipeline& pipeline) {
-    if (!EmulatorSettings.IsVkCrashDiagnosticEnabled()) {
+static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbuf,
+                               const GraphicsPipeline& pipeline) {
+    if (!EmulatorSettings.IsVkCrashDiagnosticEnabled() &&
+        !EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints()) {
         return;
     }
+    const u64 pipeline_hash = std::hash<GraphicsPipelineKey>{}(pipeline.GetGraphicsKey());
     std::array<u64, PipelineBindRecord::MaxShaderHashes> program_hashes{};
     const auto stages = pipeline.GetStages();
     for (size_t index = 0; index < stages.size(); ++index) {
@@ -35,20 +39,27 @@ static void RecordPipelineBind(const GraphicsPipeline& pipeline) {
             program_hashes[index] = stages[index]->pgm_hash;
         }
     }
-    GetPipelineBindHistory().Record(MakePipelineBindRecord(
-        PipelineBindType::Graphics, std::hash<GraphicsPipelineKey>{}(pipeline.GetGraphicsKey()),
-        program_hashes));
+    GetPipelineBindHistory().Record(
+        MakePipelineBindRecord(PipelineBindType::Graphics, pipeline_hash, program_hashes));
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        cmdbuf.setCheckpointNV(EncodeDiagnosticCheckpoint(pipeline_hash));
+    }
 }
 
-static void RecordPipelineBind(const ComputePipeline& pipeline) {
-    if (!EmulatorSettings.IsVkCrashDiagnosticEnabled()) {
+static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbuf,
+                               const ComputePipeline& pipeline) {
+    if (!EmulatorSettings.IsVkCrashDiagnosticEnabled() &&
+        !EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints()) {
         return;
     }
+    const u64 pipeline_hash = std::hash<ComputePipelineKey>{}(pipeline.GetComputeKey());
     const auto& compute = pipeline.GetStage(Shader::LogicalStage::Compute);
     const std::array program_hashes{compute.pgm_hash};
-    GetPipelineBindHistory().Record(MakePipelineBindRecord(
-        PipelineBindType::Compute, std::hash<ComputePipelineKey>{}(pipeline.GetComputeKey()),
-        program_hashes));
+    GetPipelineBindHistory().Record(
+        MakePipelineBindRecord(PipelineBindType::Compute, pipeline_hash, program_hashes));
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        cmdbuf.setCheckpointNV(EncodeDiagnosticCheckpoint(pipeline_hash));
+    }
 }
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
@@ -254,7 +265,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     VideoCore::IssueDrawWithVertexInputState(
         instance.IsVertexInputDynamicState(),
         [&] {
-            RecordPipelineBind(*pipeline);
+            RecordPipelineBind(instance, cmdbuf, *pipeline);
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
         },
         [&] { buffer_cache.CommitVertexInputState(*pipeline); },
@@ -328,7 +339,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     VideoCore::IssueDrawWithVertexInputState(
         instance.IsVertexInputDynamicState(),
         [&] {
-            RecordPipelineBind(*pipeline);
+            RecordPipelineBind(instance, cmdbuf, *pipeline);
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
         },
         [&] { buffer_cache.CommitVertexInputState(*pipeline); },
@@ -381,7 +392,7 @@ void Rasterizer::DispatchDirect() {
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    RecordPipelineBind(*pipeline);
+    RecordPipelineBind(instance, cmdbuf, *pipeline);
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
@@ -414,7 +425,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    RecordPipelineBind(*pipeline);
+    RecordPipelineBind(instance, cmdbuf, *pipeline);
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
