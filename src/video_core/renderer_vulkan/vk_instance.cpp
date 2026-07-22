@@ -8,10 +8,12 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/device_feature_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -237,6 +239,18 @@ bool Instance::CreateDevice() {
         LOG_WARNING(Render_Vulkan, "Extension {} unavailable.", extension);
         return false;
     };
+
+    const bool diagnostic_checkpoints_available = std::ranges::contains(
+        available_extensions, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    const bool native_checkpoints_requested =
+        EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints();
+    diagnostic_checkpoints = ShouldEnableDiagnosticCheckpoints(native_checkpoints_requested,
+                                                               diagnostic_checkpoints_available);
+    if (diagnostic_checkpoints) {
+        add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    } else if (native_checkpoints_requested) {
+        LOG_WARNING(Render_Vulkan, "Vulkan diagnostic checkpoints are unavailable.");
+    }
 
     // Required
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),

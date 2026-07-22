@@ -32,3 +32,14 @@ TEST(VulkanLayerSettings, ShaderDumpOnBindIsOptInAndSerializable) {
 
     EXPECT_TRUE(restored.vkcrash_diagnostic_shader_dump_on_bind.value);
 }
+
+TEST(VulkanLayerSettings, NativeCheckpointsAreOptInAndSerializable) {
+    VulkanSettings settings{};
+    EXPECT_FALSE(settings.vkcrash_diagnostic_native_checkpoints.value);
+
+    settings.vkcrash_diagnostic_native_checkpoints.set(true);
+    const nlohmann::json serialized = settings;
+    const auto restored = serialized.get<VulkanSettings>();
+
+    EXPECT_TRUE(restored.vkcrash_diagnostic_native_checkpoints.value);
+}

@@ -20,6 +20,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/presenter_sync.h"
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -498,7 +499,9 @@ static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readba
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
-               EmulatorSettings.IsVkCrashDiagnosticEnabled()},
+               ShouldEnableCrashDiagnosticLayer(
+                   EmulatorSettings.IsVkCrashDiagnosticEnabled(),
+                   EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints())},
       draw_scheduler{instance}, present_scheduler{instance}, flip_scheduler{instance},
       swapchain{instance, window},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, liverpool)},
@@ -641,6 +644,15 @@ Frame* Presenter::PrepareLastFrame() {
             continue;
         }
         if (result == vk::Result::eErrorDeviceLost) {
+            if (instance.SupportsDiagnosticCheckpoints()) {
+                std::scoped_lock submit_lock{Scheduler::submit_mutex};
+                for (const auto& checkpoint : instance.GetGraphicsQueue().getCheckpointDataNV()) {
+                    LOG_CRITICAL(Render_Vulkan,
+                                 "GPU diagnostic checkpoint: stage={}, pipeline={:#018x}",
+                                 vk::to_string(checkpoint.stage),
+                                 DecodeDiagnosticCheckpoint(checkpoint.pCheckpointMarker));
+                }
+            }
             for (const auto& bind : GetPipelineBindHistory().RecentUnique()) {
                 LOG_CRITICAL(
                     Render_Vulkan,
