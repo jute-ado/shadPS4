@@ -795,12 +795,16 @@ def load_manifest(path: str | Path) -> GameManifest:
         seen_names.add(name)
 
         timeout = raw_case.get("timeoutSeconds")
-        if (
-            not isinstance(timeout, (int, float))
-            or isinstance(timeout, bool)
-            or timeout <= 0
-        ):
-            raise ManifestError(f"{name}: timeoutSeconds must be positive")
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+            raise ManifestError(f"{name}: timeoutSeconds must be finite and positive")
+        try:
+            timeout_seconds = float(timeout)
+        except OverflowError as error:
+            raise ManifestError(
+                f"{name}: timeoutSeconds must be finite and positive"
+            ) from error
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ManifestError(f"{name}: timeoutSeconds must be finite and positive")
 
         args = _require_string_list(raw_case.get("args"), "args", name)
         user_config = (
@@ -839,25 +843,25 @@ def load_manifest(path: str | Path) -> GameManifest:
         screenshot_seconds = _require_screenshot_schedule(
             raw_case.get("screenshotSeconds"),
             case_name=name,
-            timeout=float(timeout),
+            timeout=timeout_seconds,
             use_ipc=use_ipc,
         )
         renderdoc_capture_seconds = _require_renderdoc_capture_schedule(
             raw_case.get("renderdocCaptureSeconds"),
             case_name=name,
-            timeout=float(timeout),
+            timeout=timeout_seconds,
             use_ipc=use_ipc,
         )
         button_events = _require_button_events(
             raw_case.get("buttonEvents"),
             case_name=name,
-            timeout=float(timeout),
+            timeout=timeout_seconds,
             use_ipc=use_ipc,
         )
         screenshot_button_events = _require_screenshot_button_events(
             raw_case.get("screenshotButtonEvents"),
             case_name=name,
-            timeout=float(timeout),
+            timeout=timeout_seconds,
             use_ipc=use_ipc,
             root=root,
         )
@@ -874,13 +878,13 @@ def load_manifest(path: str | Path) -> GameManifest:
         axis_events = _require_axis_events(
             raw_case.get("axisEvents"),
             case_name=name,
-            timeout=float(timeout),
+            timeout=timeout_seconds,
             use_ipc=use_ipc,
         )
         touch_events = _require_touch_events(
             raw_case.get("touchEvents"),
             case_name=name,
-            timeout=float(timeout),
+            timeout=timeout_seconds,
             use_ipc=use_ipc,
         )
         if screenshot_button_events and any(
@@ -901,7 +905,7 @@ def load_manifest(path: str | Path) -> GameManifest:
                 game_path=_resolve_existing_path(
                     root, raw_case.get("gamePath"), f"{name}: gamePath"
                 ),
-                timeout_seconds=float(timeout),
+                timeout_seconds=timeout_seconds,
                 user_config=user_config,
                 user_data_seed=user_data_seed,
                 use_ipc=use_ipc,
