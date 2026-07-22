@@ -10,6 +10,7 @@
 #include "common/uint128.h"
 #include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/kernel/time.h"
+#include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/pm4_opcodes.h"
 
 namespace AmdGpu {
