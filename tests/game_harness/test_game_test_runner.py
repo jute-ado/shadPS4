@@ -410,23 +410,36 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ManifestError, "duplicate"):
                 load_manifest(path)
 
-    def test_load_manifest_rejects_nonpositive_timeout(self) -> None:
+    def test_load_manifest_rejects_nonpositive_or_nonfinite_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             game = root / "game"
             game.mkdir()
-            path = self.write_manifest(
-                root,
-                {
-                    "schemaVersion": 1,
-                    "cases": [
-                        {"name": "boot", "gamePath": "game", "timeoutSeconds": 0}
-                    ],
-                },
-            )
+            for timeout in (
+                0,
+                -1,
+                float("nan"),
+                float("inf"),
+                float("-inf"),
+                10**400,
+            ):
+                with self.subTest(timeout=timeout):
+                    path = self.write_manifest(
+                        root,
+                        {
+                            "schemaVersion": 1,
+                            "cases": [
+                                {
+                                    "name": "boot",
+                                    "gamePath": "game",
+                                    "timeoutSeconds": timeout,
+                                }
+                            ],
+                        },
+                    )
 
-            with self.assertRaisesRegex(ManifestError, "timeoutSeconds"):
-                load_manifest(path)
+                    with self.assertRaisesRegex(ManifestError, "timeoutSeconds"):
+                        load_manifest(path)
 
     def test_load_manifest_accepts_explicit_ipc_control(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
