@@ -56,6 +56,21 @@ target_link_libraries(shadps4_buffer_resource_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_buffer_resource_test)
 
+add_executable(shadps4_vulkan_layer_settings_test
+    test_vulkan_layer_settings.cpp
+)
+target_include_directories(shadps4_vulkan_layer_settings_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_vulkan_layer_settings_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_vulkan_layer_settings_test PRIVATE
+    GTest::gtest_main
+    fmt::fmt
+    spdlog::spdlog
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_vulkan_layer_settings_test)
+
 add_executable(shadps4_pm4_lod_stats_test
     test_pm4_lod_stats.cpp
 )
