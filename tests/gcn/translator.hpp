@@ -12,6 +12,7 @@
 struct TranslationEnvironment {
     u32 subgroup_size{32};
     std::array<u32, 3> workgroup_size{1, 1, 1};
+    bool force_dma_helpers{};
 };
 
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst);
