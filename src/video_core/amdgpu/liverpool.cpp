@@ -18,6 +18,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/amdgpu/pm4_lod_stats.h"
 #include "video_core/amdgpu/pm4_predication.h"
+#include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -153,9 +154,13 @@ void Liverpool::Process(std::stop_token stoken) {
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
-                rasterizer->Flush();
-            }
-            if (submit_done_callback) {
+                SubmitSubmissionBoundary(
+                    std::move(submit_done_callback),
+                    [this](Common::UniqueFunction<void>&& completion) {
+                        rasterizer->DeferGpuCompletion(std::move(completion));
+                    },
+                    [this] { rasterizer->Flush(); });
+            } else if (submit_done_callback) {
                 submit_done_callback();
             }
         }
@@ -289,8 +294,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (eop_completion) {
                         eop_completion->AttachFlip([this] {
                             SendCommand([] {
-                                Platform::IrqC::Instance()->Signal(
-                                    Platform::InterruptId::GfxFlip);
+                                Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                             });
                         });
                     } else {

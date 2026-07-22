@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/eop_flip_completion.h"
+#include "video_core/amdgpu/submission_boundary.h"
 
 namespace {
 
@@ -55,8 +56,7 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
 
     EXPECT_EQ(fence, 0x12345678u);
     EXPECT_TRUE(interrupt_signalled);
-    EXPECT_EQ(operations,
-              (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
 TEST(EventWriteEop, DefersFlipUntilThePrecedingEopCompletes) {
@@ -90,12 +90,38 @@ TEST(EventWriteEop, CompletesEopAfterFenceWriteAndInterrupt) {
         TestEopPacket{.data = 1},
         [&](auto&& callback) { gpu_completion = std::forward<decltype(callback)>(callback); },
         [] {}, [&](u32) { operations.emplace_back("fence"); },
-        [&] { operations.emplace_back("interrupt"); },
-        [&] { completion.CompleteEop(); });
+        [&] { operations.emplace_back("interrupt"); }, [&] { completion.CompleteEop(); });
 
     EXPECT_TRUE(operations.empty());
     ASSERT_TRUE(gpu_completion);
     gpu_completion();
 
     EXPECT_EQ(operations, (std::vector<std::string>{"fence", "interrupt", "flip"}));
+}
+
+TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
+    std::vector<std::string> operations;
+    std::vector<std::function<void()>> gpu_completions;
+
+    auto defer_completion = [&](auto&& completion) {
+        gpu_completions.emplace_back(std::forward<decltype(completion)>(completion));
+    };
+
+    AmdGpu::SubmitEop(
+        TestEopPacket{.data = 1}, defer_completion, [&] { operations.emplace_back("eop-submit"); },
+        [&](u32) { operations.emplace_back("fence"); },
+        [&] { operations.emplace_back("interrupt"); });
+    AmdGpu::SubmitSubmissionBoundary([&] { operations.emplace_back("boundary"); }, defer_completion,
+                                     [&] { operations.emplace_back("boundary-submit"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit"}));
+    ASSERT_EQ(gpu_completions.size(), 2u);
+
+    gpu_completions[0]();
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"eop-submit", "boundary-submit", "fence", "interrupt"}));
+
+    gpu_completions[1]();
+    EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit", "fence",
+                                                    "interrupt", "boundary"}));
 }
