@@ -3417,6 +3417,67 @@ class RunnerTests(unittest.TestCase):
                 (result.artifact_directory / "stdout.log").stat().st_size, 1024
             )
 
+    def test_run_case_finds_required_patterns_after_artifact_limit(self) -> None:
+        marker = "late required marker"
+        for source_option in ("--stdout", "--log"):
+            with (
+                self.subTest(source=source_option),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                manifest = load_manifest(
+                    self.make_manifest(
+                        root,
+                        case={
+                            "name": "late required output",
+                            "args": [source_option, "x" * 2048 + marker],
+                            "requiredLogPatterns": [marker],
+                        },
+                    )
+                )
+
+                result = run_case(
+                    manifest.cases[0],
+                    emulator_command=[sys.executable, str(FIXTURE)],
+                    artifacts_root=root / "artifacts",
+                    output_limit_bytes=256,
+                )
+
+                self.assertTrue(result.output_truncated)
+                self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_finds_forbidden_patterns_after_artifact_limit(self) -> None:
+        marker = "late forbidden marker"
+        for source_option in ("--stdout", "--log"):
+            with (
+                self.subTest(source=source_option),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                manifest = load_manifest(
+                    self.make_manifest(
+                        root,
+                        case={
+                            "name": "late forbidden output",
+                            "args": [source_option, "x" * 2048 + marker],
+                            "forbiddenLogPatterns": [marker],
+                        },
+                    )
+                )
+
+                result = run_case(
+                    manifest.cases[0],
+                    emulator_command=[sys.executable, str(FIXTURE)],
+                    artifacts_root=root / "artifacts",
+                    output_limit_bytes=256,
+                )
+
+                self.assertTrue(result.output_truncated)
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    f"forbidden log pattern found: {marker!r}", result.failures
+                )
+
     def test_run_manifest_writes_machine_readable_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
