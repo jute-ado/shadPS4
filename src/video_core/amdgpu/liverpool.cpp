@@ -962,8 +962,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (cond_exec->command.Value() != 0) {
                     LOG_WARNING(Render, "IT_COND_EXEC used a reserved command");
                 }
-                const auto skip = *cond_exec->Address() == false;
-                if (skip) {
+                if (cond_exec->ShouldSkip()) {
                     dcb = NextPacket(dcb,
                                      header->type3.NumWords() + 1 + cond_exec->exec_count.Value());
                     continue;

@@ -191,6 +191,20 @@ target_compile_features(shadps4_pm4_predication_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_pm4_predication_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pm4_predication_test)
 
+add_executable(shadps4_pm4_cond_exec_test
+    test_pm4_cond_exec.cpp
+)
+target_include_directories(shadps4_pm4_cond_exec_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pm4_cond_exec_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pm4_cond_exec_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_pm4_cond_exec_test)
+
 add_executable(shadps4_renderdoc_path_test
     ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
     test_renderdoc_path.cpp
