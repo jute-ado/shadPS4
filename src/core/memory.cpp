@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
+#include "core/backing_write_cursor.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/memory.h"
@@ -154,6 +155,8 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    BackingWriteCursor writer{
+        std::span{static_cast<const u8*>(data), static_cast<size_t>(size)}};
     std::shared_lock lk{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -176,19 +179,19 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
         auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
         auto phys_handle = std::prev(vma.phys_areas.upper_bound(start_in_vma));
         for (; phys_handle != vma.phys_areas.end(); phys_handle++) {
-            if (!size) {
+            if (writer.IsComplete()) {
                 break;
             }
             const u64 start_in_dma =
                 std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
             u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
-            u64 copy_size = std::min<u64>(size, phys_handle->second.size - start_in_dma);
-            memcpy(backing, data, copy_size);
-            size -= copy_size;
+            const u64 copy_size =
+                std::min<u64>(writer.Remaining(), phys_handle->second.size - start_in_dma);
+            writer.Write(std::span{backing, static_cast<size_t>(copy_size)});
         }
     }
 
-    return true;
+    return writer.IsComplete();
 }
 
 PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment) {

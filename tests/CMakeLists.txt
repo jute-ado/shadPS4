@@ -129,6 +129,16 @@ target_link_libraries(shadps4_irq_controller_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_irq_controller_test)
 
+add_executable(shadps4_backing_write_cursor_test
+    test_backing_write_cursor.cpp
+)
+target_include_directories(shadps4_backing_write_cursor_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_backing_write_cursor_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_backing_write_cursor_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_backing_write_cursor_test)
+
 add_executable(shadps4_vulkan_diagnostic_checkpoint_test
     test_vulkan_diagnostic_checkpoint.cpp
 )
