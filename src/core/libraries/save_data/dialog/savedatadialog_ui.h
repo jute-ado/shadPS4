@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/file_format/psf.h"
+#include "core/libraries/save_data/dialog/gamepad_input_capture.h"
 #include "core/libraries/save_data/savedata.h"
 #include "core/libraries/system/commondialog.h"
 #include "imgui/imgui_layer.h"
@@ -290,6 +291,7 @@ class SaveDialogUi final : public ImGui::Layer {
     SaveDialogState* state{};
     CommonDialog::Status* status{};
     SaveDialogResult* result{};
+    GamepadInputCapture gamepad_input_capture{};
 
     std::recursive_mutex draw_mutex{};
 
