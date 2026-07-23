@@ -13,11 +13,10 @@ namespace {
 
 class FakeMemory {
 public:
-    bool IsValidGpuMapping(VAddr address, u64 size) {
+    bool IsValidMapping(VAddr address) {
         ++mapping_check_count;
         checked_address = address;
-        checked_size = size;
-        return gpu_mapping;
+        return valid_mapping;
     }
 
     void CopySparseMemory(VAddr address, u8* destination, u64 size) {
@@ -27,25 +26,23 @@ public:
         ++sparse_copy_count;
     }
 
-    bool gpu_mapping{};
+    bool valid_mapping{};
     u32 mapping_check_count{};
     VAddr checked_address{};
-    u64 checked_size{};
     VAddr sparse_address{};
     u64 sparse_size{};
     u32 sparse_copy_count{};
     std::array<u8, 4> sparse_data{0x12, 0x34, 0x56, 0x78};
 };
 
-TEST(StreamBufferCopy, UsesSparseCopyForGuestGpuAddresses) {
+TEST(StreamBufferCopy, UsesSparseCopyForMappedGuestAddresses) {
     constexpr VAddr GuestAddress = 0x12345000;
-    FakeMemory memory{.gpu_mapping = true};
+    FakeMemory memory{.valid_mapping = true};
     std::array<u8, 4> destination{};
 
     CopyStreamBufferSource(memory, GuestAddress, destination.data(), destination.size());
 
     EXPECT_EQ(memory.checked_address, GuestAddress);
-    EXPECT_EQ(memory.checked_size, destination.size());
     EXPECT_EQ(memory.mapping_check_count, 1);
     EXPECT_EQ(memory.sparse_address, GuestAddress);
     EXPECT_EQ(memory.sparse_size, destination.size());
@@ -55,7 +52,7 @@ TEST(StreamBufferCopy, UsesSparseCopyForGuestGpuAddresses) {
 
 TEST(StreamBufferCopy, CopiesOrdinaryHostDataDirectly) {
     const std::array<u8, 4> source{0x87, 0x65, 0x43, 0x21};
-    FakeMemory memory{.gpu_mapping = true};
+    FakeMemory memory{.valid_mapping = true};
     std::array<u8, 4> destination{};
 
     CopyStreamBufferSource(memory, source.data(), destination.data(), destination.size());
