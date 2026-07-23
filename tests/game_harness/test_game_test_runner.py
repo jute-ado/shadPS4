@@ -613,6 +613,12 @@ class ManifestTests(unittest.TestCase):
                             "gamePath": "game",
                             "timeoutSeconds": 3,
                             "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "0" * 64,
+                                    "timeoutSeconds": 0.5,
+                                }
+                            ],
                             "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
                             "postCheckpointScreenshotSource": "presented_frame",
                             "minimumDistinctPostCheckpointScreenshots": 2,
@@ -643,6 +649,69 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(case.post_checkpoint_luminance_dip_ratio, 0.5)
             self.assertEqual(case.maximum_post_checkpoint_luminance_dips, 1)
 
+    def test_load_manifest_rejects_post_checkpoint_schedule_without_checkpoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "unanchored sampling",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "postCheckpointScreenshotSeconds": [0.1],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "postCheckpointScreenshotSeconds requires screenshotButtonEvents",
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_post_checkpoint_options_without_schedule(
+        self,
+    ) -> None:
+        options = (
+            {"postCheckpointScreenshotSource": "presented_frame"},
+            {"postCheckpointLuminanceDipRatio": 0.5},
+        )
+        for option in options:
+            with (
+                self.subTest(option=option),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "game").mkdir()
+                path = self.write_manifest(
+                    root,
+                    {
+                        "schemaVersion": 1,
+                        "cases": [
+                            {
+                                "name": "unused post-checkpoint option",
+                                "gamePath": "game",
+                                "timeoutSeconds": 2,
+                                "useIpc": True,
+                                **option,
+                            }
+                        ],
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    ManifestError, "requires postCheckpointScreenshotSeconds"
+                ):
+                    load_manifest(path)
+
     def test_load_manifest_rejects_impossible_post_checkpoint_distinct_count(
         self,
     ) -> None:
@@ -659,6 +728,12 @@ class ManifestTests(unittest.TestCase):
                             "gamePath": "game",
                             "timeoutSeconds": 2,
                             "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "0" * 64,
+                                    "timeoutSeconds": 0.5,
+                                }
+                            ],
                             "postCheckpointScreenshotSeconds": [0.1, 0.2],
                             "minimumDistinctPostCheckpointScreenshots": 3,
                         }
@@ -689,6 +764,12 @@ class ManifestTests(unittest.TestCase):
                             "gamePath": "game",
                             "timeoutSeconds": 2,
                             "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "0" * 64,
+                                    "timeoutSeconds": 0.5,
+                                }
+                            ],
                             "postCheckpointScreenshotSeconds": [0.1],
                             "maximumPostCheckpointInvisibleFlashes": 0,
                         }
@@ -2430,6 +2511,22 @@ class RunnerTests(unittest.TestCase):
             and "ipcHandshakeTimeoutSeconds" not in case_content
         ):
             case_content["ipcHandshakeTimeoutSeconds"] = 2
+        if (
+            case_content.get("postCheckpointScreenshotSeconds")
+            and "screenshotButtonEvents" not in case_content
+        ):
+            checkpoint_reference = root / "post-checkpoint-reference.png"
+            checkpoint_reference.write_bytes(
+                test_png(1, 1, 2, bytes((0, 0, 0, 0)))
+            )
+            case_content["screenshotButtonEvents"] = [
+                {
+                    "referenceScreenshot": checkpoint_reference.name,
+                    "maximumDifference": 1,
+                    "timeoutSeconds": 0.2,
+                    "pollSeconds": 0.02,
+                }
+            ]
         content = {
             "schemaVersion": 1,
             "cases": [case_content],
@@ -3833,7 +3930,7 @@ class RunnerTests(unittest.TestCase):
                     "timeoutSeconds": 0.7,
                     "args": ["--expect-ipc", "--alternate-screenshot-visibility"],
                     "useIpc": True,
-                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3, 0.4],
                     "minimumPostCheckpointScreenshotNonBlackFraction": 0.9,
                     "maximumPostCheckpointInvisibleFlashes": 0,
                     "allowedOutcomes": ["timed_out"],
@@ -3877,7 +3974,7 @@ class RunnerTests(unittest.TestCase):
 
             self.assertTrue(result.passed, result.failures)
 
-    def test_run_case_keeps_scheduled_and_post_checkpoint_captures_separate(
+    def test_run_case_keeps_post_checkpoint_captures_out_of_scheduled_results(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3889,7 +3986,6 @@ class RunnerTests(unittest.TestCase):
                     "timeoutSeconds": 0.7,
                     "args": ["--expect-ipc", "--vary-screenshots"],
                     "useIpc": True,
-                    "screenshotSeconds": [0.05],
                     "postCheckpointScreenshotSeconds": [0.1, 0.2],
                     "allowedOutcomes": ["timed_out"],
                 },
@@ -3902,13 +3998,10 @@ class RunnerTests(unittest.TestCase):
             )
 
             self.assertTrue(result.passed, result.failures)
-            self.assertEqual(len(result.screenshots), 1)
+            self.assertEqual(result.screenshots, [])
             self.assertEqual(len(result.post_checkpoint_screenshots), 2)
-            self.assertTrue(
-                set(result.screenshots).isdisjoint(result.post_checkpoint_screenshots)
-            )
             report = result.to_report()
-            self.assertEqual(report["screenshots"], [str(result.screenshots[0])])
+            self.assertEqual(report["screenshots"], [])
             self.assertEqual(
                 report["post_checkpoint_screenshots"],
                 [str(path) for path in result.post_checkpoint_screenshots],
@@ -3981,7 +4074,7 @@ class RunnerTests(unittest.TestCase):
                         "--screenshot-red",
                         "64",
                         "--black-screenshots-after",
-                        "1",
+                        "2",
                     ],
                     "useIpc": True,
                     "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
