@@ -882,6 +882,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/file_sys/fs.h
          src/core/ipc/ipc.cpp
          src/core/ipc/ipc.h
+         src/core/test_lab_probe.cpp
+         src/core/test_lab_probe.h
          src/core/loader/dwarf.cpp
          src/core/loader/dwarf.h
          src/core/loader/elf.cpp
