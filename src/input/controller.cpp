@@ -14,6 +14,7 @@
 #include "core/libraries/system/userservice.h"
 #include "core/user_settings.h"
 #include "input/controller.h"
+#include "input/controller_trace.h"
 
 namespace Input {
 
@@ -93,7 +94,8 @@ void State::UpdateAxisSmoothing() {
     }
 }
 
-GameController::GameController() : m_states_queue(64) {}
+GameController::GameController(bool record_test_lab_input)
+    : m_states_queue(64), m_record_test_lab_input{record_test_lab_input} {}
 
 void GameController::ReadState(State* state, bool* isConnected, int* connectedCount) {
     *isConnected = m_connection.IsConnected();
@@ -424,6 +426,9 @@ void GameController::PushState() {
     std::lock_guard lg(m_states_queue_mutex);
     m_state.time = Libraries::Kernel::sceKernelGetProcessTime();
     m_states_queue.Push(m_state);
+    if (m_record_test_lab_input) {
+        RecordPrimaryControllerState(m_state);
+    }
 }
 
 u8 GameControllers::GetGamepadIndexFromJoystickId(SDL_JoystickID id) {

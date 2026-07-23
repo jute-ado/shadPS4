@@ -27,6 +27,7 @@ set(TEST_TARGETS
 add_executable(shadps4_controller_button_test
     ${CMAKE_SOURCE_DIR}/src/input/controller_axis.cpp
     ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/controller_trace.cpp
     test_controller_axis.cpp
     test_controller_button.cpp
     test_controller_connection.cpp
@@ -41,6 +42,7 @@ target_compile_features(shadps4_controller_button_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_controller_button_test PRIVATE
     GTest::gtest_main
     SDL3::SDL3
+    spdlog::spdlog
 )
 list(APPEND TEST_TARGETS shadps4_controller_button_test)
 

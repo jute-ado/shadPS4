@@ -29,6 +29,8 @@ struct TouchpadEntry {
     bool state{};
     u16 x{};
     u16 y{};
+
+    bool operator==(const TouchpadEntry&) const = default;
 };
 
 struct Colour {
@@ -79,7 +81,7 @@ class GameController {
     friend class GameControllers;
 
 public:
-    GameController();
+    explicit GameController(bool record_test_lab_input = false);
     virtual ~GameController() = default;
     void ConnectController(SDL_Gamepad* pad);
     void ConnectVirtualController();
@@ -141,6 +143,7 @@ private:
 
     std::mutex m_states_queue_mutex;
     RingBufferQueue<State> m_states_queue;
+    bool m_record_test_lab_input{};
 };
 
 class GameControllers {
@@ -148,7 +151,7 @@ class GameControllers {
 
 public:
     GameControllers()
-        : controllers({new GameController(), new GameController(), new GameController(),
+        : controllers({new GameController(true), new GameController(), new GameController(),
                        new GameController(), new GameController()}) {};
     virtual ~GameControllers() = default;
     GameController* operator[](const size_t& i) const {
