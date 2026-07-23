@@ -9,6 +9,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
+#include "video_core/buffer_cache/vertex_buffer_range.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -164,34 +165,20 @@ void BufferCache::BindVertexBuffers(
         }
     };
 
-    // Build list of ranges covering the requested buffers
-    Vulkan::VertexInputs<BufferRange> ranges{};
-    for (const auto& buffer : guest_buffers) {
-        if (buffer.GetSize() > 0) {
-            ranges.emplace_back(buffer.base_address, buffer.base_address + buffer.GetSize());
-        }
-    }
-
-    // Merge connecting ranges together
-    Vulkan::VertexInputs<BufferRange> ranges_merged{};
-    if (!ranges.empty()) {
-        std::ranges::sort(ranges, [](const BufferRange& lhv, const BufferRange& rhv) {
-            return lhv.base_address < rhv.base_address;
+    // Clamp every descriptor to mapped memory before merging. Unbounded descriptors from
+    // different mappings otherwise overlap numerically and collapse into one invalid host range.
+    const auto guest_ranges =
+        BuildVertexBufferRanges(guest_buffers, [this](VAddr address, u64 size) {
+            return memory->ClampRangeSize(address, size);
         });
-        ranges_merged.emplace_back(ranges[0]);
-        for (auto range : ranges) {
-            auto& prev_range = ranges_merged.back();
-            if (prev_range.end_address < range.base_address) {
-                ranges_merged.emplace_back(range);
-            } else {
-                prev_range.end_address = std::max(prev_range.end_address, range.end_address);
-            }
-        }
+    Vulkan::VertexInputs<BufferRange> ranges_merged{};
+    for (const auto& range : guest_ranges) {
+        ranges_merged.emplace_back(range.base_address, range.end_address);
     }
 
     // Map buffers for merged ranges
     for (auto& range : ranges_merged) {
-        const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        const u64 size = range.GetSize();
         const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
