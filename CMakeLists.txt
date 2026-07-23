@@ -1173,6 +1173,8 @@ set(IMGUI src/imgui/imgui_config.h
           src/imgui/renderer/font_data.h
           src/imgui/renderer/font_stack.cpp
           src/imgui/renderer/font_stack.h
+          src/imgui/renderer/png_decode.cpp
+          src/imgui/renderer/png_decode.h
           src/imgui/renderer/texture_manager.cpp
           src/imgui/renderer/texture_manager.h
           src/imgui/big_picture/big_picture.cpp
