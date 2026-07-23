@@ -2201,7 +2201,19 @@ def run_case(
     _observe_file_patterns(emulator_log_path, log_pattern_observers)
     emulator_log, log_truncated = _read_capped(emulator_log_path, output_limit_bytes)
     combined_log = "\n".join((stdout, stderr, emulator_log))
-    screenshots = _find_valid_screenshots(artifact_directory)
+    all_screenshots = _find_valid_screenshots(artifact_directory)
+    if case.screenshot_button_events:
+        # Timed screenshots and visual checkpoints are mutually exclusive.
+        # Classify by the manifest mode so a late in-flight checkpoint capture
+        # cannot leak into the scheduled screenshot result set.
+        screenshots = []
+    else:
+        post_checkpoint_set = set(post_checkpoint_screenshots)
+        screenshots = [
+            screenshot
+            for screenshot in all_screenshots
+            if screenshot not in post_checkpoint_set
+        ]
     screenshot_hashes = [_hash_file(path) for path in screenshots]
     renderdoc_captures = _find_renderdoc_captures(artifact_directory)
     renderdoc_capture_hashes = [_hash_file(path) for path in renderdoc_captures]

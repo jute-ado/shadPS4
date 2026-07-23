@@ -203,16 +203,18 @@ termination. Unless an IPC handshake timeout is configured, the hard timeout
 remains relative to process launch; scheduled actions are always relative to
 acknowledged IPC startup. Scheduled
 screenshot paths are included in the report together with their SHA-256
-content hashes and requested pixel-difference measurements. RenderDoc capture
-paths and hashes are included as well. Each `screenshotButtonEvents` poll also
-adds a `visual_checkpoint_attempts` report entry with its event index, captured
-path and hash, measured reference difference, normalized mean intensity,
-non-black pixel fraction, and match result. These measurements make blank or
-uniform output visible in machine-readable failure evidence without embedding
-the private reference-image path. Button, axis, touch, screenshot, and RenderDoc
-events share the same monotonic post-handshake timeline, allowing deterministic
-navigation, movement, gestures, causal visual assertions, and frame-level GPU
-diagnosis.
+content hashes and requested pixel-difference measurements. The `screenshots`,
+`post_checkpoint_screenshots`, and `visual_checkpoint_attempts` report fields
+are disjoint, so assertions and downstream tooling cannot mistake one capture
+phase for another. RenderDoc capture paths and hashes are included as well.
+Each `screenshotButtonEvents` poll adds a `visual_checkpoint_attempts` entry
+with its event index, captured path and hash, measured reference difference,
+normalized mean intensity, non-black pixel fraction, and match result. These
+measurements make blank or uniform output visible in machine-readable failure
+evidence without embedding the private reference-image path. Button, axis,
+touch, screenshot, and RenderDoc events share the same monotonic post-handshake
+timeline, allowing deterministic navigation, movement, gestures, causal visual
+assertions, and frame-level GPU diagnosis.
 
 The artifact size cap only limits retained log files. Required and forbidden
 patterns are evaluated across complete stdout, stderr, and emulator logs, so a
