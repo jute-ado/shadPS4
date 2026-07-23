@@ -63,6 +63,7 @@ CASE_FIELDS = frozenset(
         "screenshotSeconds",
         "postCheckpointScreenshotSeconds",
         "postCheckpointScreenshotSource",
+        "stopAfterPostCheckpointScreenshots",
         "renderdocCaptureSeconds",
         "minimumDistinctScreenshots",
         "minimumDistinctPostCheckpointScreenshots",
@@ -202,6 +203,7 @@ class GameCase:
     screenshot_seconds: tuple[float, ...] = ()
     post_checkpoint_screenshot_seconds: tuple[float, ...] = ()
     post_checkpoint_screenshot_source: str | None = None
+    stop_after_post_checkpoint_screenshots: bool = False
     renderdoc_capture_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
     minimum_distinct_post_checkpoint_screenshots: int = 0
@@ -971,6 +973,19 @@ def load_manifest(path: str | Path) -> GameManifest:
                 f"{name}: postCheckpointScreenshotSource requires "
                 "postCheckpointScreenshotSeconds"
             )
+        stop_after_post_checkpoint_screenshots = _require_bool(
+            raw_case.get("stopAfterPostCheckpointScreenshots", False),
+            "stopAfterPostCheckpointScreenshots",
+            name,
+        )
+        if (
+            stop_after_post_checkpoint_screenshots
+            and not post_checkpoint_screenshot_seconds
+        ):
+            raise ManifestError(
+                f"{name}: stopAfterPostCheckpointScreenshots requires "
+                "postCheckpointScreenshotSeconds"
+            )
         minimum_screenshot_mean_intensity = _require_optional_unit_interval(
             raw_case.get("minimumScreenshotMeanIntensity"),
             field="minimumScreenshotMeanIntensity",
@@ -1173,6 +1188,9 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ),
                 post_checkpoint_screenshot_source=(
                     post_checkpoint_screenshot_source
+                ),
+                stop_after_post_checkpoint_screenshots=(
+                    stop_after_post_checkpoint_screenshots
                 ),
                 renderdoc_capture_seconds=renderdoc_capture_seconds,
                 minimum_distinct_screenshots=_require_minimum_distinct_screenshots(
@@ -2122,6 +2140,16 @@ def run_case(
                 if screenshot is None:
                     break
                 post_checkpoint_screenshots.append(screenshot)
+            if (
+                case.stop_after_post_checkpoint_screenshots
+                and len(post_checkpoint_screenshots)
+                == len(case.post_checkpoint_screenshot_seconds)
+                and process.poll() is None
+            ):
+                process.stdin.write(b"STOP\n")
+                process.stdin.flush()
+                process.wait(timeout=5)
+                process_exited = True
 
         timeline = (
             [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]
