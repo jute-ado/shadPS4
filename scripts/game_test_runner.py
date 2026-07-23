@@ -963,6 +963,14 @@ def load_manifest(path: str | Path) -> GameManifest:
                 f"{name}: postCheckpointScreenshotSource must be one of "
                 f"{sorted(VALID_SCREENSHOT_SOURCES)}"
             )
+        if (
+            post_checkpoint_screenshot_source is not None
+            and not post_checkpoint_screenshot_seconds
+        ):
+            raise ManifestError(
+                f"{name}: postCheckpointScreenshotSource requires "
+                "postCheckpointScreenshotSeconds"
+            )
         minimum_screenshot_mean_intensity = _require_optional_unit_interval(
             raw_case.get("minimumScreenshotMeanIntensity"),
             field="minimumScreenshotMeanIntensity",
@@ -1063,6 +1071,14 @@ def load_manifest(path: str | Path) -> GameManifest:
                 f"{name}: postCheckpointLuminanceDipRatio must be greater than 0 "
                 "and less than 1"
             )
+        if (
+            post_checkpoint_luminance_dip_ratio is not None
+            and not post_checkpoint_screenshot_seconds
+        ):
+            raise ManifestError(
+                f"{name}: postCheckpointLuminanceDipRatio requires "
+                "postCheckpointScreenshotSeconds"
+            )
         maximum_post_checkpoint_luminance_dips = raw_case.get(
             "maximumPostCheckpointLuminanceDips"
         )
@@ -1100,6 +1116,11 @@ def load_manifest(path: str | Path) -> GameManifest:
             use_ipc=use_ipc,
             root=root,
         )
+        if post_checkpoint_screenshot_seconds and not screenshot_button_events:
+            raise ManifestError(
+                f"{name}: postCheckpointScreenshotSeconds requires "
+                "screenshotButtonEvents"
+            )
         renderdoc_capture_on_visual_failure = _require_bool(
             raw_case.get("renderdocCaptureOnVisualFailure", False),
             "renderdocCaptureOnVisualFailure",
