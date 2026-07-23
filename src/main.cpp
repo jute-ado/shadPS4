@@ -19,6 +19,7 @@
 #include "core/emulator_state.h"
 #include "core/file_sys/fs.h"
 #include "core/ipc/ipc.h"
+#include "core/test_lab_probe.h"
 #include "core/user_settings.h"
 #include "emulator.h"
 #include "imgui/big_picture/big_picture.h"
@@ -46,6 +47,11 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 #endif
+
+    if (argc == 2 && std::string_view{argv[1]} == "--test-lab-probe") {
+        std::cout << Core::TestLabProbeJson() << '\n';
+        return 0;
+    }
 
     CLI::App app{"shadPS4 Emulator CLI"};
 
