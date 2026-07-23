@@ -1,12 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <future>
+
 #include <gtest/gtest.h>
 
 #include "video_core/screenshot_request_queue.h"
+#include "video_core/screenshot_writer_queue.h"
 
 namespace VideoCore {
 namespace {
+
+using namespace std::chrono_literals;
 
 TEST(ScreenshotRequestQueue, KeepsAutomatedCapturesSeparateFromUserNotifications) {
     ScreenshotRequestQueue queue;
@@ -44,6 +50,37 @@ TEST(ScreenshotRequestQueue, ConsumeClearsPendingRequests) {
     const auto empty = queue.ConsumeGameOnly();
     EXPECT_EQ(empty.notifying_count, 0);
     EXPECT_EQ(empty.silent_count, 0);
+}
+
+TEST(ScreenshotWriterQueue, WaitIdleTracksWorkUntilTheWriterCompletesIt) {
+    ScreenshotWriterQueue<int> queue;
+    queue.Start();
+    ASSERT_TRUE(queue.Push(42));
+    ASSERT_EQ(queue.WaitPop(), 42);
+
+    auto idle = std::async(std::launch::async, [&queue] { queue.WaitIdle(); });
+    EXPECT_EQ(idle.wait_for(20ms), std::future_status::timeout);
+
+    queue.Complete();
+
+    EXPECT_EQ(idle.wait_for(1s), std::future_status::ready);
+    queue.Stop();
+}
+
+TEST(ScreenshotWriterQueue, WaitIdleIncludesGpuCompletionsReservedBeforeWriterSubmission) {
+    ScreenshotWriterQueue<int> queue;
+    queue.Start();
+    ASSERT_TRUE(queue.Reserve());
+
+    auto idle = std::async(std::launch::async, [&queue] { queue.WaitIdle(); });
+    EXPECT_EQ(idle.wait_for(20ms), std::future_status::timeout);
+
+    queue.PushReserved(7);
+    ASSERT_EQ(queue.WaitPop(), 7);
+    queue.Complete();
+
+    EXPECT_EQ(idle.wait_for(1s), std::future_status::ready);
+    queue.Stop();
 }
 
 } // namespace

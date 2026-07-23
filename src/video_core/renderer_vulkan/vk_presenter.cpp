@@ -6,6 +6,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
@@ -25,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/screenshot_writer_queue.h"
 #include "video_core/texture_cache/image.h"
 
 #include <algorithm>
@@ -504,6 +506,50 @@ static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readba
     }
 }
 
+class ScreenshotWriter {
+public:
+    using Job = std::shared_ptr<std::vector<ScreenshotReadback>>;
+
+    ScreenshotWriter() {
+        queue.Start();
+        worker = std::jthread([this] {
+            Common::SetCurrentThreadName("shadPS4:ScreenshotWriter");
+            while (auto job = queue.WaitPop()) {
+                try {
+                    SavePendingScreenshots(**job);
+                } catch (const std::exception& exception) {
+                    LOG_ERROR(Render_Vulkan, "Screenshot writer failed: {}", exception.what());
+                } catch (...) {
+                    LOG_ERROR(Render_Vulkan, "Screenshot writer failed with an unknown exception");
+                }
+                queue.Complete();
+            }
+        });
+    }
+
+    ~ScreenshotWriter() {
+        Drain();
+        queue.Stop();
+        worker.join();
+    }
+
+    bool Reserve() {
+        return queue.Reserve();
+    }
+
+    void PushReserved(Job job) {
+        queue.PushReserved(std::move(job));
+    }
+
+    void Drain() {
+        queue.WaitIdle();
+    }
+
+private:
+    VideoCore::ScreenshotWriterQueue<Job> queue;
+    std::jthread worker;
+};
+
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
@@ -513,7 +559,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       draw_scheduler{instance}, present_scheduler{instance}, flip_scheduler{instance},
       swapchain{instance, window},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, liverpool)},
-      texture_cache{rasterizer->GetTextureCache()} {
+      texture_cache{rasterizer->GetTextureCache()},
+      screenshot_writer{std::make_unique<ScreenshotWriter>()} {
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 
@@ -551,6 +598,7 @@ Presenter::~Presenter() {
     draw_scheduler.Finish();
     present_scheduler.Finish();
     flip_scheduler.Finish();
+    screenshot_writer->Drain();
     Check(draw_scheduler.CommandBuffer().reset());
     Check(present_scheduler.CommandBuffer().reset());
     Check(flip_scheduler.CommandBuffer().reset());
@@ -836,8 +884,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (!pending_screenshots.empty()) {
         deferred_screenshots =
             std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
+        ASSERT(screenshot_writer->Reserve());
         draw_scheduler.DeferPriorityOperation(
-            [deferred_screenshots]() { SavePendingScreenshots(*deferred_screenshots); });
+            [writer = screenshot_writer.get(), deferred_screenshots]() mutable {
+                writer->PushReserved(std::move(deferred_screenshots));
+            });
     }
 
     // Flush frame creation commands.
@@ -1140,8 +1191,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     if (!pending_screenshots.empty()) {
         deferred_screenshots =
             std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
+        ASSERT(screenshot_writer->Reserve());
         scheduler.DeferPriorityOperation(
-            [deferred_screenshots]() { SavePendingScreenshots(*deferred_screenshots); });
+            [writer = screenshot_writer.get(), deferred_screenshots]() mutable {
+                writer->PushReserved(std::move(deferred_screenshots));
+            });
     }
 
     SubmitInfo info{};
