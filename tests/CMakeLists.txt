@@ -250,6 +250,25 @@ foreach(t ${TEST_TARGETS})
     )
 endforeach()
 
+# The capability probe stays self-contained so the upstream adapter does not
+# pull emulator runtime dependencies into this contract test.
+add_executable(shadps4_test_lab_probe_test
+    ${CMAKE_SOURCE_DIR}/src/core/test_lab_probe.cpp
+    test_test_lab_probe.cpp
+)
+target_include_directories(shadps4_test_lab_probe_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_probe_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_probe_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(shadps4_test_lab_probe_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
 # ===========================================================================
 # HTTP tests (libSceHttp - URI helpers and status-line parsing)
 # ===========================================================================
