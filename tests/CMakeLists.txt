@@ -73,6 +73,21 @@ target_compile_features(shadps4_texture_job_queue_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_texture_job_queue_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_texture_job_queue_test)
 
+add_executable(shadps4_png_decode_test
+    test_png_decode.cpp
+    ../src/common/stb.cpp
+    ../src/imgui/renderer/png_decode.cpp
+)
+target_include_directories(shadps4_png_decode_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_png_decode_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_png_decode_test PRIVATE
+    GTest::gtest_main
+    stb
+)
+list(APPEND TEST_TARGETS shadps4_png_decode_test)
+
 add_executable(shadps4_texture_types_test
     test_texture_types.cpp
 )

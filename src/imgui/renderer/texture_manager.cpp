@@ -8,10 +8,10 @@
 #include "common/assert.h"
 #include "common/io_file.h"
 #include "common/polyfill_thread.h"
-#include "common/stb.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
 #include "imgui_impl_vulkan.h"
+#include "png_decode.h"
 #include "texture_job_queue.h"
 #include "texture_manager.h"
 
@@ -120,6 +120,12 @@ static std::deque<UploadJob> g_upload_list;
 
 namespace Core::TextureManager {
 
+void ReleaseWorkerReference(Inner* core) {
+    if (core->count.fetch_sub(1) == 1) {
+        delete core;
+    }
+}
+
 Inner::~Inner() {
     if (upload_data.im_texture != nullptr) {
         std::unique_lock lk{g_upload_mtx};
@@ -137,6 +143,7 @@ void WorkerLoop() {
 
         if (EmulatorSettings.IsVkCrashDiagnosticEnabled()) {
             // FIXME: Crash diagnostic hangs when building the command buffer here
+            ReleaseWorkerReference(core);
             continue;
         }
 
@@ -144,6 +151,7 @@ void WorkerLoop() {
             Common::FS::IOFile file(path, Common::FS::FileAccessMode::Read);
             if (!file.IsOpen()) {
                 LOG_ERROR(ImGui, "Failed to open PNG file: {}", path.string());
+                ReleaseWorkerReference(core);
                 continue;
             }
             png_raw.resize(file.GetSize());
@@ -152,17 +160,20 @@ void WorkerLoop() {
             file.Close();
         }
 
-        int width, height;
-        const stbi_uc* pixels =
-            stbi_load_from_memory(png_raw.data(), png_raw.size(), &width, &height, nullptr, 4);
+        auto decoded = DecodePngRgba(png_raw);
+        if (!decoded) {
+            LOG_ERROR(ImGui, "Failed to decode PNG texture{}",
+                      path.empty() ? "" : ": " + path.string());
+            ReleaseWorkerReference(core);
+            continue;
+        }
 
-        auto texture = Vulkan::UploadTexture(pixels, vk::Format::eR8G8B8A8Unorm, width, height,
-                                             width * height * 4 * sizeof(stbi_uc));
-        stbi_image_free((void*)pixels);
+        auto texture = Vulkan::UploadTexture(decoded->pixels.get(), vk::Format::eR8G8B8A8Unorm,
+                                             decoded->width, decoded->height, decoded->SizeBytes());
 
         core->upload_data = texture;
-        core->width = width;
-        core->height = height;
+        core->width = decoded->width;
+        core->height = decoded->height;
 
         std::unique_lock upload_lk{g_upload_mtx};
         g_upload_list.emplace_back(UploadJob{
@@ -220,9 +231,7 @@ void Submit() {
     if (upload.core != nullptr) {
         upload.core->upload_data.Upload();
         upload.core->texture_id = upload.core->upload_data.im_texture;
-        if (upload.core->count.fetch_sub(1) == 1) {
-            delete upload.core;
-        }
+        ReleaseWorkerReference(upload.core);
     } else {
         upload.data.Destroy();
     }
