@@ -12,6 +12,7 @@
 #include "common/thread.h"
 #include "core/emulator_settings.h"
 #include "imgui_impl_vulkan.h"
+#include "texture_job_queue.h"
 #include "texture_manager.h"
 
 namespace ImGui {
@@ -111,12 +112,8 @@ struct UploadJob {
     int tick = 0; // Used to skip the first frame when destroying to await the current frame to draw
 };
 
-static bool g_is_worker_running = false;
 static std::jthread g_worker_thread;
-static std::condition_variable g_worker_cv;
-
-static std::mutex g_job_list_mtx;
-static std::deque<Job> g_job_list;
+static JobQueue<Job> g_job_queue;
 
 static std::mutex g_upload_mtx;
 static std::deque<UploadJob> g_upload_list;
@@ -135,70 +132,55 @@ Inner::~Inner() {
 
 void WorkerLoop() {
     Common::SetCurrentThreadName("shadPS4:ImGuiTextureManager");
-    std::mutex mtx;
-    while (g_is_worker_running) {
-        std::unique_lock lk{mtx};
-        g_worker_cv.wait(lk);
-        if (!g_is_worker_running) {
-            break;
-        }
-        while (true) {
-            g_job_list_mtx.lock();
-            if (g_job_list.empty()) {
-                g_job_list_mtx.unlock();
-                break;
-            }
-            auto [core, png_raw, path] = std::move(g_job_list.front());
-            g_job_list.pop_front();
-            g_job_list_mtx.unlock();
+    while (auto job = g_job_queue.WaitPop()) {
+        auto [core, png_raw, path] = std::move(*job);
 
-            if (EmulatorSettings.IsVkCrashDiagnosticEnabled()) {
-                // FIXME: Crash diagnostic hangs when building the command buffer here
+        if (EmulatorSettings.IsVkCrashDiagnosticEnabled()) {
+            // FIXME: Crash diagnostic hangs when building the command buffer here
+            continue;
+        }
+
+        if (!path.empty()) { // Decode PNG from file
+            Common::FS::IOFile file(path, Common::FS::FileAccessMode::Read);
+            if (!file.IsOpen()) {
+                LOG_ERROR(ImGui, "Failed to open PNG file: {}", path.string());
                 continue;
             }
-
-            if (!path.empty()) { // Decode PNG from file
-                Common::FS::IOFile file(path, Common::FS::FileAccessMode::Read);
-                if (!file.IsOpen()) {
-                    LOG_ERROR(ImGui, "Failed to open PNG file: {}", path.string());
-                    continue;
-                }
-                png_raw.resize(file.GetSize());
-                file.Seek(0);
-                file.ReadRaw<u8>(png_raw.data(), png_raw.size());
-                file.Close();
-            }
-
-            int width, height;
-            const stbi_uc* pixels =
-                stbi_load_from_memory(png_raw.data(), png_raw.size(), &width, &height, nullptr, 4);
-
-            auto texture = Vulkan::UploadTexture(pixels, vk::Format::eR8G8B8A8Unorm, width, height,
-                                                 width * height * 4 * sizeof(stbi_uc));
-            stbi_image_free((void*)pixels);
-
-            core->upload_data = texture;
-            core->width = width;
-            core->height = height;
-
-            std::unique_lock upload_lk{g_upload_mtx};
-            g_upload_list.emplace_back(UploadJob{
-                .core = core,
-            });
+            png_raw.resize(file.GetSize());
+            file.Seek(0);
+            file.ReadRaw<u8>(png_raw.data(), png_raw.size());
+            file.Close();
         }
+
+        int width, height;
+        const stbi_uc* pixels =
+            stbi_load_from_memory(png_raw.data(), png_raw.size(), &width, &height, nullptr, 4);
+
+        auto texture = Vulkan::UploadTexture(pixels, vk::Format::eR8G8B8A8Unorm, width, height,
+                                             width * height * 4 * sizeof(stbi_uc));
+        stbi_image_free((void*)pixels);
+
+        core->upload_data = texture;
+        core->width = width;
+        core->height = height;
+
+        std::unique_lock upload_lk{g_upload_mtx};
+        g_upload_list.emplace_back(UploadJob{
+            .core = core,
+        });
     }
 }
 
 void StartWorker() {
-    ASSERT(!g_is_worker_running);
+    ASSERT(!g_worker_thread.joinable());
+    g_job_queue.Start();
     g_worker_thread = std::jthread(WorkerLoop);
-    g_is_worker_running = true;
 }
 
 void StopWorker() {
-    ASSERT(g_is_worker_running);
-    g_is_worker_running = false;
-    g_worker_cv.notify_one();
+    ASSERT(g_worker_thread.joinable());
+    g_job_queue.Stop();
+    g_worker_thread.join();
 }
 
 void DecodePngTexture(std::vector<u8> data, Inner* core) {
@@ -207,9 +189,7 @@ void DecodePngTexture(std::vector<u8> data, Inner* core) {
         .core = core,
         .data = std::move(data),
     };
-    std::unique_lock lk{g_job_list_mtx};
-    g_job_list.push_back(std::move(job));
-    g_worker_cv.notify_one();
+    ASSERT(g_job_queue.Push(std::move(job)));
 }
 
 void DecodePngFile(std::filesystem::path path, Inner* core) {
@@ -218,9 +198,7 @@ void DecodePngFile(std::filesystem::path path, Inner* core) {
         .core = core,
         .path = std::move(path),
     };
-    std::unique_lock lk{g_job_list_mtx};
-    g_job_list.push_back(std::move(job));
-    g_worker_cv.notify_one();
+    ASSERT(g_job_queue.Push(std::move(job)));
 }
 
 void Submit() {
