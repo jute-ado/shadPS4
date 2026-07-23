@@ -3210,6 +3210,7 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(len(result.renderdoc_captures), 1)
             self.assertGreaterEqual(len(result.visual_checkpoint_attempts), 1)
+            self.assertEqual(result.screenshots, [])
             attempt = result.visual_checkpoint_attempts[0]
             self.assertEqual(attempt.event_index, 0)
             self.assertTrue(attempt.screenshot.is_file())
@@ -3875,6 +3876,43 @@ class RunnerTests(unittest.TestCase):
             )
 
             self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_keeps_scheduled_and_post_checkpoint_captures_separate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "separate capture phases",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--vary-screenshots"],
+                    "useIpc": True,
+                    "screenshotSeconds": [0.05],
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(len(result.screenshots), 1)
+            self.assertEqual(len(result.post_checkpoint_screenshots), 2)
+            self.assertTrue(
+                set(result.screenshots).isdisjoint(result.post_checkpoint_screenshots)
+            )
+            report = result.to_report()
+            self.assertEqual(report["screenshots"], [str(result.screenshots[0])])
+            self.assertEqual(
+                report["post_checkpoint_screenshots"],
+                [str(path) for path in result.post_checkpoint_screenshots],
+            )
 
     def test_run_case_rejects_stuck_post_checkpoint_frames(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
