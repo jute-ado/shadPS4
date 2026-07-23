@@ -182,9 +182,11 @@ void IPC::InputLoop() {
             event.type = SDL_EVENT_TOGGLE_FULLSCREEN;
             SDL_PushEvent(&event);
         } else if (cmd == "SCREENSHOT") {
-            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly,
+                                         VideoCore::ScreenshotRequestOrigin::Automation);
         } else if (cmd == "SCREENSHOT_WITH_OVERLAYS") {
-            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays,
+                                         VideoCore::ScreenshotRequestOrigin::Automation);
         } else if (cmd == "RENDERDOC_CAPTURE") {
             VideoCore::TriggerCapture();
         } else if (cmd == "GAMEPAD_BUTTON") {
