@@ -39,7 +39,7 @@ TEST(ControllerTrace, WritesCanonicalChangedFullSnapshots) {
         "\"buttons\":[\"dpad_right\",\"cross\",\"l2\"],"
         "\"leftX\":-32768,\"leftY\":0,\"rightX\":32767,\"rightY\":-256,"
         "\"leftTrigger\":65535,\"rightTrigger\":32896,"
-        "\"touches\":[{\"id\":0,\"x\":65535,\"y\":32794}]}}\n");
+        "\"touches\":[{\"id\":0,\"x\":65535,\"y\":32802}]}}\n");
 }
 
 TEST(ControllerTrace, MakesSubMillisecondChangesStrictlyOrdered) {
