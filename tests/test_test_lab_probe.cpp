@@ -18,6 +18,7 @@ TEST(TestLabProbe, EmitsCanonicalProtocolOneCapabilityDocument) {
     EXPECT_EQ(document.at("adapterVersion"), "1.0.0");
     EXPECT_EQ(document.at("capabilities"),
               (std::vector<std::string>{
+                  "controller_recording",
                   "controller_replay",
                   "emulator_control",
                   "game_frame_screenshot",
