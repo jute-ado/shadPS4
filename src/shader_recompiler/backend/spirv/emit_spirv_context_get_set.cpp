@@ -7,6 +7,7 @@
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/patch.h"
+#include "shader_recompiler/read_const_access_policy.h"
 #include "shader_recompiler/runtime_info.h"
 
 #include <magic_enum/magic_enum.hpp>
@@ -58,16 +59,17 @@ Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     const u32 flatbuf_off_dw = inst->Flags<u32>();
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+    const bool has_dynamic_offset = flatbuf_off_dw == 0;
+    const auto access =
+        SelectReadConstAccess(has_dynamic_offset, EmulatorSettings.IsDirectMemoryAccessEnabled());
+    if (access == ReadConstAccess::FlatBuffer) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }
-    // We can only provide a fallback for immediate offsets.
-    if (flatbuf_off_dw == 0) {
+    if (access == ReadConstAccess::DmaOnly) {
         return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
-    } else {
-        return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const, addr, offset,
-                                  ctx.ConstU32(flatbuf_off_dw));
     }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const, addr, offset,
+                              ctx.ConstU32(flatbuf_off_dw));
 }
 
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
