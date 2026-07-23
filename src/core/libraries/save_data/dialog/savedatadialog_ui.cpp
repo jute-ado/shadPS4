@@ -12,6 +12,7 @@
 #include "core/file_sys/fs.h"
 #include "core/libraries/save_data/save_instance.h"
 #include "imgui/imgui_std.h"
+#include "imgui/renderer/imgui_core.h"
 #include "savedatadialog_navigation.h"
 #include "savedatadialog_ui.h"
 
@@ -324,6 +325,8 @@ SaveDialogState::ProgressBarState::ProgressBarState(const SaveDialogState& state
 SaveDialogUi::SaveDialogUi(SaveDialogState* state, Status* status, SaveDialogResult* result)
     : state(state), status(status), result(result) {
     if (status && *status == Status::RUNNING) {
+        gamepad_input_capture = GamepadInputCapture{ImGui::Core::AcquireGamepadInputCapture,
+                                                    ImGui::Core::ReleaseGamepadInputCapture};
         first_render = true;
         AddLayer(this);
     }
@@ -334,7 +337,8 @@ SaveDialogUi::~SaveDialogUi() {
 }
 
 SaveDialogUi::SaveDialogUi(SaveDialogUi&& other) noexcept
-    : Layer(other), state(other.state), status(other.status), result(other.result) {
+    : Layer(other), state(other.state), status(other.status), result(other.result),
+      gamepad_input_capture(std::move(other.gamepad_input_capture)) {
     std::scoped_lock lock(draw_mutex, other.draw_mutex);
     other.state = nullptr;
     other.status = nullptr;
@@ -354,6 +358,7 @@ SaveDialogUi& SaveDialogUi::operator=(SaveDialogUi&& other) noexcept {
     other.status = nullptr;
     result = other.result;
     other.result = nullptr;
+    gamepad_input_capture = std::move(other.gamepad_input_capture);
     if (status && *status == Status::RUNNING) {
         first_render = true;
         AddLayer(this);
@@ -376,6 +381,7 @@ void SaveDialogUi::Finish(ButtonId buttonId, Result r) {
         *status = Status::FINISHED;
     }
     RemoveLayer(this);
+    gamepad_input_capture.Reset();
 }
 
 void SaveDialogUi::Draw() {

@@ -24,6 +24,8 @@ struct Liverpool;
 
 namespace Vulkan {
 
+class ScreenshotWriter;
+
 struct Frame {
     u32 width;
     u32 height;
@@ -134,6 +136,7 @@ private:
     std::condition_variable_any frame_cv;
     std::optional<ImGui::RefCountedTexture> splash_img;
     std::vector<VAddr> vo_buffers_addr;
+    std::unique_ptr<ScreenshotWriter> screenshot_writer;
 };
 
 } // namespace Vulkan

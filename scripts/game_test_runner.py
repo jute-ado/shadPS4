@@ -61,11 +61,20 @@ CASE_FIELDS = frozenset(
         "ipcHandshakeTimeoutSeconds",
         "screenshotSource",
         "screenshotSeconds",
+        "postCheckpointScreenshotSeconds",
+        "postCheckpointScreenshotSource",
         "renderdocCaptureSeconds",
         "minimumDistinctScreenshots",
+        "minimumDistinctPostCheckpointScreenshots",
         "minimumScreenshotMeanIntensity",
         "minimumScreenshotNonBlackFraction",
         "minimumVisibleScreenshots",
+        "minimumPostCheckpointScreenshotMeanIntensity",
+        "minimumPostCheckpointScreenshotNonBlackFraction",
+        "maximumPostCheckpointInvisibleFlashes",
+        "maximumPostCheckpointInvisibleRunLength",
+        "postCheckpointLuminanceDipRatio",
+        "maximumPostCheckpointLuminanceDips",
         "screenshotComparisons",
         "renderdocCaptureOnVisualFailure",
         "buttonEvents",
@@ -191,11 +200,20 @@ class GameCase:
     ipc_handshake_timeout_seconds: float | None = None
     screenshot_source: str = "game_frame"
     screenshot_seconds: tuple[float, ...] = ()
+    post_checkpoint_screenshot_seconds: tuple[float, ...] = ()
+    post_checkpoint_screenshot_source: str | None = None
     renderdoc_capture_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
+    minimum_distinct_post_checkpoint_screenshots: int = 0
     minimum_screenshot_mean_intensity: float | None = None
     minimum_screenshot_non_black_fraction: float | None = None
     minimum_visible_screenshots: int | None = None
+    minimum_post_checkpoint_screenshot_mean_intensity: float | None = None
+    minimum_post_checkpoint_screenshot_non_black_fraction: float | None = None
+    maximum_post_checkpoint_invisible_flashes: int | None = None
+    maximum_post_checkpoint_invisible_run_length: int | None = None
+    post_checkpoint_luminance_dip_ratio: float | None = None
+    maximum_post_checkpoint_luminance_dips: int | None = None
     screenshot_comparisons: tuple[ScreenshotComparison, ...] = ()
     renderdoc_capture_on_visual_failure: bool = False
     button_events: tuple[ButtonEvent, ...] = ()
@@ -227,6 +245,7 @@ class CaseResult:
     screenshots: list[Path]
     screenshot_hashes: list[str]
     screenshot_differences: list[float]
+    post_checkpoint_screenshots: list[Path]
     visual_checkpoint_attempts: list[VisualCheckpointAttempt]
     renderdoc_captures: list[Path]
     renderdoc_capture_hashes: list[str]
@@ -236,6 +255,9 @@ class CaseResult:
         report = asdict(self)
         report["artifact_directory"] = str(self.artifact_directory)
         report["screenshots"] = [str(path) for path in self.screenshots]
+        report["post_checkpoint_screenshots"] = [
+            str(path) for path in self.post_checkpoint_screenshots
+        ]
         report["visual_checkpoint_attempts"] = [
             {**asdict(attempt), "screenshot": str(attempt.screenshot)}
             for attempt in self.visual_checkpoint_attempts
@@ -330,19 +352,20 @@ def _require_renderdoc_capture_schedule(
 
 
 def _require_minimum_distinct_screenshots(
-    raw: Any, *, case_name: str, screenshot_count: int
+    raw: Any,
+    *,
+    case_name: str,
+    screenshot_count: int,
+    field: str = "minimumDistinctScreenshots",
+    schedule_field: str = "screenshotSeconds",
 ) -> int:
     if not isinstance(raw, int) or isinstance(raw, bool):
-        raise ManifestError(
-            f"{case_name}: minimumDistinctScreenshots must be an integer"
-        )
+        raise ManifestError(f"{case_name}: {field} must be an integer")
     if raw < 0:
-        raise ManifestError(
-            f"{case_name}: minimumDistinctScreenshots cannot be negative"
-        )
+        raise ManifestError(f"{case_name}: {field} cannot be negative")
     if raw > screenshot_count:
         raise ManifestError(
-            f"{case_name}: minimumDistinctScreenshots cannot exceed screenshotSeconds"
+            f"{case_name}: {field} cannot exceed {schedule_field}"
         )
     return raw
 
@@ -922,6 +945,24 @@ def load_manifest(path: str | Path) -> GameManifest:
             timeout=timeout_seconds,
             use_ipc=use_ipc,
         )
+        post_checkpoint_screenshot_seconds = _require_ipc_schedule(
+            raw_case.get("postCheckpointScreenshotSeconds"),
+            field="postCheckpointScreenshotSeconds",
+            case_name=name,
+            timeout=timeout_seconds,
+            use_ipc=use_ipc,
+        )
+        post_checkpoint_screenshot_source = raw_case.get(
+            "postCheckpointScreenshotSource"
+        )
+        if (
+            post_checkpoint_screenshot_source is not None
+            and post_checkpoint_screenshot_source not in VALID_SCREENSHOT_SOURCES
+        ):
+            raise ManifestError(
+                f"{name}: postCheckpointScreenshotSource must be one of "
+                f"{sorted(VALID_SCREENSHOT_SOURCES)}"
+            )
         minimum_screenshot_mean_intensity = _require_optional_unit_interval(
             raw_case.get("minimumScreenshotMeanIntensity"),
             field="minimumScreenshotMeanIntensity",
@@ -948,6 +989,98 @@ def load_manifest(path: str | Path) -> GameManifest:
                 or minimum_screenshot_non_black_fraction is not None
             ),
         )
+        minimum_post_checkpoint_screenshot_mean_intensity = (
+            _require_optional_unit_interval(
+                raw_case.get("minimumPostCheckpointScreenshotMeanIntensity"),
+                field="minimumPostCheckpointScreenshotMeanIntensity",
+                case_name=name,
+            )
+        )
+        minimum_post_checkpoint_screenshot_non_black_fraction = (
+            _require_optional_unit_interval(
+                raw_case.get("minimumPostCheckpointScreenshotNonBlackFraction"),
+                field="minimumPostCheckpointScreenshotNonBlackFraction",
+                case_name=name,
+            )
+        )
+        has_post_checkpoint_visibility_threshold = (
+            minimum_post_checkpoint_screenshot_mean_intensity is not None
+            or minimum_post_checkpoint_screenshot_non_black_fraction is not None
+        )
+        if (
+            has_post_checkpoint_visibility_threshold
+            and not post_checkpoint_screenshot_seconds
+        ):
+            raise ManifestError(
+                f"{name}: post-checkpoint screenshot visibility thresholds require "
+                "postCheckpointScreenshotSeconds"
+            )
+        maximum_post_checkpoint_invisible_flashes = raw_case.get(
+            "maximumPostCheckpointInvisibleFlashes"
+        )
+        if maximum_post_checkpoint_invisible_flashes is not None:
+            if (
+                not isinstance(maximum_post_checkpoint_invisible_flashes, int)
+                or isinstance(maximum_post_checkpoint_invisible_flashes, bool)
+                or maximum_post_checkpoint_invisible_flashes < 0
+            ):
+                raise ManifestError(
+                    f"{name}: maximumPostCheckpointInvisibleFlashes must be a "
+                    "non-negative integer"
+                )
+            if not has_post_checkpoint_visibility_threshold:
+                raise ManifestError(
+                    f"{name}: maximumPostCheckpointInvisibleFlashes requires a "
+                    "post-checkpoint visibility threshold"
+                )
+        maximum_post_checkpoint_invisible_run_length = raw_case.get(
+            "maximumPostCheckpointInvisibleRunLength"
+        )
+        if maximum_post_checkpoint_invisible_run_length is not None:
+            if (
+                not isinstance(maximum_post_checkpoint_invisible_run_length, int)
+                or isinstance(maximum_post_checkpoint_invisible_run_length, bool)
+                or maximum_post_checkpoint_invisible_run_length < 0
+            ):
+                raise ManifestError(
+                    f"{name}: maximumPostCheckpointInvisibleRunLength must be a "
+                    "non-negative integer"
+                )
+            if not has_post_checkpoint_visibility_threshold:
+                raise ManifestError(
+                    f"{name}: maximumPostCheckpointInvisibleRunLength requires a "
+                    "post-checkpoint visibility threshold"
+                )
+        post_checkpoint_luminance_dip_ratio = _require_optional_unit_interval(
+            raw_case.get("postCheckpointLuminanceDipRatio"),
+            field="postCheckpointLuminanceDipRatio",
+            case_name=name,
+        )
+        if post_checkpoint_luminance_dip_ratio is not None and not (
+            0 < post_checkpoint_luminance_dip_ratio < 1
+        ):
+            raise ManifestError(
+                f"{name}: postCheckpointLuminanceDipRatio must be greater than 0 "
+                "and less than 1"
+            )
+        maximum_post_checkpoint_luminance_dips = raw_case.get(
+            "maximumPostCheckpointLuminanceDips"
+        )
+        if maximum_post_checkpoint_luminance_dips is not None:
+            if (
+                not isinstance(maximum_post_checkpoint_luminance_dips, int)
+                or isinstance(maximum_post_checkpoint_luminance_dips, bool)
+                or maximum_post_checkpoint_luminance_dips < 0
+            ):
+                raise ManifestError(
+                    f"{name}: maximumPostCheckpointLuminanceDips must be a "
+                    "non-negative integer"
+                )
+            if post_checkpoint_luminance_dip_ratio is None:
+                raise ManifestError(
+                    f"{name}: maximumPostCheckpointLuminanceDips requires "
+                    "postCheckpointLuminanceDipRatio"
+                )
         renderdoc_capture_seconds = _require_renderdoc_capture_schedule(
             raw_case.get("renderdocCaptureSeconds"),
             case_name=name,
@@ -1014,15 +1147,50 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ipc_handshake_timeout_seconds=ipc_handshake_timeout_seconds,
                 screenshot_source=screenshot_source,
                 screenshot_seconds=screenshot_seconds,
+                post_checkpoint_screenshot_seconds=(
+                    post_checkpoint_screenshot_seconds
+                ),
+                post_checkpoint_screenshot_source=(
+                    post_checkpoint_screenshot_source
+                ),
                 renderdoc_capture_seconds=renderdoc_capture_seconds,
                 minimum_distinct_screenshots=_require_minimum_distinct_screenshots(
                     raw_case.get("minimumDistinctScreenshots", 0),
                     case_name=name,
                     screenshot_count=len(screenshot_seconds),
                 ),
+                minimum_distinct_post_checkpoint_screenshots=(
+                    _require_minimum_distinct_screenshots(
+                        raw_case.get(
+                            "minimumDistinctPostCheckpointScreenshots", 0
+                        ),
+                        case_name=name,
+                        screenshot_count=len(post_checkpoint_screenshot_seconds),
+                        field="minimumDistinctPostCheckpointScreenshots",
+                        schedule_field="postCheckpointScreenshotSeconds",
+                    )
+                ),
                 minimum_screenshot_mean_intensity=minimum_screenshot_mean_intensity,
                 minimum_screenshot_non_black_fraction=minimum_screenshot_non_black_fraction,
                 minimum_visible_screenshots=minimum_visible_screenshots,
+                minimum_post_checkpoint_screenshot_mean_intensity=(
+                    minimum_post_checkpoint_screenshot_mean_intensity
+                ),
+                minimum_post_checkpoint_screenshot_non_black_fraction=(
+                    minimum_post_checkpoint_screenshot_non_black_fraction
+                ),
+                maximum_post_checkpoint_invisible_flashes=(
+                    maximum_post_checkpoint_invisible_flashes
+                ),
+                maximum_post_checkpoint_invisible_run_length=(
+                    maximum_post_checkpoint_invisible_run_length
+                ),
+                post_checkpoint_luminance_dip_ratio=(
+                    post_checkpoint_luminance_dip_ratio
+                ),
+                maximum_post_checkpoint_luminance_dips=(
+                    maximum_post_checkpoint_luminance_dips
+                ),
                 screenshot_comparisons=_require_screenshot_comparisons(
                     raw_case.get("screenshotComparisons"),
                     case_name=name,
@@ -1473,6 +1641,45 @@ def _screenshot_statistics(path: Path) -> tuple[float, float]:
     return mean_intensity, non_black_pixels / pixel_count
 
 
+def _count_invisible_flashes(visibility: Sequence[bool]) -> int:
+    flashes = 0
+    has_visible_frame = False
+    invisible_run_after_visible = False
+
+    for visible in visibility:
+        if visible:
+            if has_visible_frame and invisible_run_after_visible:
+                flashes += 1
+            has_visible_frame = True
+            invisible_run_after_visible = False
+        elif has_visible_frame:
+            invisible_run_after_visible = True
+
+    return flashes
+
+
+def _longest_invisible_run(visibility: Sequence[bool]) -> int:
+    longest = 0
+    current = 0
+    for visible in visibility:
+        current = 0 if visible else current + 1
+        longest = max(longest, current)
+    return longest
+
+
+def _count_relative_luminance_dips(
+    mean_intensities: Sequence[float], *, ratio: float
+) -> int:
+    return sum(
+        current < min(previous, following) * ratio
+        for previous, current, following in zip(
+            mean_intensities,
+            mean_intensities[1:],
+            mean_intensities[2:],
+        )
+    )
+
+
 def _make_tree_owner_writable(root: Path) -> None:
     root.chmod(root.stat().st_mode | stat.S_IWUSR)
     for path in root.rglob("*"):
@@ -1540,6 +1747,7 @@ def run_case(
             screenshots=[],
             screenshot_hashes=[],
             screenshot_differences=[],
+            post_checkpoint_screenshots=[],
             visual_checkpoint_attempts=[],
             renderdoc_captures=[],
             renderdoc_capture_hashes=[],
@@ -1629,7 +1837,11 @@ def run_case(
                 break
         ipc_handshake_seen = ipc_handshake.is_set()
         required_capabilities = ["ENABLE_EMU_CONTROL"]
-        if case.screenshot_seconds or case.screenshot_button_events:
+        if (
+            case.screenshot_seconds
+            or case.post_checkpoint_screenshot_seconds
+            or case.screenshot_button_events
+        ):
             required_capabilities.append("ENABLE_SCREENSHOT")
         if case.renderdoc_capture_seconds or case.renderdoc_capture_on_visual_failure:
             required_capabilities.append("ENABLE_RENDERDOC_CAPTURE")
@@ -1663,6 +1875,7 @@ def run_case(
     timed_out = ipc_negotiation_timed_out
     runtime_failures: list[str] = []
     visual_checkpoint_attempts: list[VisualCheckpointAttempt] = []
+    post_checkpoint_screenshots: list[Path] = []
     visual_failure_capture_requests = 0
     visual_checkpoint_failed = False
     try:
@@ -1839,6 +2052,56 @@ def run_case(
                     process.wait(timeout=5)
             process_exited = True
 
+        if (
+            case.post_checkpoint_screenshot_seconds
+            and ipc_ready
+            and not process_exited
+        ):
+            assert process.stdin is not None
+            post_checkpoint_started = time.monotonic()
+            known_screenshots = set(_find_valid_screenshots(artifact_directory))
+            for seconds in case.post_checkpoint_screenshot_seconds:
+                try:
+                    process.wait(
+                        timeout=max(
+                            0,
+                            post_checkpoint_started
+                            + seconds
+                            - time.monotonic(),
+                        )
+                    )
+                    process_exited = True
+                    break
+                except subprocess.TimeoutExpired:
+                    process.stdin.write(
+                        b"SCREENSHOT_WITH_OVERLAYS\n"
+                        if (
+                            case.post_checkpoint_screenshot_source
+                            or case.screenshot_source
+                        )
+                        == "presented_frame"
+                        else b"SCREENSHOT\n"
+                    )
+                    process.stdin.flush()
+
+                screenshot: Path | None = None
+                while process.poll() is None and time.monotonic() < hard_deadline:
+                    candidates = [
+                        path
+                        for path in _find_valid_screenshots(artifact_directory)
+                        if path not in known_screenshots
+                    ]
+                    if candidates:
+                        screenshot = candidates[0]
+                        known_screenshots.add(screenshot)
+                        break
+                    time.sleep(
+                        min(0.01, max(0, hard_deadline - time.monotonic()))
+                    )
+                if screenshot is None:
+                    break
+                post_checkpoint_screenshots.append(screenshot)
+
         timeline = (
             [(seconds, "screenshot", None) for seconds in case.screenshot_seconds]
             + [
@@ -1967,6 +2230,13 @@ def run_case(
             f"captured {len(screenshots)} valid screenshots; expected "
             f"{len(case.screenshot_seconds)}"
         )
+    if len(post_checkpoint_screenshots) < len(
+        case.post_checkpoint_screenshot_seconds
+    ):
+        failures.append(
+            f"captured {len(post_checkpoint_screenshots)} valid post-checkpoint "
+            f"screenshots; expected {len(case.post_checkpoint_screenshot_seconds)}"
+        )
     expected_renderdoc_captures = (
         len(case.renderdoc_capture_seconds) + visual_failure_capture_requests
     )
@@ -1980,6 +2250,23 @@ def run_case(
         failures.append(
             f"captured {distinct_screenshots} distinct screenshots; expected at least "
             f"{case.minimum_distinct_screenshots}"
+        )
+    distinct_post_checkpoint_screenshots = len(
+        {_hash_file(path) for path in post_checkpoint_screenshots}
+    )
+    if (
+        distinct_post_checkpoint_screenshots
+        < case.minimum_distinct_post_checkpoint_screenshots
+    ):
+        noun = (
+            "screenshot"
+            if distinct_post_checkpoint_screenshots == 1
+            else "screenshots"
+        )
+        failures.append(
+            f"captured {distinct_post_checkpoint_screenshots} distinct "
+            f"post-checkpoint {noun}; expected at least "
+            f"{case.minimum_distinct_post_checkpoint_screenshots}"
         )
     if (
         case.minimum_screenshot_mean_intensity is not None
@@ -2021,6 +2308,65 @@ def run_case(
                 f"captured {visible_screenshots} visible screenshots; expected at least "
                 f"{case.minimum_visible_screenshots}"
             )
+    if (
+        case.minimum_post_checkpoint_screenshot_mean_intensity is not None
+        or case.minimum_post_checkpoint_screenshot_non_black_fraction is not None
+        or case.post_checkpoint_luminance_dip_ratio is not None
+    ):
+        post_checkpoint_visibility: list[bool] = []
+        post_checkpoint_mean_intensities: list[float] = []
+        for screenshot in post_checkpoint_screenshots:
+            mean_intensity, non_black_fraction = _screenshot_statistics(screenshot)
+            post_checkpoint_mean_intensities.append(mean_intensity)
+            post_checkpoint_visibility.append(
+                (
+                    case.minimum_post_checkpoint_screenshot_mean_intensity is None
+                    or mean_intensity
+                    >= case.minimum_post_checkpoint_screenshot_mean_intensity
+                )
+                and (
+                    case.minimum_post_checkpoint_screenshot_non_black_fraction is None
+                    or non_black_fraction
+                    >= case.minimum_post_checkpoint_screenshot_non_black_fraction
+                )
+            )
+        invisible_flashes = _count_invisible_flashes(post_checkpoint_visibility)
+        if (
+            case.maximum_post_checkpoint_invisible_flashes is not None
+            and invisible_flashes
+            > case.maximum_post_checkpoint_invisible_flashes
+        ):
+            noun = "flash" if invisible_flashes == 1 else "flashes"
+            failures.append(
+                f"detected {invisible_flashes} post-checkpoint invisible {noun}; "
+                f"maximum {case.maximum_post_checkpoint_invisible_flashes}"
+            )
+        longest_invisible_run = _longest_invisible_run(post_checkpoint_visibility)
+        if (
+            case.maximum_post_checkpoint_invisible_run_length is not None
+            and longest_invisible_run
+            > case.maximum_post_checkpoint_invisible_run_length
+        ):
+            noun = "screenshot" if longest_invisible_run == 1 else "screenshots"
+            failures.append(
+                f"longest post-checkpoint invisible run was {longest_invisible_run} "
+                f"{noun}; maximum "
+                f"{case.maximum_post_checkpoint_invisible_run_length}"
+            )
+        if case.post_checkpoint_luminance_dip_ratio is not None:
+            luminance_dips = _count_relative_luminance_dips(
+                post_checkpoint_mean_intensities,
+                ratio=case.post_checkpoint_luminance_dip_ratio,
+            )
+            if (
+                case.maximum_post_checkpoint_luminance_dips is not None
+                and luminance_dips > case.maximum_post_checkpoint_luminance_dips
+            ):
+                noun = "dip" if luminance_dips == 1 else "dips"
+                failures.append(
+                    f"detected {luminance_dips} post-checkpoint luminance {noun}; "
+                    f"maximum {case.maximum_post_checkpoint_luminance_dips}"
+                )
     screenshot_differences: list[float] = []
     if len(screenshots) >= len(case.screenshot_seconds):
         for index, comparison in enumerate(case.screenshot_comparisons):
@@ -2064,6 +2410,7 @@ def run_case(
         screenshots=screenshots,
         screenshot_hashes=screenshot_hashes,
         screenshot_differences=screenshot_differences,
+        post_checkpoint_screenshots=post_checkpoint_screenshots,
         visual_checkpoint_attempts=visual_checkpoint_attempts,
         renderdoc_captures=renderdoc_captures,
         renderdoc_capture_hashes=renderdoc_capture_hashes,

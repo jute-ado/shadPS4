@@ -6,6 +6,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
@@ -25,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/screenshot_writer_queue.h"
 #include "video_core/texture_cache/image.h"
 
 #include <algorithm>
@@ -139,6 +141,7 @@ enum class ScreenshotKind : u8 {
 
 struct ScreenshotReadback {
     ScreenshotKind kind{};
+    bool notify{};
     std::vector<std::filesystem::path> paths{};
     VideoCore::Buffer buffer;
     u32 width{};
@@ -147,9 +150,10 @@ struct ScreenshotReadback {
     bool hdr_encoded{};
 
     ScreenshotReadback(const Instance& instance, Scheduler& scheduler, ScreenshotKind kind_,
-                       std::vector<std::filesystem::path> paths_, const u32 width_,
-                       const u32 height_, const vk::Format format_, const bool hdr_encoded_)
-        : kind{kind_}, paths{std::move(paths_)},
+                       const bool notify_, std::vector<std::filesystem::path> paths_,
+                       const u32 width_, const u32 height_, const vk::Format format_,
+                       const bool hdr_encoded_)
+        : kind{kind_}, notify{notify_}, paths{std::move(paths_)},
           buffer{instance,
                  scheduler,
                  VideoCore::MemoryUsage::Download,
@@ -461,14 +465,17 @@ static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readba
 
         LOG_INFO(Render_Vulkan, "Saved screenshot: {}", primary_path.string());
 
-        std::ifstream file(primary_path, std::ios::binary);
-        std::vector<u8> imgdata;
-        if (file) {
-            imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
-                                      std::istreambuf_iterator<char>());
+        if (readback.notify) {
+            std::ifstream file(primary_path, std::ios::binary);
+            std::vector<u8> imgdata;
+            if (file) {
+                imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
+                                          std::istreambuf_iterator<char>());
+            }
+            shadNotifications::QueueNotification("Saved screenshot:\n" + primary_path.string(),
+                                                 3.0f, shadNotifications::position::BottomRight,
+                                                 imgdata);
         }
-        shadNotifications::QueueNotification("Saved screenshot:\n" + primary_path.string(), 3.0f,
-                                             shadNotifications::position::BottomRight, imgdata);
 
         for (size_t i = 1; i < readback.paths.size(); ++i) {
             const auto& path = readback.paths[i];
@@ -484,17 +491,64 @@ static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readba
             }
 
             LOG_INFO(Render_Vulkan, "Saved screenshot: {}", path.string());
-            std::ifstream file(path, std::ios::binary);
-            std::vector<u8> imgdata;
-            if (file) {
-                imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
-                                          std::istreambuf_iterator<char>());
+            if (readback.notify) {
+                std::ifstream file(path, std::ios::binary);
+                std::vector<u8> imgdata;
+                if (file) {
+                    imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
+                                              std::istreambuf_iterator<char>());
+                }
+                shadNotifications::QueueNotification("Saved screenshot:\n" + path.string(), 3.0f,
+                                                     shadNotifications::position::BottomRight,
+                                                     imgdata);
             }
-            shadNotifications::QueueNotification("Saved screenshot:\n" + path.string(), 3.0f,
-                                                 shadNotifications::position::BottomRight, imgdata);
         }
     }
 }
+
+class ScreenshotWriter {
+public:
+    using Job = std::shared_ptr<std::vector<ScreenshotReadback>>;
+
+    ScreenshotWriter() {
+        queue.Start();
+        worker = std::jthread([this] {
+            Common::SetCurrentThreadName("shadPS4:ScreenshotWriter");
+            while (auto job = queue.WaitPop()) {
+                try {
+                    SavePendingScreenshots(**job);
+                } catch (const std::exception& exception) {
+                    LOG_ERROR(Render_Vulkan, "Screenshot writer failed: {}", exception.what());
+                } catch (...) {
+                    LOG_ERROR(Render_Vulkan, "Screenshot writer failed with an unknown exception");
+                }
+                queue.Complete();
+            }
+        });
+    }
+
+    ~ScreenshotWriter() {
+        Drain();
+        queue.Stop();
+        worker.join();
+    }
+
+    bool Reserve() {
+        return queue.Reserve();
+    }
+
+    void PushReserved(Job job) {
+        queue.PushReserved(std::move(job));
+    }
+
+    void Drain() {
+        queue.WaitIdle();
+    }
+
+private:
+    VideoCore::ScreenshotWriterQueue<Job> queue;
+    std::jthread worker;
+};
 
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
     : window{window_}, liverpool{liverpool_},
@@ -505,7 +559,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       draw_scheduler{instance}, present_scheduler{instance}, flip_scheduler{instance},
       swapchain{instance, window},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, liverpool)},
-      texture_cache{rasterizer->GetTextureCache()} {
+      texture_cache{rasterizer->GetTextureCache()},
+      screenshot_writer{std::make_unique<ScreenshotWriter>()} {
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 
@@ -543,6 +598,7 @@ Presenter::~Presenter() {
     draw_scheduler.Finish();
     present_scheduler.Finish();
     flip_scheduler.Finish();
+    screenshot_writer->Drain();
     Check(draw_scheduler.CommandBuffer().reset());
     Check(present_scheduler.CommandBuffer().reset());
     Check(flip_scheduler.CommandBuffer().reset());
@@ -788,23 +844,29 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
-    const u32 capture_game_only_count = VideoCore::ConsumeGameOnlyScreenshotRequests();
+    const auto capture_game_only = VideoCore::ConsumeGameOnlyScreenshotRequests();
     std::vector<ScreenshotReadback> pending_screenshots;
-    if (capture_game_only_count > 0) {
-        pending_screenshots.reserve(1);
+    if (capture_game_only.Total() > 0) {
+        pending_screenshots.reserve(2);
         const bool hdr_encoded =
             attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Bt2020Pq;
-        pending_screenshots.emplace_back(
-            instance, draw_scheduler, ScreenshotKind::GameOnly,
-            BuildScreenshotPaths(ScreenshotKind::GameOnly, capture_game_only_count),
-            image_size.width, image_size.height, view_info.format, hdr_encoded);
-        auto& readback = pending_screenshots.back();
 
         // Capture the guest output before any host-side scaling (FSR/PP) is applied.
         image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
                       cmdbuf);
-        CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                            readback);
+        const auto append_readback = [&](const u32 count, const bool notify) {
+            if (count == 0) {
+                return;
+            }
+            pending_screenshots.emplace_back(
+                instance, draw_scheduler, ScreenshotKind::GameOnly, notify,
+                BuildScreenshotPaths(ScreenshotKind::GameOnly, count), image_size.width,
+                image_size.height, view_info.format, hdr_encoded);
+            CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                pending_screenshots.back());
+        };
+        append_readback(capture_game_only.notifying_count, true);
+        append_readback(capture_game_only.silent_count, false);
     }
 
     // Continue with host-side passes that draw the displayed (scaled) frame.
@@ -822,8 +884,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (!pending_screenshots.empty()) {
         deferred_screenshots =
             std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
+        ASSERT(screenshot_writer->Reserve());
         draw_scheduler.DeferPriorityOperation(
-            [deferred_screenshots]() { SavePendingScreenshots(*deferred_screenshots); });
+            [writer = screenshot_writer.get(), deferred_screenshots]() mutable {
+                writer->PushReserved(std::move(deferred_screenshots));
+            });
     }
 
     // Flush frame creation commands.
@@ -947,10 +1012,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
 
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
-    const u32 capture_with_overlays_count = VideoCore::ConsumeWithOverlaysScreenshotRequests();
+    const auto capture_with_overlays = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     std::vector<ScreenshotReadback> pending_screenshots;
-    if (capture_with_overlays_count > 0) {
-        pending_screenshots.reserve(1);
+    if (capture_with_overlays.Total() > 0) {
+        pending_screenshots.reserve(2);
     }
 
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
@@ -1047,16 +1112,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         }
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
 
-        if (capture_with_overlays_count > 0) {
-            pending_screenshots.emplace_back(
-                instance, scheduler, ScreenshotKind::WithOverlays,
-                BuildScreenshotPaths(ScreenshotKind::WithOverlays, capture_with_overlays_count),
-                extent.width, extent.height,
-                swapchain.GetHDR() ? vk::Format::eA2B10G10R10UnormPack32
-                                   : swapchain.GetSurfaceFormat().format,
-                swapchain.GetHDR());
-            auto& readback = pending_screenshots.back();
-
+        if (capture_with_overlays.Total() > 0) {
             const vk::ImageMemoryBarrier to_transfer{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eTransferRead,
@@ -1077,8 +1133,22 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
                                    vk::PipelineStageFlagBits::eTransfer,
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_transfer);
-            CopyImageToReadback(cmdbuf, swapchain_image, vk::ImageLayout::eTransferSrcOptimal,
-                                readback);
+            const auto append_readback = [&](const u32 count, const bool notify) {
+                if (count == 0) {
+                    return;
+                }
+                pending_screenshots.emplace_back(
+                    instance, scheduler, ScreenshotKind::WithOverlays, notify,
+                    BuildScreenshotPaths(ScreenshotKind::WithOverlays, count), extent.width,
+                    extent.height,
+                    swapchain.GetHDR() ? vk::Format::eA2B10G10R10UnormPack32
+                                       : swapchain.GetSurfaceFormat().format,
+                    swapchain.GetHDR());
+                CopyImageToReadback(cmdbuf, swapchain_image, vk::ImageLayout::eTransferSrcOptimal,
+                                    pending_screenshots.back());
+            };
+            append_readback(capture_with_overlays.notifying_count, true);
+            append_readback(capture_with_overlays.silent_count, false);
             swapchain_copied_for_screenshot = true;
         }
 
@@ -1121,8 +1191,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     if (!pending_screenshots.empty()) {
         deferred_screenshots =
             std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
+        ASSERT(screenshot_writer->Reserve());
         scheduler.DeferPriorityOperation(
-            [deferred_screenshots]() { SavePendingScreenshots(*deferred_screenshots); });
+            [writer = screenshot_writer.get(), deferred_screenshots]() mutable {
+                writer->PushReserved(std::move(deferred_screenshots));
+            });
     }
 
     SubmitInfo info{};

@@ -20,7 +20,10 @@ import scripts.game_test_runner as game_test_runner
 from scripts.game_test_runner import (
     ManifestError,
     ScreenshotRegion,
+    _count_invisible_flashes,
+    _count_relative_luminance_dips,
     _decode_png_rgb,
+    _longest_invisible_run,
     _screenshot_difference,
     load_manifest,
     main,
@@ -48,6 +51,50 @@ def test_png(width: int, height: int, color_type: int, scanlines: bytes) -> byte
         + png_chunk(b"IDAT", zlib.compress(scanlines))
         + png_chunk(b"IEND", b"")
     )
+
+
+class FlickerDetectionTests(unittest.TestCase):
+    def test_counts_each_invisible_run_between_visible_frames_as_one_flash(self) -> None:
+        self.assertEqual(
+            _count_invisible_flashes(
+                (True, False, True, False, False, True, True, False, True)
+            ),
+            3,
+        )
+
+    def test_ignores_expected_leading_and_trailing_darkness(self) -> None:
+        self.assertEqual(
+            _count_invisible_flashes((False, False, True, True, False, False)),
+            0,
+        )
+
+    def test_stable_visible_sequence_has_no_flashes(self) -> None:
+        self.assertEqual(_count_invisible_flashes((True, True, True)), 0)
+
+    def test_longest_invisible_run_includes_trailing_output_loss(self) -> None:
+        self.assertEqual(
+            _longest_invisible_run((True, False, True, False, False, False)),
+            3,
+        )
+
+    def test_visible_sequence_has_no_invisible_run(self) -> None:
+        self.assertEqual(_longest_invisible_run((True, True, True)), 0)
+
+    def test_counts_repeated_relative_luminance_valleys(self) -> None:
+        self.assertEqual(
+            _count_relative_luminance_dips(
+                (0.018, 0.004, 0.018, 0.005, 0.018), ratio=0.5
+            ),
+            2,
+        )
+
+    def test_ignores_monotonic_fades(self) -> None:
+        self.assertEqual(
+            _count_relative_luminance_dips(
+                (0.02, 0.01, 0.005, 0.002), ratio=0.5
+            ),
+            0,
+        )
 
 
 class ManifestTests(unittest.TestCase):
@@ -551,6 +598,110 @@ class ManifestTests(unittest.TestCase):
 
             self.assertEqual(manifest.cases[0].screenshot_seconds, (0.25, 1.5))
             self.assertEqual(manifest.cases[0].minimum_distinct_screenshots, 2)
+
+    def test_load_manifest_accepts_post_checkpoint_flicker_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "intro flicker",
+                            "gamePath": "game",
+                            "timeoutSeconds": 3,
+                            "useIpc": True,
+                            "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                            "postCheckpointScreenshotSource": "presented_frame",
+                            "minimumDistinctPostCheckpointScreenshots": 2,
+                            "minimumPostCheckpointScreenshotNonBlackFraction": 0.01,
+                            "maximumPostCheckpointInvisibleFlashes": 0,
+                            "postCheckpointLuminanceDipRatio": 0.5,
+                            "maximumPostCheckpointLuminanceDips": 1,
+                        }
+                    ],
+                },
+            )
+
+            case = load_manifest(path).cases[0]
+
+            self.assertEqual(
+                case.post_checkpoint_screenshot_seconds, (0.1, 0.2, 0.3)
+            )
+            self.assertEqual(
+                case.post_checkpoint_screenshot_source, "presented_frame"
+            )
+            self.assertEqual(
+                case.minimum_distinct_post_checkpoint_screenshots, 2
+            )
+            self.assertEqual(
+                case.minimum_post_checkpoint_screenshot_non_black_fraction, 0.01
+            )
+            self.assertEqual(case.maximum_post_checkpoint_invisible_flashes, 0)
+            self.assertEqual(case.post_checkpoint_luminance_dip_ratio, 0.5)
+            self.assertEqual(case.maximum_post_checkpoint_luminance_dips, 1)
+
+    def test_load_manifest_rejects_impossible_post_checkpoint_distinct_count(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "impossible progress",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "postCheckpointScreenshotSeconds": [0.1, 0.2],
+                            "minimumDistinctPostCheckpointScreenshots": 3,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "minimumDistinctPostCheckpointScreenshots cannot exceed "
+                "postCheckpointScreenshotSeconds",
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_flicker_limit_without_visibility_threshold(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "undefined flicker",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "postCheckpointScreenshotSeconds": [0.1],
+                            "maximumPostCheckpointInvisibleFlashes": 0,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "maximumPostCheckpointInvisibleFlashes requires a post-checkpoint "
+                "visibility threshold",
+            ):
+                load_manifest(path)
 
     def test_load_manifest_accepts_screenshot_visibility_thresholds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3670,6 +3821,149 @@ class RunnerTests(unittest.TestCase):
             )
 
             self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_rejects_black_flash_after_visual_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "flickering intro",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--alternate-screenshot-visibility"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumPostCheckpointScreenshotNonBlackFraction": 0.9,
+                    "maximumPostCheckpointInvisibleFlashes": 0,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "detected 1 post-checkpoint invisible flash; maximum 0",
+                result.failures,
+            )
+
+    def test_run_case_accepts_stable_post_checkpoint_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "stable intro",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--screenshot-red", "64"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumPostCheckpointScreenshotNonBlackFraction": 0.9,
+                    "maximumPostCheckpointInvisibleFlashes": 0,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_rejects_stuck_post_checkpoint_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "stuck menu",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--screenshot-red", "64"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumDistinctPostCheckpointScreenshots": 2,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "captured 1 distinct post-checkpoint screenshot; expected at least 2",
+                result.failures,
+            )
+
+    def test_run_case_accepts_progressing_post_checkpoint_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "progressing intro",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--vary-screenshots-after", "1"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumDistinctPostCheckpointScreenshots": 2,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_rejects_sustained_black_output_after_visual_checkpoints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "lost intro output",
+                    "timeoutSeconds": 0.7,
+                    "args": [
+                        "--expect-ipc",
+                        "--screenshot-red",
+                        "64",
+                        "--black-screenshots-after",
+                        "1",
+                    ],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumPostCheckpointScreenshotNonBlackFraction": 0.9,
+                    "maximumPostCheckpointInvisibleRunLength": 1,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "longest post-checkpoint invisible run was 2 screenshots; maximum 1",
+                result.failures,
+            )
 
     def test_run_case_accepts_visible_sample_window_with_a_blank_transition(
         self,

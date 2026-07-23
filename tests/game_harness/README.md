@@ -55,6 +55,35 @@ Each case supports:
   host processing. `presented_frame` captures the composed swapchain image that
   is actually shown, avoiding false black checkpoints when a title submits
   intermediate buffers between visible frames.
+- `postCheckpointScreenshotSeconds`: optional increasing list of times, in
+  seconds after the final `screenshotButtonEvents` checkpoint matches, at which
+  to capture frames. This makes regression windows relative to a reached game
+  state instead of variable boot and loading times. Requires `useIpc` and
+  `screenshotButtonEvents`; every requested capture must produce a valid PNG.
+- `postCheckpointScreenshotSource`: optional source override for the
+  post-checkpoint schedule. It accepts the same `game_frame` and
+  `presented_frame` values as `screenshotSource`.
+- `minimumDistinctPostCheckpointScreenshots`: optional minimum number of
+  unique post-checkpoint captures. Use it to reject a route that remains stuck
+  on a visible menu instead of reaching or progressing through the target
+  scene.
+- `minimumPostCheckpointScreenshotMeanIntensity` and
+  `minimumPostCheckpointScreenshotNonBlackFraction`: optional visibility
+  thresholds for post-checkpoint captures. A frame is visible only when it
+  meets every configured threshold.
+- `maximumPostCheckpointInvisibleFlashes`: optional maximum number of invisible
+  runs bounded by visible captures. Leading and trailing darkness is ignored,
+  so ordinary fades do not count as flashes. It requires at least one
+  post-checkpoint visibility threshold.
+- `maximumPostCheckpointInvisibleRunLength`: optional maximum consecutive
+  invisible captures, including leading or trailing runs. Use it to reject
+  sustained output loss while allowing a bounded fade or transition.
+- `postCheckpointLuminanceDipRatio`: optional ratio from 0 to 1 for detecting a
+  local brightness valley. A capture is a dip when its mean intensity is below
+  this fraction of both neighboring captures.
+- `maximumPostCheckpointLuminanceDips`: optional maximum number of local
+  brightness valleys in the post-checkpoint schedule. It requires
+  `postCheckpointLuminanceDipRatio`; monotonic fades are not counted.
 - `renderdocCaptureSeconds`: optional increasing list of times, in seconds after
   the IPC handshake, at which to capture a complete RenderDoc frame. Requires
   `useIpc` and a process launched with RenderDoc loaded; every requested capture

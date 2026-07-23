@@ -81,8 +81,10 @@ def main() -> int:
     parser.add_argument("--vary-screenshots", action="store_true")
     parser.add_argument("--vary-screenshots-after", type=int)
     parser.add_argument("--screenshot-red", type=int)
+    parser.add_argument("--black-screenshots-after", type=int)
     parser.add_argument("--vary-left-pixel", action="store_true")
     parser.add_argument("--dark-movement-screenshots", action="store_true")
+    parser.add_argument("--alternate-screenshot-visibility", action="store_true")
     parser.add_argument("game")
     args = parser.parse_args()
 
@@ -144,16 +146,25 @@ def main() -> int:
                     png = varying_left_pixel_png(index)
                 else:
                     png = one_pixel_png(
-                        args.screenshot_red
-                        if args.screenshot_red is not None
+                        0
+                        if (
+                            args.black_screenshots_after is not None
+                            and index >= args.black_screenshots_after
+                        )
                         else (
-                            index
-                            if args.vary_screenshots
-                            or (
-                                args.vary_screenshots_after is not None
-                                and index >= args.vary_screenshots_after
+                            (64 if index % 2 == 0 else 0)
+                            if args.alternate_screenshot_visibility
+                            else args.screenshot_red
+                            if args.screenshot_red is not None
+                            else (
+                                index
+                                if args.vary_screenshots
+                                or (
+                                    args.vary_screenshots_after is not None
+                                    and index >= args.vary_screenshots_after
+                                )
+                                else 0
                             )
-                            else 0
                         )
                     )
                 (screenshots / f"fake_{index}.png").write_bytes(png)
