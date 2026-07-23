@@ -53,6 +53,16 @@ target_compile_features(shadps4_savedata_dialog_navigation_test PRIVATE cxx_std_
 target_link_libraries(shadps4_savedata_dialog_navigation_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_savedata_dialog_navigation_test)
 
+add_executable(shadps4_notification_state_test
+    test_notification_state.cpp
+)
+target_include_directories(shadps4_notification_state_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_notification_state_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_notification_state_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_notification_state_test)
+
 add_executable(shadps4_texture_types_test
     test_texture_types.cpp
 )

@@ -3,17 +3,14 @@
 
 #include <cmrc/cmrc.hpp>
 #include <imgui.h>
-#include <queue>
-
 #include "imgui/imgui_std.h"
 #include "notifications_layer.h"
 
 CMRC_DECLARE(res);
 namespace shadNotifications {
 
-std::optional<NotificationsUI> current_notif;
-std::queue<NotificationInfo> notif_queue;
-std::mutex queueMtx;
+std::optional<NotificationsUI> notification_layer;
+std::mutex notification_layer_mutex;
 
 const std::map<shadNotifications::stockIcons, std::string> iconMap = {
     {shadNotifications::stockIcons::shadPS4, "src/resources/shadps4.png"},
@@ -22,20 +19,23 @@ const std::map<shadNotifications::stockIcons, std::string> iconMap = {
     {shadNotifications::stockIcons::Input, "src/resources/big_picture/controller.png"},
 };
 
-NotificationsUI::NotificationsUI(NotificationInfo info) {
+NotificationsUI::NotificationsUI() {
     AddLayer(this);
-    currentInfo = info;
-
-    // Resetting the animation
-    elapsed_time = 0.0f; // Resetting animation time
-    fade_opacity = 0.0f; // Starts invisible
 }
 
 NotificationsUI::~NotificationsUI() {
     RemoveLayer(this);
 }
 
+void NotificationsUI::Queue(NotificationInfo info) {
+    notifications.Push(std::move(info));
+}
+
 void NotificationsUI::Draw() {
+    if (!notifications.ActivateNext()) {
+        return;
+    }
+    auto& currentInfo = *notifications.Current();
     auto& io = ImGui::GetIO();
     currentInfo.timer -= io.DeltaTime;
 
@@ -115,14 +115,9 @@ void NotificationsUI::Draw() {
     ImGui::End();
 
     if (currentInfo.timer <= 0) {
-        std::lock_guard<std::mutex> lock(queueMtx);
-        if (!notif_queue.empty()) {
-            NotificationInfo next = notif_queue.front();
-            notif_queue.pop();
-            current_notif.emplace(next);
-        } else {
-            current_notif.reset();
-        }
+        notifications.CompleteCurrent();
+        elapsed_time = 0.0f;
+        fade_opacity = 0.0f;
     }
 }
 
@@ -143,8 +138,6 @@ void QueueNotification(std::string message, float timer, position pos, stockIcon
 
 void QueueNotification(std::string message, float timer, position pos, std::vector<u8> pngData,
                        bool addBackground) {
-    std::lock_guard<std::mutex> lock(queueMtx);
-
     NotificationInfo info;
     info.message = message;
     info.timer = timer;
@@ -152,11 +145,11 @@ void QueueNotification(std::string message, float timer, position pos, std::vect
     info.icon = ImGui::RefCountedTexture::DecodePngTexture(pngData);
     info.addIconBackground = addBackground;
 
-    if (!current_notif.has_value()) {
-        current_notif.emplace(info);
-    } else {
-        notif_queue.push(info);
+    std::scoped_lock lock{notification_layer_mutex};
+    if (!notification_layer.has_value()) {
+        notification_layer.emplace();
     }
+    notification_layer->Queue(std::move(info));
 }
 
 } // namespace shadNotifications

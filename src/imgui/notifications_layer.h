@@ -4,6 +4,7 @@
 #pragma once
 
 #include "imgui/imgui_layer.h"
+#include "imgui/notification_state.h"
 #include "imgui/imgui_texture.h"
 
 namespace shadNotifications {
@@ -32,13 +33,14 @@ struct NotificationInfo {
 
 class NotificationsUI final : public ImGui::Layer {
 public:
-    NotificationsUI(NotificationInfo info);
+    NotificationsUI();
     ~NotificationsUI() override;
 
+    void Queue(NotificationInfo info);
     void Draw() override;
 
 private:
-    NotificationInfo currentInfo;
+    ImGui::NotificationState<NotificationInfo> notifications;
 
     // notification animation
     const float animation_duration = 0.5f; // Animation duration
