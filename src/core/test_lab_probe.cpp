@@ -11,6 +11,7 @@ std::string_view TestLabProbeJson() {
   "emulator": "shadps4",
   "adapterVersion": "1.0.0",
   "capabilities": [
+    "controller_recording",
     "controller_replay",
     "emulator_control",
     "game_frame_screenshot",
