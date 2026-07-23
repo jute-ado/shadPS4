@@ -88,6 +88,20 @@ target_link_libraries(shadps4_png_decode_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_png_decode_test)
 
+add_executable(shadps4_videodec_frame_copy_test
+    test_videodec_frame_copy.cpp
+    ../src/core/libraries/videodec/video_utils.cpp
+)
+target_include_directories(shadps4_videodec_frame_copy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_videodec_frame_copy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_videodec_frame_copy_test PRIVATE
+    GTest::gtest_main
+    FFmpeg::ffmpeg
+)
+list(APPEND TEST_TARGETS shadps4_videodec_frame_copy_test)
+
 add_executable(shadps4_intrusive_ref_test
     test_intrusive_ref.cpp
 )
