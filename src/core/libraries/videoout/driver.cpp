@@ -252,10 +252,7 @@ void VideoOutDriver::Flip(const Request& req) {
         flip_status.tsc = Libraries::Kernel::sceKernelReadTsc();
         flip_status.flip_arg = req.flip_arg;
         flip_status.current_buffer = req.index;
-        if (req.eop) {
-            --flip_status.gc_queue_num;
-        }
-        --flip_status.flip_pending_num;
+        CompleteFlip(flip_status.flip_pending_num, flip_status.gc_queue_num, req.eop);
     }
 
     // Trigger flip events for the port.
@@ -291,30 +288,34 @@ void VideoOutDriver::DrawLastFrame() {
     }
 }
 
+bool VideoOutDriver::ReserveFlip(VideoOutPort* port, s32 index, bool is_eop) {
+    std::unique_lock lock{port->port_mutex};
+    if (!VideoOut::ReserveFlip(port->flip_status.flip_pending_num,
+                              port->flip_status.gc_queue_num, index, is_eop)) {
+        LOG_ERROR(Lib_VideoOut, "Flip queue is full");
+        return false;
+    }
+    port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
+    return true;
+}
+
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
-    {
-        std::unique_lock lock{port->port_mutex};
-        if (!CanQueueFlip(port->flip_status.flip_pending_num, index)) {
-            LOG_ERROR(Lib_VideoOut, "Flip queue is full");
-            return false;
-        }
-
-        if (is_eop) {
-            ++port->flip_status.gc_queue_num;
-        }
-        ++port->flip_status.flip_pending_num; // integral GPU and CPU pending flips counter
-        port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
+    if (!ReserveFlip(port, index, is_eop)) {
+        return false;
     }
 
+    SubmitReservedFlip(port, index, flip_arg, is_eop);
+    return true;
+}
+
+void VideoOutDriver::SubmitReservedFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
         liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
     } else {
         SubmitFlipInternal(port, index, flip_arg, is_eop);
     }
-
-    return true;
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
