@@ -615,6 +615,7 @@ class ManifestTests(unittest.TestCase):
                             "useIpc": True,
                             "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
                             "postCheckpointScreenshotSource": "presented_frame",
+                            "minimumDistinctPostCheckpointScreenshots": 2,
                             "minimumPostCheckpointScreenshotNonBlackFraction": 0.01,
                             "maximumPostCheckpointInvisibleFlashes": 0,
                             "postCheckpointLuminanceDipRatio": 0.5,
@@ -633,11 +634,44 @@ class ManifestTests(unittest.TestCase):
                 case.post_checkpoint_screenshot_source, "presented_frame"
             )
             self.assertEqual(
+                case.minimum_distinct_post_checkpoint_screenshots, 2
+            )
+            self.assertEqual(
                 case.minimum_post_checkpoint_screenshot_non_black_fraction, 0.01
             )
             self.assertEqual(case.maximum_post_checkpoint_invisible_flashes, 0)
             self.assertEqual(case.post_checkpoint_luminance_dip_ratio, 0.5)
             self.assertEqual(case.maximum_post_checkpoint_luminance_dips, 1)
+
+    def test_load_manifest_rejects_impossible_post_checkpoint_distinct_count(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "impossible progress",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "postCheckpointScreenshotSeconds": [0.1, 0.2],
+                            "minimumDistinctPostCheckpointScreenshots": 3,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "minimumDistinctPostCheckpointScreenshots cannot exceed "
+                "postCheckpointScreenshotSeconds",
+            ):
+                load_manifest(path)
 
     def test_load_manifest_rejects_flicker_limit_without_visibility_threshold(
         self,
@@ -3830,6 +3864,58 @@ class RunnerTests(unittest.TestCase):
                     "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
                     "minimumPostCheckpointScreenshotNonBlackFraction": 0.9,
                     "maximumPostCheckpointInvisibleFlashes": 0,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_rejects_stuck_post_checkpoint_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "stuck menu",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--screenshot-red", "64"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumDistinctPostCheckpointScreenshots": 2,
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "captured 1 distinct post-checkpoint screenshot; expected at least 2",
+                result.failures,
+            )
+
+    def test_run_case_accepts_progressing_post_checkpoint_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "progressing intro",
+                    "timeoutSeconds": 0.7,
+                    "args": ["--expect-ipc", "--vary-screenshots-after", "1"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
+                    "minimumDistinctPostCheckpointScreenshots": 2,
                     "allowedOutcomes": ["timed_out"],
                 },
             )

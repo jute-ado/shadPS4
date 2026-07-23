@@ -65,6 +65,7 @@ CASE_FIELDS = frozenset(
         "postCheckpointScreenshotSource",
         "renderdocCaptureSeconds",
         "minimumDistinctScreenshots",
+        "minimumDistinctPostCheckpointScreenshots",
         "minimumScreenshotMeanIntensity",
         "minimumScreenshotNonBlackFraction",
         "minimumVisibleScreenshots",
@@ -203,6 +204,7 @@ class GameCase:
     post_checkpoint_screenshot_source: str | None = None
     renderdoc_capture_seconds: tuple[float, ...] = ()
     minimum_distinct_screenshots: int = 0
+    minimum_distinct_post_checkpoint_screenshots: int = 0
     minimum_screenshot_mean_intensity: float | None = None
     minimum_screenshot_non_black_fraction: float | None = None
     minimum_visible_screenshots: int | None = None
@@ -350,19 +352,20 @@ def _require_renderdoc_capture_schedule(
 
 
 def _require_minimum_distinct_screenshots(
-    raw: Any, *, case_name: str, screenshot_count: int
+    raw: Any,
+    *,
+    case_name: str,
+    screenshot_count: int,
+    field: str = "minimumDistinctScreenshots",
+    schedule_field: str = "screenshotSeconds",
 ) -> int:
     if not isinstance(raw, int) or isinstance(raw, bool):
-        raise ManifestError(
-            f"{case_name}: minimumDistinctScreenshots must be an integer"
-        )
+        raise ManifestError(f"{case_name}: {field} must be an integer")
     if raw < 0:
-        raise ManifestError(
-            f"{case_name}: minimumDistinctScreenshots cannot be negative"
-        )
+        raise ManifestError(f"{case_name}: {field} cannot be negative")
     if raw > screenshot_count:
         raise ManifestError(
-            f"{case_name}: minimumDistinctScreenshots cannot exceed screenshotSeconds"
+            f"{case_name}: {field} cannot exceed {schedule_field}"
         )
     return raw
 
@@ -1155,6 +1158,17 @@ def load_manifest(path: str | Path) -> GameManifest:
                     raw_case.get("minimumDistinctScreenshots", 0),
                     case_name=name,
                     screenshot_count=len(screenshot_seconds),
+                ),
+                minimum_distinct_post_checkpoint_screenshots=(
+                    _require_minimum_distinct_screenshots(
+                        raw_case.get(
+                            "minimumDistinctPostCheckpointScreenshots", 0
+                        ),
+                        case_name=name,
+                        screenshot_count=len(post_checkpoint_screenshot_seconds),
+                        field="minimumDistinctPostCheckpointScreenshots",
+                        schedule_field="postCheckpointScreenshotSeconds",
+                    )
                 ),
                 minimum_screenshot_mean_intensity=minimum_screenshot_mean_intensity,
                 minimum_screenshot_non_black_fraction=minimum_screenshot_non_black_fraction,
@@ -2236,6 +2250,23 @@ def run_case(
         failures.append(
             f"captured {distinct_screenshots} distinct screenshots; expected at least "
             f"{case.minimum_distinct_screenshots}"
+        )
+    distinct_post_checkpoint_screenshots = len(
+        {_hash_file(path) for path in post_checkpoint_screenshots}
+    )
+    if (
+        distinct_post_checkpoint_screenshots
+        < case.minimum_distinct_post_checkpoint_screenshots
+    ):
+        noun = (
+            "screenshot"
+            if distinct_post_checkpoint_screenshots == 1
+            else "screenshots"
+        )
+        failures.append(
+            f"captured {distinct_post_checkpoint_screenshots} distinct "
+            f"post-checkpoint {noun}; expected at least "
+            f"{case.minimum_distinct_post_checkpoint_screenshots}"
         )
     if (
         case.minimum_screenshot_mean_intensity is not None

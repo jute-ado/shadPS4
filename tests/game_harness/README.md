@@ -63,6 +63,10 @@ Each case supports:
 - `postCheckpointScreenshotSource`: optional source override for the
   post-checkpoint schedule. It accepts the same `game_frame` and
   `presented_frame` values as `screenshotSource`.
+- `minimumDistinctPostCheckpointScreenshots`: optional minimum number of
+  unique post-checkpoint captures. Use it to reject a route that remains stuck
+  on a visible menu instead of reaching or progressing through the target
+  scene.
 - `minimumPostCheckpointScreenshotMeanIntensity` and
   `minimumPostCheckpointScreenshotNonBlackFraction`: optional visibility
   thresholds for post-checkpoint captures. A frame is visible only when it
