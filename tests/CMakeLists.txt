@@ -31,6 +31,7 @@ add_executable(shadps4_controller_button_test
     test_controller_button.cpp
     test_controller_connection.cpp
     test_controller_touch.cpp
+    test_controller_trace.cpp
     test_virtual_gamepad.cpp
 )
 target_include_directories(shadps4_controller_button_test PRIVATE
