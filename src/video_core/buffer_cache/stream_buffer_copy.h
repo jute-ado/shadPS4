@@ -17,7 +17,7 @@ void CopyStreamBufferSource(Memory& memory, Source source, u8* destination, size
         std::memcpy(destination, source, size);
     } else {
         const VAddr source_address = static_cast<VAddr>(source);
-        if (memory.IsValidGpuMapping(source_address, size)) {
+        if (memory.IsValidMapping(source_address)) {
             memory.CopySparseMemory(source_address, destination, size);
         } else {
             std::memcpy(destination, reinterpret_cast<const void*>(source_address), size);
