@@ -788,6 +788,7 @@ set(COMMON src/common/logging/classes.h
            src/common/error.cpp
            src/common/error.h
            src/common/fixed_value.h
+           src/common/first_use_tracker.h
            src/common/func_traits.h
            src/common/native_clock.cpp
            src/common/native_clock.h

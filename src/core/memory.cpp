@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
+#include "common/first_use_tracker.h"
 #include "core/backing_write_cursor.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
@@ -112,8 +113,13 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     clamped_size = std::min(clamped_size, size);
 
     if (size != clamped_size) {
-        LOG_WARNING(Kernel_Vmm, "Clamped requested buffer range addr={:#x}, size={:#x} to {:#x}",
-                    virtual_addr, size, clamped_size);
+        static Common::FirstUseTracker<1> logged;
+        if (logged.IsFirstUse(0)) {
+            LOG_WARNING(Kernel_Vmm,
+                        "Clamped requested buffer range addr={:#x}, size={:#x} to {:#x}; "
+                        "suppressing repeated clamp warnings",
+                        virtual_addr, size, clamped_size);
+        }
     }
     return clamped_size;
 }
