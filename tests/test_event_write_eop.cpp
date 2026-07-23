@@ -60,7 +60,7 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
-TEST(EventWriteEop, DefersFlipUntilThePrecedingEopCompletes) {
+TEST(EventWriteEop, DefersFlipUntilThePrecedingEopIsSubmitted) {
     bool flip_signalled = false;
     AmdGpu::EopFlipCompletion completion;
 
@@ -71,7 +71,7 @@ TEST(EventWriteEop, DefersFlipUntilThePrecedingEopCompletes) {
     EXPECT_TRUE(flip_signalled);
 }
 
-TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopAlreadyCompleted) {
+TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopWasAlreadySubmitted) {
     bool flip_signalled = false;
     AmdGpu::EopFlipCompletion completion;
 
@@ -81,7 +81,7 @@ TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopAlreadyCompleted) {
     EXPECT_TRUE(flip_signalled);
 }
 
-TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {
+TEST(EventWriteEop, MakesFlipEligibleAfterSubmissionBeforeGpuCompletion) {
     std::vector<std::string> operations;
     std::function<void()> gpu_completion;
     AmdGpu::EopFlipCompletion completion;
@@ -93,12 +93,11 @@ TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {
         [&] { operations.emplace_back("submit"); }, [&](u32) { operations.emplace_back("fence"); },
         [&] { operations.emplace_back("interrupt"); }, [&] { completion.CompleteEop(); });
 
-    EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "flip"}));
     ASSERT_TRUE(gpu_completion);
     gpu_completion();
 
-    EXPECT_EQ(operations,
-              (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "flip", "fence", "interrupt"}));
 }
 
 TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
