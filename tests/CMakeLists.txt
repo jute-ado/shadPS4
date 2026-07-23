@@ -88,6 +88,16 @@ target_link_libraries(shadps4_png_decode_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_png_decode_test)
 
+add_executable(shadps4_intrusive_ref_test
+    test_intrusive_ref.cpp
+)
+target_include_directories(shadps4_intrusive_ref_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_intrusive_ref_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_intrusive_ref_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_intrusive_ref_test)
+
 add_executable(shadps4_texture_types_test
     test_texture_types.cpp
 )

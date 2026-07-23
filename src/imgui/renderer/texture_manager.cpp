@@ -6,6 +6,7 @@
 
 #include <imgui.h>
 #include "common/assert.h"
+#include "common/intrusive_ref.h"
 #include "common/io_file.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
@@ -32,8 +33,22 @@ struct Inner {
 
 using namespace Core::TextureManager;
 
+namespace {
+
+void RetainTexture(Inner* core) {
+    ++core->count;
+}
+
+void ReleaseTexture(Inner* core) {
+    if (core->count.fetch_sub(1) == 1) {
+        delete core;
+    }
+}
+
+} // namespace
+
 RefCountedTexture::RefCountedTexture(Inner* inner) : inner(inner) {
-    ++inner->count;
+    RetainTexture(inner);
 }
 
 RefCountedTexture RefCountedTexture::DecodePngTexture(std::vector<u8> data) {
@@ -52,7 +67,7 @@ RefCountedTexture::RefCountedTexture() : inner(nullptr) {}
 
 RefCountedTexture::RefCountedTexture(const RefCountedTexture& other) : inner(other.inner) {
     if (inner != nullptr) {
-        ++inner->count;
+        RetainTexture(inner);
     }
 }
 
@@ -61,12 +76,7 @@ RefCountedTexture::RefCountedTexture(RefCountedTexture&& other) noexcept : inner
 }
 
 RefCountedTexture& RefCountedTexture::operator=(const RefCountedTexture& other) {
-    if (this == &other)
-        return *this;
-    inner = other.inner;
-    if (inner != nullptr) {
-        ++inner->count;
-    }
+    Common::AssignIntrusiveRef(inner, other.inner, RetainTexture, ReleaseTexture);
     return *this;
 }
 
@@ -79,9 +89,7 @@ RefCountedTexture& RefCountedTexture::operator=(RefCountedTexture&& other) noexc
 
 RefCountedTexture::~RefCountedTexture() {
     if (inner != nullptr) {
-        if (inner->count.fetch_sub(1) == 1) {
-            delete inner;
-        }
+        ReleaseTexture(inner);
     }
 }
 
@@ -120,12 +128,6 @@ static std::deque<UploadJob> g_upload_list;
 
 namespace Core::TextureManager {
 
-void ReleaseWorkerReference(Inner* core) {
-    if (core->count.fetch_sub(1) == 1) {
-        delete core;
-    }
-}
-
 Inner::~Inner() {
     if (upload_data.im_texture != nullptr) {
         std::unique_lock lk{g_upload_mtx};
@@ -143,7 +145,7 @@ void WorkerLoop() {
 
         if (EmulatorSettings.IsVkCrashDiagnosticEnabled()) {
             // FIXME: Crash diagnostic hangs when building the command buffer here
-            ReleaseWorkerReference(core);
+            ReleaseTexture(core);
             continue;
         }
 
@@ -151,7 +153,7 @@ void WorkerLoop() {
             Common::FS::IOFile file(path, Common::FS::FileAccessMode::Read);
             if (!file.IsOpen()) {
                 LOG_ERROR(ImGui, "Failed to open PNG file: {}", path.string());
-                ReleaseWorkerReference(core);
+                ReleaseTexture(core);
                 continue;
             }
             png_raw.resize(file.GetSize());
@@ -164,7 +166,7 @@ void WorkerLoop() {
         if (!decoded) {
             LOG_ERROR(ImGui, "Failed to decode PNG texture{}",
                       path.empty() ? "" : ": " + path.string());
-            ReleaseWorkerReference(core);
+            ReleaseTexture(core);
             continue;
         }
 
@@ -231,7 +233,7 @@ void Submit() {
     if (upload.core != nullptr) {
         upload.core->upload_data.Upload();
         upload.core->texture_id = upload.core->upload_data.im_texture;
-        ReleaseWorkerReference(upload.core);
+        ReleaseTexture(upload.core);
     } else {
         upload.data.Destroy();
     }
