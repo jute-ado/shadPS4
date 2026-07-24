@@ -8,6 +8,7 @@
 #include "common/logging/log.h"
 #include "video_utils.h"
 #include "videodec_error.h"
+#include "videodec_packet_handle.h"
 
 #include "common/support/avdec.h"
 
@@ -57,7 +58,7 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
         return ORBIS_VIDEODEC2_ERROR_ACCESS_UNIT_SIZE;
     }
 
-    AVPacket* packet = av_packet_alloc();
+    auto packet = Videodec::AdoptPacket(av_packet_alloc());
     if (!packet) {
         LOG_ERROR(Lib_Vdec2, "Failed to allocate packet");
         return ORBIS_VIDEODEC2_ERROR_API_FAIL;
@@ -68,17 +69,15 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
     packet->pts = inputData.ptsData;
     packet->dts = inputData.dtsData;
 
-    int ret = avcodec_send_packet(mCodecContext, packet);
+    int ret = avcodec_send_packet(mCodecContext, packet.get());
     if (ret < 0) {
         LOG_ERROR(Lib_Vdec2, "Error sending packet to decoder: {}", ret);
-        av_packet_free(&packet);
         return ORBIS_VIDEODEC2_ERROR_API_FAIL;
     }
 
     AVFrame* frame = av_frame_alloc();
     if (frame == nullptr) {
         LOG_ERROR(Lib_Vdec2, "Failed to allocate frame");
-        av_packet_free(&packet);
         return ORBIS_VIDEODEC2_ERROR_API_FAIL;
     }
 
@@ -88,7 +87,6 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
         return ORBIS_OK;
     } else if (ret < 0) {
         LOG_ERROR(Lib_Vdec2, "Error receiving frame from decoder: {}", ret);
-        av_packet_free(&packet);
         av_frame_free(&frame);
         return ORBIS_VIDEODEC2_ERROR_API_FAIL;
     }
@@ -139,7 +137,6 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
 
     gPictureInfo.Set(pictureInfo);
 
-    av_packet_free(&packet);
     av_frame_free(&frame);
     return ORBIS_OK;
 }

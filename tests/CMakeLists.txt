@@ -204,6 +204,19 @@ target_compile_features(shadps4_videodec2_picture_info_store_test PRIVATE cxx_st
 target_link_libraries(shadps4_videodec2_picture_info_store_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_videodec2_picture_info_store_test)
 
+add_executable(shadps4_videodec_packet_handle_test
+    test_videodec_packet_handle.cpp
+)
+target_include_directories(shadps4_videodec_packet_handle_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_videodec_packet_handle_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_videodec_packet_handle_test PRIVATE
+    GTest::gtest_main
+    FFmpeg::ffmpeg
+)
+list(APPEND TEST_TARGETS shadps4_videodec_packet_handle_test)
+
 add_executable(shadps4_pm4_memory_wait_test
     test_pm4_memory_wait.cpp
 )
