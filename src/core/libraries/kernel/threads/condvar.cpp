@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include "common/assert.h"
 #include "core/libraries/kernel/kernel.h"
@@ -102,7 +104,7 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
 
     Pthread* curthread = g_curthread;
     ASSERT_MSG(curthread->wchan == nullptr, "Thread was already on queue.");
-    // _thr_testcancel(curthread);
+    PthreadTestCancel();
     SleepqLock(this);
 
     /*
@@ -118,15 +120,45 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
     curthread->mutex_obj = mp;
     SleepqAdd(this, curthread);
 
+    const bool is_reltime = abstime == THR_RELTIME;
+    auto reltime_deadline = std::chrono::steady_clock::time_point{};
+    if (is_reltime) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto max_relative = std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::time_point::max() - now)
+                                      .count();
+        reltime_deadline = usec > static_cast<u64>(max_relative)
+                               ? std::chrono::steady_clock::time_point::max()
+                               : now + std::chrono::microseconds(usec);
+    }
+
     int error = 0;
+    bool first_sleep = true;
     for (;;) {
+        curthread->cancel_point = true;
         curthread->ClearWake();
+        const bool cancel_pending = curthread->ShouldCancel();
         SleepqUnlock(this);
 
-        //_thr_cancel_enter2(curthread, 0);
-        error = curthread->Sleep(abstime, usec) ? 0 : POSIX_ETIMEDOUT;
-        //_thr_cancel_leave(curthread, 0);
-
+        if (cancel_pending) {
+            error = 0;
+        } else if (!is_reltime) {
+            error = curthread->Sleep(abstime, usec, clock_id) ? 0 : POSIX_ETIMEDOUT;
+        } else if (first_sleep) {
+            first_sleep = false;
+            error = curthread->Sleep(abstime, usec) ? 0 : POSIX_ETIMEDOUT;
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= reltime_deadline) {
+                error = POSIX_ETIMEDOUT;
+            } else {
+                const auto remaining_us =
+                    std::chrono::ceil<std::chrono::microseconds>(reltime_deadline - now);
+                error = curthread->Sleep(abstime, static_cast<u64>(remaining_us.count()))
+                            ? 0
+                            : POSIX_ETIMEDOUT;
+            }
+        }
         SleepqLock(this);
         const auto decision = DecideCondWait(curthread->wchan != nullptr,
                                              curthread->ShouldCancel(),
@@ -140,6 +172,8 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
             SleepqUnlock(this);
             curthread->mutex_obj = nullptr;
             mp->CvLock(recurse);
+            curthread->cancel_point = false;
+            PthreadTestCancel();
             return 0;
         } else if (decision == CondWaitDecision::TimedOut) {
             SleepQueue* sq = SleepqLookup(this);
@@ -152,6 +186,8 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
     SleepqUnlock(this);
     curthread->mutex_obj = nullptr;
     const int error2 = mp->CvLock(recurse);
+    curthread->cancel_point = false;
+    PthreadCancelInterrupt();
     if (error == 0) {
         error = error2;
     }
@@ -198,7 +234,7 @@ int PthreadCond::Signal(Pthread* thread) {
     SleepQueue* sq = SleepqLookup(this);
     if (sq == nullptr) {
         SleepqUnlock(this);
-        return 0;
+        return thread != nullptr ? 1 : 0;
     }
 
     Pthread* td = SelectSleepqWaiter(sq, thread);
@@ -210,27 +246,26 @@ int PthreadCond::Signal(Pthread* thread) {
     PthreadMutex* mp = td->mutex_obj;
     has_user_waiters = SleepqRemove(sq, td);
 
-    BinarySemaphore* waddr = nullptr;
-    if (mp->m_owner == curthread) {
+    WakeSemaphore* wake_address = &td->wake_sema;
+    if (mp != nullptr && curthread != nullptr && mp->m_owner.load() == curthread) {
         if (curthread->nwaiter_defer >= Pthread::MaxDeferWaiters) {
             curthread->WakeAll();
         }
         curthread->defer_waiters[curthread->nwaiter_defer++] = &td->wake_sema;
         mp->m_flags |= PthreadMutexFlags::Deferred;
-    } else {
-        waddr = &td->wake_sema;
+        wake_address = nullptr;
     }
 
     SleepqUnlock(this);
-    if (waddr != nullptr) {
-        waddr->release();
+    if (wake_address != nullptr) {
+        wake_address->release();
     }
     return 0;
 }
 
 struct BroadcastArg {
     Pthread* curthread;
-    BinarySemaphore* waddrs[Pthread::MaxDeferWaiters];
+    WakeSemaphore* immediate_wakes[Pthread::MaxDeferWaiters];
     int count;
 };
 
@@ -244,7 +279,7 @@ int PthreadCond::Broadcast() {
         Pthread* curthread = ba2->curthread;
         PthreadMutex* mp = td->mutex_obj;
 
-        if (mp->m_owner == curthread) {
+        if (mp != nullptr && curthread != nullptr && mp->m_owner.load() == curthread) {
             if (curthread->nwaiter_defer >= Pthread::MaxDeferWaiters) {
                 curthread->WakeAll();
             }
@@ -253,11 +288,11 @@ int PthreadCond::Broadcast() {
         } else {
             if (ba2->count >= Pthread::MaxDeferWaiters) {
                 for (int i = 0; i < ba2->count; i++) {
-                    ba2->waddrs[i]->release();
+                    ba2->immediate_wakes[i]->release();
                 }
                 ba2->count = 0;
             }
-            ba2->waddrs[ba2->count++] = &td->wake_sema;
+            ba2->immediate_wakes[ba2->count++] = &td->wake_sema;
         }
     };
 
@@ -273,7 +308,7 @@ int PthreadCond::Broadcast() {
     SleepqUnlock(this);
 
     for (int i = 0; i < ba.count; i++) {
-        ba.waddrs[i]->release();
+        ba.immediate_wakes[i]->release();
     }
     return 0;
 }
