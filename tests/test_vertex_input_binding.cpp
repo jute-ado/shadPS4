@@ -53,6 +53,20 @@ TEST(VertexBufferRange, MergesOverlappingClampedRanges) {
     EXPECT_EQ(ranges[0].end_address, 0x1600u);
 }
 
+TEST(VertexBufferRange, IgnoresNullAddressDescriptors) {
+    constexpr std::array buffers{
+        TestBuffer{.base_address = 0, .size = 0x400},
+        TestBuffer{.base_address = 0x1000, .size = 0x400},
+    };
+
+    const auto ranges =
+        VideoCore::BuildVertexBufferRanges(buffers, [](VAddr, u64 size) { return size; });
+
+    ASSERT_EQ(ranges.size(), 1u);
+    EXPECT_EQ(ranges[0].base_address, 0x1000u);
+    EXPECT_EQ(ranges[0].end_address, 0x1400u);
+}
+
 TEST(VertexInputBinding, DrawCommitsDynamicStateAfterPipelineBinding) {
     std::vector<std::string_view> operations;
 

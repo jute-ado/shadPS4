@@ -8,6 +8,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_cache_policy.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/vertex_buffer_range.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -197,7 +198,7 @@ void BufferCache::BindVertexBuffers(
     Vulkan::VertexInputs<vk::DeviceSize> host_sizes;
     Vulkan::VertexInputs<vk::DeviceSize> host_strides;
     for (const auto& buffer : guest_buffers) {
-        if (buffer.GetSize() > 0) {
+        if (buffer.base_address != 0 && buffer.GetSize() > 0) {
             const auto host_buffer_info =
                 std::ranges::find_if(ranges_merged, [&](const BufferRange& range) {
                     return buffer.base_address >= range.base_address &&
@@ -378,8 +379,8 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
-    if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size) &&
-        IsRegionCpuModified(device_addr, size)) {
+    if (ShouldUseStreamBuffer(is_written, size, CACHING_PAGESIZE,
+                              IsRegionGpuModified(device_addr, size))) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
         return {&stream_buffer, offset};
     }

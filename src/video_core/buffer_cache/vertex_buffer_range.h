@@ -24,7 +24,7 @@ template <std::ranges::input_range Buffers, typename ClampSize>
     std::vector<VertexBufferRange> ranges;
     for (const auto& buffer : buffers) {
         const u64 requested_size = buffer.GetSize();
-        if (requested_size == 0) {
+        if (buffer.base_address == 0 || requested_size == 0) {
             continue;
         }
         const u64 clamped_size = std::invoke(clamp_size, buffer.base_address, requested_size);
