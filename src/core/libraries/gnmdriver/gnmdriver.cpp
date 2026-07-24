@@ -142,7 +142,7 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
 
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed() {
     LOG_TRACE(Lib_GnmDriver, "called");
-    return submission_gate.AreSubmitsAllowed(liverpool->IsGpuIdle());
+    return submission_gate.AreSubmitsAllowed();
 }
 
 int PS4_SYSV_ABI sceGnmBeginWorkload(u32 workload_stream, u64* workload) {
