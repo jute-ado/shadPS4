@@ -187,8 +187,8 @@ public:
         return is_guest_threads_paused;
     }
 
-    void IncFlipFrameNum() {
-        ++flip_frame_count;
+    u32 IncFlipFrameNum() {
+        return ++flip_frame_count;
     }
 
     void IncGnmFrameNum() {

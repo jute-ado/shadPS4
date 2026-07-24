@@ -27,10 +27,12 @@ set(TEST_TARGETS
 add_executable(shadps4_controller_button_test
     ${CMAKE_SOURCE_DIR}/src/input/controller_axis.cpp
     ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/controller_trace.cpp
     test_controller_axis.cpp
     test_controller_button.cpp
     test_controller_connection.cpp
     test_controller_touch.cpp
+    test_controller_trace.cpp
     test_virtual_gamepad.cpp
 )
 target_include_directories(shadps4_controller_button_test PRIVATE
@@ -40,6 +42,7 @@ target_compile_features(shadps4_controller_button_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_controller_button_test PRIVATE
     GTest::gtest_main
     SDL3::SDL3
+    spdlog::spdlog
 )
 list(APPEND TEST_TARGETS shadps4_controller_button_test)
 
@@ -291,6 +294,20 @@ target_compile_features(shadps4_renderdoc_path_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
 
+add_executable(shadps4_test_lab_probe_test
+    ${CMAKE_SOURCE_DIR}/src/core/test_lab_probe.cpp
+    test_test_lab_probe.cpp
+)
+target_include_directories(shadps4_test_lab_probe_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_probe_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_probe_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+list(APPEND TEST_TARGETS shadps4_test_lab_probe_test)
+
 add_executable(shadps4_presenter_sync_test
     test_presenter_sync.cpp
 )
@@ -303,6 +320,19 @@ target_link_libraries(shadps4_presenter_sync_test PRIVATE
     Vulkan::Headers
 )
 list(APPEND TEST_TARGETS shadps4_presenter_sync_test)
+
+add_executable(shadps4_presented_frame_timing_trace_test
+    test_presented_frame_timing_trace.cpp
+)
+target_include_directories(shadps4_presented_frame_timing_trace_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_presented_frame_timing_trace_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_presented_frame_timing_trace_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+list(APPEND TEST_TARGETS shadps4_presented_frame_timing_trace_test)
 
 add_executable(shadps4_equeue_event_test
     test_equeue_event.cpp
