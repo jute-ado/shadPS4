@@ -3,15 +3,23 @@
 
 #include "playgo_chunk.h"
 
+#include <algorithm>
+#include <cstring>
+
 bool PlaygoFile::Open(const std::filesystem::path& filepath) {
     Common::FS::IOFile file(filepath, Common::FS::FileAccessMode::Read);
-    if (file.IsOpen()) {
-        file.Read(playgoHeader);
-        if (LoadChunks(file)) {
-            return true;
-        }
+    if (!file.IsOpen() || file.Read(playgoHeader) != 1 ||
+        !ValidatePlaygoHeaderLayout(playgoHeader, file.GetSize())) {
+        playgoHeader = {};
+        chunks.clear();
+        return false;
     }
-    return false;
+    if (!LoadChunks(file)) {
+        playgoHeader = {};
+        chunks.clear();
+        return false;
+    }
+    return true;
 }
 
 bool PlaygoFile::LoadChunks(const Common::FS::IOFile& file) {
@@ -28,26 +36,53 @@ bool PlaygoFile::LoadChunks(const Common::FS::IOFile& file) {
             if (ret) {
                 chunks.resize(playgoHeader.chunk_count);
 
-                auto chunk_attrs =
-                    reinterpret_cast<playgo_chunk_attr_entry_t*>(&chunk_attrs_data[0]);
-                auto chunk_mchunks = reinterpret_cast<u16*>(&chunk_mchunks_data[0]);
-                auto chunk_labels = reinterpret_cast<char*>(&chunk_labels_data[0]);
-                auto mchunk_attrs =
-                    reinterpret_cast<playgo_mchunk_attr_entry_t*>(&mchunk_attrs_data[0]);
-
                 for (u16 i = 0; i < playgoHeader.chunk_count; i++) {
-                    chunks[i].req_locus = chunk_attrs[i].req_locus;
-                    chunks[i].language_mask = chunk_attrs[i].language_mask;
-                    chunks[i].label_name = std::string(chunk_labels + chunk_attrs[i].label_offset);
+                    playgo_chunk_attr_entry_t chunk_attr{};
+                    std::memcpy(&chunk_attr,
+                                chunk_attrs_data.data() +
+                                    static_cast<size_t>(i) * sizeof(chunk_attr),
+                                sizeof(chunk_attr));
+
+                    if (chunk_attr.label_offset >= chunk_labels_data.size()) {
+                        return false;
+                    }
+                    const auto label_begin =
+                        chunk_labels_data.begin() + chunk_attr.label_offset;
+                    const auto label_end =
+                        std::find(label_begin, chunk_labels_data.end(), '\0');
+                    if (label_end == chunk_labels_data.end()) {
+                        return false;
+                    }
+
+                    chunks[i].req_locus = chunk_attr.req_locus;
+                    chunks[i].language_mask = chunk_attr.language_mask;
+                    chunks[i].label_name.assign(label_begin, label_end);
 
                     u64 total_size = 0;
-                    u16 mchunk_count = chunk_attrs[i].mchunk_count;
+                    const u16 mchunk_count = chunk_attr.mchunk_count;
                     if (mchunk_count != 0) {
-                        auto mchunks = reinterpret_cast<u16*>(
-                            ((u8*)chunk_mchunks + chunk_attrs[i].mchunks_offset));
+                        if (!IsPlaygoSubrangeWithinSection(
+                                chunk_attr.mchunks_offset, mchunk_count, sizeof(u16),
+                                chunk_mchunks_data.size())) {
+                            return false;
+                        }
+
                         for (u16 j = 0; j < mchunk_count; j++) {
-                            u16 mchunk_id = mchunks[j];
-                            total_size += mchunk_attrs[mchunk_id].size.size;
+                            u16 mchunk_id{};
+                            std::memcpy(&mchunk_id,
+                                        chunk_mchunks_data.data() + chunk_attr.mchunks_offset +
+                                            static_cast<size_t>(j) * sizeof(mchunk_id),
+                                        sizeof(mchunk_id));
+                            if (mchunk_id >= playgoHeader.mchunk_count) {
+                                return false;
+                            }
+
+                            playgo_mchunk_attr_entry_t mchunk_attr{};
+                            std::memcpy(&mchunk_attr,
+                                        mchunk_attrs_data.data() +
+                                            static_cast<size_t>(mchunk_id) * sizeof(mchunk_attr),
+                                        sizeof(mchunk_attr));
+                            total_size += mchunk_attr.size.size;
                         }
                     }
                     chunks[i].total_size = total_size;
@@ -65,10 +100,8 @@ bool PlaygoFile::load_chunk_data(const Common::FS::IOFile& file, const chunk_t c
     if (file.IsOpen()) {
         if (file.Seek(chunk.offset)) {
             data.resize(chunk.length);
-            if (data.size() == chunk.length) {
-                file.ReadRaw<char>(&data[0], chunk.length);
-                return true;
-            }
+            return data.empty() ||
+                   file.ReadRaw<char>(data.data(), data.size()) == data.size();
         }
     }
     return false;

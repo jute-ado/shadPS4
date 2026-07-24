@@ -686,7 +686,10 @@ target_include_directories(shadps4_playgo_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_playgo_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_playgo_test PRIVATE GTest::gtest_main)
+target_link_libraries(shadps4_playgo_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
 list(APPEND TEST_TARGETS shadps4_playgo_test)
 
 set(USER_MIGRATION_TEST_SOURCES

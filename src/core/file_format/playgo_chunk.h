@@ -95,6 +95,42 @@ struct PlaygoChunk {
     std::string label_name;
 };
 
+constexpr bool IsPlaygoSectionWithinFile(const chunk_t& section, u64 file_size,
+                                         u64 minimum_length = 0) {
+    return section.offset <= file_size && section.length <= file_size - section.offset &&
+           section.length >= minimum_length;
+}
+
+constexpr bool IsPlaygoSubrangeWithinSection(u64 offset, u64 entry_count, u64 entry_size,
+                                             u64 section_size) {
+    return offset <= section_size &&
+           (entry_size == 0 || entry_count <= (section_size - offset) / entry_size);
+}
+
+constexpr bool ValidatePlaygoHeaderLayout(const PlaygoHeader& header, u64 host_file_size) {
+    if (header.magic != PLAYGO_MAGIC || header.file_size < sizeof(PlaygoHeader) ||
+        header.file_size > host_file_size || header.chunk_count > 1000 ||
+        header.mchunk_count > 8000 || header.scenario_count > 32) {
+        return false;
+    }
+
+    const u64 file_size = header.file_size;
+    return IsPlaygoSectionWithinFile(
+               header.chunk_attrs, file_size,
+               static_cast<u64>(header.chunk_count) * sizeof(playgo_chunk_attr_entry_t)) &&
+           IsPlaygoSectionWithinFile(header.chunk_mchunks, file_size) &&
+           IsPlaygoSectionWithinFile(header.chunk_labels, file_size) &&
+           IsPlaygoSectionWithinFile(
+               header.mchunk_attrs, file_size,
+               static_cast<u64>(header.mchunk_count) * sizeof(playgo_mchunk_attr_entry_t)) &&
+           IsPlaygoSectionWithinFile(
+               header.scenario_attrs, file_size,
+               static_cast<u64>(header.scenario_count) * sizeof(playgo_scenario_attr_entry_t)) &&
+           IsPlaygoSectionWithinFile(header.scenario_chunks, file_size) &&
+           IsPlaygoSectionWithinFile(header.scenario_labels, file_size) &&
+           IsPlaygoSectionWithinFile(header.inner_mchunk_attrs, file_size);
+}
+
 class PlaygoFile {
 public:
     OrbisPlayGoHandle handle = 0;
@@ -124,6 +160,6 @@ private:
     bool load_chunk_data(const Common::FS::IOFile& file, const chunk_t chunk, std::string& data);
 
 private:
-    PlaygoHeader playgoHeader;
+    PlaygoHeader playgoHeader{};
     std::mutex speed_mutex;
 };
