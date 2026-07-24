@@ -74,6 +74,19 @@ target_compile_features(shadps4_notification_state_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_notification_state_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_notification_state_test)
 
+add_executable(shadps4_log_once_test
+    test_log_once.cpp
+)
+target_include_directories(shadps4_log_once_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_log_once_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_log_once_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_log_once_test)
+
 add_executable(shadps4_texture_job_queue_test
     test_texture_job_queue.cpp
 )

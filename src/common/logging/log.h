@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <iostream>
 #include <unordered_map>
 #include <vector>
@@ -76,5 +77,12 @@ static constexpr std::array level_string_views{"Trace", "Debug",    "Info", "War
     LOG_GENERIC(Common::Log::Class::log_class, spdlog::level::warn, __VA_ARGS__)
 #define LOG_ERROR(log_class, ...)                                                                  \
     LOG_GENERIC(Common::Log::Class::log_class, spdlog::level::err, __VA_ARGS__)
+#define LOG_ERROR_ONCE(log_class, ...)                                                             \
+    do {                                                                                           \
+        static std::atomic_flag logged_once = ATOMIC_FLAG_INIT;                                    \
+        if (!logged_once.test_and_set(std::memory_order_relaxed)) {                                \
+            LOG_ERROR(log_class, __VA_ARGS__);                                                     \
+        }                                                                                          \
+    } while (false)
 #define LOG_CRITICAL(log_class, ...)                                                               \
     LOG_GENERIC(Common::Log::Class::log_class, spdlog::level::critical, __VA_ARGS__)
