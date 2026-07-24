@@ -5,6 +5,7 @@
 
 #include "core/libraries/error_codes.h"
 #include "core/libraries/videodec/videodec2.h"
+#include "core/libraries/videodec/videodec2_compute_validation.h"
 #include "core/libraries/videodec/videodec2_decode_validation.h"
 #include "core/libraries/videodec/videodec_error.h"
 
@@ -28,6 +29,57 @@ struct ValidDecodeArguments {
         .thisSize = sizeof(OrbisVideodec2OutputInfo),
     };
 };
+
+struct ValidComputeArguments {
+    OrbisVideodec2ComputeConfigInfo config{
+        .thisSize = sizeof(OrbisVideodec2ComputeConfigInfo),
+    };
+    OrbisVideodec2ComputeMemoryInfo memory{
+        .thisSize = sizeof(OrbisVideodec2ComputeMemoryInfo),
+        .cpuGpuMemorySize = Videodec2ComputeMemorySize,
+        .cpuGpuMemory = reinterpret_cast<void*>(0x10000),
+    };
+};
+
+TEST(Videodec2ComputeValidation, AcceptsAdvertisedMinimumMemory) {
+    ValidComputeArguments args;
+
+    EXPECT_EQ(ValidateComputeQueueArguments(args.config, args.memory), ORBIS_OK);
+}
+
+TEST(Videodec2ComputeValidation, RejectsMemoryBelowAdvertisedMinimum) {
+    ValidComputeArguments args;
+    args.memory.cpuGpuMemorySize = Videodec2ComputeMemorySize - 1;
+
+    EXPECT_EQ(ValidateComputeQueueArguments(args.config, args.memory),
+              ORBIS_VIDEODEC2_ERROR_MEMORY_SIZE);
+}
+
+TEST(Videodec2ComputeValidation, RejectsInvalidQueueConfiguration) {
+    ValidComputeArguments args;
+    args.config.computeQueueId = 8;
+
+    EXPECT_EQ(ValidateComputeQueueArguments(args.config, args.memory),
+              ORBIS_VIDEODEC2_ERROR_COMPUTE_QUEUE_ID);
+}
+
+TEST(Videodec2ComputeValidation, PreservesSpecificConfigurationAndMemoryErrors) {
+    ValidComputeArguments args;
+
+    args.config.computePipeId = 5;
+    EXPECT_EQ(ValidateComputeQueueArguments(args.config, args.memory),
+              ORBIS_VIDEODEC2_ERROR_COMPUTE_PIPE_ID);
+
+    args.config.computePipeId = 0;
+    args.config.reserved0 = 1;
+    EXPECT_EQ(ValidateComputeQueueArguments(args.config, args.memory),
+              ORBIS_VIDEODEC2_ERROR_CONFIG_INFO);
+
+    args.config.reserved0 = 0;
+    args.memory.cpuGpuMemory = nullptr;
+    EXPECT_EQ(ValidateComputeQueueArguments(args.config, args.memory),
+              ORBIS_VIDEODEC2_ERROR_MEMORY_POINTER);
+}
 
 TEST(Videodec2DecodeValidation, AcceptsCurrentAndLegacyOutputStructures) {
     ValidDecodeArguments args;
@@ -62,8 +114,7 @@ TEST(Videodec2DecodeValidation, RejectsZeroFrameBufferSize) {
 }
 
 TEST(Videodec2DecodeValidation, RejectsFrameBufferSmallerThanDecodedOutput) {
-    EXPECT_EQ(ValidateFrameBufferCapacity(0x17ff, 0x1800),
-              ORBIS_VIDEODEC2_ERROR_FRAME_BUFFER_SIZE);
+    EXPECT_EQ(ValidateFrameBufferCapacity(0x17ff, 0x1800), ORBIS_VIDEODEC2_ERROR_FRAME_BUFFER_SIZE);
     EXPECT_EQ(ValidateFrameBufferCapacity(0x1800, 0x1800), ORBIS_OK);
     EXPECT_EQ(ValidateFrameBufferCapacity(0x1801, 0x1800), ORBIS_OK);
 }
