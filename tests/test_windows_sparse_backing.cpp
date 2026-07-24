@@ -7,6 +7,33 @@
 #include <windows.h>
 #include "core/windows_sparse_backing.h"
 
+TEST(WindowsSparseBacking, PreSplitCountBatchesOneMiBMappings) {
+    constexpr u64 MiB = 1024 * 1024;
+
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(1 * MiB, 128 * MiB), 64);
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(1 * MiB, 7 * MiB), 7);
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(1 * MiB, 7 * MiB + 512 * 1024),
+              7);
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(1 * MiB, 1 * MiB), 1);
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(1 * MiB, 512 * 1024), 1);
+}
+
+TEST(WindowsSparseBacking, PreSplitCountLeavesOtherMappingSizesUnbatched) {
+    constexpr u64 KiB = 1024;
+    constexpr u64 MiB = 1024 * KiB;
+
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(64 * KiB, 128 * MiB), 1);
+    EXPECT_EQ(Core::WindowsSparseBacking::PlaceholderPreSplitCount(2 * MiB, 128 * MiB), 1);
+}
+
+TEST(WindowsSparseBacking, CoalescesPreparedFreeChunksForLargerMapping) {
+    constexpr u64 MiB = 1024 * 1024;
+
+    EXPECT_TRUE(Core::WindowsSparseBacking::PlaceholderNeedsCoalesce(false, 1 * MiB, 2 * MiB));
+    EXPECT_FALSE(Core::WindowsSparseBacking::PlaceholderNeedsCoalesce(false, 2 * MiB, 2 * MiB));
+    EXPECT_FALSE(Core::WindowsSparseBacking::PlaceholderNeedsCoalesce(true, 1 * MiB, 2 * MiB));
+}
+
 TEST(WindowsSparseBacking, CommittedSectionRangeIsVisibleThroughAlias) {
     constexpr u64 Granularity = 64_KB;
     constexpr u64 SectionSize = 2 * Granularity;

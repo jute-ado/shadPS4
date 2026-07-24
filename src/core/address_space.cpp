@@ -402,15 +402,58 @@ struct AddressSpace::Impl {
         }
     }
 
+    void PreSplitPlaceholderRun(std::map<VAddr, MemoryRegion>::iterator it, u64 size, u64 count) {
+        while (count > 0 && it != regions.end() && !it->second.is_mapped &&
+               it->second.size >= size) {
+            auto& region = it->second;
+            if (region.size == size) {
+                break;
+            }
+
+            const VAddr next_region_addr = region.base + size;
+            const u64 next_region_size = region.size - size;
+            region.size = size;
+
+            auto next = regions.emplace_hint(std::next(it), next_region_addr,
+                                             MemoryRegion(next_region_addr, -1, next_region_size,
+                                                          region.prot, region.fd, false));
+
+            if (!VirtualFreeEx(process, LPVOID(region.base), region.size,
+                               MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
+                UNREACHABLE_MSG("Region pre-splitting failed: {}", Common::GetLastErrorMsg());
+            }
+
+            it = next;
+            --count;
+        }
+    }
+
     void* Map(VAddr virtual_addr, PAddr phys_addr, u64 size, ULONG prot, s32 fd = -1) {
         std::scoped_lock lk{mutex};
         // Get a pointer to the region containing virtual_addr
         auto it = std::prev(regions.upper_bound(virtual_addr));
+        u64 available_size = it->second.base + it->second.size - virtual_addr;
+
+        // Proactively split placeholders remain free, but a later larger mapping can span them.
+        // Restore the original contiguous placeholder before fitting that mapping.
+        if (WindowsSparseBacking::PlaceholderNeedsCoalesce(it->second.is_mapped, available_size,
+                                                           size)) {
+            CoalesceFreeRegions(virtual_addr);
+            it = std::prev(regions.upper_bound(virtual_addr));
+            available_size = it->second.base + it->second.size - virtual_addr;
+        }
 
         // If needed, split surrounding regions to create a placeholder
         if (it->first != virtual_addr || it->second.size != size) {
+            const bool can_pre_split = !it->second.is_mapped;
+            const u64 pre_split_count =
+                can_pre_split ? WindowsSparseBacking::PlaceholderPreSplitCount(size, available_size)
+                              : 1;
             SplitRegion(virtual_addr, size);
             it = std::prev(regions.upper_bound(virtual_addr));
+            if (pre_split_count > 1) {
+                PreSplitPlaceholderRun(std::next(it), size, pre_split_count - 1);
+            }
         }
 
         // Get the address and region for this range.
