@@ -19,6 +19,13 @@ endif()
 
 project(shadPS4 CXX C ASM ${ADDITIONAL_LANGUAGES})
 
+# CMake 3.31 forwards clang-cl dependency flags to rc.exe, which rejects them.
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(CMAKE_DEPFILE_FLAGS_RC "")
+    set(CMAKE_RC_COMPILE_OBJECT
+        "<CMAKE_RC_COMPILER> <DEFINES> <INCLUDES> <FLAGS> /fo <OBJECT> <SOURCE>")
+endif()
+
 include(FetchContent)
 
 # Forcing PIE makes sure that the base address is high enough so that it doesn't clash with the PS4 memory.
