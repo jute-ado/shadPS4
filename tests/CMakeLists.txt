@@ -244,6 +244,16 @@ target_link_libraries(shadps4_videodec_nv12_copy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_videodec_nv12_copy_test)
 
+add_executable(shadps4_videodec2_decode_validation_test
+    test_videodec2_decode_validation.cpp
+)
+target_include_directories(shadps4_videodec2_decode_validation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_videodec2_decode_validation_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_videodec2_decode_validation_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_videodec2_decode_validation_test)
+
 add_executable(shadps4_pm4_memory_wait_test
     test_pm4_memory_wait.cpp
 )

@@ -7,6 +7,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "video_utils.h"
+#include "videodec2_decode_validation.h"
 #include "videodec_error.h"
 #include "videodec_frame_handle.h"
 #include "videodec_packet_handle.h"
@@ -101,19 +102,26 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
         frame = nv12_frame;
     }
 
-    Videodec::CopyNV12Data((u8*)frameBuffer.frameBuffer, *frame);
-    frameBuffer.isAccepted = true;
-
     const auto width = Common::AlignUp<u32>(frame->width, 16);
     const auto pitch = Common::AlignUp<u32>(frame->width, 64);
     const auto height = Common::AlignUp<u32>(frame->height, 16);
+    const u64 output_size = (static_cast<u64>(pitch) * height * 3) / 2;
+    const s32 capacity_result =
+        ValidateFrameBufferCapacity(frameBuffer.frameBufferSize, output_size);
+    if (capacity_result != ORBIS_OK) {
+        av_frame_free(&frame);
+        return capacity_result;
+    }
+
+    Videodec::CopyNV12Data((u8*)frameBuffer.frameBuffer, *frame);
+    frameBuffer.isAccepted = true;
 
     outputInfo.codecType = 1; // FIXME: Hardcoded to AVC
     outputInfo.frameWidth = width;
     outputInfo.framePitch = pitch;
     outputInfo.frameHeight = height;
     outputInfo.frameBuffer = frameBuffer.frameBuffer;
-    outputInfo.frameBufferSize = (pitch * height * 3) / 2;
+    outputInfo.frameBufferSize = output_size;
 
     outputInfo.isValid = true;
     outputInfo.isErrorFrame = false;
@@ -182,19 +190,26 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
         frame = nv12_frame;
     }
 
-    Videodec::CopyNV12Data((u8*)frameBuffer.frameBuffer, *frame);
-    frameBuffer.isAccepted = true;
-
     const auto width = Common::AlignUp<u32>(frame->width, 16);
     const auto pitch = Common::AlignUp<u32>(frame->width, 64);
     const auto height = Common::AlignUp<u32>(frame->height, 16);
+    const u64 output_size = (static_cast<u64>(pitch) * height * 3) / 2;
+    const s32 capacity_result =
+        ValidateFrameBufferCapacity(frameBuffer.frameBufferSize, output_size);
+    if (capacity_result != ORBIS_OK) {
+        av_frame_free(&frame);
+        return capacity_result;
+    }
+
+    Videodec::CopyNV12Data((u8*)frameBuffer.frameBuffer, *frame);
+    frameBuffer.isAccepted = true;
 
     outputInfo.codecType = 1; // FIXME: Hardcoded to AVC
     outputInfo.frameWidth = width;
     outputInfo.framePitch = pitch;
     outputInfo.frameHeight = height;
     outputInfo.frameBuffer = frameBuffer.frameBuffer;
-    outputInfo.frameBufferSize = (pitch * height * 3) / 2;
+    outputInfo.frameBufferSize = output_size;
 
     outputInfo.isValid = true;
     outputInfo.isErrorFrame = false;
