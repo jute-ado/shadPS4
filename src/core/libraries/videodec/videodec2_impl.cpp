@@ -13,7 +13,7 @@
 
 namespace Libraries::Videodec2 {
 
-std::vector<OrbisVideodec2AvcPictureInfo> gPictureInfos;
+PictureInfoStore gPictureInfo;
 
 VdecDecoder::VdecDecoder(const OrbisVideodec2DecoderConfigInfo& configInfo,
                          const OrbisVideodec2DecoderMemoryInfo& memoryInfo) {
@@ -34,7 +34,7 @@ VdecDecoder::~VdecDecoder() {
     avcodec_free_context(&mCodecContext);
     sws_freeContext(mSwsContext);
 
-    gPictureInfos.clear();
+    gPictureInfo.Clear();
 }
 
 s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
@@ -137,7 +137,7 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
     pictureInfo.frameCropRightOffset = pitch - frame->width;
     pictureInfo.frameCropBottomOffset = height - frame->height;
 
-    gPictureInfos.push_back(pictureInfo);
+    gPictureInfo.Set(pictureInfo);
 
     av_packet_free(&packet);
     av_frame_free(&frame);
@@ -217,7 +217,7 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
     pictureInfo.frameCropRightOffset = pitch - frame->width;
     pictureInfo.frameCropBottomOffset = height - frame->height;
 
-    gPictureInfos.push_back(pictureInfo);
+    gPictureInfo.Set(pictureInfo);
 
     av_frame_free(&frame);
     return ORBIS_OK;
@@ -225,7 +225,7 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
 
 s32 VdecDecoder::Reset() {
     avcodec_flush_buffers(mCodecContext);
-    gPictureInfos.clear();
+    gPictureInfo.Clear();
     return ORBIS_OK;
 }
 

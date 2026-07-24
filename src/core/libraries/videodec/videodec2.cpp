@@ -203,7 +203,8 @@ s32 PS4_SYSV_ABI sceVideodec2GetPictureInfo(const OrbisVideodec2OutputInfo* outp
         LOG_ERROR(Lib_Vdec2, "No picture info available");
         return ORBIS_OK;
     }
-    if (gPictureInfos.empty()) {
+    const auto picture_info = gPictureInfo.Get();
+    if (!picture_info) {
         LOG_ERROR(Lib_Vdec2, "No picture info available");
         return ORBIS_OK;
     }
@@ -217,7 +218,7 @@ s32 PS4_SYSV_ABI sceVideodec2GetPictureInfo(const OrbisVideodec2OutputInfo* outp
             return ORBIS_VIDEODEC2_ERROR_STRUCT_SIZE;
         }
         // Copy the requested picture data to the output.
-        memcpy(p1stPictureInfoOut, &gPictureInfos.back(), picture_size);
+        memcpy(p1stPictureInfoOut, &*picture_info, picture_size);
         // Correct the outputted picture struct size.
         memcpy(p1stPictureInfoOut, &picture_size, sizeof(u64));
     }

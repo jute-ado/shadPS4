@@ -3,9 +3,8 @@
 
 #pragma once
 
-#include <vector>
-
 #include "videodec2.h"
+#include "videodec2_picture_info_store.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -15,7 +14,7 @@ extern "C" {
 
 namespace Libraries::Videodec2 {
 
-extern std::vector<OrbisVideodec2AvcPictureInfo> gPictureInfos;
+extern PictureInfoStore gPictureInfo;
 
 class VdecDecoder {
 public:
