@@ -846,6 +846,7 @@ foreach(t ${TEST_TARGETS})
     gtest_discover_tests(${t}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         DISCOVERY_TIMEOUT 60
+        DISCOVERY_MODE PRE_TEST
     )
 endforeach()
 
@@ -954,4 +955,5 @@ endif()
 gtest_discover_tests(shadps4_http_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     DISCOVERY_TIMEOUT 60
+    DISCOVERY_MODE PRE_TEST
 )
