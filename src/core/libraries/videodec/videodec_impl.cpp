@@ -7,6 +7,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "video_utils.h"
+#include "videodec_decode_validation.h"
 #include "videodec_error.h"
 #include "videodec_frame_handle.h"
 
@@ -91,11 +92,18 @@ s32 VdecDecoder::Decode(const OrbisVideodecInputData& pInputDataIn,
         frame = nv12_frame;
     }
 
-    CopyNV12Data((u8*)pFrameBufferInOut.pFrameBuffer, *frame);
-
     const auto width = Common::AlignUp<u32>(frame->width, 16);
     const auto pitch = Common::AlignUp<u32>(frame->width, 64);
     const auto height = Common::AlignUp<u32>(frame->height, 16);
+    const u64 output_size = (static_cast<u64>(pitch) * height * 3) / 2;
+    const s32 capacity_result =
+        ValidateFrameBufferCapacity(pFrameBufferInOut.frameBufferSize, output_size);
+    if (capacity_result != ORBIS_OK) {
+        av_frame_free(&frame);
+        return capacity_result;
+    }
+
+    CopyNV12Data((u8*)pFrameBufferInOut.pFrameBuffer, *frame);
 
     pPictureInfoOut.codecType = 0;
     pPictureInfoOut.frameWidth = width;
@@ -152,11 +160,18 @@ s32 VdecDecoder::Flush(OrbisVideodecFrameBuffer& pFrameBufferInOut,
         frame = nv12_frame;
     }
 
-    CopyNV12Data((u8*)pFrameBufferInOut.pFrameBuffer, *frame);
-
     const auto width = Common::AlignUp<u32>(frame->width, 16);
     const auto pitch = Common::AlignUp<u32>(frame->width, 64);
     const auto height = Common::AlignUp<u32>(frame->height, 16);
+    const u64 output_size = (static_cast<u64>(pitch) * height * 3) / 2;
+    const s32 capacity_result =
+        ValidateFrameBufferCapacity(pFrameBufferInOut.frameBufferSize, output_size);
+    if (capacity_result != ORBIS_OK) {
+        av_frame_free(&frame);
+        return capacity_result;
+    }
+
+    CopyNV12Data((u8*)pFrameBufferInOut.pFrameBuffer, *frame);
 
     pPictureInfoOut.codecType = 0;
     pPictureInfoOut.frameWidth = width;

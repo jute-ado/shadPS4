@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/videodec/videodec.h"
+#include "core/libraries/videodec/videodec_decode_validation.h"
 #include "core/libraries/videodec/videodec_error.h"
 #include "core/libraries/videodec/videodec_impl.h"
 
@@ -76,14 +77,19 @@ int PS4_SYSV_ABI sceVideodecDecode(OrbisVideodecCtrl* pCtrlIn,
                                    OrbisVideodecFrameBuffer* pFrameBufferInOut,
                                    OrbisVideodecPictureInfo* pPictureInfoOut) {
     LOG_TRACE(Lib_Videodec, "called");
-    if (!pCtrlIn || !pInputDataIn || !pPictureInfoOut) {
+    if (!pCtrlIn || !pInputDataIn || !pFrameBufferInOut || !pPictureInfoOut) {
         LOG_ERROR(Lib_Videodec, "Invalid arguments");
         return ORBIS_VIDEODEC_ERROR_ARGUMENT_POINTER;
     }
-    if (pCtrlIn->thisSize != sizeof(OrbisVideodecCtrl) ||
-        pFrameBufferInOut->thisSize != sizeof(OrbisVideodecFrameBuffer)) {
+    if (pCtrlIn->thisSize != sizeof(OrbisVideodecCtrl)) {
         LOG_ERROR(Lib_Videodec, "Invalid struct size");
         return ORBIS_VIDEODEC_ERROR_STRUCT_SIZE;
+    }
+    const s32 validation_result =
+        ValidateDecodeArguments(*pInputDataIn, *pFrameBufferInOut, *pPictureInfoOut);
+    if (validation_result != ORBIS_OK) {
+        LOG_ERROR(Lib_Videodec, "Invalid decode arguments: {:#x}", validation_result);
+        return validation_result;
     }
 
     VdecDecoder* decoder = (VdecDecoder*)pCtrlIn->handle;
@@ -111,7 +117,7 @@ int PS4_SYSV_ABI sceVideodecFlush(OrbisVideodecCtrl* pCtrlIn,
                                   OrbisVideodecPictureInfo* pPictureInfoOut) {
     LOG_INFO(Lib_Videodec, "called");
 
-    if (!pFrameBufferInOut || !pPictureInfoOut) {
+    if (!pCtrlIn || !pFrameBufferInOut || !pPictureInfoOut) {
         LOG_ERROR(Lib_Videodec, "Invalid arguments");
         return ORBIS_VIDEODEC_ERROR_ARGUMENT_POINTER;
     }
@@ -119,6 +125,11 @@ int PS4_SYSV_ABI sceVideodecFlush(OrbisVideodecCtrl* pCtrlIn,
         pPictureInfoOut->thisSize != sizeof(OrbisVideodecPictureInfo)) {
         LOG_ERROR(Lib_Videodec, "Invalid struct size");
         return ORBIS_VIDEODEC_ERROR_STRUCT_SIZE;
+    }
+    const s32 validation_result = ValidateFrameBufferStorage(*pFrameBufferInOut);
+    if (validation_result != ORBIS_OK) {
+        LOG_ERROR(Lib_Videodec, "Invalid frame buffer: {:#x}", validation_result);
+        return validation_result;
     }
 
     VdecDecoder* decoder = (VdecDecoder*)pCtrlIn->handle;
