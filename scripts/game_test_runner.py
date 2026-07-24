@@ -72,6 +72,7 @@ CASE_FIELDS = frozenset(
         "minimumVisibleScreenshots",
         "minimumPostCheckpointScreenshotMeanIntensity",
         "minimumPostCheckpointScreenshotNonBlackFraction",
+        "postCheckpointVisibilityRegion",
         "maximumPostCheckpointInvisibleFlashes",
         "maximumPostCheckpointInvisibleRunLength",
         "postCheckpointLuminanceDipRatio",
@@ -212,6 +213,7 @@ class GameCase:
     minimum_visible_screenshots: int | None = None
     minimum_post_checkpoint_screenshot_mean_intensity: float | None = None
     minimum_post_checkpoint_screenshot_non_black_fraction: float | None = None
+    post_checkpoint_visibility_region: ScreenshotRegion | None = None
     maximum_post_checkpoint_invisible_flashes: int | None = None
     maximum_post_checkpoint_invisible_run_length: int | None = None
     post_checkpoint_luminance_dip_ratio: float | None = None
@@ -534,6 +536,28 @@ def _require_button_events(
     if events and not use_ipc:
         raise ManifestError(f"{case_name}: buttonEvents requires useIpc")
     return tuple(events)
+
+
+def _require_screenshot_region(
+    raw: Any, *, field: str, case_name: str
+) -> ScreenshotRegion | None:
+    if raw is None:
+        return None
+    qualified_field = f"{case_name}: {field}"
+    if not isinstance(raw, dict):
+        raise ManifestError(f"{qualified_field} must be an object")
+    _reject_unknown_fields(raw, SCREENSHOT_REGION_FIELDS, qualified_field)
+    region_values: dict[str, int] = {}
+    for component in ("left", "top", "width", "height"):
+        value = raw.get(component)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ManifestError(f"{qualified_field}.{component} must be an integer")
+        region_values[component] = value
+    if region_values["left"] < 0 or region_values["top"] < 0:
+        raise ManifestError(f"{qualified_field} left and top cannot be negative")
+    if region_values["width"] <= 0 or region_values["height"] <= 0:
+        raise ManifestError(f"{qualified_field} width and height must be positive")
+    return ScreenshotRegion(**region_values)
 
 
 def _require_screenshot_button_events(
@@ -1030,6 +1054,19 @@ def load_manifest(path: str | Path) -> GameManifest:
             minimum_post_checkpoint_screenshot_mean_intensity is not None
             or minimum_post_checkpoint_screenshot_non_black_fraction is not None
         )
+        post_checkpoint_visibility_region = _require_screenshot_region(
+            raw_case.get("postCheckpointVisibilityRegion"),
+            field="postCheckpointVisibilityRegion",
+            case_name=name,
+        )
+        if (
+            post_checkpoint_visibility_region is not None
+            and not post_checkpoint_screenshot_seconds
+        ):
+            raise ManifestError(
+                f"{name}: postCheckpointVisibilityRegion requires "
+                "postCheckpointScreenshotSeconds"
+            )
         if (
             has_post_checkpoint_visibility_threshold
             and not post_checkpoint_screenshot_seconds
@@ -1217,6 +1254,9 @@ def load_manifest(path: str | Path) -> GameManifest:
                 ),
                 minimum_post_checkpoint_screenshot_non_black_fraction=(
                     minimum_post_checkpoint_screenshot_non_black_fraction
+                ),
+                post_checkpoint_visibility_region=(
+                    post_checkpoint_visibility_region
                 ),
                 maximum_post_checkpoint_invisible_flashes=(
                     maximum_post_checkpoint_invisible_flashes
@@ -1670,8 +1710,26 @@ def _resize_rgb_linear(
     return bytes(resized)
 
 
-def _screenshot_statistics(path: Path) -> tuple[float, float]:
-    _, _, pixels = _decode_png_rgb(path)
+def _screenshot_statistics(
+    path: Path, *, region: ScreenshotRegion | None = None
+) -> tuple[float, float]:
+    width, height, pixels = _decode_png_rgb(path)
+    if region is not None:
+        if (
+            region.left + region.width > width
+            or region.top + region.height > height
+        ):
+            raise ValueError("screenshot statistics region is outside the image")
+        row_bytes = region.width * 3
+        pixels = b"".join(
+            pixels[
+                ((region.top + row) * width + region.left)
+                * 3 : ((region.top + row) * width + region.left)
+                * 3
+                + row_bytes
+            ]
+            for row in range(region.height)
+        )
     pixel_count = len(pixels) // 3
     mean_intensity = sum(pixels) / (len(pixels) * 255)
     non_black_pixels = sum(
@@ -2376,8 +2434,17 @@ def run_case(
     ):
         post_checkpoint_visibility: list[bool] = []
         post_checkpoint_mean_intensities: list[float] = []
-        for screenshot in post_checkpoint_screenshots:
-            mean_intensity, non_black_fraction = _screenshot_statistics(screenshot)
+        for index, screenshot in enumerate(post_checkpoint_screenshots):
+            try:
+                mean_intensity, non_black_fraction = _screenshot_statistics(
+                    screenshot, region=case.post_checkpoint_visibility_region
+                )
+            except (OSError, ValueError) as error:
+                failures.append(
+                    f"post-checkpoint screenshot {index} statistics failed: {error}"
+                )
+                post_checkpoint_visibility.append(False)
+                continue
             post_checkpoint_mean_intensities.append(mean_intensity)
             post_checkpoint_visibility.append(
                 (

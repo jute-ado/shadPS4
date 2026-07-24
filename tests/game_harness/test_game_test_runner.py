@@ -25,6 +25,7 @@ from scripts.game_test_runner import (
     _decode_png_rgb,
     _longest_invisible_run,
     _screenshot_difference,
+    _screenshot_statistics,
     load_manifest,
     main,
     run_case,
@@ -54,6 +55,39 @@ def test_png(width: int, height: int, color_type: int, scanlines: bytes) -> byte
 
 
 class FlickerDetectionTests(unittest.TestCase):
+    def test_screenshot_statistics_can_ignore_a_host_overlay_region(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            screenshot = Path(directory) / "overlay.png"
+            screenshot.write_bytes(
+                test_png(
+                    2,
+                    1,
+                    2,
+                    b"\x00" + bytes((0, 0, 0, 255, 255, 255)),
+                )
+            )
+
+            mean_intensity, non_black_fraction = _screenshot_statistics(
+                screenshot,
+                region=ScreenshotRegion(left=0, top=0, width=1, height=1),
+            )
+
+            self.assertEqual(mean_intensity, 0.0)
+            self.assertEqual(non_black_fraction, 0.0)
+
+    def test_screenshot_statistics_rejects_a_region_outside_the_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            screenshot = Path(directory) / "frame.png"
+            screenshot.write_bytes(
+                test_png(1, 1, 2, b"\x00" + bytes((0, 0, 0)))
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside the image"):
+                _screenshot_statistics(
+                    screenshot,
+                    region=ScreenshotRegion(left=1, top=0, width=1, height=1),
+                )
+
     def test_counts_each_invisible_run_between_visible_frames_as_one_flash(self) -> None:
         self.assertEqual(
             _count_invisible_flashes(
@@ -130,6 +164,79 @@ class ManifestTests(unittest.TestCase):
 
             self.assertEqual(manifest.emulator, emulator.resolve())
             self.assertEqual(manifest.cases[0].game_path, game.resolve())
+
+    def test_load_manifest_accepts_post_checkpoint_visibility_region(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "notification-free visibility",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "0" * 64,
+                                    "timeoutSeconds": 0.5,
+                                }
+                            ],
+                            "postCheckpointScreenshotSeconds": [0.1],
+                            "minimumPostCheckpointScreenshotMeanIntensity": 0.01,
+                            "postCheckpointVisibilityRegion": {
+                                "left": 0,
+                                "top": 0,
+                                "width": 1280,
+                                "height": 720,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            case = load_manifest(path).cases[0]
+
+            self.assertEqual(
+                case.post_checkpoint_visibility_region,
+                ScreenshotRegion(left=0, top=0, width=1280, height=720),
+            )
+
+    def test_load_manifest_requires_post_checkpoint_schedule_for_visibility_region(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "unanchored region",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "postCheckpointVisibilityRegion": {
+                                "left": 0,
+                                "top": 0,
+                                "width": 1280,
+                                "height": 720,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "postCheckpointVisibilityRegion requires "
+                "postCheckpointScreenshotSeconds",
+            ):
+                load_manifest(path)
 
     def test_load_manifest_resolves_portable_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4089,6 +4196,43 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertIn(
                 "captured 1 distinct post-checkpoint screenshot; expected at least 2",
+                result.failures,
+            )
+
+    def test_run_case_reports_post_checkpoint_visibility_region_outside_capture(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "invalid capture region",
+                    "timeoutSeconds": 0.5,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1],
+                    "minimumPostCheckpointScreenshotMeanIntensity": 0.01,
+                    "postCheckpointVisibilityRegion": {
+                        "left": 0,
+                        "top": 0,
+                        "width": 2,
+                        "height": 1,
+                    },
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "post-checkpoint screenshot 0 statistics failed: "
+                "screenshot statistics region is outside the image",
                 result.failures,
             )
 

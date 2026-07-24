@@ -71,6 +71,10 @@ Each case supports:
   `minimumPostCheckpointScreenshotNonBlackFraction`: optional visibility
   thresholds for post-checkpoint captures. A frame is visible only when it
   meets every configured threshold.
+- `postCheckpointVisibilityRegion`: optional pixel region (`left`, `top`,
+  `width`, `height`) used for post-checkpoint visibility thresholds and
+  luminance-dip detection. Use a stable game-content region to exclude host
+  notifications or overlays from visual metrics.
 - `maximumPostCheckpointInvisibleFlashes`: optional maximum number of invisible
   runs bounded by visible captures. Leading and trailing darkness is ignored,
   so ordinary fades do not count as flashes. It requires at least one
