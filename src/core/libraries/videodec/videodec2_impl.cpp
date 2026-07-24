@@ -8,6 +8,7 @@
 #include "common/logging/log.h"
 #include "video_utils.h"
 #include "videodec_error.h"
+#include "videodec_frame_handle.h"
 #include "videodec_packet_handle.h"
 
 #include "common/support/avdec.h"
@@ -93,8 +94,10 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
 
     if (frame->format != AV_PIX_FMT_NV12) {
         AVFrame* nv12_frame = ConvertNV12Frame(*frame);
-        ASSERT(nv12_frame);
         av_frame_free(&frame);
+        if (!nv12_frame) {
+            return ORBIS_VIDEODEC2_ERROR_API_FAIL;
+        }
         frame = nv12_frame;
     }
 
@@ -172,8 +175,10 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
 
     if (frame->format != AV_PIX_FMT_NV12) {
         AVFrame* nv12_frame = ConvertNV12Frame(*frame);
-        ASSERT(nv12_frame);
         av_frame_free(&frame);
+        if (!nv12_frame) {
+            return ORBIS_VIDEODEC2_ERROR_API_FAIL;
+        }
         frame = nv12_frame;
     }
 
@@ -227,7 +232,11 @@ s32 VdecDecoder::Reset() {
 }
 
 AVFrame* VdecDecoder::ConvertNV12Frame(AVFrame& frame) {
-    AVFrame* nv12_frame = av_frame_alloc();
+    auto nv12_frame = Videodec::AdoptFrame(av_frame_alloc());
+    if (!nv12_frame) {
+        LOG_ERROR(Lib_Vdec2, "Failed to allocate NV12 frame");
+        return nullptr;
+    }
     nv12_frame->pts = frame.pts;
     nv12_frame->pkt_dts = frame.pkt_dts < 0 ? 0 : frame.pkt_dts;
     nv12_frame->format = AV_PIX_FMT_NV12;
@@ -239,12 +248,21 @@ AVFrame* VdecDecoder::ConvertNV12Frame(AVFrame& frame) {
     nv12_frame->crop_left = frame.crop_left;
     nv12_frame->crop_right = frame.crop_right;
 
-    av_frame_get_buffer(nv12_frame, 0);
+    const auto buffer_result = av_frame_get_buffer(nv12_frame.get(), 0);
+    if (buffer_result < 0) {
+        LOG_ERROR(Lib_Vdec2, "Could not allocate NV12 frame buffer: {}",
+                  av_err2str(buffer_result));
+        return nullptr;
+    }
 
     if (mSwsContext == nullptr) {
         mSwsContext = sws_getContext(frame.width, frame.height, AVPixelFormat(frame.format),
                                      nv12_frame->width, nv12_frame->height, AV_PIX_FMT_NV12,
                                      SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        if (mSwsContext == nullptr) {
+            LOG_ERROR(Lib_Vdec2, "Could not create NV12 conversion context");
+            return nullptr;
+        }
     }
 
     const auto res = sws_scale(mSwsContext, frame.data, frame.linesize, 0, frame.height,
@@ -254,7 +272,7 @@ AVFrame* VdecDecoder::ConvertNV12Frame(AVFrame& frame) {
         return nullptr;
     }
 
-    return nv12_frame;
+    return nv12_frame.release();
 }
 
 } // namespace Libraries::Videodec2
