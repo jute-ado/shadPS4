@@ -13,6 +13,14 @@ FetchContent_MakeAvailable(googletest)
 # char8_t-to-char32_t conversion in gtest-printers.h, so keep the third-party target buildable
 # without weakening warnings for shadPS4's test targets.
 if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(
+        "-Wno-character-conversion"
+        SHADPS4_SUPPORTS_WNO_CHARACTER_CONVERSION
+    )
+endif()
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
+   SHADPS4_SUPPORTS_WNO_CHARACTER_CONVERSION)
     foreach(googletest_target gtest gtest_main gmock gmock_main)
         target_compile_options(${googletest_target} PRIVATE -Wno-character-conversion)
     endforeach()
@@ -838,6 +846,7 @@ foreach(t ${TEST_TARGETS})
     gtest_discover_tests(${t}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         DISCOVERY_TIMEOUT 60
+        DISCOVERY_MODE PRE_TEST
     )
 endforeach()
 
@@ -946,4 +955,5 @@ endif()
 gtest_discover_tests(shadps4_http_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     DISCOVERY_TIMEOUT 60
+    DISCOVERY_MODE PRE_TEST
 )

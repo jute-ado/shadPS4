@@ -9,6 +9,20 @@
 #include "common/shared_slot_registry.h"
 
 namespace Common {
+std::string GetCurrentThreadName() {
+    return "shadPS4::SharedSlotRegistryTest";
+}
+} // namespace Common
+
+namespace Common::Log {
+std::unordered_map<std::string_view, std::shared_ptr<spdlog::logger>> ALL_LOGGERS;
+} // namespace Common::Log
+
+void assert_fail_impl() {
+    std::abort();
+}
+
+namespace Common {
 namespace {
 
 struct LifetimeProbe {

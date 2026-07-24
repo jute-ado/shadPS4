@@ -45,15 +45,25 @@ Tcb* GetTcbBase();
 /// Makes sure TLS is initialized for the thread before entering guest.
 void InitializeTLS();
 
-template <auto f>
-struct HostCallWrapperImpl;
+template <class Signature, auto func>
+struct HostCallWrapperFor;
 
 template <class ReturnType, class... Args, PS4_SYSV_ABI ReturnType (*func)(Args...)>
-struct HostCallWrapperImpl<func> {
+struct HostCallWrapperFor<decltype(func), func> {
     static ReturnType PS4_SYSV_ABI wrap(Args... args) {
         return func(args...);
     }
 };
+
+template <class ReturnType, class... Args, PS4_SYSV_ABI ReturnType (*func)(Args...) noexcept>
+struct HostCallWrapperFor<decltype(func), func> {
+    static ReturnType PS4_SYSV_ABI wrap(Args... args) noexcept {
+        return func(args...);
+    }
+};
+
+template <auto func>
+struct HostCallWrapperImpl : HostCallWrapperFor<decltype(func), func> {};
 
 #define HOST_CALL(func) (Core::HostCallWrapperImpl<func>::wrap)
 
