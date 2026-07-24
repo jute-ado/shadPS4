@@ -94,6 +94,14 @@ shadPS4 /path/to/game.elf # Boots a PS4 ELF file directly. Useful if you want to
 shadPS4 CUSA00001 -- -flag1 -flag2 # Passes '-flag1' and '-flag2' to the game executable in argv.
 ```
 
+# Game regression development
+
+This fork can be exercised by an external, local-only game regression
+framework without placing commercial games or game-derived artifacts in this
+repository. Contributors and AI agents working on compatibility changes should
+read [**the Emulator Test Lab workflow**](documents/emulator-test-lab.md) before
+changing accepted game expectations.
+
 # Debugging and reporting issues
 
 For more information on how to test, debug and report issues with the emulator or games, read the [**Debugging documentation**](https://github.com/shadps4-emu/shadPS4/blob/main/documents/Debugging/Debugging.md).
