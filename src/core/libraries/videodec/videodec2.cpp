@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/videodec/videodec2.h"
+#include "core/libraries/videodec/videodec2_compute_validation.h"
 #include "core/libraries/videodec/videodec2_decode_validation.h"
 #include "core/libraries/videodec/videodec2_impl.h"
 #include "core/libraries/videodec/videodec_error.h"
@@ -27,7 +28,7 @@ sceVideodec2QueryComputeMemoryInfo(OrbisVideodec2ComputeMemoryInfo* computeMemIn
     }
 
     computeMemInfo->cpuGpuMemory = nullptr;
-    computeMemInfo->cpuGpuMemorySize = kMinimumMemorySize;
+    computeMemInfo->cpuGpuMemorySize = Videodec2ComputeMemorySize;
     return ORBIS_OK;
 }
 
@@ -40,26 +41,10 @@ sceVideodec2AllocateComputeQueue(const OrbisVideodec2ComputeConfigInfo* computeC
         LOG_ERROR(Lib_Vdec2, "Invalid arguments");
         return ORBIS_VIDEODEC2_ERROR_ARGUMENT_POINTER;
     }
-    if (computeCfgInfo->thisSize != sizeof(OrbisVideodec2ComputeConfigInfo) ||
-        computeMemInfo->thisSize != sizeof(OrbisVideodec2ComputeMemoryInfo)) {
-        LOG_ERROR(Lib_Vdec2, "Invalid struct size");
-        return ORBIS_VIDEODEC2_ERROR_STRUCT_SIZE;
-    }
-    if (computeCfgInfo->reserved0 != 0 || computeCfgInfo->reserved1 != 0) {
-        LOG_ERROR(Lib_Vdec2, "Invalid compute config");
-        return ORBIS_VIDEODEC2_ERROR_CONFIG_INFO;
-    }
-    if (computeCfgInfo->computePipeId > 4) {
-        LOG_ERROR(Lib_Vdec2, "Invalid compute pipe id");
-        return ORBIS_VIDEODEC2_ERROR_COMPUTE_PIPE_ID;
-    }
-    if (computeCfgInfo->computeQueueId > 7) {
-        LOG_ERROR(Lib_Vdec2, "Invalid compute queue id");
-        return ORBIS_VIDEODEC2_ERROR_COMPUTE_QUEUE_ID;
-    }
-    if (!computeMemInfo->cpuGpuMemory) {
-        LOG_ERROR(Lib_Vdec2, "Invalid memory pointer");
-        return ORBIS_VIDEODEC2_ERROR_MEMORY_POINTER;
+    const s32 validation_result = ValidateComputeQueueArguments(*computeCfgInfo, *computeMemInfo);
+    if (validation_result != ORBIS_OK) {
+        LOG_ERROR(Lib_Vdec2, "Invalid compute queue arguments: {:#x}", validation_result);
+        return validation_result;
     }
 
     // The real library returns a pointer to memory inside cpuGpuMemory
