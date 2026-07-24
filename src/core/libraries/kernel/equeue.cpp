@@ -10,6 +10,7 @@
 #include "common/singleton.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/equeue.h"
+#include "core/libraries/kernel/equeue_wait_policy.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
@@ -176,16 +177,25 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     if (timo != nullptr && *timo == 0) {
         // Effectively acts as a poll; only events that have already
         // arrived at the time of this function call can be received
+        std::scoped_lock lock{m_mutex};
         return GetTriggeredEvents(ev, num);
     }
     const auto micros = timo ? *timo : 0u;
 
-    if (HasSmallTimer()) {
+    int count = 0;
+    {
+        std::scoped_lock lock{m_mutex};
+        count = GetTriggeredEvents(ev, num);
+    }
+
+    const auto wait_source = SelectEqueueWaitSource(count > 0, HasSmallTimer());
+    if (wait_source == EqueueWaitSource::RegularEvent) {
+        return count;
+    }
+    if (wait_source == EqueueWaitSource::SmallTimer) {
         // If a small timer is set, just wait for it to expire.
         return WaitForSmallTimer(ev, num, micros);
     }
-
-    int count = 0;
 
     const auto predicate = [&] {
         count = GetTriggeredEvents(ev, num);
@@ -284,6 +294,11 @@ int EqueueInternal::WaitForSmallTimer(OrbisKernelEvent* ev, int num, u32 micros)
         curr_clock = std::chrono::steady_clock::now();
         {
             std::scoped_lock lock{m_mutex};
+            count = GetTriggeredEvents(ev, num);
+            if (count > 0) {
+                return count;
+            }
+
             for (auto it = m_small_timers.begin(); it != m_small_timers.end() && count < num;) {
                 const SmallTimer& st = it->second;
 

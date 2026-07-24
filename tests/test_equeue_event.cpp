@@ -5,6 +5,7 @@
 
 #include "core/libraries/gnmdriver/graphics_event.h"
 #include "core/libraries/kernel/equeue.h"
+#include "core/libraries/kernel/equeue_wait_policy.h"
 
 using Libraries::Kernel::EqueueEvent;
 using Libraries::Kernel::OrbisKernelEvent;
@@ -44,4 +45,13 @@ TEST(EqueueEvent, OrdinaryClearEventsStillCoalesceRepeatedTriggers) {
     event.ConsumeTrigger();
 
     EXPECT_FALSE(event.IsTriggered());
+}
+
+TEST(EqueueWaitPolicy, ReadyRegularEventWinsOverPendingSmallTimer) {
+    using Libraries::Kernel::EqueueWaitSource;
+    using Libraries::Kernel::SelectEqueueWaitSource;
+
+    EXPECT_EQ(SelectEqueueWaitSource(true, true), EqueueWaitSource::RegularEvent);
+    EXPECT_EQ(SelectEqueueWaitSource(false, true), EqueueWaitSource::SmallTimer);
+    EXPECT_EQ(SelectEqueueWaitSource(false, false), EqueueWaitSource::ConditionVariable);
 }
