@@ -230,6 +230,20 @@ target_link_libraries(shadps4_videodec_frame_handle_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_videodec_frame_handle_test)
 
+add_executable(shadps4_videodec_nv12_copy_test
+    test_videodec_nv12_copy.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/videodec/video_utils.cpp
+)
+target_include_directories(shadps4_videodec_nv12_copy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_videodec_nv12_copy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_videodec_nv12_copy_test PRIVATE
+    GTest::gtest_main
+    FFmpeg::ffmpeg
+)
+list(APPEND TEST_TARGETS shadps4_videodec_nv12_copy_test)
+
 add_executable(shadps4_pm4_memory_wait_test
     test_pm4_memory_wait.cpp
 )

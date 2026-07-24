@@ -18,7 +18,9 @@ void CopyNV12Data(u8* dst, const AVFrame& src) {
     const auto luma_dst = dst;
     const auto chroma_dst = dst + dst_pitch * dst_height;
 
-    if (src.width != dst_pitch) {
+    const bool source_is_tightly_packed =
+        src.linesize[0] == src.width && src.linesize[1] == src.width;
+    if (src.width != dst_pitch || !source_is_tightly_packed) {
         for (u32 y = 0; y < src.height; ++y) {
             std::memcpy(luma_dst + y * dst_pitch, src.data[0] + y * src.linesize[0], src.width);
         }
