@@ -83,5 +83,18 @@ TEST(ScreenshotWriterQueue, WaitIdleIncludesGpuCompletionsReservedBeforeWriterSu
     queue.Stop();
 }
 
+TEST(ScreenshotWriterQueue, StopRejectsLateReservedSubmissionAndReleasesReservation) {
+    ScreenshotWriterQueue<int> queue;
+    queue.Start();
+    ASSERT_TRUE(queue.Reserve());
+
+    queue.Stop();
+    EXPECT_FALSE(queue.PushReserved(7));
+
+    auto idle = std::async(std::launch::async, [&queue] { queue.WaitIdle(); });
+    EXPECT_EQ(idle.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(queue.WaitPop(), std::nullopt);
+}
+
 } // namespace
 } // namespace VideoCore

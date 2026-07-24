@@ -41,12 +41,18 @@ public:
         return true;
     }
 
-    void PushReserved(Job job) {
+    bool PushReserved(Job job) {
         {
             std::scoped_lock lock{mutex};
+            if (!accepting) {
+                --outstanding;
+                idle.notify_all();
+                return false;
+            }
             jobs.push_back(std::move(job));
         }
         ready.notify_one();
+        return true;
     }
 
     std::optional<Job> WaitPop() {
