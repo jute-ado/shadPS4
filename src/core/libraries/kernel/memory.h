@@ -52,6 +52,14 @@ enum MemoryOpTypes : u32 {
 
 constexpr u32 ORBIS_KERNEL_MAXIMUM_NAME_LENGTH = 32;
 
+constexpr bool IsMemoryAddressStorageValid(void* const* addr) {
+    return addr != nullptr;
+}
+
+constexpr bool AreNamedMemoryPointersValid(void* const* addr, const char* name) {
+    return addr != nullptr && name != nullptr;
+}
+
 struct OrbisQueryInfo {
     uintptr_t start;
     uintptr_t end;

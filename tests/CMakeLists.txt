@@ -692,6 +692,16 @@ target_link_libraries(shadps4_playgo_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_playgo_test)
 
+add_executable(shadps4_kernel_memory_validation_test
+    test_kernel_memory_validation.cpp
+)
+target_include_directories(shadps4_kernel_memory_validation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_kernel_memory_validation_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_kernel_memory_validation_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_kernel_memory_validation_test)
+
 set(USER_MIGRATION_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/user_migration.cpp
     test_user_migration.cpp

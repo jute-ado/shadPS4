@@ -150,12 +150,12 @@ s32 PS4_SYSV_ABI sceKernelVirtualQuery(const void* addr, s32 flags, OrbisVirtual
 }
 
 s32 PS4_SYSV_ABI sceKernelReserveVirtualRange(void** addr, u64 len, s32 flags, u64 alignment) {
-    LOG_INFO(Kernel_Vmm, "addr = {}, len = {:#x}, flags = {:#x}, alignment = {:#x}",
-             fmt::ptr(*addr), len, flags, alignment);
-    if (addr == nullptr) {
+    if (!IsMemoryAddressStorageValid(addr)) {
         LOG_ERROR(Kernel_Vmm, "Address is invalid!");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
+    LOG_INFO(Kernel_Vmm, "addr = {}, len = {:#x}, flags = {:#x}, alignment = {:#x}",
+             fmt::ptr(*addr), len, flags, alignment);
     if (len == 0 || !Common::Is16KBAligned(len)) {
         LOG_ERROR(Kernel_Vmm, "Map size is either zero or not 16KB aligned!");
         return ORBIS_KERNEL_ERROR_EINVAL;
@@ -188,6 +188,15 @@ s32 PS4_SYSV_ABI sceKernelReserveVirtualRange(void** addr, u64 len, s32 flags, u
 
 s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s32 flags,
                                                s64 phys_addr, u64 alignment, const char* name) {
+    if (!IsMemoryAddressStorageValid(addr)) {
+        LOG_ERROR(Kernel_Vmm, "Address storage must be valid");
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    if (name == nullptr) {
+        LOG_ERROR(Kernel_Vmm, "Name must be valid");
+        return ORBIS_KERNEL_ERROR_EFAULT;
+    }
+
     LOG_INFO(Kernel_Vmm,
              "in_addr = {}, len = {:#x}, prot = {:#x}, flags = {:#x}, "
              "phys_addr = {:#x}, alignment = {:#x}, name = '{}'",
@@ -255,6 +264,11 @@ s32 PS4_SYSV_ABI sceKernelMapDirectMemory(void** addr, u64 len, s32 prot, s32 fl
 
 s32 PS4_SYSV_ABI sceKernelMapDirectMemory2(void** addr, u64 len, s32 type, s32 prot, s32 flags,
                                            s64 phys_addr, u64 alignment) {
+    if (!IsMemoryAddressStorageValid(addr)) {
+        LOG_ERROR(Kernel_Vmm, "Address storage must be valid");
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
     LOG_INFO(Kernel_Vmm,
              "in_addr = {}, len = {:#x}, prot = {:#x}, flags = {:#x}, "
              "phys_addr = {:#x}, alignment = {:#x}",
@@ -303,16 +317,16 @@ s32 PS4_SYSV_ABI sceKernelMapDirectMemory2(void** addr, u64 len, s32 type, s32 p
 
 s32 PS4_SYSV_ABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, u64 len, s32 prot, s32 flags,
                                                  const char* name) {
+    if (!AreNamedMemoryPointersValid(addr_in_out, name)) {
+        LOG_ERROR(Kernel_Vmm, "Address storage and name must be valid");
+        return addr_in_out == nullptr ? ORBIS_KERNEL_ERROR_EINVAL : ORBIS_KERNEL_ERROR_EFAULT;
+    }
+
     LOG_INFO(Kernel_Vmm, "in_addr = {}, len = {:#x}, prot = {:#x}, flags = {:#x}, name = '{}'",
              fmt::ptr(*addr_in_out), len, prot, flags, name);
     if (len == 0 || !Common::Is16KBAligned(len)) {
         LOG_ERROR(Kernel_Vmm, "len is 0 or not 16kb multiple");
         return ORBIS_KERNEL_ERROR_EINVAL;
-    }
-
-    if (name == nullptr) {
-        LOG_ERROR(Kernel_Vmm, "name is invalid!");
-        return ORBIS_KERNEL_ERROR_EFAULT;
     }
 
     if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH) {
@@ -344,16 +358,16 @@ s32 PS4_SYSV_ABI sceKernelMapFlexibleMemory(void** addr_in_out, u64 len, s32 pro
 
 s32 PS4_SYSV_ABI sceKernelMapNamedSystemFlexibleMemory(void** addr_in_out, u64 len, s32 prot,
                                                        s32 flags, const char* name) {
+    if (!AreNamedMemoryPointersValid(addr_in_out, name)) {
+        LOG_ERROR(Kernel_Vmm, "Address storage and name must be valid");
+        return addr_in_out == nullptr ? ORBIS_KERNEL_ERROR_EINVAL : ORBIS_KERNEL_ERROR_EFAULT;
+    }
+
     LOG_INFO(Kernel_Vmm, "in_addr = {}, len = {:#x}, prot = {:#x}, flags = {:#x}, name = '{}'",
              fmt::ptr(*addr_in_out), len, prot, flags, name);
     if (len == 0 || !Common::Is16KBAligned(len)) {
         LOG_ERROR(Kernel_Vmm, "len is 0 or not 16kb multiple");
         return ORBIS_KERNEL_ERROR_EINVAL;
-    }
-
-    if (name == nullptr) {
-        LOG_ERROR(Kernel_Vmm, "name is invalid!");
-        return ORBIS_KERNEL_ERROR_EFAULT;
     }
 
     auto map_flags = static_cast<Core::MemoryMapFlags>(flags);
