@@ -20,6 +20,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
 #include "video_core/renderer_vulkan/presenter_sync.h"
 #include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
@@ -52,6 +53,13 @@
 #include <vk_mem_alloc.h>
 
 namespace Vulkan {
+
+void RecordPresentedFrameTiming(const u32 presented_frame) {
+    static auto trace = PresentedFrameTimingTrace::CreateFromEnvironment();
+    if (trace) {
+        trace->Record(presented_frame, PresentedFrameTimingTrace::MonotonicNanoseconds());
+    }
+}
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format format) {
     const vk::FormatProperties props{physical_device.getFormatProperties(format)};
@@ -1217,7 +1225,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
 
     free_frame();
     if (!is_reusing_frame) {
-        DebugState.IncFlipFrameNum();
+        const auto presented_frame = DebugState.IncFlipFrameNum();
+        RecordPresentedFrameTiming(presented_frame);
     }
 }
 
