@@ -14,7 +14,7 @@ using Vulkan::PipelineCommandType;
 using Vulkan::PipelineImageInfo;
 
 TEST(PipelineBindHistory, RetainsDispatchKindAndDimensions) {
-    constexpr std::array program_hashes{0x11ull};
+    constexpr std::array<u64, 1> program_hashes{0x11};
     constexpr PipelineCommandInfo command{
         .type = PipelineCommandType::Dispatch,
         .arguments = {64, 32, 1},
@@ -27,7 +27,7 @@ TEST(PipelineBindHistory, RetainsDispatchKindAndDimensions) {
 }
 
 TEST(PipelineBindHistory, RetainsBoundBufferAddressSizesAndAccess) {
-    constexpr std::array program_hashes{0x11ull};
+    constexpr std::array<u64, 1> program_hashes{0x11};
     constexpr std::array buffers{
         PipelineBufferInfo{
             .base_address = 0x119eda8d00,
@@ -63,7 +63,7 @@ TEST(PipelineBindHistory, RetainsBoundBufferAddressSizesAndAccess) {
 }
 
 TEST(PipelineBindHistory, RetainsBoundImageDimensionsFormatAndAccess) {
-    constexpr std::array program_hashes{0x11ull};
+    constexpr std::array<u64, 1> program_hashes{0x11};
     constexpr std::array images{
         PipelineImageInfo{
             .base_address = 0x119de0ec00,
@@ -99,7 +99,7 @@ TEST(PipelineBindHistory, CapturesOnlyBoundedBufferSample) {
 }
 
 TEST(PipelineBindHistory, MakesRecordFromProgramHashesAndPadsUnusedStages) {
-    constexpr std::array program_hashes{0x11ull, 0x22ull, 0ull, 0x44ull};
+    constexpr std::array<u64, 4> program_hashes{0x11, 0x22, 0, 0x44};
 
     const auto record =
         Vulkan::MakePipelineBindRecord(PipelineBindType::Graphics, 0x55, program_hashes);

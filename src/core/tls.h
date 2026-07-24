@@ -55,6 +55,13 @@ struct HostCallWrapperImpl<func> {
     }
 };
 
+template <class ReturnType, class... Args, PS4_SYSV_ABI ReturnType (*func)(Args...) noexcept>
+struct HostCallWrapperImpl<func> {
+    static ReturnType PS4_SYSV_ABI wrap(Args... args) noexcept {
+        return func(args...);
+    }
+};
+
 #define HOST_CALL(func) (Core::HostCallWrapperImpl<func>::wrap)
 
 } // namespace Core

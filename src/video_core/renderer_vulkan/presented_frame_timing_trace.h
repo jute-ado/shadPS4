@@ -62,8 +62,9 @@ public:
         if (!output) {
             throw std::runtime_error{"Cannot create performance trace"};
         }
-        output << R"({"kind":"header","protocolVersion":1,"source":"presented_frame","clock":"monotonic_nanoseconds"})"
-               << '\n';
+        output
+            << R"({"kind":"header","protocolVersion":1,"source":"presented_frame","clock":"monotonic_nanoseconds"})"
+            << '\n';
     }
 
     PresentedFrameTimingTrace(const PresentedFrameTimingTrace&) = delete;
@@ -93,17 +94,15 @@ public:
         }
     }
 
-    void Record(const std::int64_t presented_frame,
-                const std::int64_t timestamp_nanoseconds) {
+    void Record(const std::int64_t presented_frame, const std::int64_t timestamp_nanoseconds) {
         if (completed || presented_frame < start_frame || presented_frame > final_frame) {
             return;
         }
         if (last_written_frame >= 0 && presented_frame != last_written_frame + 1) {
             return;
         }
-        output << R"({"kind":"sample","protocolVersion":1,"presentedFrame":)"
-               << presented_frame << R"(,"timestampNanoseconds":)" << timestamp_nanoseconds
-               << "}\n";
+        output << R"({"kind":"sample","protocolVersion":1,"presentedFrame":)" << presented_frame
+               << R"(,"timestampNanoseconds":)" << timestamp_nanoseconds << "}\n";
         last_written_frame = presented_frame;
         if (presented_frame == final_frame) {
             output.flush();
