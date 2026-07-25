@@ -68,5 +68,18 @@ TEST(KernelMemoryValidation, VirtualMemoryRangesUseHalfOpenEndpoints) {
     EXPECT_TRUE(area.Overlaps(0x1fff, 1));
 }
 
+TEST(KernelMemoryValidation, GpuRangeMayEndAtFortyBitBoundary) {
+    constexpr VAddr gpu_address_limit = 0x10000000000;
+
+    EXPECT_TRUE(Core::MemoryManager::IsValidGpuMapping(gpu_address_limit - 1, 1));
+    EXPECT_TRUE(Core::MemoryManager::IsValidGpuMapping(0, gpu_address_limit));
+    EXPECT_FALSE(Core::MemoryManager::IsValidGpuMapping(gpu_address_limit - 1, 2));
+}
+
+TEST(KernelMemoryValidation, RejectsWrappedGpuAddressRange) {
+    EXPECT_FALSE(Core::MemoryManager::IsValidGpuMapping(
+        std::numeric_limits<VAddr>::max() - 1, 4));
+}
+
 } // namespace
 } // namespace Libraries::Kernel
