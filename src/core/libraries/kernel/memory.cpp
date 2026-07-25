@@ -775,10 +775,15 @@ void* PS4_SYSV_ABI posix_mmap(void* addr, u64 len, s32 prot, s32 flags, s32 fd, 
     const auto vaddr = reinterpret_cast<VAddr>(addr);
 
     // Align address and size here. Both align up to the next page
-    const VAddr aligned_addr = Common::AlignUp(vaddr, 16_KB);
-    const u64 aligned_size = Common::AlignUp(len, 16_KB);
+    const auto aligned_addr = Core::AlignMemoryValueUp(vaddr, 16_KB);
+    const auto aligned_size = Core::AlignMemoryValueUp(len, 16_KB);
+    if (!aligned_addr || !aligned_size) {
+        ErrSceToPosix(ORBIS_KERNEL_ERROR_EINVAL);
+        LOG_ERROR(Kernel_Vmm, "Address or length alignment overflows");
+        return reinterpret_cast<void*>(-1);
+    }
 
-    if (True(mem_flags & Core::MemoryMapFlags::Fixed) && vaddr != aligned_addr) {
+    if (True(mem_flags & Core::MemoryMapFlags::Fixed) && vaddr != *aligned_addr) {
         // If flags Fixed is specified, the input address must be aligned.
         ErrSceToPosix(ORBIS_KERNEL_ERROR_EINVAL);
         LOG_ERROR(Kernel_Vmm, "Misaligned input address");
@@ -791,20 +796,20 @@ void* PS4_SYSV_ABI posix_mmap(void* addr, u64 len, s32 prot, s32 flags, s32 fd, 
         const Core::VMAType mapping_type = True(mem_flags & Core::MemoryMapFlags::System)
                                                ? Core::VMAType::System
                                                : Core::VMAType::Flexible;
-        result = memory->MapMemory(&addr_out, aligned_addr, aligned_size, mem_prot, mem_flags,
+        result = memory->MapMemory(&addr_out, *aligned_addr, *aligned_size, mem_prot, mem_flags,
                                    mapping_type, "anon", false);
     } else if (True(mem_flags & Core::MemoryMapFlags::Stack)) {
         // Maps stack memory
-        result = memory->MapMemory(&addr_out, aligned_addr, aligned_size, mem_prot, mem_flags,
+        result = memory->MapMemory(&addr_out, *aligned_addr, *aligned_size, mem_prot, mem_flags,
                                    Core::VMAType::Stack, "anon", false);
     } else if (True(mem_flags & Core::MemoryMapFlags::Void)) {
         // Reserves memory
         result =
-            memory->MapMemory(&addr_out, aligned_addr, aligned_size, Core::MemoryProt::NoAccess,
+            memory->MapMemory(&addr_out, *aligned_addr, *aligned_size, Core::MemoryProt::NoAccess,
                               mem_flags, Core::VMAType::Reserved, "anon", false);
     } else {
         // Default to file mapping
-        result = memory->MapFile(&addr_out, aligned_addr, aligned_size, mem_prot, mem_flags, fd,
+        result = memory->MapFile(&addr_out, *aligned_addr, *aligned_size, mem_prot, mem_flags, fd,
                                  phys_addr);
     }
 

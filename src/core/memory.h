@@ -116,18 +116,25 @@ constexpr bool IsMemoryRangeWithinBounds(u64 lower_bound, u64 upper_bound, u64 o
            IsMemoryRangeWithinLimit(upper_bound, offset, size);
 }
 
-constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 alignment, u64 size,
-                                                            u64 limit) {
+constexpr std::optional<u64> AlignMemoryValueUp(u64 value, u64 alignment) {
     if (alignment == 0) {
         return std::nullopt;
     }
-    const u64 remainder = address % alignment;
+    const u64 remainder = value % alignment;
     const u64 padding = remainder == 0 ? 0 : alignment - remainder;
-    if (address > std::numeric_limits<u64>::max() - padding) {
+    if (value > std::numeric_limits<u64>::max() - padding) {
         return std::nullopt;
     }
-    const u64 aligned_address = address + padding;
-    if (!IsMemoryRangeWithinLimit(limit, aligned_address, size)) {
+    return value + padding;
+}
+
+constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 alignment, u64 size,
+                                                            u64 limit) {
+    const auto aligned_address = AlignMemoryValueUp(address, alignment);
+    if (!aligned_address) {
+        return std::nullopt;
+    }
+    if (!IsMemoryRangeWithinLimit(limit, *aligned_address, size)) {
         return std::nullopt;
     }
     return aligned_address;
