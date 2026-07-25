@@ -231,6 +231,10 @@ constexpr std::optional<MemorySpan> ResolvePageAlignedMemorySpan(u64 address, u6
     return MemorySpan{.base = aligned_address, .size = aligned_size};
 }
 
+constexpr std::optional<MemorySpan> ResolveNamedVirtualRange(u64 address, u64 size) {
+    return ResolvePageAlignedMemorySpan(address, size, 16_KB);
+}
+
 constexpr std::optional<MemorySpan> ClipMemorySpanToLimit(u64 base, u64 size, u64 limit) {
     if (size == 0 || base >= limit) {
         return std::nullopt;
@@ -482,7 +486,7 @@ public:
 
     s32 SetDirectMemoryType(VAddr addr, u64 size, s32 memory_type);
 
-    void NameVirtualRange(VAddr virtual_addr, u64 size, std::string_view name);
+    s32 NameVirtualRange(VAddr virtual_addr, u64 size, std::string_view name);
 
     s32 GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPoolBlockStats* stats);
 
