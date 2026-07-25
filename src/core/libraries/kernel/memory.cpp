@@ -503,10 +503,14 @@ s32 PS4_SYSV_ABI sceKernelBatchMap(OrbisKernelBatchMapEntry* entries, s32 numEnt
 
 s32 PS4_SYSV_ABI sceKernelBatchMap2(OrbisKernelBatchMapEntry* entries, s32 numEntries,
                                     s32* numEntriesOut, s32 flags) {
+    if (!IsMemoryBatchRequestValid(entries, numEntries)) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
     s32 result = ORBIS_OK;
     s32 processed = 0;
     for (s32 i = 0; i < numEntries; i++, processed++) {
-        if (entries == nullptr || entries[i].length == 0 || entries[i].operation > 4) {
+        if (entries[i].length == 0 || !IsMemoryBatchMapOperationValid(entries[i].operation)) {
             result = ORBIS_KERNEL_ERROR_EINVAL;
             break; // break and assign a value to numEntriesOut.
         }
@@ -676,7 +680,7 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags) {
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry* entries, s32 count,
                                           s32* num_processed, s32 flags) {
-    if (entries == nullptr) {
+    if (!IsMemoryBatchRequestValid(entries, count)) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
     s32 result = ORBIS_OK;
@@ -684,6 +688,11 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry*
 
     for (s32 i = 0; i < count; i++, processed++) {
         OrbisKernelMemoryPoolBatchEntry entry = entries[i];
+        if (!IsMemoryPoolBatchOperationSupported(entry.opcode)) {
+            result = ORBIS_KERNEL_ERROR_EINVAL;
+            break;
+        }
+
         switch (entry.opcode) {
         case OrbisKernelMemoryPoolOpcode::Commit: {
             result = sceKernelMemoryPoolCommit(entry.commit_params.addr, entry.commit_params.len,
@@ -708,7 +717,8 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry*
             break;
         }
         case OrbisKernelMemoryPoolOpcode::Move: {
-            UNREACHABLE_MSG("Unimplemented sceKernelMemoryPoolBatch opcode Move");
+            result = ORBIS_KERNEL_ERROR_EINVAL;
+            break;
         }
         default: {
             result = ORBIS_KERNEL_ERROR_EINVAL;
