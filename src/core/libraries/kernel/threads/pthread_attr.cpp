@@ -4,6 +4,7 @@
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
+#include "core/libraries/kernel/threads/pthread_attr_policy.h"
 #include "core/libraries/kernel/threads/pthread_attr_storage.h"
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
@@ -160,8 +161,7 @@ int PS4_SYSV_ABI posix_pthread_attr_setscope(PthreadAttrT* attr, PthreadAttrFlag
     if (attr == nullptr || *attr == nullptr) {
         return POSIX_EINVAL;
     }
-    if (contentionscope != PthreadAttrFlags::ScopeProcess ||
-        contentionscope != PthreadAttrFlags::ScopeSystem) {
+    if (!IsValidPthreadScope(contentionscope)) {
         return POSIX_EINVAL;
     }
     if (contentionscope == PthreadAttrFlags::ScopeSystem) {
