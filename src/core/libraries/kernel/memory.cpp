@@ -113,8 +113,7 @@ s32 PS4_SYSV_ABI sceKernelReleaseDirectMemory(u64 start, u64 len) {
         return ORBIS_OK;
     }
     auto* memory = Core::Memory::Instance();
-    memory->Free(start, len, false);
-    return ORBIS_OK;
+    return memory->Free(start, len, false);
 }
 
 s32 PS4_SYSV_ABI sceKernelAvailableDirectMemorySize(u64 searchStart, u64 searchEnd, u64 alignment,
