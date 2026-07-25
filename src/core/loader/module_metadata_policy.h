@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace Core::Loader {
@@ -24,6 +26,22 @@ constexpr void WriteModuleFilename(std::array<char, Size>& destination,
         std::min(module_name.size(), content_capacity - suffix_size);
     std::copy_n(module_name.begin(), stem_size, destination.begin());
     std::copy_n(suffix.begin(), suffix_size, destination.begin() + stem_size);
+}
+
+inline constexpr std::size_t DynamicFingerprintSize = 0x18;
+
+template <std::size_t Size>
+constexpr bool CopyModuleFingerprint(std::array<std::uint8_t, Size>& destination,
+                                     std::span<const std::uint8_t> dynamic_data,
+                                     std::uint64_t offset) {
+    destination.fill(0);
+    if (offset > dynamic_data.size() ||
+        DynamicFingerprintSize > dynamic_data.size() - offset) {
+        return false;
+    }
+    std::copy_n(dynamic_data.begin() + static_cast<std::size_t>(offset),
+                std::min(Size, DynamicFingerprintSize), destination.begin());
+    return true;
 }
 
 } // namespace Core::Loader

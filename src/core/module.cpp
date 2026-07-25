@@ -429,12 +429,13 @@ void Module::LoadDynamicInfo() {
             break;
         }
         case DT_SCE_FINGERPRINT:
-            // The fingerprint is a 24 byte (0x18) size buffer that contains a unique identifier for
-            // the given app. How exactly this is generated isn't known, however it is not necessary
-            // to have a valid fingerprint. While an invalid fingerprint will cause a warning to be
-            // printed to the kernel log, the ELF will still load and run.
-            LOG_INFO(Core_Linker, "DT_SCE_FINGERPRINT value = {:#018x}", dyn->d_un.d_val);
-            std::memcpy(info.fingerprint.data(), &dyn->d_un.d_val, sizeof(SCE_DBG_NUM_FINGERPRINT));
+            // This tag identifies the offset of a 24-byte fingerprint in PT_SCE_DYNLIBDATA. The
+            // kernel module-info ABI exposes the first 20 bytes.
+            if (!Loader::CopyModuleFingerprint(info.fingerprint, m_dynamic_data,
+                                               dyn->d_un.d_ptr)) {
+                LOG_ERROR(Core_Linker, "DT_SCE_FINGERPRINT is outside dynamic data: {:#x}",
+                          dyn->d_un.d_ptr);
+            }
             break;
         case DT_SCE_IMPORT_LIB_ATTR:
             // The upper 32-bits should contain the module index multiplied by 0x10000. The lower

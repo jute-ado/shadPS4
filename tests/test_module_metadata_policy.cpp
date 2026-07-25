@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <cstdint>
 #include <string_view>
 
 #include <gtest/gtest.h>
@@ -37,4 +38,27 @@ TEST(ModuleMetadataPolicy, ClearsUnusedBytesFromPreviousName) {
     EXPECT_EQ(std::string_view(destination.data()), "a.sprx");
     EXPECT_EQ(destination[6], '\0');
     EXPECT_EQ(destination.back(), '\0');
+}
+
+TEST(ModuleMetadataPolicy, CopiesAbiFingerprintFromDynamicDataOffset) {
+    std::array<std::uint8_t, 32> dynamic_data{};
+    for (std::uint8_t index = 0; index < 24; ++index) {
+        dynamic_data[index + 4] = static_cast<std::uint8_t>(index + 1);
+    }
+    std::array<std::uint8_t, 20> fingerprint{};
+
+    EXPECT_TRUE(CopyModuleFingerprint(fingerprint, dynamic_data, 4));
+    for (std::uint8_t index = 0; index < fingerprint.size(); ++index) {
+        EXPECT_EQ(fingerprint[index], index + 1);
+    }
+}
+
+TEST(ModuleMetadataPolicy, RejectsTruncatedDynamicFingerprint) {
+    std::array<std::uint8_t, 24> dynamic_data{};
+    std::array<std::uint8_t, 20> fingerprint;
+    const std::array<std::uint8_t, 20> empty_fingerprint{};
+    fingerprint.fill(0xff);
+
+    EXPECT_FALSE(CopyModuleFingerprint(fingerprint, dynamic_data, 1));
+    EXPECT_EQ(fingerprint, empty_fingerprint);
 }
