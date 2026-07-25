@@ -4,6 +4,7 @@
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
+#include "core/libraries/kernel/threads/pthread_attr_storage.h"
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
 
@@ -40,6 +41,7 @@ int PS4_SYSV_ABI posix_pthread_attr_destroy(PthreadAttrT* attr) {
     if (attr == nullptr || *attr == nullptr) {
         return POSIX_EINVAL;
     }
+    ReleasePthreadAttr(**attr);
     delete *attr;
     *attr = nullptr;
     return 0;
@@ -127,7 +129,10 @@ int PS4_SYSV_ABI posix_pthread_attr_init(PthreadAttrT* attr) {
     if (pattr == nullptr) {
         return POSIX_ENOMEM;
     }
-    memcpy(pattr, &PthreadAttrDefault, sizeof(PthreadAttr));
+    if (!ClonePthreadAttr(*pattr, PthreadAttrDefault)) {
+        delete pattr;
+        return POSIX_ENOMEM;
+    }
     *attr = pattr;
     return 0;
 }
@@ -255,13 +260,12 @@ int PS4_SYSV_ABI posix_pthread_attr_get_np(PthreadT pthread, PthreadAttrT* dstat
     if (ret != 0) {
         return ret;
     }
-    PthreadAttr attr = pthread->attr;
-    if (True(pthread->flags & ThreadFlags::Detached)) {
-        attr.flags |= PthreadAttrFlags::Detached;
+    const bool copied = ClonePthreadAttr(*dst, pthread->attr);
+    if (copied && True(pthread->flags & ThreadFlags::Detached)) {
+        dst->flags |= PthreadAttrFlags::Detached;
     }
     pthread->lock.unlock();
-    memcpy(dst, &attr, sizeof(PthreadAttr));
-    return ret;
+    return copied ? ret : POSIX_ENOMEM;
 }
 
 int PS4_SYSV_ABI posix_pthread_attr_getaffinity_np(const PthreadAttrT* pattr, size_t cpusetsize,
