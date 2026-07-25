@@ -78,19 +78,14 @@ Pthread* ThreadState::Alloc(Pthread* curthread) {
         if (GcNeeded()) {
             Collect(curthread);
         }
-        if (!free_threads.empty()) {
-            std::scoped_lock lk{free_thread_lock};
-            if (!free_threads.empty()) {
-                thread = free_threads.back();
-                free_threads.pop_back();
-            }
-        }
+        thread = free_threads.TryPop();
     }
     if (thread == nullptr) {
-        if (total_threads > MaxThreads) {
+        const s32 previous_total = total_threads.fetch_add(1);
+        if (!CanAllocateThread(previous_total, MaxThreads)) {
+            total_threads.fetch_sub(1);
             return nullptr;
         }
-        total_threads.fetch_add(1);
         thread = thread_heap.Allocate();
         if (thread == nullptr) {
             total_threads.fetch_sub(1);
@@ -129,17 +124,7 @@ void ThreadState::Free(Pthread* curthread, Pthread* thread) {
     thread->tcb = nullptr;
     ReleasePthreadAttr(thread->attr);
     DestroyThreadForReuse(thread);
-    bool should_free;
-    {
-        std::scoped_lock lk{free_thread_lock};
-        if (free_threads.size() >= MaxCachedThreads) {
-            should_free = true;
-        } else {
-            should_free = false;
-            free_threads.push_back(thread);
-        }
-    }
-    if (should_free) {
+    if (!free_threads.TryPush(thread)) {
         thread_heap.Free(thread);
         total_threads.fetch_sub(1);
     }
