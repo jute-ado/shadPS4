@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include "common/enum.h"
@@ -106,6 +108,23 @@ enum class VMAType : u32 {
 
 constexpr bool IsMemoryRangeWithinLimit(u64 limit, u64 offset, u64 size) {
     return offset <= limit && size <= limit - offset;
+}
+
+constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 alignment, u64 size,
+                                                            u64 limit) {
+    if (alignment == 0) {
+        return std::nullopt;
+    }
+    const u64 remainder = address % alignment;
+    const u64 padding = remainder == 0 ? 0 : alignment - remainder;
+    if (address > std::numeric_limits<u64>::max() - padding) {
+        return std::nullopt;
+    }
+    const u64 aligned_address = address + padding;
+    if (!IsMemoryRangeWithinLimit(limit, aligned_address, size)) {
+        return std::nullopt;
+    }
+    return aligned_address;
 }
 
 struct VirtualMemoryArea {
