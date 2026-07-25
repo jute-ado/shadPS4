@@ -3,8 +3,10 @@
 
 #include <array>
 #include <climits>
+#include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -24,6 +26,7 @@ struct FileCallbacks {
     u32 close_count{};
     u64 file_size{};
     bool closed{};
+    std::vector<u8> data;
 };
 
 s32 PS4_SYSV_ABI OpenFile(void* opaque, const char* path) {
@@ -40,8 +43,15 @@ s32 PS4_SYSV_ABI CloseFile(void* opaque) {
     return 0;
 }
 
-s32 PS4_SYSV_ABI ReadFile(void*, u8*, u64, u32) {
-    return 0;
+s32 PS4_SYSV_ABI ReadFile(void* opaque, u8* buffer, u64 offset, u32 size) {
+    auto* callbacks = static_cast<FileCallbacks*>(opaque);
+    if (offset >= callbacks->data.size()) {
+        return 0;
+    }
+    const auto read_size =
+        std::min<std::size_t>(size, callbacks->data.size() - static_cast<std::size_t>(offset));
+    std::memcpy(buffer, callbacks->data.data() + offset, read_size);
+    return static_cast<s32>(read_size);
 }
 
 u64 PS4_SYSV_ABI FileSize(void* opaque) {
@@ -140,6 +150,36 @@ TEST(AvPlayerFileStreamer, ForcedSeekPreservesTheRequestedOrigin) {
     auto* context = streamer.GetContext();
     ASSERT_NE(context->seek, nullptr);
     EXPECT_EQ(context->seek(context->opaque, 7, SEEK_SET | AVSEEK_FORCE), 7);
+}
+
+TEST(AvPlayerFileStreamer, ResetDiscardsPrefetchedInput) {
+    FileCallbacks callbacks{
+        .file_size = 5000,
+        .data = std::vector<u8>(5000),
+    };
+    for (std::size_t index = 0; index < callbacks.data.size(); ++index) {
+        callbacks.data[index] = static_cast<u8>(index % 251);
+    }
+    const AvPlayerFileReplacement replacement{
+        .object_ptr = &callbacks,
+        .open = OpenFile,
+        .close = CloseFile,
+        .read_offset = ReadFile,
+        .size = FileSize,
+    };
+
+    AvPlayerFileStreamer streamer{replacement};
+    ASSERT_TRUE(streamer.Init("game.pmf"));
+    u8 byte{};
+    ASSERT_EQ(avio_read(streamer.GetContext(), &byte, 1), 1);
+    ASSERT_EQ(byte, callbacks.data[0]);
+
+    streamer.Reset();
+
+    std::vector<u8> replayed(callbacks.data.size());
+    ASSERT_EQ(avio_read(streamer.GetContext(), replayed.data(), static_cast<int>(replayed.size())),
+              static_cast<int>(replayed.size()));
+    EXPECT_EQ(replayed, callbacks.data);
 }
 
 } // namespace

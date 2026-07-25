@@ -72,6 +72,9 @@ bool AvPlayerFileStreamer::Init(std::string_view path) {
 }
 
 void AvPlayerFileStreamer::Reset() {
+    if (m_avio_context != nullptr && avio_seek(m_avio_context, 0, SEEK_SET) >= 0) {
+        return;
+    }
     m_position = 0;
 }
 
