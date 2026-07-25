@@ -738,6 +738,16 @@ target_compile_features(shadps4_user_migration_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_user_migration_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_user_migration_test)
 
+add_executable(shadps4_system_gesture_behavior_test
+    test_system_gesture_behavior.cpp
+)
+target_include_directories(shadps4_system_gesture_behavior_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_system_gesture_behavior_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_system_gesture_behavior_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_system_gesture_behavior_test)
+
 set(KERNEL_SELECT_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/libraries/kernel/select_timing.cpp
     test_kernel_select_timing.cpp
