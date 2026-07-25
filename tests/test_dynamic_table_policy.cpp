@@ -83,3 +83,57 @@ TEST(DynamicTablePolicy, RequiresDynamicStringsToBeBoundedAndTerminated) {
     EXPECT_FALSE(ReadDynamicString(terminated, terminated.size()).has_value());
     EXPECT_FALSE(ReadDynamicString(unterminated, 0).has_value());
 }
+
+TEST(DynamicTablePolicy, FindsTypedDataTableIndependentOfDynamicTagOrder) {
+    const std::array entries{
+        elf_dynamic{.d_tag = DT_SCE_SYMTABSZ, .d_un = {.d_val = sizeof(elf_symbol) * 2}},
+        elf_dynamic{.d_tag = DT_NEEDED, .d_un = {.d_val = 1}},
+        elf_dynamic{.d_tag = DT_SCE_SYMTAB, .d_un = {.d_ptr = sizeof(elf_symbol)}},
+    };
+    alignas(elf_symbol) const std::array<u8, sizeof(elf_symbol) * 4> data{};
+
+    const auto table =
+        FindDynamicDataTable<elf_symbol>(entries, data, DT_SCE_SYMTAB, DT_SCE_SYMTABSZ);
+
+    ASSERT_TRUE(table.has_value());
+    EXPECT_EQ(table->size(), 2u);
+    EXPECT_EQ(reinterpret_cast<const u8*>(table->data()), data.data() + sizeof(elf_symbol));
+}
+
+TEST(DynamicTablePolicy, RejectsTypedDataTableOutsideDynamicData) {
+    alignas(elf_relocation) const std::array<u8, sizeof(elf_relocation) * 2> data{};
+    const std::array offset_outside{
+        elf_dynamic{.d_tag = DT_SCE_RELA, .d_un = {.d_ptr = data.size() + 1}},
+        elf_dynamic{.d_tag = DT_SCE_RELASZ, .d_un = {.d_val = 0}},
+    };
+    const std::array size_outside{
+        elf_dynamic{.d_tag = DT_SCE_RELA, .d_un = {.d_ptr = sizeof(elf_relocation)}},
+        elf_dynamic{.d_tag = DT_SCE_RELASZ, .d_un = {.d_val = sizeof(elf_relocation) * 2}},
+    };
+
+    EXPECT_FALSE(FindDynamicDataTable<elf_relocation>(offset_outside, data, DT_SCE_RELA,
+                                                       DT_SCE_RELASZ)
+                     .has_value());
+    EXPECT_FALSE(FindDynamicDataTable<elf_relocation>(size_outside, data, DT_SCE_RELA,
+                                                       DT_SCE_RELASZ)
+                     .has_value());
+}
+
+TEST(DynamicTablePolicy, RejectsPartialOrMisalignedTypedDataTables) {
+    alignas(elf_symbol) const std::array<u8, sizeof(elf_symbol) * 3> data{};
+    const std::array partial_entry{
+        elf_dynamic{.d_tag = DT_SCE_SYMTAB, .d_un = {.d_ptr = 0}},
+        elf_dynamic{.d_tag = DT_SCE_SYMTABSZ, .d_un = {.d_val = sizeof(elf_symbol) + 1}},
+    };
+    const std::array misaligned_offset{
+        elf_dynamic{.d_tag = DT_SCE_SYMTAB, .d_un = {.d_ptr = 1}},
+        elf_dynamic{.d_tag = DT_SCE_SYMTABSZ, .d_un = {.d_val = sizeof(elf_symbol)}},
+    };
+
+    EXPECT_FALSE(FindDynamicDataTable<elf_symbol>(partial_entry, data, DT_SCE_SYMTAB,
+                                                  DT_SCE_SYMTABSZ)
+                     .has_value());
+    EXPECT_FALSE(FindDynamicDataTable<elf_symbol>(misaligned_offset, data, DT_SCE_SYMTAB,
+                                                  DT_SCE_SYMTABSZ)
+                     .has_value());
+}
