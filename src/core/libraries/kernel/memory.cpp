@@ -145,6 +145,10 @@ s32 PS4_SYSV_ABI sceKernelAvailableDirectMemorySize(u64 searchStart, u64 searchE
 s32 PS4_SYSV_ABI sceKernelVirtualQuery(const void* addr, s32 flags, OrbisVirtualQueryInfo* info,
                                        u64 infoSize) {
     LOG_INFO(Kernel_Vmm, "called addr = {}, flags = {:#x}", fmt::ptr(addr), flags);
+    if (!IsMemoryQueryRequestValid(info, infoSize, sizeof(OrbisVirtualQueryInfo), flags)) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
     auto* memory = Core::Memory::Instance();
     return memory->VirtualQuery(std::bit_cast<VAddr>(addr), flags, info);
 }
@@ -459,6 +463,10 @@ s32 PS4_SYSV_ABI sceKernelMtypeprotect(const void* addr, u64 size, s32 mtype, s3
 s32 PS4_SYSV_ABI sceKernelDirectMemoryQuery(u64 offset, s32 flags, OrbisQueryInfo* query_info,
                                             u64 infoSize) {
     LOG_INFO(Kernel_Vmm, "called offset = {:#x}, flags = {:#x}", offset, flags);
+    if (!IsMemoryQueryRequestValid(query_info, infoSize, sizeof(OrbisQueryInfo), flags)) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
     auto* memory = Core::Memory::Instance();
     return memory->DirectMemoryQuery(offset, flags == 1, query_info);
 }

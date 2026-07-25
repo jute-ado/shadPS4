@@ -81,6 +81,19 @@ TEST(KernelMemoryValidation, PoolBatchRejectsUnsupportedOperations) {
         IsMemoryPoolBatchOperationSupported(static_cast<OrbisKernelMemoryPoolOpcode>(0)));
 }
 
+TEST(KernelMemoryValidation, QueryRequestsRequireAnExactOutputContract) {
+    OrbisVirtualQueryInfo info{};
+
+    EXPECT_TRUE(IsMemoryQueryRequestValid(&info, sizeof(info), sizeof(info), 0));
+    EXPECT_TRUE(IsMemoryQueryRequestValid(&info, sizeof(info), sizeof(info), 1));
+
+    EXPECT_FALSE(IsMemoryQueryRequestValid(nullptr, sizeof(info), sizeof(info), 0));
+    EXPECT_FALSE(IsMemoryQueryRequestValid(&info, sizeof(info) - 1, sizeof(info), 0));
+    EXPECT_FALSE(IsMemoryQueryRequestValid(&info, sizeof(info) + 1, sizeof(info), 0));
+    EXPECT_FALSE(IsMemoryQueryRequestValid(&info, sizeof(info), sizeof(info), -1));
+    EXPECT_FALSE(IsMemoryQueryRequestValid(&info, sizeof(info), sizeof(info), 2));
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedVirtualMemoryContainmentRange) {
     const Core::VirtualMemoryArea area{
         .base = std::numeric_limits<VAddr>::max() - 0xff,
