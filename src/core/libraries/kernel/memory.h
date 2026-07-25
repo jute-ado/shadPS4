@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <bit>
+
 #include "common/bit_field.h"
 #include "common/types.h"
 
@@ -58,6 +60,17 @@ constexpr bool IsMemoryAddressStorageValid(void* const* addr) {
 
 constexpr bool AreNamedMemoryPointersValid(void* const* addr, const char* name) {
     return addr != nullptr && name != nullptr;
+}
+
+constexpr bool IsMemoryAlignmentValid(u64 alignment, u64 granularity) {
+    return granularity != 0 &&
+           (alignment == 0 ||
+            (std::has_single_bit(alignment) && alignment % granularity == 0));
+}
+
+constexpr bool IsMemoryPoolReserveRequestValid(void* const* addr_out, u64 len, u64 alignment) {
+    return addr_out != nullptr && len != 0 && len % 2_MB == 0 &&
+           IsMemoryAlignmentValid(alignment, 2_MB);
 }
 
 struct OrbisQueryInfo {

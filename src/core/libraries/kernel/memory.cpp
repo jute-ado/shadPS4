@@ -160,11 +160,9 @@ s32 PS4_SYSV_ABI sceKernelReserveVirtualRange(void** addr, u64 len, s32 flags, u
         LOG_ERROR(Kernel_Vmm, "Map size is either zero or not 16KB aligned!");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    if (alignment != 0) {
-        if ((!std::has_single_bit(alignment) && !Common::Is16KBAligned(alignment))) {
-            LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
-            return ORBIS_KERNEL_ERROR_EINVAL;
-        }
+    if (!IsMemoryAlignmentValid(alignment, 16_KB)) {
+        LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
+        return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
     auto* memory = Core::Memory::Instance();
@@ -212,11 +210,9 @@ s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    if (alignment != 0) {
-        if ((!std::has_single_bit(alignment) && !Common::Is16KBAligned(alignment))) {
-            LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
-            return ORBIS_KERNEL_ERROR_EINVAL;
-        }
+    if (!IsMemoryAlignmentValid(alignment, 16_KB)) {
+        LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
+        return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
     if (std::strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH) {
@@ -284,11 +280,9 @@ s32 PS4_SYSV_ABI sceKernelMapDirectMemory2(void** addr, u64 len, s32 type, s32 p
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    if (alignment != 0) {
-        if ((!std::has_single_bit(alignment) && !Common::Is16KBAligned(alignment))) {
-            LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
-            return ORBIS_KERNEL_ERROR_EINVAL;
-        }
+    if (!IsMemoryAlignmentValid(alignment, 16_KB)) {
+        LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
+        return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
     const auto mem_prot = static_cast<Core::MemoryProt>(prot);
@@ -622,15 +616,10 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignmen
     LOG_INFO(Kernel_Vmm, "addr_in = {}, len = {:#x}, alignment = {:#x}, flags = {:#x}",
              fmt::ptr(addr_in), len, alignment, flags);
 
-    if (len == 0 || !Common::Is2MBAligned(len)) {
-        LOG_ERROR(Kernel_Vmm, "Map size is either zero or not 2MB aligned!");
+    if (!IsMemoryPoolReserveRequestValid(addr_out, len, alignment)) {
+        LOG_ERROR(Kernel_Vmm,
+                  "Output pointer, map size, or alignment violates the pool reserve contract");
         return ORBIS_KERNEL_ERROR_EINVAL;
-    }
-    if (alignment != 0) {
-        if ((!std::has_single_bit(alignment) && !Common::Is2MBAligned(alignment))) {
-            LOG_ERROR(Kernel_Vmm, "Alignment value is invalid!");
-            return ORBIS_KERNEL_ERROR_EINVAL;
-        }
     }
 
     auto* memory = Core::Memory::Instance();
