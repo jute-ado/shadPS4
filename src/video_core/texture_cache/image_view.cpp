@@ -98,9 +98,8 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
     }
     vk::ImageViewMinLodCreateInfoEXT min_lod_ci{};
     if (info.min_lod != 0 && instance.IsImageViewMinLodSupported()) {
-        const float last_level =
-            static_cast<float>(info.range.base.level + info.range.extent.levels - 1);
-        min_lod_ci.minLod = std::min(static_cast<float>(info.min_lod) / 256.f, last_level);
+        min_lod_ci.minLod = ComputeImageViewMinLod(
+            info.min_lod, info.range.base.level, info.range.extent.levels);
         usage_ci.pNext = &min_lod_ci;
     }
     // When sampling D32/D16 texture from shader, the T# specifies R32/R16 format so adjust it.

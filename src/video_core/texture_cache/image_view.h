@@ -23,6 +23,13 @@ class Scheduler;
 
 namespace VideoCore {
 
+constexpr float ComputeImageViewMinLod(u32 raw_min_lod, u32 base_level, u32 level_count) noexcept {
+    const u64 last_level =
+        level_count == 0 ? base_level : static_cast<u64>(base_level) + level_count - 1;
+    const float min_lod = static_cast<float>(raw_min_lod) / 256.0f;
+    return min_lod < static_cast<float>(last_level) ? min_lod : static_cast<float>(last_level);
+}
+
 struct ImageViewInfo {
     ImageViewInfo() = default;
     ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept;
