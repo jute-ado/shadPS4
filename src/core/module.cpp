@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include "common/alignment.h"
 #include "common/arch.h"
 #include "common/assert.h"
@@ -283,7 +285,34 @@ void Module::LoadDynamicInfo() {
         return;
     }
 
-    for (const auto& dynamic_entry : dynamic_entries.first(*terminator)) {
+    const auto active_entries = dynamic_entries.first(*terminator);
+    const auto string_table = Loader::FindDynamicStringTable(active_entries, m_dynamic_data);
+    if (string_table) {
+        dynamic_info.str_table = const_cast<char*>(string_table->data());
+        dynamic_info.str_table_size = string_table->size();
+    } else {
+        const bool declares_string_table =
+            std::ranges::any_of(active_entries, [](const auto& entry) {
+                return entry.d_tag == DT_SCE_STRTAB || entry.d_tag == DT_SCE_STRSZ;
+            });
+        if (declares_string_table) {
+            LOG_ERROR(Core_Linker, "Dynamic string table is incomplete or outside dynamic data");
+        }
+    }
+    const auto read_string = [&](u64 offset, std::string_view tag) {
+        if (!string_table) {
+            LOG_ERROR(Core_Linker, "{} requires a valid dynamic string table", tag);
+            return std::optional<std::string_view>{};
+        }
+        auto value = Loader::ReadDynamicString(*string_table, offset);
+        if (!value) {
+            LOG_ERROR(Core_Linker, "{} has invalid or unterminated string offset {:#x}", tag,
+                      offset);
+        }
+        return value;
+    };
+
+    for (const auto& dynamic_entry : active_entries) {
         const auto* dyn = &dynamic_entry;
         switch (dyn->d_tag) {
         case DT_SCE_HASH: // Offset of the hash table.
@@ -294,11 +323,8 @@ void Module::LoadDynamicInfo() {
             dynamic_info.hash_table_size = dyn->d_un.d_val;
             break;
         case DT_SCE_STRTAB: // Offset of the string table.
-            dynamic_info.str_table =
-                reinterpret_cast<char*>(m_dynamic_data.data() + dyn->d_un.d_ptr);
             break;
         case DT_SCE_STRSZ: // Size of the string table.
-            dynamic_info.str_table_size = dyn->d_un.d_val;
             break;
         case DT_SCE_SYMTAB: // Offset of the symbol table.
             dynamic_info.symbol_table =
@@ -381,25 +407,32 @@ void Module::LoadDynamicInfo() {
             break;
         case DT_NEEDED:
             // Offset of the library string in the string table to be linked in.
-            // In theory this should already be filled from about just make a test case
-            if (dynamic_info.str_table) {
-                dynamic_info.needed.push_back(dynamic_info.str_table + dyn->d_un.d_val);
-            } else {
-                LOG_ERROR(Core_Linker, "DT_NEEDED str table is not loaded should check!");
+            if (const auto name = read_string(dyn->d_un.d_val, "DT_NEEDED")) {
+                dynamic_info.needed.push_back(name->data());
             }
             break;
         case DT_SCE_NEEDED_MODULE: {
-            ModuleInfo& info = dynamic_info.import_modules.emplace_back();
+            ModuleInfo info{};
             info.value = dyn->d_un.d_val;
-            info.name = dynamic_info.str_table + info.name_offset;
+            const auto name = read_string(info.name_offset, "DT_SCE_NEEDED_MODULE");
+            if (!name) {
+                break;
+            }
+            info.name = *name;
             info.enc_id = EncodeId(info.id);
+            dynamic_info.import_modules.push_back(std::move(info));
             break;
         }
         case DT_SCE_IMPORT_LIB: {
-            LibraryInfo& info = dynamic_info.import_libs.emplace_back();
+            LibraryInfo info{};
             info.value = dyn->d_un.d_val;
-            info.name = dynamic_info.str_table + info.name_offset;
+            const auto name = read_string(info.name_offset, "DT_SCE_IMPORT_LIB");
+            if (!name) {
+                break;
+            }
+            info.name = *name;
             info.enc_id = EncodeId(info.id);
+            dynamic_info.import_libs.push_back(std::move(info));
             break;
         }
         case DT_SCE_FINGERPRINT:
@@ -417,15 +450,22 @@ void Module::LoadDynamicInfo() {
                      dyn->d_un.d_val);
             break;
         case DT_SCE_ORIGINAL_FILENAME:
-            dynamic_info.filename = dynamic_info.str_table + dyn->d_un.d_val;
+            if (const auto name = read_string(dyn->d_un.d_val, "DT_SCE_ORIGINAL_FILENAME")) {
+                dynamic_info.filename = *name;
+            }
             break;
         case DT_SCE_MODULE_INFO: {
-            ModuleInfo& info = dynamic_info.export_modules.emplace_back();
+            ModuleInfo info{};
             info.value = dyn->d_un.d_val;
-            info.name = dynamic_info.str_table + info.name_offset;
+            const auto name = read_string(info.name_offset, "DT_SCE_MODULE_INFO");
+            if (!name) {
+                break;
+            }
+            info.name = *name;
             info.enc_id = EncodeId(info.id);
             const std::string full_name = info.name + ".sprx";
             full_name.copy(this->info.name.data(), full_name.size());
+            dynamic_info.export_modules.push_back(std::move(info));
             break;
         };
         case DT_SCE_MODULE_ATTR:
@@ -433,10 +473,15 @@ void Module::LoadDynamicInfo() {
                      dyn->d_un.d_val);
             break;
         case DT_SCE_EXPORT_LIB: {
-            LibraryInfo& info = dynamic_info.export_libs.emplace_back();
+            LibraryInfo info{};
             info.value = dyn->d_un.d_val;
-            info.name = dynamic_info.str_table + info.name_offset;
+            const auto name = read_string(info.name_offset, "DT_SCE_EXPORT_LIB");
+            if (!name) {
+                break;
+            }
+            info.name = *name;
             info.enc_id = EncodeId(info.id);
+            dynamic_info.export_libs.push_back(std::move(info));
             break;
         }
         default:
@@ -462,7 +507,16 @@ void Module::LoadSymbols() {
             const u8 bind = sym->GetBind();
             const u8 type = sym->GetType();
             const u8 visibility = sym->GetVisibility();
-            const auto id = std::string(dynamic_info.str_table + sym->st_name);
+            const auto id_view = Loader::ReadDynamicString(
+                std::span{dynamic_info.str_table,
+                          static_cast<std::size_t>(dynamic_info.str_table_size)},
+                sym->st_name);
+            if (!id_view) {
+                LOG_ERROR(Core_Linker, "Symbol has invalid or unterminated string offset {:#x}",
+                          sym->st_name);
+                continue;
+            }
+            const auto id = std::string(*id_view);
             const auto ids = Common::SplitString(id, '#');
             if (ids.size() != 3) {
                 continue;
