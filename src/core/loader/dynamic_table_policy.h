@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include "core/loader/elf.h"
 
@@ -19,6 +20,39 @@ constexpr std::optional<std::size_t> FindDynamicTerminator(std::span<const elf_d
     for (std::size_t index = 0; index < entries.size(); ++index) {
         if (entries[index].d_tag == DT_NULL) {
             return index;
+        }
+    }
+    return std::nullopt;
+}
+
+inline std::optional<std::span<const char>> FindDynamicStringTable(
+    std::span<const elf_dynamic> entries, std::span<const u8> dynamic_data) {
+    std::optional<u64> offset;
+    std::optional<u64> size;
+    for (const auto& entry : entries) {
+        if (entry.d_tag == DT_SCE_STRTAB) {
+            offset = entry.d_un.d_ptr;
+        } else if (entry.d_tag == DT_SCE_STRSZ) {
+            size = entry.d_un.d_val;
+        }
+    }
+    if (!offset || !size || *offset > dynamic_data.size() ||
+        *size > dynamic_data.size() - *offset) {
+        return std::nullopt;
+    }
+    return std::span{reinterpret_cast<const char*>(dynamic_data.data() + *offset),
+                     static_cast<std::size_t>(*size)};
+}
+
+constexpr std::optional<std::string_view> ReadDynamicString(std::span<const char> table,
+                                                            u64 offset) {
+    if (offset >= table.size()) {
+        return std::nullopt;
+    }
+    const auto start = static_cast<std::size_t>(offset);
+    for (std::size_t end = start; end < table.size(); ++end) {
+        if (table[end] == '\0') {
+            return std::string_view{table.data() + start, end - start};
         }
     }
     return std::nullopt;
