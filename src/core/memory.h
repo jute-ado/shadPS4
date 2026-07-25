@@ -61,6 +61,10 @@ enum class MemoryMapFlags : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(MemoryMapFlags)
 
+constexpr bool IsRequestedMappingRangeValid(MemoryMapFlags flags, bool range_is_valid) {
+    return False(flags & MemoryMapFlags::Fixed) || range_is_valid;
+}
+
 enum class PhysicalMemoryType : u32 {
     Free = 0,
     Allocated = 1,

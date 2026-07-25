@@ -81,6 +81,16 @@ TEST(KernelMemoryValidation, RejectsWrappedGpuAddressRange) {
         std::numeric_limits<VAddr>::max() - 1, 4));
 }
 
+TEST(KernelMemoryValidation, FixedMappingsAlwaysRequireAValidVirtualRange) {
+    using Core::MemoryMapFlags;
+
+    EXPECT_TRUE(Core::IsRequestedMappingRangeValid(MemoryMapFlags::NoFlags, false));
+    EXPECT_TRUE(Core::IsRequestedMappingRangeValid(MemoryMapFlags::Fixed, true));
+    EXPECT_FALSE(Core::IsRequestedMappingRangeValid(MemoryMapFlags::Fixed, false));
+    EXPECT_FALSE(Core::IsRequestedMappingRangeValid(
+        MemoryMapFlags::Fixed | MemoryMapFlags::NoOverwrite, false));
+}
+
 TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x400, 0x600));
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1000, 0));

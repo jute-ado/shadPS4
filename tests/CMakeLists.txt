@@ -841,6 +841,7 @@ set(SETTINGS_TEST_SOURCES
     # Tests
     test_emulator_settings.cpp
     test_gpu_compatibility_settings.cpp
+    test_log_settings.cpp
 )
 
 set(NGS2_TEST_SOURCES
