@@ -71,6 +71,11 @@ constexpr bool AreNamedMemoryPointersValid(void* const* addr, const char* name) 
     return addr != nullptr && name != nullptr;
 }
 
+constexpr bool IsMemoryQueryRequestValid(const void* info, u64 info_size, u64 expected_size,
+                                         s32 flags) {
+    return info != nullptr && info_size == expected_size && flags >= 0 && flags <= 1;
+}
+
 constexpr bool IsMemoryAlignmentValid(u64 alignment, u64 granularity) {
     return granularity != 0 &&
            (alignment == 0 ||
