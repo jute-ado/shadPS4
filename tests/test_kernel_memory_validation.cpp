@@ -208,6 +208,15 @@ TEST(KernelMemoryValidation, PoolBlockStatsKeepAvailableAndAllocatedCountsDistin
     EXPECT_EQ(partial_counts.allocated, 1);
 }
 
+TEST(KernelMemoryValidation, PoolStatsCopySizeHonorsZeroAndDestinationBounds) {
+    EXPECT_EQ(ResolveMemoryPoolStatsCopySize(0), 0);
+    EXPECT_EQ(ResolveMemoryPoolStatsCopySize(1), 1);
+    EXPECT_EQ(ResolveMemoryPoolStatsCopySize(sizeof(OrbisKernelMemoryPoolBlockStats)),
+              sizeof(OrbisKernelMemoryPoolBlockStats));
+    EXPECT_EQ(ResolveMemoryPoolStatsCopySize(sizeof(OrbisKernelMemoryPoolBlockStats) + 1),
+              sizeof(OrbisKernelMemoryPoolBlockStats));
+}
+
 TEST(KernelMemoryValidation, PoolBackingReleaseIsAtomicAndReturnsAvailableBudget) {
     Core::PhysicalReleaseAccounting accounting{};
 

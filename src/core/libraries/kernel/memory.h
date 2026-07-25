@@ -177,6 +177,12 @@ struct OrbisKernelMemoryPoolBlockStats {
     s32 allocated_cached_blocks;
 };
 
+constexpr u64 ResolveMemoryPoolStatsCopySize(u64 requested_size) {
+    return requested_size < sizeof(OrbisKernelMemoryPoolBlockStats)
+               ? requested_size
+               : sizeof(OrbisKernelMemoryPoolBlockStats);
+}
+
 u64 PS4_SYSV_ABI sceKernelGetDirectMemorySize();
 s32 PS4_SYSV_ABI sceKernelAllocateDirectMemory(s64 searchStart, s64 searchEnd, u64 len,
                                                u64 alignment, s32 memoryType, s64* physAddrOut);
