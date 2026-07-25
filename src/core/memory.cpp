@@ -299,16 +299,26 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
         return ORBIS_OK;
     }
 
+    const auto release_span = ClipMemorySpanToLimit(phys_addr, size, total_direct_size);
+    if (!release_span) {
+        return ORBIS_OK;
+    }
+
     std::scoped_lock lk{unmap_mutex};
     // If this is a checked free, then all direct memory in range must be allocated.
     std::vector<std::pair<PAddr, u64>> free_list;
-    u64 remaining_size = size;
     auto phys_handle = FindDmemArea(phys_addr);
     for (; phys_handle != dmem_map.end(); phys_handle++) {
-        if (remaining_size == 0) {
-            // Done searching
-            break;
+        const auto overlap =
+            IntersectMemorySpans(*release_span, {.base = phys_handle->second.base,
+                                                .size = phys_handle->second.size});
+        if (!overlap) {
+            if (phys_handle->second.base >= release_span->base + release_span->size) {
+                break;
+            }
+            continue;
         }
+
         auto& dmem_area = phys_handle->second;
         if (dmem_area.dma_type == PhysicalMemoryType::Free) {
             if (is_checked) {
@@ -320,15 +330,10 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
             continue;
         }
 
-        // Store physical address and size to release
-        const PAddr current_phys_addr = std::max<PAddr>(phys_addr, phys_handle->first);
-        const u64 start_in_dma = current_phys_addr - phys_handle->first;
-        const u64 size_in_dma =
-            std::min<u64>(remaining_size, phys_handle->second.size - start_in_dma);
-        free_list.emplace_back(current_phys_addr, size_in_dma);
-
-        // Track remaining size to free
-        remaining_size -= size_in_dma;
+        free_list.emplace_back(overlap->base, overlap->size);
+        if (overlap->base + overlap->size == release_span->base + release_span->size) {
+            break;
+        }
     }
 
     // Release any dmem mappings that reference this physical block.
@@ -338,15 +343,15 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
             continue;
         }
         for (auto& [offset_in_vma, phys_mapping] : mapping.phys_areas) {
-            if (phys_addr + size > phys_mapping.base &&
-                phys_addr < phys_mapping.base + phys_mapping.size) {
-                const u64 phys_offset =
-                    std::max<u64>(phys_mapping.base, phys_addr) - phys_mapping.base;
+            const auto overlap =
+                IntersectMemorySpans(*release_span, {.base = phys_mapping.base,
+                                                    .size = phys_mapping.size});
+            if (overlap) {
+                const u64 phys_offset = overlap->base - phys_mapping.base;
                 const VAddr addr_in_vma = mapping.base + offset_in_vma + phys_offset;
-                const u64 unmap_size = std::min<u64>(phys_mapping.size - phys_offset, size);
 
                 // Unmapping might erase from vma_map. We can't do it here.
-                remove_list.emplace_back(addr_in_vma, unmap_size);
+                remove_list.emplace_back(addr_in_vma, overlap->size);
             }
         }
     }
