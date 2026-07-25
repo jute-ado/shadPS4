@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/resource.h"
+#include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/tile.h"
 #include "video_core/texture_cache/types.h"
 
@@ -162,6 +163,19 @@ TEST(CompressedMipCompatibility, IsInactiveByDefault) {
     };
 
     EXPECT_EQ(ApplyCompressedMipCompatibility(range, true, false, false), range);
+}
+
+TEST(ImageViewInfo, MinLodParticipatesInViewIdentity) {
+    VideoCore::ImageViewInfo base_view{};
+    VideoCore::ImageViewInfo clamped_view{};
+    clamped_view.min_lod = 0x180;
+
+    EXPECT_NE(base_view, clamped_view);
+}
+
+TEST(ImageViewInfo, ConvertsAndClampsDescriptorMinLodToTheAccessibleMipRange) {
+    EXPECT_FLOAT_EQ(VideoCore::ComputeImageViewMinLod(0x180, 2, 4), 1.5f);
+    EXPECT_FLOAT_EQ(VideoCore::ComputeImageViewMinLod(0x900, 2, 4), 5.0f);
 }
 
 TEST(TilingDispatch, CoversACompressedBlockTailSmallerThanOneWorkgroup) {
