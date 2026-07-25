@@ -296,6 +296,9 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_group_ballot) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
     }
+    if (info.uses_group_shuffle) {
+        ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
+    }
     const auto stage = info.l_stage;
     if (stage == LogicalStage::Vertex) {
         ctx.AddExtension("SPV_KHR_shader_draw_parameters");

@@ -31,7 +31,16 @@ Id EmitReadFirstLane(EmitContext& ctx, Id value) {
 }
 
 Id EmitReadLane(EmitContext& ctx, Id value, Id lane) {
-    return ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, lane);
+    if (ctx.profile.subgroup_size > 0 && ctx.profile.subgroup_size < 64) {
+        // Guest lane indices address a 64-lane wave. Vulkan subgroup lane operations become
+        // undefined when that index is outside the host subgroup, so map inactive guest lanes to
+        // a valid host lane on wave32 hardware.
+        lane = ctx.OpBitwiseAnd(ctx.U32[1], lane,
+                                ctx.ConstU32(ctx.profile.subgroup_size - 1));
+    }
+    const Id invocation_id = ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id);
+    const Id xor_mask = ctx.OpBitwiseXor(ctx.U32[1], invocation_id, lane);
+    return ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, xor_mask);
 }
 
 Id EmitWriteLane(EmitContext& ctx, Id value, Id write_value, u32 lane) {

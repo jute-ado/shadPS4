@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
@@ -54,6 +56,66 @@ bool HasOpcode(std::span<const u32> spirv, spv::Op expected) {
             return false;
         }
         if (opcode == static_cast<u16>(expected)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+bool HasSubgroupLaneOperationWithConstantIndex(std::span<const u32> spirv,
+                                               u32 expected_index) {
+    std::unordered_map<u32, u32> constants;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u16 word_count = instruction >> 16;
+        const u16 opcode = instruction & 0xffff;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if (opcode == static_cast<u16>(spv::Op::OpConstant) && word_count == 4) {
+            constants.emplace(spirv[offset + 2], spirv[offset + 3]);
+        } else if ((opcode == static_cast<u16>(spv::Op::OpGroupNonUniformBroadcast) ||
+                    opcode == static_cast<u16>(spv::Op::OpGroupNonUniformShuffle) ||
+                    opcode == static_cast<u16>(spv::Op::OpGroupNonUniformShuffleXor)) &&
+                   word_count == 6) {
+            const auto index = constants.find(spirv[offset + 5]);
+            if (index != constants.end() && index->second == expected_index) {
+                return true;
+            }
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+bool HasSubgroupLaneIndexMaskedBy(std::span<const u32> spirv, u32 expected_mask) {
+    std::unordered_map<u32, u32> constants;
+    std::unordered_set<u32> safe_indices;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u16 word_count = instruction >> 16;
+        const u16 opcode = instruction & 0xffff;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if (opcode == static_cast<u16>(spv::Op::OpConstant) && word_count == 4) {
+            constants.emplace(spirv[offset + 2], spirv[offset + 3]);
+        } else if (opcode == static_cast<u16>(spv::Op::OpBitwiseAnd) && word_count == 5) {
+            const auto lhs = constants.find(spirv[offset + 3]);
+            const auto rhs = constants.find(spirv[offset + 4]);
+            if ((lhs != constants.end() && lhs->second == expected_mask) ||
+                (rhs != constants.end() && rhs->second == expected_mask)) {
+                safe_indices.emplace(spirv[offset + 2]);
+            }
+        } else if (opcode == static_cast<u16>(spv::Op::OpBitwiseXor) && word_count == 5 &&
+                   (safe_indices.contains(spirv[offset + 3]) ||
+                    safe_indices.contains(spirv[offset + 4]))) {
+            safe_indices.emplace(spirv[offset + 2]);
+        } else if ((opcode == static_cast<u16>(spv::Op::OpGroupNonUniformBroadcast) ||
+                    opcode == static_cast<u16>(spv::Op::OpGroupNonUniformShuffle) ||
+                    opcode == static_cast<u16>(spv::Op::OpGroupNonUniformShuffleXor)) &&
+                   word_count == 6 && safe_indices.contains(spirv[offset + 5])) {
             return true;
         }
         offset += word_count;
@@ -114,6 +176,13 @@ bool UsesMaskedBuiltIn(std::span<const u32> spirv, spv::BuiltIn built_in, u32 ma
     return false;
 }
 
+constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
+    return u64{offset0} | (u64{offset1} << 8) |
+           (u64{std::to_underlying(Shader::Gcn::OpcodeDS::DS_SWIZZLE_B32)} << 18) |
+           u64{std::to_underlying(Shader::Gcn::InstEncoding::DS)} | (u64{source} << 32) |
+           (u64{destination} << 56);
+}
+
 TEST_F(GcnTest, compute_wave64_lane_id_uses_local_invocation_index_on_subgroup32) {
     TranslationEnvironment environment{};
     environment.subgroup_size = 32;
@@ -126,6 +195,39 @@ TEST_F(GcnTest, compute_wave64_lane_id_uses_local_invocation_index_on_subgroup32
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
     EXPECT_FALSE(HasBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
     EXPECT_TRUE(UsesMaskedBuiltIn(spirv, spv::BuiltInLocalInvocationIndex, 63));
+}
+
+TEST_F(GcnTest, compute_subgroup32_readlane_masks_guest_lane32) {
+    TranslationEnvironment environment{};
+    environment.subgroup_size = 32;
+    environment.workgroup_size = {32, 1, 1};
+    const std::array<u64, 2> instructions{
+        VOP2(OpcodeVOP2::V_READLANE_B32, static_cast<VOperand8>(4), SOperand9::V0,
+             static_cast<VOperand8>(std::to_underlying(SOperand9::Const32)))
+            .Get(),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S4).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions, environment);
+
+    EXPECT_FALSE(HasSubgroupLaneOperationWithConstantIndex(spirv, 32));
+    EXPECT_TRUE(HasSubgroupLaneIndexMaskedBy(spirv, 31));
+}
+
+TEST_F(GcnTest, compute_ds_swizzle_uses_nonuniform_subgroup_shuffle) {
+    TranslationEnvironment environment{};
+    environment.subgroup_size = 32;
+    environment.workgroup_size = {32, 1, 1};
+    const std::array<u64, 2> instructions{
+        MakeDsSwizzle(0, 1, 0x1f, 0),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::V1).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions, environment);
+
+    EXPECT_TRUE(HasOpcode(spirv, spv::Op::OpGroupNonUniformShuffleXor));
+    EXPECT_FALSE(HasOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast));
+    EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
 }
 
 TEST_F(GcnTest, dma_helper_bounds_checks_pages_and_records_faults_atomically) {
