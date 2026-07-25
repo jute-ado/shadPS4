@@ -8,6 +8,7 @@
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
 #include "core/libraries/avplayer/avplayer_source.h"
+#include "core/libraries/avplayer/avplayer_stream_policy.h"
 #include "core/libraries/videodec/video_utils.h"
 #include "core/memory.h"
 
@@ -91,7 +92,7 @@ bool AvPlayerSource::FindStreams() {
         }
     }
     m_duration = DurationMillis();
-    return m_streams.size() >= 0;
+    return HasDiscoveredStreams(m_streams.size());
 }
 
 s32 AvPlayerSource::GetStreamCount() {
@@ -419,11 +420,12 @@ u64 AvPlayerSource::DurationMillis() const {
         if (!stream_index.has_value()) {
             return;
         }
-        if (stream_index.value() < 0) {
+        const auto selected_index = stream_index.value();
+        if (!IsValidSelectedStreamIndex(selected_index, m_streams.size())) {
             return;
         }
-        const auto index = m_streams[stream_index.value()].ffmpeg_index;
-        if (index >= m_streams.size()) {
+        const auto index = m_streams[selected_index].ffmpeg_index;
+        if (!IsValidFfmpegStreamIndex(index, m_avformat_context->nb_streams)) {
             return;
         }
         const auto stream = m_avformat_context->streams[index];
