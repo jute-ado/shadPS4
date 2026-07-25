@@ -187,3 +187,10 @@ TEST(ElfProgramHeaderPolicy, BoundsOptionalSelfProgramIdInsideDeclaredHeader) {
     EXPECT_FALSE(ResolveSelfProgramIdOffset(0x1000, 0x1a0, 0x180, 0x40).has_value());
     EXPECT_FALSE(ResolveSelfProgramIdOffset(0x190, 0x200, 0x180, 0x40).has_value());
 }
+
+TEST(ElfProgramHeaderPolicy, CalculatesModuleReservationWithoutOverflow) {
+    EXPECT_EQ(CalculateModuleReservationSize(0x4000, 0x800000), 0x804000u);
+    EXPECT_FALSE(CalculateModuleReservationSize(std::numeric_limits<u64>::max() - 0x1000,
+                                                0x2000)
+                     .has_value());
+}

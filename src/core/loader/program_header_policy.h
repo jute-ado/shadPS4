@@ -163,4 +163,12 @@ constexpr std::optional<u64> ResolveSelfProgramIdOffset(u64 file_size, u64 decla
     return calculated_offset;
 }
 
+constexpr std::optional<u64> CalculateModuleReservationSize(u64 aligned_image_size,
+                                                            u64 trampoline_size) {
+    if (aligned_image_size > std::numeric_limits<u64>::max() - trampoline_size) {
+        return std::nullopt;
+    }
+    return aligned_image_size + trampoline_size;
+}
+
 } // namespace Core::Loader
