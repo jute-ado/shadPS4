@@ -318,6 +318,16 @@ TEST(KernelMemoryValidation, ResolvesPageAlignedProtectionSpansWithoutOverflow) 
                      .has_value());
 }
 
+TEST(KernelMemoryValidation, ResolvesNamedVirtualRangesWithoutAlignmentOverflow) {
+    const auto span = Core::ResolveNamedVirtualRange(0x4100, 0x4000);
+    ASSERT_TRUE(span.has_value());
+    EXPECT_EQ(span->base, 0x4000);
+    EXPECT_EQ(span->size, 0x8000);
+
+    EXPECT_FALSE(Core::ResolveNamedVirtualRange(std::numeric_limits<u64>::max() - 0xff, 0x100)
+                     .has_value());
+}
+
 TEST(KernelMemoryValidation, ResolvesBoundedAvailableMemorySpansAfterAlignment) {
     const auto aligned =
         Core::ResolveAvailableMemorySpan(0x1000, 0x9000, 0x2500, 0x8000, 0x2000);

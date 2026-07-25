@@ -1307,16 +1307,20 @@ s32 MemoryManager::SetDirectMemoryType(VAddr addr, u64 size, s32 memory_type) {
     return ORBIS_OK;
 }
 
-void MemoryManager::NameVirtualRange(VAddr virtual_addr, u64 size, std::string_view name) {
+s32 MemoryManager::NameVirtualRange(VAddr virtual_addr, u64 size, std::string_view name) {
     std::scoped_lock lk{mutex, unmap_mutex};
 
-    // Sizes are aligned up to the nearest 16_KB
-    u64 aligned_size = Common::AlignUp(size, 16_KB);
-    // Addresses are aligned down to the nearest 16_KB
-    VAddr aligned_addr = Common::AlignDown(virtual_addr, 16_KB);
+    const auto aligned_span = ResolveNamedVirtualRange(virtual_addr, size);
+    if (!aligned_span ||
+        !IsMappedMemoryOperationRangeValid(IsValidMapping(aligned_span->base, aligned_span->size))) {
+        LOG_ERROR(Kernel_Vmm,
+                  "Named virtual range is outside the memory map: addr = {:#x}, size = {:#x}",
+                  virtual_addr, size);
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
 
-    ASSERT_MSG(IsValidMapping(aligned_addr, aligned_size),
-               "Attempted to access invalid address {:#x}", aligned_addr);
+    const VAddr aligned_addr = aligned_span->base;
+    const u64 aligned_size = aligned_span->size;
     auto it = FindVMA(aligned_addr);
     u64 remaining_size = aligned_size;
     VAddr current_addr = aligned_addr;
@@ -1344,6 +1348,7 @@ void MemoryManager::NameVirtualRange(VAddr virtual_addr, u64 size, std::string_v
             it++;
         }
     }
+    return ORBIS_OK;
 }
 
 s32 MemoryManager::GetDirectMemoryType(PAddr addr, s32* directMemoryTypeOut,

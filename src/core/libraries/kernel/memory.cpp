@@ -579,8 +579,7 @@ s32 PS4_SYSV_ABI sceKernelSetVirtualRangeName(const void* addr, u64 len, const c
     }
 
     auto* memory = Core::Memory::Instance();
-    memory->NameVirtualRange(std::bit_cast<VAddr>(addr), len, name);
-    return ORBIS_OK;
+    return memory->NameVirtualRange(std::bit_cast<VAddr>(addr), len, name);
 }
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolExpand(u64 searchStart, u64 searchEnd, u64 len, u64 alignment,
