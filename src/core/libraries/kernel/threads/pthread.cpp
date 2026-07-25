@@ -16,6 +16,7 @@
 #include "core/libraries/kernel/threads.h"
 #include "core/libraries/kernel/threads/guest_thread_priority.h"
 #include "core/libraries/kernel/threads/pthread.h"
+#include "core/libraries/kernel/threads/pthread_attr_storage.h"
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
@@ -297,11 +298,11 @@ int PS4_SYSV_ABI posix_pthread_create_name_np(PthreadT* thread, const PthreadAtt
         return POSIX_EAGAIN;
     }
 
-    if (attr == nullptr || *attr == nullptr) {
-        new_thread->attr = PthreadAttrDefault;
-    } else {
-        new_thread->attr = *(*attr);
-        new_thread->attr.cpusetsize = 0;
+    const PthreadAttr& source_attr =
+        attr == nullptr || *attr == nullptr ? PthreadAttrDefault : *(*attr);
+    if (!ClonePthreadAttr(new_thread->attr, source_attr)) {
+        thread_state->Free(curthread, new_thread);
+        return POSIX_EAGAIN;
     }
     if (curthread != nullptr && new_thread->attr.sched_inherit == PthreadInheritSched) {
         if (True(curthread->attr.flags & PthreadAttrFlags::ScopeSystem)) {

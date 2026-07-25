@@ -6,6 +6,7 @@
 #include "common/scope_exit.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
+#include "core/libraries/kernel/threads/pthread_attr_storage.h"
 #include "core/libraries/kernel/threads/sleepq.h"
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/memory.h"
@@ -126,6 +127,7 @@ void ThreadState::Free(Pthread* curthread, Pthread* thread) {
     }
     thread->tcb = nullptr;
     auto* sleepqueue = thread->sleepqueue;
+    ReleasePthreadAttr(thread->attr);
     std::destroy_at(thread);
     bool should_free;
     {
