@@ -6,6 +6,7 @@
 #include <core/libraries/system/userservice.h>
 #include "core/libraries/kernel/equeue.h"
 #include "core/libraries/videoout/buffer.h"
+#include "core/libraries/videoout/videoout_event_id.h"
 
 namespace Core::Loader {
 class SymbolsResolver;
@@ -44,23 +45,6 @@ constexpr int ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_BT2020_PQ = 0x80;
 enum OrbisVideoOutColorimetry : u8 {
     Bt2020PQ = 12,
     Any = 0xFF,
-};
-
-enum class OrbisVideoOutEventId : s16 {
-    Flip = 0,
-    Vblank = 1,
-    PreVblankStart = 2,
-    SetMode = 8,
-    Position = 12,
-};
-
-enum class OrbisVideoOutInternalEventId : s16 {
-    Flip = 0x6,
-    Vblank = 0x7,
-    SetMode = 0x51,
-    Position = 0x58,
-    PreVblankStart = 0x59,
-    SysVblank = 0x63,
 };
 
 enum class AspectRatioMode : s32 {
