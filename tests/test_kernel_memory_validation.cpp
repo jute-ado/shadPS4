@@ -168,6 +168,11 @@ TEST(KernelMemoryValidation, FixedMappingsAlwaysRequireAValidVirtualRange) {
         MemoryMapFlags::Fixed | MemoryMapFlags::NoOverwrite, false));
 }
 
+TEST(KernelMemoryValidation, MappedMemoryOperationsRejectRangesOutsideTheAddressSpace) {
+    EXPECT_TRUE(Core::IsMappedMemoryOperationRangeValid(true));
+    EXPECT_FALSE(Core::IsMappedMemoryOperationRangeValid(false));
+}
+
 TEST(KernelMemoryValidation, PoolDecommitValidatesEveryOverlappingArea) {
     const std::map<VAddr, Core::VirtualMemoryArea> areas{
         {0x1000,

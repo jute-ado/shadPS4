@@ -409,8 +409,12 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
 s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32 mtype) {
     std::scoped_lock lk{unmap_mutex};
     std::unique_lock lk2{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
-               virtual_addr);
+    if (!IsMappedMemoryOperationRangeValid(IsValidMapping(virtual_addr, size))) {
+        LOG_ERROR(Kernel_Vmm,
+                  "Pool commit range is outside the memory map: addr = {:#x}, size = {:#x}",
+                  virtual_addr, size);
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
 
     // Input addresses to PoolCommit are treated as fixed, and have a constant alignment.
     const u64 alignment = 64_KB;
@@ -818,8 +822,12 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
 
 s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
     std::scoped_lock lk{unmap_mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
-               virtual_addr);
+    if (!IsMappedMemoryOperationRangeValid(IsValidMapping(virtual_addr, size))) {
+        LOG_ERROR(Kernel_Vmm,
+                  "Pool decommit range is outside the memory map: addr = {:#x}, size = {:#x}",
+                  virtual_addr, size);
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
 
     // Do an initial search to ensure this decommit is valid.
     auto it = FindVMA(virtual_addr);
@@ -1106,7 +1114,12 @@ s32 MemoryManager::Protect(VAddr addr, u64 size, MemoryProt prot) {
 
     // Ensure the range to modify is valid
     std::scoped_lock lk{mutex, unmap_mutex};
-    ASSERT_MSG(IsValidMapping(addr, size), "Attempted to access invalid address {:#x}", addr);
+    if (!IsMappedMemoryOperationRangeValid(IsValidMapping(addr, size))) {
+        LOG_ERROR(Kernel_Vmm,
+                  "Memory protection range is outside the memory map: addr = {:#x}, size = {:#x}",
+                  addr, size);
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
 
     // Appropriately restrict flags.
     constexpr static MemoryProt flag_mask =
