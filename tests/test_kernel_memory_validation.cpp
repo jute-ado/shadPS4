@@ -123,6 +123,21 @@ TEST(KernelMemoryValidation, AlignsMemoryValuesWithoutOverflow) {
     EXPECT_FALSE(Core::AlignMemoryValueUp(std::numeric_limits<u64>::max(), 0x4000).has_value());
 }
 
+TEST(KernelMemoryValidation, ResolvesFreeMemoryCandidatesInsideTheVma) {
+    EXPECT_EQ(Core::ResolveFreeMemoryCandidate(0x1000, 0x3000, 0x1100, 0x1000, 0x1000),
+              0x2000u);
+    EXPECT_EQ(Core::ResolveFreeMemoryCandidate(0x1000, 0x3000, 0, 0x3000, 0x1000), 0x1000u);
+
+    EXPECT_FALSE(
+        Core::ResolveFreeMemoryCandidate(0x1000, 0x1000, 0x1800, 0x900, 0x1000).has_value());
+    EXPECT_FALSE(Core::ResolveFreeMemoryCandidate(
+                     std::numeric_limits<u64>::max() - 0xfff, 0xfff,
+                     std::numeric_limits<u64>::max() - 0xff, 1, 0x1000)
+                     .has_value());
+    EXPECT_FALSE(
+        Core::ResolveFreeMemoryCandidate(0x1000, 0x3000, 0x1000, 0x1000, 0).has_value());
+}
+
 TEST(KernelMemoryValidation, ResolvesPageAlignedProtectionSpansWithoutOverflow) {
     const auto span = Core::ResolvePageAlignedMemorySpan(0x4100, 0x4000, 0x4000);
     ASSERT_TRUE(span.has_value());
