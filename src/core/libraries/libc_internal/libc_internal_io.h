@@ -5,6 +5,7 @@
 
 #include <mutex>
 #include "common/types.h"
+#include "common/va_ctx.h"
 #include "core/libraries/kernel/threads.h"
 
 namespace Core::Loader {
@@ -78,6 +79,7 @@ struct OrbisFILE {
 };
 
 s32 PS4_SYSV_ABI internal_snprintf(char* s, u64 n, VA_ARGS);
+s32 PS4_SYSV_ABI internal_vprintf(const char* format, Common::VaList* arguments);
 void PS4_SYSV_ABI internal__Lockfilelock(OrbisFILE* file);
 void PS4_SYSV_ABI internal__Unlockfilelock(OrbisFILE* file);
 OrbisFILE* PS4_SYSV_ABI internal__Fofind();
