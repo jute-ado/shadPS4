@@ -409,11 +409,10 @@ static inline size_t _ftoa(out_fct_type out, char* buffer, size_t idx, size_t ma
 #endif // PRINTF_SUPPORT_FLOAT
 
 // internal vsnprintf
-static inline int _vsnprintf(out_fct_type out, char* buffer, const char* format,
+static inline int _vsnprintf(out_fct_type out, char* buffer, size_t maxlen, const char* format,
                              Common::VaList* va_list) {
     unsigned int flags, width, precision, n;
     size_t idx = 0U;
-    auto maxlen = static_cast<size_t>(-1);
 
     if (!buffer) {
         // use null output function
@@ -729,35 +728,45 @@ static inline int _vsnprintf(out_fct_type out, char* buffer, const char* format,
     return (int)idx;
 }
 
+inline int FormatToBuffer(char* buffer, size_t size, const char* format,
+                          Common::VaList* arguments) {
+    return _vsnprintf(_out_buffer, buffer, size, format, arguments);
+}
+
+inline int PrintToStdout(const char* format, Common::VaList* arguments) {
+    Common::VaList measuring_arguments = *arguments;
+    const int required_size = FormatToBuffer(nullptr, 0, format, &measuring_arguments);
+    if (required_size < 0) {
+        return required_size;
+    }
+
+    std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
+    const int result = FormatToBuffer(buffer.data(), buffer.size(), format, arguments);
+    std::fwrite(buffer.data(), sizeof(char), static_cast<size_t>(result), stdout);
+    return result;
+}
+
 static int printf_ctx(Common::VaCtx* ctx) {
     const char* format = vaArgPtr<const char>(&ctx->va_list);
-    char buffer[256];
-    int result = _vsnprintf(_out_buffer, buffer, format, &ctx->va_list);
-    printf("%s", buffer);
-    return result;
+    return PrintToStdout(format, &ctx->va_list);
 }
 
 static int fprintf_ctx(Common::VaCtx* ctx, char* buf) {
     const char* format = vaArgPtr<const char>(&ctx->va_list);
-    char buffer[256];
-    int result = _vsnprintf(_out_buffer, buffer, format, &ctx->va_list);
-    std::strcpy(buf, buffer);
+    Common::VaList measuring_arguments = ctx->va_list;
+    const int required_size = FormatToBuffer(nullptr, 0, format, &measuring_arguments);
+    const int result =
+        FormatToBuffer(buf, static_cast<size_t>(required_size) + 1, format, &ctx->va_list);
     return result;
 }
 
 static int vsnprintf_ctx(char* s, size_t n, const char* format, Common::VaList* arg) {
-    std::vector<char> buffer(n);
-    int result = _vsnprintf(_out_buffer, buffer.data(), format, arg);
-    std::strcpy(s, buffer.data());
-    return result;
+    return FormatToBuffer(s, n, format, arg);
 }
 
 static int snprintf_ctx(char* s, size_t n, Common::VaCtx* ctx) {
     const char* format = vaArgPtr<const char>(&ctx->va_list);
-    std::vector<char> buffer(n);
-    int result = _vsnprintf(_out_buffer, buffer.data(), format, &ctx->va_list);
-    std::strcpy(s, buffer.data());
-    return result;
+    return FormatToBuffer(s, n, format, &ctx->va_list);
 }
 
 } // namespace Libraries::LibcInternal
