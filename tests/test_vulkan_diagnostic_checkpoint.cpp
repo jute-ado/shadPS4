@@ -24,3 +24,17 @@ TEST(VulkanDiagnosticCheckpoint, PipelineHashRoundTripsThroughOpaqueMarker) {
 
     EXPECT_EQ(Vulkan::DecodeDiagnosticCheckpoint(marker), pipeline_hash);
 }
+
+TEST(VulkanDiagnosticCheckpoint, ReportsCheckpointsForEveryDeviceLossSource) {
+    EXPECT_TRUE(Vulkan::ShouldReportDiagnosticCheckpoints(
+        Vulkan::DeviceLossSource::Presentation, true));
+    EXPECT_TRUE(Vulkan::ShouldReportDiagnosticCheckpoints(Vulkan::DeviceLossSource::Submission,
+                                                         true));
+}
+
+TEST(VulkanDiagnosticCheckpoint, DoesNotQueryUnsupportedCheckpoints) {
+    EXPECT_FALSE(Vulkan::ShouldReportDiagnosticCheckpoints(
+        Vulkan::DeviceLossSource::Presentation, false));
+    EXPECT_FALSE(Vulkan::ShouldReportDiagnosticCheckpoints(Vulkan::DeviceLossSource::Submission,
+                                                          false));
+}

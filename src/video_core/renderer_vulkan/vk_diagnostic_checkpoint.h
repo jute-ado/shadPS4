@@ -9,9 +9,19 @@
 
 namespace Vulkan {
 
+enum class DeviceLossSource {
+    Presentation,
+    Submission,
+};
+
 constexpr bool ShouldEnableDiagnosticCheckpoints(bool native_checkpoints_requested,
                                                  bool extension_available) {
     return native_checkpoints_requested && extension_available;
+}
+
+constexpr bool ShouldReportDiagnosticCheckpoints(DeviceLossSource source,
+                                                 bool checkpoints_supported) {
+    return checkpoints_supported;
 }
 
 constexpr bool ShouldEnableCrashDiagnosticLayer(bool crash_diagnostics_requested,
