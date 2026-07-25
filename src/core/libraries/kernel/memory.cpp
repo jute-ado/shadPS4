@@ -472,6 +472,10 @@ s32 PS4_SYSV_ABI sceKernelDirectMemoryQuery(u64 offset, s32 flags, OrbisQueryInf
 }
 
 s32 PS4_SYSV_ABI sceKernelAvailableFlexibleMemorySize(u64* out_size) {
+    if (!IsRequiredMemoryOutputValid(out_size)) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
     auto* memory = Core::Memory::Instance();
     *out_size = memory->GetAvailableFlexibleSize();
     LOG_INFO(Kernel_Vmm, "called size = {:#x}", *out_size);
@@ -834,6 +838,10 @@ void* PS4_SYSV_ABI posix_mmap(void* addr, u64 len, s32 prot, s32 flags, s32 fd, 
 
 s32 PS4_SYSV_ABI sceKernelMmap(void* addr, u64 len, s32 prot, s32 flags, s32 fd, s64 phys_addr,
                                void** res) {
+    if (!IsRequiredMemoryOutputValid(res)) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
     void* addr_out = posix_mmap(addr, len, prot, flags, fd, phys_addr);
 
     if (addr_out == reinterpret_cast<void*>(-1)) {
@@ -847,7 +855,7 @@ s32 PS4_SYSV_ABI sceKernelMmap(void* addr, u64 len, s32 prot, s32 flags, s32 fd,
 }
 
 s32 PS4_SYSV_ABI sceKernelConfiguredFlexibleMemorySize(u64* sizeOut) {
-    if (sizeOut == nullptr) {
+    if (!IsRequiredMemoryOutputValid(sizeOut)) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 

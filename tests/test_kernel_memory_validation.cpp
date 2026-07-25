@@ -94,6 +94,15 @@ TEST(KernelMemoryValidation, QueryRequestsRequireAnExactOutputContract) {
     EXPECT_FALSE(IsMemoryQueryRequestValid(&info, sizeof(info), sizeof(info), 2));
 }
 
+TEST(KernelMemoryValidation, RequiredMemoryOutputsRejectNullStorage) {
+    void* address{};
+    u64 size{};
+
+    EXPECT_TRUE(IsRequiredMemoryOutputValid(&address));
+    EXPECT_TRUE(IsRequiredMemoryOutputValid(&size));
+    EXPECT_FALSE(IsRequiredMemoryOutputValid(nullptr));
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedVirtualMemoryContainmentRange) {
     const Core::VirtualMemoryArea area{
         .base = std::numeric_limits<VAddr>::max() - 0xff,
