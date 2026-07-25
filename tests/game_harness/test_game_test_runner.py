@@ -4576,8 +4576,18 @@ class RunnerTests(unittest.TestCase):
     def test_run_manifest_writes_machine_readable_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            embedded_revision = "0123456789abcdef0123456789abcdef01234567"
             manifest = load_manifest(
-                self.make_manifest(root, case={"name": "summary case"})
+                self.make_manifest(
+                    root,
+                    case={
+                        "name": "summary case",
+                        "args": [
+                            "--stdout",
+                            f"[Loader] <Info> Revision {embedded_revision}",
+                        ],
+                    },
+                )
             )
             artifacts = root / "artifacts"
 
@@ -4613,6 +4623,7 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertIn("revision", provenance["source"])
             self.assertIn("dirty", provenance["source"])
+            self.assertEqual(provenance["emulatorRevision"], embedded_revision)
 
     def test_run_manifest_uses_emulator_and_arguments_from_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

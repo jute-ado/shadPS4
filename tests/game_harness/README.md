@@ -212,9 +212,10 @@ content hashes and requested pixel-difference measurements. The `screenshots`,
 are disjoint, so assertions and downstream tooling cannot mistake one capture
 phase for another. RenderDoc capture paths and hashes are included as well.
 The report's `provenance` object records the exact emulator command, executable
-path, size, modification time, SHA-256, and the runner checkout's Git revision
-and dirty state. Keep this metadata with artifacts so intermittent results can
-be attributed to the binary that actually ran rather than an artifact name.
+path, size, modification time, SHA-256, embedded revision reported at startup,
+and the runner checkout's Git revision and dirty state. Keep this metadata with
+artifacts so intermittent results can be attributed to the binary that actually
+ran rather than an artifact name.
 Each `screenshotButtonEvents` poll adds a `visual_checkpoint_attempts` entry
 with its event index, captured path and hash, measured reference difference,
 normalized mean intensity, non-black pixel fraction, and match result. These
