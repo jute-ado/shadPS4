@@ -208,6 +208,25 @@ TEST(KernelMemoryValidation, PoolBlockStatsKeepAvailableAndAllocatedCountsDistin
     EXPECT_EQ(partial_counts.allocated, 1);
 }
 
+TEST(KernelMemoryValidation, PoolBackingReleaseIsAtomicAndReturnsAvailableBudget) {
+    Core::PhysicalReleaseAccounting accounting{};
+
+    accounting =
+        Core::AccumulatePhysicalRelease(accounting, Core::PhysicalMemoryType::Pooled, 2 * 64_KB);
+    EXPECT_TRUE(accounting.can_release);
+    EXPECT_EQ(accounting.pool_bytes, 2 * 64_KB);
+
+    accounting =
+        Core::AccumulatePhysicalRelease(accounting, Core::PhysicalMemoryType::Allocated, 64_KB);
+    EXPECT_TRUE(accounting.can_release);
+    EXPECT_EQ(accounting.pool_bytes, 2 * 64_KB);
+
+    accounting =
+        Core::AccumulatePhysicalRelease(accounting, Core::PhysicalMemoryType::Committed, 64_KB);
+    EXPECT_FALSE(accounting.can_release);
+    EXPECT_EQ(accounting.pool_bytes, 2 * 64_KB);
+}
+
 TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x400, 0x600));
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1000, 0));

@@ -307,6 +307,7 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
     std::scoped_lock lk{unmap_mutex};
     // If this is a checked free, then all direct memory in range must be allocated.
     std::vector<std::pair<PAddr, u64>> free_list;
+    PhysicalReleaseAccounting release_accounting{};
     auto phys_handle = FindDmemArea(phys_addr);
     for (; phys_handle != dmem_map.end(); phys_handle++) {
         const auto overlap =
@@ -330,10 +331,27 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
             continue;
         }
 
+        release_accounting =
+            AccumulatePhysicalRelease(release_accounting, dmem_area.dma_type, overlap->size);
+        if (!release_accounting.can_release) {
+            LOG_ERROR(Kernel_Vmm,
+                      "Attempting to release committed pool backing at {:#x} with size {:#x}",
+                      overlap->base, overlap->size);
+            return ORBIS_KERNEL_ERROR_EBUSY;
+        }
+
         free_list.emplace_back(overlap->base, overlap->size);
         if (overlap->base + overlap->size == release_span->base + release_span->size) {
             break;
         }
+    }
+
+    if (release_accounting.pool_bytes > pool_budget) {
+        LOG_CRITICAL(Kernel_Vmm,
+                     "Pool release accounting underflow: releasing {:#x} bytes with {:#x} "
+                     "available",
+                     release_accounting.pool_bytes, pool_budget);
+        return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
     // Release any dmem mappings that reference this physical block.
@@ -365,6 +383,8 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
 
     // Acquire writer lock
     std::scoped_lock lk2{mutex};
+
+    pool_budget -= release_accounting.pool_bytes;
 
     for (const auto& [addr, size] : remove_list) {
         LOG_INFO(Kernel_Vmm, "Unmapping direct mapping {:#x} with size {:#x}", addr, size);

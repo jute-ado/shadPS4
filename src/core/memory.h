@@ -92,6 +92,21 @@ enum class PhysicalMemoryType : u32 {
     Flexible = 5,
 };
 
+struct PhysicalReleaseAccounting {
+    bool can_release = true;
+    u64 pool_bytes = 0;
+};
+
+constexpr PhysicalReleaseAccounting AccumulatePhysicalRelease(
+    PhysicalReleaseAccounting accounting, PhysicalMemoryType type, u64 size) {
+    if (type == PhysicalMemoryType::Committed) {
+        accounting.can_release = false;
+    } else if (type == PhysicalMemoryType::Pooled) {
+        accounting.pool_bytes += size;
+    }
+    return accounting;
+}
+
 struct PhysicalMemoryArea {
     PAddr base = 0;
     u64 size = 0;
