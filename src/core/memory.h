@@ -78,7 +78,7 @@ struct PhysicalMemoryArea {
     }
 
     bool CanMergeWith(const PhysicalMemoryArea& next) const {
-        if (base + size != next.base) {
+        if (next.base < base || next.base - base != size) {
             return false;
         }
         if (memory_type != next.memory_type) {
@@ -144,7 +144,7 @@ struct VirtualMemoryArea {
         if (disallow_merge || next.disallow_merge) {
             return false;
         }
-        if (base + size != next.base) {
+        if (next.base < base || next.base - base != size) {
             return false;
         }
         if (type == VMAType::Direct && next.type == VMAType::Direct) {
