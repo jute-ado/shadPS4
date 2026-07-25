@@ -128,35 +128,58 @@ constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 ali
     return aligned_address;
 }
 
-struct AvailableMemorySpan {
+struct MemorySpan {
     u64 base;
     u64 size;
 };
 
-constexpr std::optional<AvailableMemorySpan> ResolveAvailableMemorySpan(
+constexpr std::optional<MemorySpan> ClipMemorySpanToLimit(u64 base, u64 size, u64 limit) {
+    if (size == 0 || base >= limit) {
+        return std::nullopt;
+    }
+    return MemorySpan{.base = base, .size = std::min(size, limit - base)};
+}
+
+constexpr std::optional<MemorySpan> IntersectMemorySpans(MemorySpan first, MemorySpan second) {
+    if (first.size == 0 || second.size == 0 ||
+        !IsMemoryRangeWithinLimit(std::numeric_limits<u64>::max(), first.base, first.size) ||
+        !IsMemoryRangeWithinLimit(std::numeric_limits<u64>::max(), second.base, second.size)) {
+        return std::nullopt;
+    }
+
+    const u64 intersection_base = std::max(first.base, second.base);
+    const u64 intersection_end =
+        std::min(first.base + first.size, second.base + second.size);
+    if (intersection_base >= intersection_end) {
+        return std::nullopt;
+    }
+    return MemorySpan{.base = intersection_base, .size = intersection_end - intersection_base};
+}
+
+constexpr std::optional<MemorySpan> ResolveAvailableMemorySpan(
     u64 area_base, u64 area_size, u64 search_start, u64 search_end, u64 alignment) {
-    if (area_size == 0 || search_start >= search_end ||
-        !IsMemoryRangeWithinLimit(std::numeric_limits<u64>::max(), area_base, area_size)) {
+    if (search_start >= search_end) {
         return std::nullopt;
     }
 
-    const u64 area_end = area_base + area_size;
-    const u64 span_start = std::max(area_base, search_start);
-    const u64 span_end = std::min(area_end, search_end);
-    if (span_start >= span_end) {
+    const auto intersection =
+        IntersectMemorySpans({.base = area_base, .size = area_size},
+                             {.base = search_start, .size = search_end - search_start});
+    if (!intersection) {
         return std::nullopt;
     }
 
-    u64 aligned_start = span_start;
+    u64 aligned_start = intersection->base;
+    const u64 span_end = intersection->base + intersection->size;
     if (alignment > 0) {
         const auto resolved_start =
-            ResolveAlignedMemoryRangeStart(span_start, alignment, 0, span_end);
+            ResolveAlignedMemoryRangeStart(intersection->base, alignment, 0, span_end);
         if (!resolved_start || *resolved_start >= span_end) {
             return std::nullopt;
         }
         aligned_start = *resolved_start;
     }
-    return AvailableMemorySpan{.base = aligned_start, .size = span_end - aligned_start};
+    return MemorySpan{.base = aligned_start, .size = span_end - aligned_start};
 }
 
 struct VirtualMemoryArea {

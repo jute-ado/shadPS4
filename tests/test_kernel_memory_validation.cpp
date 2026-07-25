@@ -129,6 +129,39 @@ TEST(KernelMemoryValidation, ResolvesBoundedAvailableMemorySpansAfterAlignment) 
                      .has_value());
 }
 
+TEST(KernelMemoryValidation, ClipsAndIntersectsDirectMemoryReleaseSpans) {
+    const auto clipped = Core::ClipMemorySpanToLimit(0x3000, 0x3000, 0x4000);
+    ASSERT_TRUE(clipped.has_value());
+    EXPECT_EQ(clipped->base, 0x3000u);
+    EXPECT_EQ(clipped->size, 0x1000u);
+
+    const auto wrapped = Core::ClipMemorySpanToLimit(
+        std::numeric_limits<u64>::max() - 0x1000, 0x4000,
+        std::numeric_limits<u64>::max());
+    ASSERT_TRUE(wrapped.has_value());
+    EXPECT_EQ(wrapped->base, std::numeric_limits<u64>::max() - 0x1000);
+    EXPECT_EQ(wrapped->size, 0x1000u);
+
+    const auto allocated_overlap =
+        Core::IntersectMemorySpans({.base = 0x1000, .size = 0x3000},
+                                   {.base = 0x2800, .size = 0x2000});
+    ASSERT_TRUE(allocated_overlap.has_value());
+    EXPECT_EQ(allocated_overlap->base, 0x2800u);
+    EXPECT_EQ(allocated_overlap->size, 0x1800u);
+
+    const auto mapping_overlap =
+        Core::IntersectMemorySpans({.base = 0x1000, .size = 0x1000},
+                                   {.base = 0x1800, .size = 0x1000});
+    ASSERT_TRUE(mapping_overlap.has_value());
+    EXPECT_EQ(mapping_overlap->base, 0x1800u);
+    EXPECT_EQ(mapping_overlap->size, 0x800u);
+
+    EXPECT_FALSE(Core::ClipMemorySpanToLimit(0x4000, 0x1000, 0x4000).has_value());
+    EXPECT_FALSE(Core::IntersectMemorySpans({.base = 0x1000, .size = 0x1000},
+                                            {.base = 0x2000, .size = 0x1000})
+                     .has_value());
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedPhysicalAreaAdjacency) {
     Core::PhysicalMemoryArea area{
         .base = std::numeric_limits<PAddr>::max() - 0xff,
