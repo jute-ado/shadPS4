@@ -13,7 +13,6 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
-#include "video_core/amdgpu/eop_flip_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/amdgpu/pm4_lod_stats.h"
@@ -289,18 +288,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
-                    // The flip marker follows the frame's EOP packet. Preserve that ordering so
-                    // the guest cannot recycle the frame before its fence and interrupt.
-                    auto eop_completion = std::move(last_eop_completion);
-                    if (eop_completion) {
-                        eop_completion->AttachFlip([this] {
-                            SendCommand([] {
-                                Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
-                            });
-                        });
-                    } else {
-                        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
-                    }
+                    const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    ASSERT_MSG(
+                        eop_flip_tracker.QueueFlip(eop_position,
+                                                   [this] {
+                                                       SendCommand([] {
+                                                           Platform::IrqC::Instance()->Signal(
+                                                               Platform::InterruptId::GfxFlip);
+                                                       });
+                                                   }),
+                        "A patched flip could not be associated with its EOP packet");
                     break;
                 }
                 case PM4CmdNop::PayloadType::DebugMarkerPush: {
@@ -776,9 +773,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
-                    auto eop_completion = std::make_shared<EopFlipCompletion>();
-                    last_eop_completion = eop_completion;
                     rasterizer->ProcessDownloadImages();
                     SubmitEop(
                         *event_eop,
@@ -793,11 +789,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             }
                         },
                         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                        [eop_completion] { eop_completion->CompleteEop(); });
+                        [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
+                            complete_eop_flip();
+                        });
                     break;
                 }
-                auto eop_completion = std::make_shared<EopFlipCompletion>();
-                last_eop_completion = eop_completion;
                 event_eop->SignalFence(
                     [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
@@ -806,7 +802,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         }
                     },
                     [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
-                eop_completion->CompleteEop();
+                complete_eop_flip();
                 break;
             }
             case PM4ItOpcode::DmaData: {

@@ -9,7 +9,7 @@
 
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
-#include "video_core/amdgpu/eop_flip_completion.h"
+#include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
 
@@ -69,45 +69,80 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
-TEST(EventWriteEop, DefersFlipUntilThePrecedingEopCompletes) {
-    bool flip_signalled = false;
-    AmdGpu::EopFlipCompletion completion;
-
-    completion.AttachFlip([&] { flip_signalled = true; });
-    EXPECT_FALSE(flip_signalled);
-
-    completion.CompleteEop();
-    EXPECT_TRUE(flip_signalled);
-}
-
-TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopAlreadyCompleted) {
-    bool flip_signalled = false;
-    AmdGpu::EopFlipCompletion completion;
-
-    completion.CompleteEop();
-    completion.AttachFlip([&] { flip_signalled = true; });
-
-    EXPECT_TRUE(flip_signalled);
-}
-
 TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {
     std::vector<std::string> operations;
-    std::function<void()> gpu_completion;
-    AmdGpu::EopFlipCompletion completion;
-    completion.AttachFlip([&] { operations.emplace_back("flip"); });
+    Common::UniqueFunction<void> gpu_completion;
+    AmdGpu::EopFlipTracker tracker;
+    auto complete_eop_flip = tracker.BeginEop();
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                  [&] { operations.emplace_back("flip"); }));
 
     AmdGpu::SubmitEop(
         TestEopPacket{.data = 1},
         [&](auto&& callback) { gpu_completion = std::forward<decltype(callback)>(callback); },
         [&] { operations.emplace_back("submit"); }, [&](u32) { operations.emplace_back("fence"); },
-        [&] { operations.emplace_back("interrupt"); }, [&] { completion.CompleteEop(); });
+        [&] { operations.emplace_back("interrupt"); },
+        [complete_eop_flip = std::move(complete_eop_flip)]() mutable { complete_eop_flip(); });
 
     EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
     ASSERT_TRUE(gpu_completion);
     gpu_completion();
 
-    EXPECT_EQ(operations,
-              (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
+}
+
+TEST(EventWriteEop, InterruptFlipWaitsForTheFollowingEop) {
+    bool flip_signalled = false;
+    AmdGpu::EopFlipTracker tracker;
+
+    ASSERT_TRUE(
+        tracker.QueueFlip(AmdGpu::DecodeFlipEopPosition(0x33), [&] { flip_signalled = true; }));
+    EXPECT_FALSE(flip_signalled);
+
+    auto complete_eop = tracker.BeginEop();
+    EXPECT_FALSE(flip_signalled);
+
+    complete_eop();
+    EXPECT_TRUE(flip_signalled);
+}
+
+TEST(EventWriteEop, PlainAndLabelFlipsWaitForThePrecedingEop) {
+    for (const u32 nop_count : {0x34u, 0x39u}) {
+        bool flip_signalled = false;
+        AmdGpu::EopFlipTracker tracker;
+
+        auto complete_eop = tracker.BeginEop();
+        ASSERT_TRUE(tracker.QueueFlip(AmdGpu::DecodeFlipEopPosition(nop_count),
+                                      [&] { flip_signalled = true; }));
+        EXPECT_FALSE(flip_signalled);
+
+        complete_eop();
+        EXPECT_TRUE(flip_signalled);
+    }
+}
+
+TEST(EventWriteEop, LatePrecedingFlipRunsAfterItsEopAlreadyCompleted) {
+    bool flip_signalled = false;
+    AmdGpu::EopFlipTracker tracker;
+
+    auto complete_eop = tracker.BeginEop();
+    complete_eop();
+    ASSERT_TRUE(
+        tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding, [&] { flip_signalled = true; }));
+
+    EXPECT_TRUE(flip_signalled);
+}
+
+TEST(EventWriteEop, RejectsASecondFlipForTheSameEop) {
+    AmdGpu::EopFlipTracker tracker;
+
+    auto complete_eop = tracker.BeginEop();
+    EXPECT_TRUE(
+        tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding, Common::UniqueFunction<void>{[] {}}));
+    EXPECT_FALSE(
+        tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding, Common::UniqueFunction<void>{[] {}}));
+
+    complete_eop();
 }
 
 TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {

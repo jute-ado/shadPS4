@@ -19,6 +19,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
 
@@ -31,8 +32,6 @@ struct VideoOutPort;
 }
 
 namespace AmdGpu {
-
-class EopFlipCompletion;
 
 struct Liverpool {
     static constexpr u32 GfxQueueId = 0u;
@@ -206,7 +205,7 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     bool predicate_skip{};
-    std::shared_ptr<EopFlipCompletion> last_eop_completion;
+    EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {
         void Reset() {
