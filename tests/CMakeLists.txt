@@ -331,6 +331,7 @@ list(APPEND TEST_TARGETS shadps4_guest_thread_priority_test)
 
 add_executable(shadps4_pthread_attr_storage_test
     test_pthread_attr_storage.cpp
+    test_pthread_once_layout.cpp
 )
 target_include_directories(shadps4_pthread_attr_storage_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
