@@ -20,6 +20,7 @@
 #include "core/libraries/libc_internal/libc_internal.h"
 #include "core/libraries/sysmodule/sysmodule.h"
 #include "core/linker.h"
+#include "core/loader/relocation_symbol_policy.h"
 #include "core/memory.h"
 #include "core/tls.h"
 #include "ipc/ipc.h"
@@ -318,9 +319,11 @@ void Linker::Relocate(Module* module) {
             auto sym_type = sym.GetType();
             auto sym_visibility = sym.GetVisibility();
             u64 symbol_virtual_addr = 0;
+            bool is_undefined_weak = false;
             Loader::SymbolRecord symrec{};
             switch (sym_type) {
             case STT_FUN:
+            case STT_SCE:
                 rel_sym_type = Loader::SymbolType::Function;
                 break;
             case STT_OBJECT:
@@ -337,13 +340,12 @@ void Linker::Relocate(Module* module) {
                 LOG_INFO(Core_Linker, "symbol visibility !=0");
             }
 
-            switch (sym_bind) {
-            case STB_LOCAL:
+            switch (Loader::ClassifyRelocationSymbol(sym_bind, sym.st_value)) {
+            case Loader::RelocationSymbolSource::Module:
                 symbol_virtual_addr = rel_base_virtual_addr + sym.st_value;
                 module->SetRelaBit(bit_idx);
                 break;
-            case STB_GLOBAL:
-            case STB_WEAK: {
+            case Loader::RelocationSymbolSource::External: {
                 rel_name = names_tlb + sym.st_name;
                 if (Resolve(rel_name, rel_sym_type, module, &symrec)) {
                     // Only set the rela bit if the symbol was actually resolved and not stubbed.
@@ -352,12 +354,19 @@ void Linker::Relocate(Module* module) {
                 symbol_virtual_addr = symrec.virtual_address;
                 break;
             }
-            default:
+            case Loader::RelocationSymbolSource::UndefinedWeak:
+                rel_name = names_tlb + sym.st_name;
+                is_undefined_weak = true;
+                module->SetRelaBit(bit_idx);
+                break;
+            case Loader::RelocationSymbolSource::Unsupported:
                 UNREACHABLE_MSG("Unknown bind type {}", sym_bind);
             }
-            rel_is_resolved = (symbol_virtual_addr != 0);
-            rel_value = (rel_is_resolved ? symbol_virtual_addr + addend : 0);
-            rel_name = symrec.name;
+            rel_is_resolved = is_undefined_weak || symbol_virtual_addr != 0;
+            rel_value = rel_is_resolved ? symbol_virtual_addr + addend : 0;
+            if (!is_undefined_weak) {
+                rel_name = symrec.name;
+            }
             break;
         }
         default:

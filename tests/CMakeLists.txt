@@ -761,6 +761,19 @@ target_link_libraries(shadps4_elf_program_header_policy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_elf_program_header_policy_test)
 
+add_executable(shadps4_relocation_symbol_policy_test
+    test_relocation_symbol_policy.cpp
+)
+target_include_directories(shadps4_relocation_symbol_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_relocation_symbol_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_relocation_symbol_policy_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_relocation_symbol_policy_test)
+
 set(KERNEL_SELECT_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/libraries/kernel/select_timing.cpp
     test_kernel_select_timing.cpp
