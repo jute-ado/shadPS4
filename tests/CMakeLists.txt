@@ -499,6 +499,16 @@ target_compile_features(shadps4_vblank_tick_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_vblank_tick_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_vblank_tick_test)
 
+add_executable(shadps4_videoout_event_subscription_test
+    test_videoout_event_subscription.cpp
+)
+target_include_directories(shadps4_videoout_event_subscription_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_videoout_event_subscription_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_videoout_event_subscription_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_videoout_event_subscription_test)
+
 add_executable(shadps4_sleepq_waiter_selection_test
     test_sleepq_waiter_selection.cpp
 )
