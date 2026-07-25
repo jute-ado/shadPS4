@@ -63,8 +63,12 @@ constexpr bool IsMemoryBatchMapOperationValid(s32 operation) {
 
 constexpr u32 ORBIS_KERNEL_MAXIMUM_NAME_LENGTH = 32;
 
+constexpr bool IsRequiredMemoryOutputValid(const void* output) {
+    return output != nullptr;
+}
+
 constexpr bool IsMemoryAddressStorageValid(void* const* addr) {
-    return addr != nullptr;
+    return IsRequiredMemoryOutputValid(addr);
 }
 
 constexpr bool AreNamedMemoryPointersValid(void* const* addr, const char* name) {
