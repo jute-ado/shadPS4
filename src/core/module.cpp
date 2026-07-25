@@ -12,6 +12,7 @@
 #include "core/cpu_patches.h"
 #include "core/libraries/error_codes.h"
 #include "core/loader/dwarf.h"
+#include "core/loader/program_header_policy.h"
 #include "core/memory.h"
 #include "core/module.h"
 #include "core/tls.h"
@@ -172,6 +173,10 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
 
     for (u16 i = 0; i < elf_header.e_phnum; i++) {
         const auto header_type = elf.ElfPheaderTypeStr(elf_pheader[i].p_type);
+        if (Loader::ClassifyProgramHeader(elf_pheader[i].p_type) ==
+            Loader::ProgramHeaderAction::Ignore) {
+            continue;
+        }
         switch (elf_pheader[i].p_type) {
         case PT_LOAD:
         case PT_SCE_RELRO: {
