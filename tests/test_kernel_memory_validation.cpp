@@ -81,5 +81,53 @@ TEST(KernelMemoryValidation, RejectsWrappedGpuAddressRange) {
         std::numeric_limits<VAddr>::max() - 1, 4));
 }
 
+TEST(KernelMemoryValidation, RejectsWrappedPhysicalAreaAdjacency) {
+    Core::PhysicalMemoryArea area{
+        .base = std::numeric_limits<PAddr>::max() - 0xff,
+        .size = 0x200,
+    };
+    Core::PhysicalMemoryArea low_area{
+        .base = 0x100,
+        .size = 0x100,
+    };
+
+    EXPECT_FALSE(area.CanMergeWith(low_area));
+}
+
+TEST(KernelMemoryValidation, RejectsWrappedVirtualAreaAdjacency) {
+    Core::VirtualMemoryArea area{
+        .base = std::numeric_limits<VAddr>::max() - 0xff,
+        .size = 0x200,
+    };
+    Core::VirtualMemoryArea low_area{
+        .base = 0x100,
+        .size = 0x100,
+    };
+
+    EXPECT_FALSE(area.CanMergeWith(low_area));
+}
+
+TEST(KernelMemoryValidation, AdjacentMemoryAreasRemainMergeable) {
+    Core::PhysicalMemoryArea physical{
+        .base = 0x1000,
+        .size = 0x1000,
+    };
+    Core::PhysicalMemoryArea next_physical{
+        .base = 0x2000,
+        .size = 0x1000,
+    };
+    Core::VirtualMemoryArea virtual_area{
+        .base = 0x1000,
+        .size = 0x1000,
+    };
+    Core::VirtualMemoryArea next_virtual{
+        .base = 0x2000,
+        .size = 0x1000,
+    };
+
+    EXPECT_TRUE(physical.CanMergeWith(next_physical));
+    EXPECT_TRUE(virtual_area.CanMergeWith(next_virtual));
+}
+
 } // namespace
 } // namespace Libraries::Kernel
