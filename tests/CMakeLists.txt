@@ -341,6 +341,22 @@ target_link_libraries(shadps4_pthread_attr_storage_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_pthread_attr_storage_test)
 
+add_executable(shadps4_pthread_attr_api_test
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/kernel/threads/pthread_attr.cpp
+    stubs/loader_stub.cpp
+    test_pthread_attr_api.cpp
+)
+target_include_directories(shadps4_pthread_attr_api_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pthread_attr_api_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pthread_attr_api_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_pthread_attr_api_test)
+
 add_executable(shadps4_irq_controller_test
     test_irq_controller.cpp
 )
