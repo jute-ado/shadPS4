@@ -634,6 +634,7 @@ set(VDEC_LIB src/core/libraries/videodec/video_utils.cpp
              src/core/libraries/videodec/videodec2.h
              src/core/libraries/videodec/videodec2_avc.h
              src/core/libraries/videodec/videodec2_decode_validation.h
+             src/core/libraries/videodec/videodec2_decoder_validation.h
              src/core/libraries/videodec/videodec.cpp
              src/core/libraries/videodec/videodec.h
              src/core/libraries/videodec/videodec_decode_validation.h
