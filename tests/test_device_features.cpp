@@ -21,3 +21,10 @@ TEST(DeviceFeaturePolicy, DoesNotRequestUnsupportedIndirectFirstInstance) {
 
     EXPECT_EQ(enabled.drawIndirectFirstInstance, vk::False);
 }
+
+TEST(DeviceFeaturePolicy, ImageViewMinLodRequiresExtensionAndFeatureSupport) {
+    EXPECT_TRUE(Vulkan::ShouldEnableImageViewMinLod(true, true));
+    EXPECT_FALSE(Vulkan::ShouldEnableImageViewMinLod(true, false));
+    EXPECT_FALSE(Vulkan::ShouldEnableImageViewMinLod(false, true));
+    EXPECT_FALSE(Vulkan::ShouldEnableImageViewMinLod(false, false));
+}
