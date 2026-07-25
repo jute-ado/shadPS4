@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -91,17 +92,36 @@ struct EqueueEvent {
 
     void Clear() {
         is_triggered = false;
+        pending_events.clear();
         event.fflags = 0;
         event.data = 0;
     }
 
     void Trigger(void* data) {
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+            auto triggered_event = event;
+            ++triggered_event.fflags;
+            triggered_event.data = reinterpret_cast<uintptr_t>(data);
+            if (is_triggered) {
+                pending_events.push_back(triggered_event);
+            } else {
+                event = triggered_event;
+                is_triggered = true;
+            }
+            return;
+        }
         is_triggered = true;
         event.data = reinterpret_cast<uintptr_t>(data);
     }
 
     void ConsumeTrigger() {
-        Clear();
+        if (pending_events.empty()) {
+            Clear();
+            return;
+        }
+        event = pending_events.front();
+        pending_events.pop_front();
+        is_triggered = true;
     }
 
     void TriggerUser(void* data) {
@@ -141,6 +161,7 @@ struct EqueueEvent {
     }
 
 private:
+    std::deque<OrbisKernelEvent> pending_events;
     bool is_triggered = false;
 };
 
