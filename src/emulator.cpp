@@ -33,6 +33,7 @@
 #include "core/file_format/trp.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/kernel.h"
+#include "core/loader/program_header_policy.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/np/np_trophy.h"
 #include "core/libraries/save_data/save_backup.h"
@@ -103,7 +104,13 @@ s32 ReadCompiledSdkVersion(const std::filesystem::path& file) {
 
     if (i_procparam != elf_pheader.end()) {
         Core::OrbisProcParam param{};
-        elf.LoadSegment(u64(&param), i_procparam->p_offset, i_procparam->p_filesz);
+        constexpr u64 SdkVersionEnd =
+            offsetof(Core::OrbisProcParam, sdk_version) + sizeof(param.sdk_version);
+        if (i_procparam->p_filesz < SdkVersionEnd ||
+            !Core::Loader::IsFileRangeValid(sizeof(param), 0, i_procparam->p_filesz) ||
+            !elf.LoadSegment(u64(&param), i_procparam->p_offset, i_procparam->p_filesz)) {
+            return 0;
+        }
         return param.sdk_version;
     }
     return 0;

@@ -212,7 +212,7 @@ public:
     }
 
     s32 Start(u64 args, const void* argp, void* param);
-    void LoadModuleToMemory(u32& max_tls_index);
+    bool LoadModuleToMemory(u32& max_tls_index);
     void LoadDynamicInfo();
     void LoadSymbols();
 

@@ -43,6 +43,16 @@ constexpr ProgramHeaderAction ClassifyProgramHeader(u32 type) {
     }
 }
 
+constexpr bool IsProgramHeaderFileSizeValid(const elf_program_header& header) {
+    return (header.p_type != PT_LOAD && header.p_type != PT_SCE_RELRO) ||
+           header.p_filesz <= header.p_memsz;
+}
+
+constexpr bool IsDirectlyLoadedFromFile(u32 type) {
+    return type == PT_LOAD || type == PT_SCE_RELRO || type == PT_DYNAMIC ||
+           type == PT_SCE_DYNLIBDATA;
+}
+
 constexpr std::optional<u64> GetAlignedSegmentSize(const elf_program_header& header) {
     const u64 alignment = header.p_align;
     if (alignment == 0 || alignment == 1) {
@@ -73,6 +83,48 @@ constexpr std::optional<u64> CalculateLoadImageSize(
         image_size = std::max(image_size, header.p_vaddr + *segment_size);
     }
     return image_size;
+}
+
+constexpr bool IsFileRangeValid(u64 file_size, u64 offset, u64 size) {
+    return offset <= file_size && size <= file_size - offset;
+}
+
+constexpr bool IsRangeContained(u64 outer_offset, u64 outer_size, u64 inner_offset,
+                                u64 inner_size) {
+    if (outer_offset > std::numeric_limits<u64>::max() - outer_size ||
+        inner_offset < outer_offset) {
+        return false;
+    }
+    const u64 relative_offset = inner_offset - outer_offset;
+    return relative_offset <= outer_size && inner_size <= outer_size - relative_offset;
+}
+
+constexpr std::optional<u64> ResolveSelfSegmentFileOffset(
+    std::span<const self_segment_header> segments, std::span<const elf_program_header> headers,
+    u64 file_size, u64 logical_offset, u64 size) {
+    for (const auto& segment : segments) {
+        if (!segment.IsBlocked()) {
+            continue;
+        }
+        const u32 header_id = segment.GetId();
+        if (header_id >= headers.size()) {
+            continue;
+        }
+        const auto& header = headers[header_id];
+        if (!IsRangeContained(header.p_offset, header.p_filesz, logical_offset, size) ||
+            !IsFileRangeValid(file_size, segment.file_offset, segment.file_size)) {
+            continue;
+        }
+        const u64 relative_offset = logical_offset - header.p_offset;
+        if (segment.file_offset > std::numeric_limits<u64>::max() - relative_offset) {
+            continue;
+        }
+        const u64 physical_offset = segment.file_offset + relative_offset;
+        if (IsRangeContained(segment.file_offset, segment.file_size, physical_offset, size)) {
+            return physical_offset;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace Core::Loader
