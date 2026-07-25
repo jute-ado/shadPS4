@@ -4594,6 +4594,25 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(report["schemaVersion"], 1)
             self.assertEqual(report["cases"][0]["name"], "summary case")
             self.assertTrue(report["cases"][0]["passed"])
+            provenance = report["provenance"]
+            self.assertEqual(
+                provenance["emulatorCommand"],
+                [sys.executable, str(FIXTURE)],
+            )
+            executable = Path(sys.executable).resolve()
+            self.assertEqual(
+                provenance["emulatorExecutable"]["path"], str(executable)
+            )
+            self.assertEqual(
+                provenance["emulatorExecutable"]["sha256"],
+                game_test_runner._hash_file(executable),
+            )
+            self.assertEqual(
+                provenance["emulatorExecutable"]["sizeBytes"],
+                executable.stat().st_size,
+            )
+            self.assertIn("revision", provenance["source"])
+            self.assertIn("dirty", provenance["source"])
 
     def test_run_manifest_uses_emulator_and_arguments_from_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

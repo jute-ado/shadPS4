@@ -1477,6 +1477,61 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _command_executable(command: Sequence[str]) -> Path | None:
+    if not command:
+        return None
+    candidate = Path(command[0]).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    resolved = shutil.which(command[0])
+    return Path(resolved).resolve() if resolved else None
+
+
+def _source_provenance() -> dict[str, Any]:
+    source_root = Path(__file__).resolve().parents[1]
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"revision": None, "dirty": None}
+    return {"revision": revision or None, "dirty": bool(status.strip())}
+
+
+def _run_provenance(command: Sequence[str]) -> dict[str, Any]:
+    executable = _command_executable(command)
+    executable_report = None
+    if executable is not None:
+        try:
+            stat_result = executable.stat()
+            executable_report = {
+                "path": str(executable),
+                "sizeBytes": stat_result.st_size,
+                "mtimeNs": stat_result.st_mtime_ns,
+                "sha256": _hash_file(executable),
+            }
+        except OSError:
+            executable_report = {"path": str(executable)}
+    return {
+        "emulatorCommand": [str(argument) for argument in command],
+        "emulatorExecutable": executable_report,
+        "source": _source_provenance(),
+    }
+
+
 def _paeth_predictor(left: int, above: int, upper_left: int) -> int:
     estimate = left + above - upper_left
     left_distance = abs(estimate - left)
@@ -2561,6 +2616,7 @@ def run_manifest(
 
     root = Path(artifacts_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    provenance = _run_provenance(command)
     results = [
         run_case(
             case,
@@ -2575,6 +2631,7 @@ def run_manifest(
     report = {
         "schemaVersion": REPORT_SCHEMA_VERSION,
         "manifest": str(manifest.source),
+        "provenance": provenance,
         "passed": summary.passed,
         "failed": summary.failed,
         "cases": [result.to_report() for result in results],
