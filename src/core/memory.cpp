@@ -803,12 +803,9 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
 
     // Do an initial search to ensure this decommit is valid.
     auto it = FindVMA(virtual_addr);
-    while (it != vma_map.end() && it->second.base + it->second.size <= virtual_addr + size) {
-        if (it->second.type != VMAType::PoolReserved && it->second.type != VMAType::Pooled) {
-            LOG_ERROR(Kernel_Vmm, "Attempting to decommit non-pooled memory!");
-            return ORBIS_KERNEL_ERROR_EINVAL;
-        }
-        it++;
+    if (!ArePoolDecommitAreasValid(it, vma_map.end(), virtual_addr, size)) {
+        LOG_ERROR(Kernel_Vmm, "Attempting to decommit non-pooled memory!");
+        return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
     // Perform early GPU unmap to avoid potential deadlocks

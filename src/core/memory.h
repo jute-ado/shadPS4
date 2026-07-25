@@ -305,6 +305,18 @@ struct VirtualMemoryArea {
     }
 };
 
+template <typename Iterator>
+bool ArePoolDecommitAreasValid(Iterator area, Iterator end, VAddr address, u64 size) {
+    while (area != end && area->second.Overlaps(address, size)) {
+        const auto type = area->second.type;
+        if (type != VMAType::PoolReserved && type != VMAType::Pooled) {
+            return false;
+        }
+        ++area;
+    }
+    return true;
+}
+
 class MemoryManager {
     using PhysMap = std::map<PAddr, PhysicalMemoryArea>;
     using PhysHandle = PhysMap::iterator;
