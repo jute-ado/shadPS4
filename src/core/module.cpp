@@ -107,6 +107,12 @@ bool Module::LoadModuleToMemory(u32& max_tls_index) {
         return false;
     }
     aligned_base_size = *aligned_base_size_result;
+    const auto reservation_size =
+        Loader::CalculateModuleReservationSize(aligned_base_size, TrampolineSize);
+    if (!reservation_size) {
+        LOG_ERROR(Core_Linker, "Module image and trampoline reservation size overflow");
+        return false;
+    }
 
     for (const auto& header : elf_pheader) {
         if (Loader::ClassifyProgramHeader(header.p_type) !=
@@ -129,7 +135,7 @@ bool Module::LoadModuleToMemory(u32& max_tls_index) {
     // Reserve memory area for module
     void** out_addr = reinterpret_cast<void**>(&base_virtual_addr);
     s32 result =
-        memory->MapMemory(out_addr, ModuleLoadBase, aligned_base_size + TrampolineSize,
+        memory->MapMemory(out_addr, ModuleLoadBase, *reservation_size,
                           MemoryProt::NoAccess, MemoryMapFlags::NoFlags, VMAType::Reserved, name);
     ASSERT_MSG(result == ORBIS_OK, "Failed to reserve memory for module {}", name);
     LOG_INFO(Core_Linker, "Loading module {} to {}", name, fmt::ptr(*out_addr));
