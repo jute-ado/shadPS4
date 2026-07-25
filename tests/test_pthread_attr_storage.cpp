@@ -3,12 +3,25 @@
 
 #include <gtest/gtest.h>
 
+#include "core/libraries/kernel/threads/pthread_attr_policy.h"
 #include "core/libraries/kernel/threads/pthread_attr_storage.h"
 
 using Libraries::Kernel::ClonePthreadAttr;
 using Libraries::Kernel::Cpuset;
+using Libraries::Kernel::IsValidPthreadScope;
 using Libraries::Kernel::PthreadAttr;
+using Libraries::Kernel::PthreadAttrFlags;
 using Libraries::Kernel::ReleasePthreadAttr;
+
+TEST(PthreadAttrPolicy, AcceptsBothSupportedContentionScopes) {
+    EXPECT_TRUE(IsValidPthreadScope(PthreadAttrFlags::ScopeProcess));
+    EXPECT_TRUE(IsValidPthreadScope(PthreadAttrFlags::ScopeSystem));
+}
+
+TEST(PthreadAttrPolicy, RejectsNonScopeFlags) {
+    EXPECT_FALSE(IsValidPthreadScope(PthreadAttrFlags::Detached));
+    EXPECT_FALSE(IsValidPthreadScope(PthreadAttrFlags::ScopeSystem | PthreadAttrFlags::Detached));
+}
 
 TEST(PthreadAttrStorage, CloneOwnsAnIndependentAffinityCopy) {
     Cpuset source_cpuset{.bits = 0x15, ._reserved = 0x1234};
