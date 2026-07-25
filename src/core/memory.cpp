@@ -1403,12 +1403,21 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
     }
 
     // Align up the virtual_addr first.
-    virtual_addr = Common::AlignUp(virtual_addr, alignment);
+    const auto aligned_start = AlignMemoryValueUp(virtual_addr, alignment);
+    if (!aligned_start) {
+        LOG_ERROR(Kernel_Vmm, "Address alignment overflows for free mapping search");
+        return -1;
+    }
+    virtual_addr = *aligned_start;
     auto it = FindVMA(virtual_addr);
 
     // If the VMA is free and contains the requested mapping we are done.
-    if (it->second.IsFree() && it->second.Contains(virtual_addr, size)) {
-        return virtual_addr;
+    if (it->second.IsFree()) {
+        const auto candidate = ResolveFreeMemoryCandidate(
+            it->second.base, it->second.size, virtual_addr, size, alignment);
+        if (candidate) {
+            return *candidate;
+        }
     }
 
     // If we didn't hit the return above, then we know the current VMA isn't suitable
@@ -1422,12 +1431,13 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
         }
 
         const auto& vma = it->second;
-        virtual_addr = Common::AlignUp(vma.base, alignment);
-        // Sometimes the alignment itself might be larger than the VMA.
-        if (virtual_addr > vma.base + vma.size) {
+        const auto candidate =
+            ResolveFreeMemoryCandidate(vma.base, vma.size, vma.base, size, alignment);
+        if (!candidate) {
             it++;
             continue;
         }
+        virtual_addr = *candidate;
 
         // Make sure the address is within our defined bounds
         if (virtual_addr >= max_search_address) {
@@ -1435,12 +1445,7 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
             break;
         }
 
-        // If there's enough space in the VMA, return the address.
-        const u64 remaining_size = vma.base + vma.size - virtual_addr;
-        if (remaining_size >= size) {
-            return virtual_addr;
-        }
-        it++;
+        return virtual_addr;
     }
 
     // Couldn't find a suitable VMA, return an error.

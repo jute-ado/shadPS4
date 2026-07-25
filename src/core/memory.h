@@ -128,6 +128,24 @@ constexpr std::optional<u64> AlignMemoryValueUp(u64 value, u64 alignment) {
     return value + padding;
 }
 
+constexpr std::optional<u64> ResolveFreeMemoryCandidate(u64 area_base, u64 area_size,
+                                                        u64 requested_start, u64 requested_size,
+                                                        u64 alignment) {
+    if (!IsMemoryRangeWithinLimit(std::numeric_limits<u64>::max(), area_base, area_size)) {
+        return std::nullopt;
+    }
+    const auto candidate = AlignMemoryValueUp(std::max(area_base, requested_start), alignment);
+    if (!candidate) {
+        return std::nullopt;
+    }
+
+    const u64 area_end = area_base + area_size;
+    if (*candidate > area_end || requested_size > area_end - *candidate) {
+        return std::nullopt;
+    }
+    return candidate;
+}
+
 constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 alignment, u64 size,
                                                             u64 limit) {
     const auto aligned_address = AlignMemoryValueUp(address, alignment);
