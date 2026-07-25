@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <limits>
+#include <string>
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
 #include "core/libraries/avplayer/avplayer_stream_policy.h"
 
@@ -33,7 +34,8 @@ AvPlayerFileStreamer::~AvPlayerFileStreamer() {
 
 bool AvPlayerFileStreamer::Init(std::string_view path) {
     const auto ptr = m_file_replacement.object_ptr;
-    m_fd = m_file_replacement.open(ptr, path.data());
+    const std::string null_terminated_path{path};
+    m_fd = m_file_replacement.open(ptr, null_terminated_path.c_str());
     if (m_fd < 0) {
         return false;
     }

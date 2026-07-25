@@ -284,6 +284,20 @@ target_compile_features(shadps4_avplayer_stream_policy_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_avplayer_stream_policy_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_avplayer_stream_policy_test)
 
+add_executable(shadps4_avplayer_file_streamer_test
+    test_avplayer_file_streamer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/avplayer/avplayer_file_streamer.cpp
+)
+target_include_directories(shadps4_avplayer_file_streamer_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_avplayer_file_streamer_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_avplayer_file_streamer_test PRIVATE
+    GTest::gtest_main
+    FFmpeg::ffmpeg
+)
+list(APPEND TEST_TARGETS shadps4_avplayer_file_streamer_test)
+
 add_executable(shadps4_pm4_memory_wait_test
     test_pm4_memory_wait.cpp
 )
