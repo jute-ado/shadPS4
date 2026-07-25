@@ -33,6 +33,9 @@ AvPlayerFileStreamer::~AvPlayerFileStreamer() {
 }
 
 bool AvPlayerFileStreamer::Init(std::string_view path) {
+    if (m_fd >= 0 || m_avio_context != nullptr) {
+        return false;
+    }
     const auto ptr = m_file_replacement.object_ptr;
     const std::string null_terminated_path{path};
     m_fd = m_file_replacement.open(ptr, null_terminated_path.c_str());
