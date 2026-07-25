@@ -30,6 +30,9 @@ DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 VALID_OUTCOMES = frozenset({"exited_zero", "exited_nonzero", "timed_out"})
 VALID_SCREENSHOT_DIFFERENCE_MODES = frozenset({"cosine", "mean_absolute"})
 VALID_SCREENSHOT_SOURCES = frozenset({"game_frame", "presented_frame"})
+EMULATOR_REVISION_PATTERN = re.compile(
+    r"\bRevision\s+([0-9a-fA-F]{7,64})\b"
+)
 SUPPORTED_BUTTONS = frozenset(
     {
         "circle",
@@ -1532,6 +1535,27 @@ def _run_provenance(command: Sequence[str]) -> dict[str, Any]:
     }
 
 
+def _emulator_revision(results: Sequence[CaseResult]) -> str | None:
+    revisions: set[str] = set()
+    for result in results:
+        paths = (
+            result.artifact_directory / "stdout.log",
+            result.artifact_directory / "user" / "log" / "shad_log.txt",
+            result.artifact_directory / "user" / "log" / "shadps4.log",
+        )
+        for path in paths:
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as stream:
+                    text = stream.read(2 * 1024 * 1024)
+            except OSError:
+                continue
+            revisions.update(
+                match.group(1).lower()
+                for match in EMULATOR_REVISION_PATTERN.finditer(text)
+            )
+    return next(iter(revisions)) if len(revisions) == 1 else None
+
+
 def _paeth_predictor(left: int, above: int, upper_left: int) -> int:
     estimate = left + above - upper_left
     left_distance = abs(estimate - left)
@@ -2628,6 +2652,7 @@ def run_manifest(
         for index, case in enumerate(manifest.cases, start=1)
     ]
     summary = RunSummary(cases=results)
+    provenance["emulatorRevision"] = _emulator_revision(results)
     report = {
         "schemaVersion": REPORT_SCHEMA_VERSION,
         "manifest": str(manifest.source),
