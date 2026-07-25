@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <limits>
+
 #include <gtest/gtest.h>
 
 #include "core/loader/elf.h"
@@ -32,4 +35,42 @@ TEST(ElfProgramHeaderPolicy, KeepsImplementedHeadersOnProcessingPath) {
 
 TEST(ElfProgramHeaderPolicy, PreservesDiagnosticsForUnknownHeaders) {
     EXPECT_EQ(ClassifyProgramHeader(0x6abcdeff), ProgramHeaderAction::Unsupported);
+}
+
+TEST(ElfProgramHeaderPolicy, AlignsSegmentMemorySizeWithValidElfAlignment) {
+    elf_program_header header{.p_memsz = 0x1001, .p_align = 0x1000};
+
+    EXPECT_EQ(GetAlignedSegmentSize(header), 0x2000u);
+
+    header.p_align = 0;
+    EXPECT_EQ(GetAlignedSegmentSize(header), 0x1001u);
+}
+
+TEST(ElfProgramHeaderPolicy, RejectsInvalidOrOverflowingSegmentAlignment) {
+    elf_program_header header{.p_memsz = 0x1001, .p_align = 3};
+    EXPECT_FALSE(GetAlignedSegmentSize(header).has_value());
+
+    header.p_memsz = std::numeric_limits<u64>::max();
+    header.p_align = 0x1000;
+    EXPECT_FALSE(GetAlignedSegmentSize(header).has_value());
+}
+
+TEST(ElfProgramHeaderPolicy, CalculatesMaximumLoadImageEnd) {
+    const std::array headers{
+        elf_program_header{.p_type = PT_LOAD, .p_vaddr = 0x1000, .p_memsz = 0x2000},
+        elf_program_header{.p_type = PT_DYNAMIC, .p_vaddr = 0xf000, .p_memsz = 0x1000},
+        elf_program_header{.p_type = PT_SCE_RELRO, .p_vaddr = 0x5000, .p_memsz = 0x1000},
+    };
+
+    EXPECT_EQ(CalculateLoadImageSize(headers), 0x6000u);
+}
+
+TEST(ElfProgramHeaderPolicy, RejectsOverflowingLoadImageEnd) {
+    const std::array headers{
+        elf_program_header{.p_type = PT_LOAD,
+                           .p_vaddr = std::numeric_limits<u64>::max() - 3,
+                           .p_memsz = 4},
+    };
+
+    EXPECT_FALSE(CalculateLoadImageSize(headers).has_value());
 }

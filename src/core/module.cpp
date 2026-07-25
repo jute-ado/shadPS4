@@ -3,7 +3,6 @@
 
 #include <algorithm>
 
-#include "common/alignment.h"
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -26,22 +25,6 @@ namespace Core {
 using EntryFunc = PS4_SYSV_ABI int (*)(size_t args, const void* argp, void* param);
 
 static constexpr u64 ModuleLoadBase = 0x800000000;
-
-static u64 GetAlignedSize(const elf_program_header& phdr) {
-    return (phdr.p_align != 0 ? (phdr.p_memsz + (phdr.p_align - 1)) & ~(phdr.p_align - 1)
-                              : phdr.p_memsz);
-}
-
-static u64 CalculateBaseSize(const elf_header& ehdr, std::span<const elf_program_header> phdr) {
-    u64 base_size = 0;
-    for (u16 i = 0; i < ehdr.e_phnum; i++) {
-        if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_SCE_RELRO)) {
-            const u64 last_addr = phdr[i].p_vaddr + GetAlignedSize(phdr[i]);
-            base_size = std::max(last_addr, base_size);
-        }
-    }
-    return base_size;
-}
 
 static std::string EncodeId(u64 nVal) {
     std::string enc;
@@ -113,8 +96,28 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
     // Retrieve elf header and program header
     const auto elf_header = elf.GetElfHeader();
     const auto elf_pheader = elf.GetProgramHeader();
-    const u64 base_size = CalculateBaseSize(elf_header, elf_pheader);
-    aligned_base_size = Common::AlignUp(base_size, BlockAlign);
+    const auto base_size_result = Loader::CalculateLoadImageSize(elf_pheader);
+    if (!base_size_result) {
+        LOG_ERROR(Core_Linker, "Program headers have invalid alignment or overflow the load image");
+        return;
+    }
+    const u64 base_size = *base_size_result;
+    const elf_program_header image_header{.p_memsz = base_size, .p_align = BlockAlign};
+    const auto aligned_base_size_result = Loader::GetAlignedSegmentSize(image_header);
+    if (!aligned_base_size_result) {
+        LOG_ERROR(Core_Linker, "Module load image cannot be aligned");
+        return;
+    }
+    aligned_base_size = *aligned_base_size_result;
+
+    for (const auto& header : elf_pheader) {
+        if (Loader::ClassifyProgramHeader(header.p_type) ==
+                Loader::ProgramHeaderAction::Process &&
+            !Loader::GetAlignedSegmentSize(header)) {
+            LOG_ERROR(Core_Linker, "Program header has invalid size or alignment");
+            return;
+        }
+    }
 
     // Reserve memory area for module
     void** out_addr = reinterpret_cast<void**>(&base_virtual_addr);
@@ -143,7 +146,7 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
     const auto add_segment = [this](const elf_program_header& phdr, bool do_map = true) {
         const VAddr segment_vaddr = base_virtual_addr + phdr.p_vaddr;
         void* segment_addr = std::bit_cast<void*>(segment_vaddr);
-        const u64 segment_size = GetAlignedSize(phdr);
+        const u64 segment_size = *Loader::GetAlignedSegmentSize(phdr);
         if (do_map) {
             // Convert ELF flags to memory prot.
             auto segment_prot = MemoryProt::NoAccess;
@@ -191,7 +194,7 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
 
             const u64 segment_addr = elf_pheader[i].p_vaddr + base_virtual_addr;
             const u64 segment_file_size = elf_pheader[i].p_filesz;
-            const u64 segment_memory_size = GetAlignedSize(elf_pheader[i]);
+            const u64 segment_memory_size = *Loader::GetAlignedSegmentSize(elf_pheader[i]);
             const auto segment_mode = elf.ElfPheaderFlagsStr(elf_pheader[i].p_flags);
             LOG_INFO(Core_Linker, "program header = [{}] type = {}", i, header_type);
             LOG_INFO(Core_Linker, "segment_addr ..........: {:#018x}", segment_addr);
@@ -230,7 +233,7 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             tls.init_image_size = elf_pheader[i].p_filesz;
             tls.align = elf_pheader[i].p_align;
             tls.image_virtual_addr = elf_pheader[i].p_vaddr + base_virtual_addr;
-            tls.image_size = GetAlignedSize(elf_pheader[i]);
+            tls.image_size = *Loader::GetAlignedSegmentSize(elf_pheader[i]);
             tls.modid = ++max_tls_index;
             LOG_INFO(Core_Linker, "TLS virtual address = {:#x}", tls.image_virtual_addr);
             LOG_INFO(Core_Linker, "TLS image size      = {}", tls.image_size);

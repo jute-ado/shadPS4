@@ -3,6 +3,11 @@
 
 #pragma once
 
+#include <algorithm>
+#include <limits>
+#include <optional>
+#include <span>
+
 #include "core/loader/elf.h"
 
 namespace Core::Loader {
@@ -36,6 +41,38 @@ constexpr ProgramHeaderAction ClassifyProgramHeader(u32 type) {
     default:
         return ProgramHeaderAction::Unsupported;
     }
+}
+
+constexpr std::optional<u64> GetAlignedSegmentSize(const elf_program_header& header) {
+    const u64 alignment = header.p_align;
+    if (alignment == 0 || alignment == 1) {
+        return header.p_memsz;
+    }
+    if ((alignment & (alignment - 1)) != 0) {
+        return std::nullopt;
+    }
+    const u64 padding = alignment - 1;
+    if (header.p_memsz > std::numeric_limits<u64>::max() - padding) {
+        return std::nullopt;
+    }
+    return (header.p_memsz + padding) & ~padding;
+}
+
+constexpr std::optional<u64> CalculateLoadImageSize(
+    std::span<const elf_program_header> headers) {
+    u64 image_size = 0;
+    for (const auto& header : headers) {
+        if (header.p_type != PT_LOAD && header.p_type != PT_SCE_RELRO) {
+            continue;
+        }
+        const auto segment_size = GetAlignedSegmentSize(header);
+        if (!segment_size ||
+            header.p_vaddr > std::numeric_limits<u64>::max() - *segment_size) {
+            return std::nullopt;
+        }
+        image_size = std::max(image_size, header.p_vaddr + *segment_size);
+    }
+    return image_size;
 }
 
 } // namespace Core::Loader
