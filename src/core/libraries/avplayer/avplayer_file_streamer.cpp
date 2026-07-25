@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm> // std::max, std::min
+#include <algorithm>
+#include <cerrno>
+#include <limits>
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
+#include "core/libraries/avplayer/avplayer_stream_policy.h"
 
 extern "C" {
 #include <libavformat/avio.h>
@@ -52,36 +55,38 @@ s32 AvPlayerFileStreamer::ReadPacket(void* opaque, u8* buffer, s32 size) {
     if (self->m_position >= self->m_file_size) {
         return AVERROR_EOF;
     }
-    if (self->m_position + size > self->m_file_size) {
-        size = self->m_file_size - self->m_position;
+    const auto request_size = ResolveFileReadRequest(self->m_position, self->m_file_size, size);
+    if (!request_size) {
+        return AVERROR(EINVAL);
     }
     const auto read_offset = self->m_file_replacement.read_offset;
     const auto ptr = self->m_file_replacement.object_ptr;
-    const auto bytes_read = read_offset(ptr, buffer, self->m_position, size);
-    if (bytes_read == 0 && size != 0) {
+    const auto bytes_read = read_offset(ptr, buffer, self->m_position, *request_size);
+    const auto result = ResolveFileReadResult(self->m_position, *request_size, bytes_read);
+    if (result.return_value == 0 && *request_size != 0) {
         return AVERROR_EOF;
     }
-    self->m_position += bytes_read;
-    return bytes_read;
+    self->m_position = result.next_position;
+    return result.return_value;
 }
 
 s64 AvPlayerFileStreamer::Seek(void* opaque, s64 offset, int whence) {
     const auto self = reinterpret_cast<AvPlayerFileStreamer*>(opaque);
+    const auto seek_limit =
+        std::min(self->m_file_size, static_cast<u64>(std::numeric_limits<s64>::max()));
     if (whence & AVSEEK_SIZE) {
-        return self->m_file_size;
+        return static_cast<s64>(seek_limit);
     }
 
     if (whence == SEEK_CUR) {
-        self->m_position =
-            std::min(u64(std::max(s64(0), s64(self->m_position) + offset)), self->m_file_size);
-        return self->m_position;
+        self->m_position = ResolveFileSeek(self->m_position, seek_limit, offset);
+        return static_cast<s64>(self->m_position);
     } else if (whence == SEEK_SET) {
-        self->m_position = std::min(u64(std::max(s64(0), offset)), self->m_file_size);
-        return self->m_position;
+        self->m_position = ResolveFileSeek(0, seek_limit, offset);
+        return static_cast<s64>(self->m_position);
     } else if (whence == SEEK_END) {
-        self->m_position =
-            std::min(u64(std::max(s64(0), s64(self->m_file_size) + offset)), self->m_file_size);
-        return self->m_position;
+        self->m_position = ResolveFileSeek(seek_limit, seek_limit, offset);
+        return static_cast<s64>(self->m_position);
     }
 
     return -1;
