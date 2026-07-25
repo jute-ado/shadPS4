@@ -69,6 +69,20 @@ constexpr bool CanCommitPoolBudget(u64 available, u64 requested) {
     return requested <= available;
 }
 
+struct MemoryPoolBlockCounts {
+    s32 available;
+    s32 allocated;
+};
+
+constexpr MemoryPoolBlockCounts ResolveMemoryPoolBlockCounts(u64 available_bytes,
+                                                             u64 allocated_bytes) {
+    constexpr u64 block_size = 64_KB;
+    return {
+        .available = static_cast<s32>(available_bytes / block_size),
+        .allocated = static_cast<s32>(allocated_bytes / block_size),
+    };
+}
+
 enum class PhysicalMemoryType : u32 {
     Free = 0,
     Allocated = 1,
