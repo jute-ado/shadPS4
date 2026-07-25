@@ -568,18 +568,20 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         }
     }
 
-    if (True(flags & MemoryMapFlags::Fixed) && True(flags & MemoryMapFlags::NoOverwrite)) {
-        // Perform necessary error checking for Fixed & NoOverwrite case
-        if (!IsValidMapping(virtual_addr, size)) {
+    if (True(flags & MemoryMapFlags::Fixed)) {
+        if (!IsRequestedMappingRangeValid(flags, IsValidMapping(virtual_addr, size))) {
             LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map",
                       virtual_addr, size);
             return ORBIS_KERNEL_ERROR_ENOMEM;
         }
-        auto vma = FindVMA(virtual_addr)->second;
-        auto remaining_size = vma.base + vma.size - virtual_addr;
-        if (!vma.IsFree() || remaining_size < size) {
-            LOG_ERROR(Kernel_Vmm, "Unable to map {:#x} bytes at address {:#x}", size, virtual_addr);
-            return ORBIS_KERNEL_ERROR_ENOMEM;
+        if (True(flags & MemoryMapFlags::NoOverwrite)) {
+            auto vma = FindVMA(virtual_addr)->second;
+            auto remaining_size = vma.base + vma.size - virtual_addr;
+            if (!vma.IsFree() || remaining_size < size) {
+                LOG_ERROR(Kernel_Vmm, "Unable to map {:#x} bytes at address {:#x}", size,
+                          virtual_addr);
+                return ORBIS_KERNEL_ERROR_ENOMEM;
+            }
         }
     } else if (False(flags & MemoryMapFlags::Fixed)) {
         // Find a free virtual addr to map
@@ -747,18 +749,21 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
         prot &= ~MemoryProt::CpuExec;
     }
 
-    if (True(flags & MemoryMapFlags::Fixed) && True(flags & MemoryMapFlags::NoOverwrite)) {
-        if (!IsValidMapping(virtual_addr, size)) {
+    if (True(flags & MemoryMapFlags::Fixed)) {
+        if (!IsRequestedMappingRangeValid(flags, IsValidMapping(virtual_addr, size))) {
             LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map",
                       virtual_addr, size);
             return ORBIS_KERNEL_ERROR_ENOMEM;
         }
-        auto vma = FindVMA(virtual_addr)->second;
+        if (True(flags & MemoryMapFlags::NoOverwrite)) {
+            auto vma = FindVMA(virtual_addr)->second;
 
-        auto remaining_size = vma.base + vma.size - virtual_addr;
-        if (!vma.IsFree() || remaining_size < size) {
-            LOG_ERROR(Kernel_Vmm, "Unable to map {:#x} bytes at address {:#x}", size, virtual_addr);
-            return ORBIS_KERNEL_ERROR_ENOMEM;
+            auto remaining_size = vma.base + vma.size - virtual_addr;
+            if (!vma.IsFree() || remaining_size < size) {
+                LOG_ERROR(Kernel_Vmm, "Unable to map {:#x} bytes at address {:#x}", size,
+                          virtual_addr);
+                return ORBIS_KERNEL_ERROR_ENOMEM;
+            }
         }
     } else if (False(flags & MemoryMapFlags::Fixed)) {
         virtual_addr = virtual_addr == 0 ? DEFAULT_MAPPING_BASE : virtual_addr;
