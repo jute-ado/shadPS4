@@ -24,6 +24,15 @@ struct TestEopPacket {
     }
 };
 
+struct TestReleaseMemPacket {
+    u32 data;
+
+    void SignalFence(auto&& write_memory, auto&& signal_interrupt, auto&&) const {
+        write_memory(data);
+        signal_interrupt();
+    }
+};
+
 } // namespace
 
 TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) {
@@ -126,6 +135,41 @@ TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
     gpu_completions[1]();
     EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit", "fence",
                                                     "interrupt", "boundary"}));
+}
+
+TEST(ReleaseMem, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) {
+    u32 fence = 0;
+    bool interrupt_signalled = false;
+    std::vector<std::string> operations;
+    std::function<void()> gpu_completion;
+
+    AmdGpu::SubmitReleaseMem(
+        TestReleaseMemPacket{.data = 0x89abcdef},
+        [&](auto&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::forward<decltype(completion)>(completion);
+        },
+        [&] { operations.emplace_back("submit"); },
+        [&](u32 data) {
+            operations.emplace_back("fence");
+            fence = data;
+        },
+        [&] {
+            operations.emplace_back("interrupt");
+            interrupt_signalled = true;
+        },
+        [] {});
+
+    EXPECT_EQ(fence, 0u);
+    EXPECT_FALSE(interrupt_signalled);
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit"}));
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+
+    EXPECT_EQ(fence, 0x89abcdefu);
+    EXPECT_TRUE(interrupt_signalled);
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
 TEST(SubmissionBoundaryQueue, PreservesConsecutiveCallbacksInFifoOrder) {
