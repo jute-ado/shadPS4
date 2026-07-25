@@ -755,13 +755,13 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolGetBlockStats(OrbisKernelMemoryPoolBlockStat
     OrbisKernelMemoryPoolBlockStats local_stats;
     memory->GetMemoryPoolStats(&local_stats);
 
-    u64 size_to_copy = size < sizeof(OrbisKernelMemoryPoolBlockStats)
-                           ? size
-                           : sizeof(OrbisKernelMemoryPoolBlockStats);
+    const u64 size_to_copy = ResolveMemoryPoolStatsCopySize(size);
     // As of firmware 12.02, the kernel does not check if stats is null,
     // this can cause crashes on real hardware, so have an assert for this case.
     ASSERT_MSG(stats != nullptr || size == 0, "Block stats cannot be null");
-    std::memcpy(stats, &local_stats, size_to_copy);
+    if (size_to_copy != 0) {
+        std::memcpy(stats, &local_stats, size_to_copy);
+    }
     return ORBIS_OK;
 }
 
