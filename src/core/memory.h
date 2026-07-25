@@ -115,11 +115,21 @@ struct VirtualMemoryArea {
     bool disallow_merge = false;
 
     bool Contains(VAddr addr, u64 size) const {
-        return addr >= base && (addr + size) <= (base + this->size);
+        if (addr < base) {
+            return false;
+        }
+        const u64 offset = addr - base;
+        return offset <= this->size && size <= this->size - offset;
     }
 
     bool Overlaps(VAddr addr, u64 size) const {
-        return addr < (base + this->size) && (addr + size) > base;
+        if (size == 0 || this->size == 0) {
+            return false;
+        }
+        if (addr < base) {
+            return size > base - addr;
+        }
+        return addr - base < this->size;
     }
 
     bool IsFree() const noexcept {
