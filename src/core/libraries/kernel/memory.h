@@ -52,6 +52,15 @@ enum MemoryOpTypes : u32 {
     ORBIS_KERNEL_MAP_OP_TYPE_PROTECT = 4
 };
 
+constexpr bool IsMemoryBatchRequestValid(const void* entries, s32 count) {
+    return entries != nullptr && count >= 0;
+}
+
+constexpr bool IsMemoryBatchMapOperationValid(s32 operation) {
+    return operation >= ORBIS_KERNEL_MAP_OP_MAP_DIRECT &&
+           operation <= ORBIS_KERNEL_MAP_OP_TYPE_PROTECT;
+}
+
 constexpr u32 ORBIS_KERNEL_MAXIMUM_NAME_LENGTH = 32;
 
 constexpr bool IsMemoryAddressStorageValid(void* const* addr) {
@@ -112,6 +121,11 @@ enum class OrbisKernelMemoryPoolOpcode : u32 {
     TypeProtect = 4,
     Move = 5,
 };
+
+constexpr bool IsMemoryPoolBatchOperationSupported(OrbisKernelMemoryPoolOpcode operation) {
+    return operation >= OrbisKernelMemoryPoolOpcode::Commit &&
+           operation <= OrbisKernelMemoryPoolOpcode::TypeProtect;
+}
 
 struct OrbisKernelMemoryPoolBatchEntry {
     OrbisKernelMemoryPoolOpcode opcode;

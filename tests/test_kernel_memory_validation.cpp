@@ -53,6 +53,34 @@ TEST(KernelMemoryValidation, AlignmentMustMatchGranularityAndBeAPowerOfTwo) {
     EXPECT_FALSE(IsMemoryAlignmentValid(6_MB, 2_MB));
 }
 
+TEST(KernelMemoryValidation, BatchRequestsRequireEntriesAndANonnegativeCount) {
+    OrbisKernelBatchMapEntry entry{};
+
+    EXPECT_TRUE(IsMemoryBatchRequestValid(&entry, 0));
+    EXPECT_TRUE(IsMemoryBatchRequestValid(&entry, 1));
+    EXPECT_FALSE(IsMemoryBatchRequestValid(nullptr, 0));
+    EXPECT_FALSE(IsMemoryBatchRequestValid(&entry, -1));
+}
+
+TEST(KernelMemoryValidation, BatchMapOperationsStayWithinTheDefinedRange) {
+    EXPECT_TRUE(IsMemoryBatchMapOperationValid(ORBIS_KERNEL_MAP_OP_MAP_DIRECT));
+    EXPECT_TRUE(IsMemoryBatchMapOperationValid(ORBIS_KERNEL_MAP_OP_TYPE_PROTECT));
+
+    EXPECT_FALSE(IsMemoryBatchMapOperationValid(-1));
+    EXPECT_FALSE(IsMemoryBatchMapOperationValid(ORBIS_KERNEL_MAP_OP_TYPE_PROTECT + 1));
+}
+
+TEST(KernelMemoryValidation, PoolBatchRejectsUnsupportedOperations) {
+    EXPECT_TRUE(IsMemoryPoolBatchOperationSupported(OrbisKernelMemoryPoolOpcode::Commit));
+    EXPECT_TRUE(IsMemoryPoolBatchOperationSupported(OrbisKernelMemoryPoolOpcode::Decommit));
+    EXPECT_TRUE(IsMemoryPoolBatchOperationSupported(OrbisKernelMemoryPoolOpcode::Protect));
+    EXPECT_TRUE(IsMemoryPoolBatchOperationSupported(OrbisKernelMemoryPoolOpcode::TypeProtect));
+
+    EXPECT_FALSE(IsMemoryPoolBatchOperationSupported(OrbisKernelMemoryPoolOpcode::Move));
+    EXPECT_FALSE(
+        IsMemoryPoolBatchOperationSupported(static_cast<OrbisKernelMemoryPoolOpcode>(0)));
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedVirtualMemoryContainmentRange) {
     const Core::VirtualMemoryArea area{
         .base = std::numeric_limits<VAddr>::max() - 0xff,
