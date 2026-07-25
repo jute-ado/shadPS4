@@ -46,6 +46,7 @@ void ThreadState::Collect(Pthread* curthread) {
             FreeStack(&td->attr);
             work_list.push_back(td);
             it = gc_list.erase(it);
+            gc_accounting.MarkCollected();
         }
     }
     for (Pthread* td : work_list) {
@@ -69,6 +70,7 @@ void ThreadState::TryCollect(Pthread* thread) {
     if (thread->ShouldCollect()) {
         threads.erase(thread);
         gc_list.push_back(thread);
+        gc_accounting.MarkQueued();
     }
 }
 

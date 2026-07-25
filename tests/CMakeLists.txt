@@ -571,6 +571,16 @@ target_compile_features(shadps4_thread_cache_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_thread_cache_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_thread_cache_test)
 
+add_executable(shadps4_thread_gc_test
+    test_thread_gc.cpp
+)
+target_include_directories(shadps4_thread_gc_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_thread_gc_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_thread_gc_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_thread_gc_test)
+
 add_executable(shadps4_condvar_wait_state_test
     test_condvar_wait_state.cpp
 )
