@@ -285,7 +285,8 @@ PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, u64 size, u6
 
 s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
     // Basic bounds checking
-    if (phys_addr > total_direct_size || (is_checked && phys_addr + size > total_direct_size)) {
+    if (phys_addr > total_direct_size ||
+        (is_checked && !IsMemoryRangeWithinLimit(total_direct_size, phys_addr, size))) {
         LOG_ERROR(Kernel_Vmm, "phys_addr {:#x}, size {:#x} goes outside dmem map", phys_addr, size);
         if (is_checked) {
             return ORBIS_KERNEL_ERROR_ENOENT;
@@ -516,7 +517,8 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
                              bool validate_dmem, PAddr phys_addr, u64 alignment) {
     // Certain games perform flexible mappings on loop to determine
     // the available flexible memory size. Questionable but we need to handle this.
-    if (type == VMAType::Flexible && flexible_usage + size > total_flexible_size) {
+    if (type == VMAType::Flexible &&
+        !IsMemoryRangeWithinLimit(total_flexible_size, flexible_usage, size)) {
         LOG_ERROR(Kernel_Vmm,
                   "Out of flexible memory, available flexible memory = {:#x}"
                   " requested size = {:#x}",
@@ -528,7 +530,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
     PhysHandle dmem_area;
     // Validate the requested physical address range
     if (phys_addr != -1) {
-        if (total_direct_size < phys_addr + size) {
+        if (!IsMemoryRangeWithinLimit(total_direct_size, phys_addr, size)) {
             LOG_ERROR(Kernel_Vmm, "Unable to map {:#x} bytes at physical address {:#x}", size,
                       phys_addr);
             return ORBIS_KERNEL_ERROR_ENOMEM;

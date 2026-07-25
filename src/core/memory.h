@@ -104,6 +104,10 @@ enum class VMAType : u32 {
     System = 9,
 };
 
+constexpr bool IsMemoryRangeWithinLimit(u64 limit, u64 offset, u64 size) {
+    return offset <= limit && size <= limit - offset;
+}
+
 struct VirtualMemoryArea {
     VAddr base = 0;
     u64 size = 0;
