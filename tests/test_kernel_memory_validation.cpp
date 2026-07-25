@@ -91,6 +91,17 @@ TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
         std::numeric_limits<u64>::max(), std::numeric_limits<u64>::max() - 1, 2));
 }
 
+TEST(KernelMemoryValidation, ValidatesBoundedMemoryWindowsWithoutOverflow) {
+    EXPECT_TRUE(Core::IsMemoryRangeWithinBounds(0x1000, 0x4000, 0x1000, 0x3000));
+    EXPECT_TRUE(Core::IsMemoryRangeWithinBounds(0x1000, 0x4000, 0x4000, 0));
+
+    EXPECT_FALSE(Core::IsMemoryRangeWithinBounds(0x1000, 0x4000, 0xfff, 1));
+    EXPECT_FALSE(Core::IsMemoryRangeWithinBounds(0x1000, 0x4000, 0x3000, 0x1001));
+    EXPECT_FALSE(Core::IsMemoryRangeWithinBounds(0x4000, 0x1000, 0x2000, 0x100));
+    EXPECT_FALSE(Core::IsMemoryRangeWithinBounds(
+        0x1000, 0x4000, std::numeric_limits<u64>::max() - 0xfff, 0x2000));
+}
+
 TEST(KernelMemoryValidation, ResolvesAlignedMemoryRangesWithoutOverflow) {
     EXPECT_EQ(Core::ResolveAlignedMemoryRangeStart(0x11000, 0xc000, 0x4000, 0x40000), 0x18000u);
     EXPECT_EQ(Core::ResolveAlignedMemoryRangeStart(0x18000, 0xc000, 0x4000, 0x40000), 0x18000u);

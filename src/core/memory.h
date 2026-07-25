@@ -111,6 +111,11 @@ constexpr bool IsMemoryRangeWithinLimit(u64 limit, u64 offset, u64 size) {
     return offset <= limit && size <= limit - offset;
 }
 
+constexpr bool IsMemoryRangeWithinBounds(u64 lower_bound, u64 upper_bound, u64 offset, u64 size) {
+    return lower_bound <= upper_bound && offset >= lower_bound &&
+           IsMemoryRangeWithinLimit(upper_bound, offset, size);
+}
+
 constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 alignment, u64 size,
                                                             u64 limit) {
     if (alignment == 0) {

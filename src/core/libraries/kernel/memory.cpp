@@ -884,7 +884,8 @@ s32 PS4_SYSV_ABI sceKernelSetPrtAperture(s32 id, VAddr address, u64 size) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    if (address < PRT_AREA_START_ADDR || address + size > PRT_AREA_START_ADDR + PRT_AREA_SIZE) {
+    if (!Core::IsMemoryRangeWithinBounds(PRT_AREA_START_ADDR,
+                                         PRT_AREA_START_ADDR + PRT_AREA_SIZE, address, size)) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
