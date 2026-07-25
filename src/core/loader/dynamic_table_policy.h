@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -56,6 +57,31 @@ constexpr std::optional<std::string_view> ReadDynamicString(std::span<const char
         }
     }
     return std::nullopt;
+}
+
+template <typename T>
+inline std::optional<std::span<const T>> FindDynamicDataTable(
+    std::span<const elf_dynamic> entries, std::span<const u8> dynamic_data, s64 offset_tag,
+    s64 size_tag) {
+    std::optional<u64> offset;
+    std::optional<u64> size;
+    for (const auto& entry : entries) {
+        if (entry.d_tag == offset_tag) {
+            offset = entry.d_un.d_ptr;
+        } else if (entry.d_tag == size_tag) {
+            size = entry.d_un.d_val;
+        }
+    }
+    if (!offset || !size || *offset > dynamic_data.size() ||
+        *size > dynamic_data.size() - *offset || *size % sizeof(T) != 0) {
+        return std::nullopt;
+    }
+    const auto* bytes = dynamic_data.data() + *offset;
+    if (reinterpret_cast<std::uintptr_t>(bytes) % alignof(T) != 0) {
+        return std::nullopt;
+    }
+    return std::span{reinterpret_cast<const T*>(bytes),
+                     static_cast<std::size_t>(*size / sizeof(T))};
 }
 
 } // namespace Core::Loader

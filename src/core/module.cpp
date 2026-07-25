@@ -316,8 +316,6 @@ void Module::LoadDynamicInfo() {
         const auto* dyn = &dynamic_entry;
         switch (dyn->d_tag) {
         case DT_SCE_HASH: // Offset of the hash table.
-            dynamic_info.hash_table =
-                reinterpret_cast<void*>(m_dynamic_data.data() + dyn->d_un.d_ptr);
             break;
         case DT_SCE_HASHSZ: // Size of the hash table
             dynamic_info.hash_table_size = dyn->d_un.d_val;
@@ -327,8 +325,6 @@ void Module::LoadDynamicInfo() {
         case DT_SCE_STRSZ: // Size of the string table.
             break;
         case DT_SCE_SYMTAB: // Offset of the symbol table.
-            dynamic_info.symbol_table =
-                reinterpret_cast<elf_symbol*>(m_dynamic_data.data() + dyn->d_un.d_ptr);
             break;
         case DT_SCE_SYMTABSZ: // Size of the symbol table.
             dynamic_info.symbol_table_total_size = dyn->d_un.d_val;
@@ -343,8 +339,6 @@ void Module::LoadDynamicInfo() {
             dynamic_info.pltgot_virtual_addr = dyn->d_un.d_ptr;
             break;
         case DT_SCE_JMPREL: // Offset of the table containing jump slots.
-            dynamic_info.jmp_relocation_table =
-                reinterpret_cast<elf_relocation*>(m_dynamic_data.data() + dyn->d_un.d_ptr);
             break;
         case DT_SCE_PLTRELSZ: // Size of the global offset table.
             dynamic_info.jmp_relocation_table_size = dyn->d_un.d_val;
@@ -356,8 +350,6 @@ void Module::LoadDynamicInfo() {
             }
             break;
         case DT_SCE_RELA: // Offset of the relocation table.
-            dynamic_info.relocation_table =
-                reinterpret_cast<elf_relocation*>(m_dynamic_data.data() + dyn->d_un.d_ptr);
             break;
         case DT_SCE_RELASZ: // Size of the relocation table.
             dynamic_info.relocation_table_size = dyn->d_un.d_val;
@@ -488,6 +480,59 @@ void Module::LoadDynamicInfo() {
             LOG_INFO(Core_Linker, "unsupported dynamic tag ..........: {:#018x}", dyn->d_tag);
         }
     }
+
+    const auto has_tag = [&](s64 tag) {
+        return std::ranges::any_of(active_entries,
+                                   [tag](const auto& entry) { return entry.d_tag == tag; });
+    };
+    const auto hash_table =
+        Loader::FindDynamicDataTable<u8>(active_entries, m_dynamic_data, DT_SCE_HASH,
+                                         DT_SCE_HASHSZ);
+    if (hash_table) {
+        dynamic_info.hash_table = const_cast<u8*>(hash_table->data());
+        dynamic_info.hash_table_size = hash_table->size_bytes();
+    } else if (has_tag(DT_SCE_HASH) || has_tag(DT_SCE_HASHSZ)) {
+        LOG_ERROR(Core_Linker, "Dynamic hash table is incomplete or outside dynamic data");
+        dynamic_info.hash_table = nullptr;
+        dynamic_info.hash_table_size = 0;
+    }
+
+    const auto symbol_table =
+        Loader::FindDynamicDataTable<elf_symbol>(active_entries, m_dynamic_data, DT_SCE_SYMTAB,
+                                                 DT_SCE_SYMTABSZ);
+    if (symbol_table) {
+        dynamic_info.symbol_table = const_cast<elf_symbol*>(symbol_table->data());
+        dynamic_info.symbol_table_total_size = symbol_table->size_bytes();
+    } else if (has_tag(DT_SCE_SYMTAB) || has_tag(DT_SCE_SYMTABSZ)) {
+        LOG_ERROR(Core_Linker, "Dynamic symbol table is incomplete or outside dynamic data");
+        dynamic_info.symbol_table = nullptr;
+        dynamic_info.symbol_table_total_size = 0;
+    }
+
+    const auto jump_relocations = Loader::FindDynamicDataTable<elf_relocation>(
+        active_entries, m_dynamic_data, DT_SCE_JMPREL, DT_SCE_PLTRELSZ);
+    if (jump_relocations) {
+        dynamic_info.jmp_relocation_table =
+            const_cast<elf_relocation*>(jump_relocations->data());
+        dynamic_info.jmp_relocation_table_size = jump_relocations->size_bytes();
+    } else if (has_tag(DT_SCE_JMPREL) || has_tag(DT_SCE_PLTRELSZ)) {
+        LOG_ERROR(Core_Linker,
+                  "Dynamic jump relocation table is incomplete or outside dynamic data");
+        dynamic_info.jmp_relocation_table = nullptr;
+        dynamic_info.jmp_relocation_table_size = 0;
+    }
+
+    const auto relocations = Loader::FindDynamicDataTable<elf_relocation>(
+        active_entries, m_dynamic_data, DT_SCE_RELA, DT_SCE_RELASZ);
+    if (relocations) {
+        dynamic_info.relocation_table = const_cast<elf_relocation*>(relocations->data());
+        dynamic_info.relocation_table_size = relocations->size_bytes();
+    } else if (has_tag(DT_SCE_RELA) || has_tag(DT_SCE_RELASZ)) {
+        LOG_ERROR(Core_Linker, "Dynamic relocation table is incomplete or outside dynamic data");
+        dynamic_info.relocation_table = nullptr;
+        dynamic_info.relocation_table_size = 0;
+    }
+
     const u32 relabits_num = dynamic_info.relocation_table_size / sizeof(elf_relocation) +
                              dynamic_info.jmp_relocation_table_size / sizeof(elf_relocation);
     rela_bits.resize((relabits_num + 7) / 8);
