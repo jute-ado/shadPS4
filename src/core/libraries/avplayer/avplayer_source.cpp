@@ -8,6 +8,7 @@
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
 #include "core/libraries/avplayer/avplayer_source.h"
+#include "core/libraries/avplayer/avplayer_stream_policy.h"
 #include "core/libraries/videodec/video_utils.h"
 #include "core/memory.h"
 
@@ -77,6 +78,10 @@ bool AvPlayerSource::Init(const AvPlayerInitData& init_data, std::string_view pa
     }
     m_avformat_context = AVFormatContextPtr(context, &ReleaseAVFormatContext);
 
+    return true;
+}
+
+bool AvPlayerSource::FindStreams() {
     if (avformat_find_stream_info(m_avformat_context.get(), nullptr) >= 0) {
         m_streams.reserve(m_avformat_context->nb_streams);
         for (u32 idx = 0; idx < m_avformat_context->nb_streams; ++idx) {
@@ -86,11 +91,8 @@ bool AvPlayerSource::Init(const AvPlayerInitData& init_data, std::string_view pa
             m_streams.push_back({idx, CreateStreamInfo(idx)});
         }
     }
-    return true;
-}
-
-bool AvPlayerSource::HasStreams() {
-    return m_streams.size() >= 0;
+    m_duration = DurationMillis();
+    return HasDiscoveredStreams(m_streams.size());
 }
 
 s32 AvPlayerSource::GetStreamCount() {
@@ -418,8 +420,12 @@ u64 AvPlayerSource::DurationMillis() const {
         if (!stream_index.has_value()) {
             return;
         }
-        const auto index = m_streams[stream_index.value()].ffmpeg_index;
-        if (index < 0 || u32(index) >= m_avformat_context->nb_streams) {
+        const auto selected_index = stream_index.value();
+        if (!IsValidSelectedStreamIndex(selected_index, m_streams.size())) {
+            return;
+        }
+        const auto index = m_streams[selected_index].ffmpeg_index;
+        if (!IsValidFfmpegStreamIndex(index, m_avformat_context->nb_streams)) {
             return;
         }
         const auto stream = m_avformat_context->streams[index];
@@ -449,9 +455,8 @@ u64 AvPlayerSource::CurrentTime() {
         return 0;
     }
 
-    const auto duration = DurationMillis();
     if (m_is_eof && !IsActive()) {
-        return duration;
+        return m_duration;
     }
     if (!IsActive()) {
         return 0;
@@ -465,7 +470,7 @@ u64 AvPlayerSource::CurrentTime() {
         return 0;
     }
     const auto current_time = u64(elapsed);
-    return duration != 0 && current_time > duration ? duration : current_time;
+    return m_duration != 0 && current_time > m_duration ? m_duration : current_time;
 }
 
 bool AvPlayerSource::IsActive() {
