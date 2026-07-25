@@ -6,6 +6,7 @@
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
 #include "core/libraries/videoout/video_out.h"
+#include "core/libraries/videoout/window_margins.h"
 
 #include <condition_variable>
 #include <mutex>
@@ -25,6 +26,7 @@ struct VideoOutPort {
     std::array<BufferAttributeGroup, MaxDisplayBufferGroups> groups;
     FlipStatus flip_status;
     SceVideoOutVblankStatus vblank_status;
+    WindowMargins window_margins;
     std::vector<Kernel::OrbisKernelEqueue> flip_events;
     std::vector<Kernel::OrbisKernelEqueue> vblank_events;
     std::mutex vo_mutex;
