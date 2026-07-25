@@ -7,6 +7,10 @@
 
 namespace Vulkan {
 
+constexpr bool ShouldEnableImageViewMinLod(bool extension_available, bool feature_supported) {
+    return extension_available && feature_supported;
+}
+
 inline vk::PhysicalDeviceFeatures BuildCoreDeviceFeatures(
     const vk::PhysicalDeviceFeatures& supported) {
     vk::PhysicalDeviceFeatures enabled{};

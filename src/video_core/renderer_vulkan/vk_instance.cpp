@@ -206,7 +206,8 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
+                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
+                          vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -349,7 +350,13 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- sampler2DViewOf3D: {}",
                  image_2d_view_of_3d_features.sampler2DViewOf3D);
     }
-    image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+    const bool image_view_min_lod_extension =
+        add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+    const auto image_view_min_lod_features =
+        feature_chain.get<vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();
+    image_view_min_lod =
+        ShouldEnableImageViewMinLod(image_view_min_lod_extension, image_view_min_lod_features.minLod);
+    LOG_INFO(Render_Vulkan, "- imageViewMinLod: {}", image_view_min_lod_features.minLod);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
@@ -490,7 +497,7 @@ bool Instance::CreateDevice() {
             .sampler2DViewOf3D = image_2d_view_of_3d_features.sampler2DViewOf3D,
         },
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
-            .minLod = true,
+            .minLod = image_view_min_lod,
         },
     };
 
