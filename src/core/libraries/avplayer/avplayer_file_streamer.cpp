@@ -103,13 +103,14 @@ s64 AvPlayerFileStreamer::Seek(void* opaque, s64 offset, int whence) {
         return static_cast<s64>(seek_limit);
     }
 
-    if (whence == SEEK_CUR) {
+    const int seek_origin = whence & ~AVSEEK_FORCE;
+    if (seek_origin == SEEK_CUR) {
         self->m_position = ResolveFileSeek(self->m_position, seek_limit, offset);
         return static_cast<s64>(self->m_position);
-    } else if (whence == SEEK_SET) {
+    } else if (seek_origin == SEEK_SET) {
         self->m_position = ResolveFileSeek(0, seek_limit, offset);
         return static_cast<s64>(self->m_position);
-    } else if (whence == SEEK_END) {
+    } else if (seek_origin == SEEK_END) {
         self->m_position = ResolveFileSeek(seek_limit, seek_limit, offset);
         return static_cast<s64>(self->m_position);
     }

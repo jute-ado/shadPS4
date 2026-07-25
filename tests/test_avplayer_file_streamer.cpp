@@ -11,6 +11,7 @@
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
 
 extern "C" {
+#include <libavformat/avio.h>
 #include <libavutil/mem.h>
 }
 
@@ -21,6 +22,7 @@ struct FileCallbacks {
     std::string opened_path;
     u32 open_count{};
     u32 close_count{};
+    u64 file_size{};
     bool closed{};
 };
 
@@ -42,8 +44,8 @@ s32 PS4_SYSV_ABI ReadFile(void*, u8*, u64, u32) {
     return 0;
 }
 
-u64 PS4_SYSV_ABI FileSize(void*) {
-    return 0;
+u64 PS4_SYSV_ABI FileSize(void* opaque) {
+    return static_cast<FileCallbacks*>(opaque)->file_size;
 }
 
 TEST(AvPlayerFileStreamer, OpenReceivesOnlyTheBoundedPathView) {
@@ -121,6 +123,23 @@ TEST(AvPlayerFileStreamer, AllocationFailureClosesTheFileAndAllowsRetry) {
         EXPECT_EQ(callbacks.open_count, 2u);
     }
     EXPECT_EQ(callbacks.close_count, 2u);
+}
+
+TEST(AvPlayerFileStreamer, ForcedSeekPreservesTheRequestedOrigin) {
+    FileCallbacks callbacks{.file_size = 16};
+    const AvPlayerFileReplacement replacement{
+        .object_ptr = &callbacks,
+        .open = OpenFile,
+        .close = CloseFile,
+        .read_offset = ReadFile,
+        .size = FileSize,
+    };
+
+    AvPlayerFileStreamer streamer{replacement};
+    ASSERT_TRUE(streamer.Init("game.pmf"));
+    auto* context = streamer.GetContext();
+    ASSERT_NE(context->seek, nullptr);
+    EXPECT_EQ(context->seek(context->opaque, 7, SEEK_SET | AVSEEK_FORCE), 7);
 }
 
 } // namespace
