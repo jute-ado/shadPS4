@@ -104,6 +104,31 @@ TEST(KernelMemoryValidation, ResolvesAlignedMemoryRangesWithoutOverflow) {
         Core::ResolveAlignedMemoryRangeStart(0x3f000, 0x1000, 0x2000, 0x40000).has_value());
 }
 
+TEST(KernelMemoryValidation, ResolvesBoundedAvailableMemorySpansAfterAlignment) {
+    const auto aligned =
+        Core::ResolveAvailableMemorySpan(0x1000, 0x9000, 0x2500, 0x8000, 0x2000);
+    ASSERT_TRUE(aligned.has_value());
+    EXPECT_EQ(aligned->base, 0x4000u);
+    EXPECT_EQ(aligned->size, 0x4000u);
+
+    const auto unaligned =
+        Core::ResolveAvailableMemorySpan(0x1000, 0x9000, 0x2500, 0x8000, 0);
+    ASSERT_TRUE(unaligned.has_value());
+    EXPECT_EQ(unaligned->base, 0x2500u);
+    EXPECT_EQ(unaligned->size, 0x5b00u);
+
+    EXPECT_FALSE(
+        Core::ResolveAvailableMemorySpan(0x1000, 0x1000, 0x3000, 0x4000, 0x1000).has_value());
+    EXPECT_FALSE(Core::ResolveAvailableMemorySpan(
+                     std::numeric_limits<u64>::max() - 0x1000, 0x2000, 0,
+                     std::numeric_limits<u64>::max(), 0x1000)
+                     .has_value());
+    EXPECT_FALSE(Core::ResolveAvailableMemorySpan(
+                     std::numeric_limits<u64>::max() - 0x1000, 0x1000, 0,
+                     std::numeric_limits<u64>::max(), 0x4000)
+                     .has_value());
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedPhysicalAreaAdjacency) {
     Core::PhysicalMemoryArea area{
         .base = std::numeric_limits<PAddr>::max() - 0xff,

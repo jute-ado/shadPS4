@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -125,6 +126,37 @@ constexpr std::optional<u64> ResolveAlignedMemoryRangeStart(u64 address, u64 ali
         return std::nullopt;
     }
     return aligned_address;
+}
+
+struct AvailableMemorySpan {
+    u64 base;
+    u64 size;
+};
+
+constexpr std::optional<AvailableMemorySpan> ResolveAvailableMemorySpan(
+    u64 area_base, u64 area_size, u64 search_start, u64 search_end, u64 alignment) {
+    if (area_size == 0 || search_start >= search_end ||
+        !IsMemoryRangeWithinLimit(std::numeric_limits<u64>::max(), area_base, area_size)) {
+        return std::nullopt;
+    }
+
+    const u64 area_end = area_base + area_size;
+    const u64 span_start = std::max(area_base, search_start);
+    const u64 span_end = std::min(area_end, search_end);
+    if (span_start >= span_end) {
+        return std::nullopt;
+    }
+
+    u64 aligned_start = span_start;
+    if (alignment > 0) {
+        const auto resolved_start =
+            ResolveAlignedMemoryRangeStart(span_start, alignment, 0, span_end);
+        if (!resolved_start || *resolved_start >= span_end) {
+            return std::nullopt;
+        }
+        aligned_start = *resolved_start;
+    }
+    return AvailableMemorySpan{.base = aligned_start, .size = span_end - aligned_start};
 }
 
 struct VirtualMemoryArea {
