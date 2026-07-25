@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 #include "core/libraries/kernel/memory.h"
+#include "core/memory.h"
 
 namespace Libraries::Kernel {
 namespace {
@@ -21,6 +24,48 @@ TEST(KernelMemoryValidation, AcceptsAddressStorageAndName) {
 
     EXPECT_TRUE(IsMemoryAddressStorageValid(&address));
     EXPECT_TRUE(AreNamedMemoryPointersValid(&address, "anon"));
+}
+
+TEST(KernelMemoryValidation, RejectsWrappedVirtualMemoryContainmentRange) {
+    const Core::VirtualMemoryArea area{
+        .base = std::numeric_limits<VAddr>::max() - 0xff,
+        .size = 0x80,
+    };
+
+    EXPECT_FALSE(area.Contains(std::numeric_limits<VAddr>::max() - 0x3f, 0x80));
+}
+
+TEST(KernelMemoryValidation, DetectsOverlapBeforeWrappedRangeEnd) {
+    const Core::VirtualMemoryArea area{
+        .base = std::numeric_limits<VAddr>::max() - 0x3f,
+        .size = 0x30,
+    };
+
+    EXPECT_TRUE(area.Overlaps(std::numeric_limits<VAddr>::max() - 0x7f, 0x100));
+}
+
+TEST(KernelMemoryValidation, EmptyVirtualMemoryRangeDoesNotOverlap) {
+    const Core::VirtualMemoryArea area{
+        .base = 0x1000,
+        .size = 0x1000,
+    };
+
+    EXPECT_FALSE(area.Overlaps(0x1800, 0));
+}
+
+TEST(KernelMemoryValidation, VirtualMemoryRangesUseHalfOpenEndpoints) {
+    const Core::VirtualMemoryArea area{
+        .base = 0x1000,
+        .size = 0x1000,
+    };
+
+    EXPECT_TRUE(area.Contains(0x1000, 0x1000));
+    EXPECT_TRUE(area.Contains(0x2000, 0));
+    EXPECT_FALSE(area.Contains(0x2000, 1));
+    EXPECT_FALSE(area.Overlaps(0x0800, 0x800));
+    EXPECT_FALSE(area.Overlaps(0x2000, 0x800));
+    EXPECT_TRUE(area.Overlaps(0x0800, 0x801));
+    EXPECT_TRUE(area.Overlaps(0x1fff, 1));
 }
 
 } // namespace
