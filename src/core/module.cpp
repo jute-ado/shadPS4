@@ -15,6 +15,7 @@
 #include "core/libraries/error_codes.h"
 #include "core/loader/dynamic_table_policy.h"
 #include "core/loader/dwarf.h"
+#include "core/loader/module_metadata_policy.h"
 #include "core/loader/program_header_policy.h"
 #include "core/memory.h"
 #include "core/module.h"
@@ -455,8 +456,7 @@ void Module::LoadDynamicInfo() {
             }
             info.name = *name;
             info.enc_id = EncodeId(info.id);
-            const std::string full_name = info.name + ".sprx";
-            full_name.copy(this->info.name.data(), full_name.size());
+            Loader::WriteModuleFilename(this->info.name, info.name);
             dynamic_info.export_modules.push_back(std::move(info));
             break;
         };
