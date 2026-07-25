@@ -462,8 +462,13 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitChangeBufferAttribute(s32 handle, s32 attribut
 }
 
 s32 PS4_SYSV_ABI sceVideoOutSetWindowModeMargins(s32 handle, s32 top, s32 bottom) {
-    LOG_ERROR(Lib_VideoOut, "(STUBBED) called top = {}, bottom = {}", top, bottom);
-    return ORBIS_OK;
+    auto* port = driver->GetPort(handle);
+    if (!port || !port->is_open) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+
+    std::scoped_lock lock{port->port_mutex};
+    return ApplyWindowModeMargins(&port->window_margins, top, bottom);
 }
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
