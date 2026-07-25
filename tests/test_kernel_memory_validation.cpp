@@ -91,6 +91,19 @@ TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
         std::numeric_limits<u64>::max(), std::numeric_limits<u64>::max() - 1, 2));
 }
 
+TEST(KernelMemoryValidation, ResolvesAlignedMemoryRangesWithoutOverflow) {
+    EXPECT_EQ(Core::ResolveAlignedMemoryRangeStart(0x11000, 0xc000, 0x4000, 0x40000), 0x18000u);
+    EXPECT_EQ(Core::ResolveAlignedMemoryRangeStart(0x18000, 0xc000, 0x4000, 0x40000), 0x18000u);
+
+    EXPECT_FALSE(Core::ResolveAlignedMemoryRangeStart(0x1000, 0, 0x1000, 0x40000).has_value());
+    EXPECT_FALSE(Core::ResolveAlignedMemoryRangeStart(
+                     std::numeric_limits<u64>::max() - 0x1000, 0x4000, 0x1000,
+                     std::numeric_limits<u64>::max())
+                     .has_value());
+    EXPECT_FALSE(
+        Core::ResolveAlignedMemoryRangeStart(0x3f000, 0x1000, 0x2000, 0x40000).has_value());
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedPhysicalAreaAdjacency) {
     Core::PhysicalMemoryArea area{
         .base = std::numeric_limits<PAddr>::max() - 0xff,
