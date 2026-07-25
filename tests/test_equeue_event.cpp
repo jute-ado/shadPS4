@@ -7,7 +7,9 @@
 
 #include "core/libraries/gnmdriver/graphics_event.h"
 #include "core/libraries/kernel/equeue.h"
+#include "core/libraries/kernel/equeue_validation.h"
 #include "core/libraries/kernel/equeue_wait_policy.h"
+#include "core/libraries/kernel/orbis_error.h"
 
 using Libraries::Kernel::EqueueEvent;
 using Libraries::Kernel::OrbisKernelEvent;
@@ -101,4 +103,39 @@ TEST(EqueueWaitPolicy, ReadyRegularEventWinsOverPendingSmallTimer) {
     EXPECT_EQ(SelectEqueueWaitSource(true, true), EqueueWaitSource::RegularEvent);
     EXPECT_EQ(SelectEqueueWaitSource(false, true), EqueueWaitSource::SmallTimer);
     EXPECT_EQ(SelectEqueueWaitSource(false, false), EqueueWaitSource::ConditionVariable);
+}
+
+TEST(EqueueWaitValidation, RequiresBothOutputBuffersBeforeValidatingCapacity) {
+    OrbisKernelEvent event{};
+    int count = 7;
+
+    EXPECT_EQ(Libraries::Kernel::ValidateEqueueWaitArguments(nullptr, 1, &count),
+              ORBIS_KERNEL_ERROR_EFAULT);
+    EXPECT_EQ(Libraries::Kernel::ValidateEqueueWaitArguments(&event, 1, nullptr),
+              ORBIS_KERNEL_ERROR_EFAULT);
+    EXPECT_EQ(Libraries::Kernel::ValidateEqueueWaitArguments(nullptr, 0, nullptr),
+              ORBIS_KERNEL_ERROR_EFAULT);
+}
+
+TEST(EqueueWaitValidation, RejectsNonpositiveCapacityAndClearsCount) {
+    OrbisKernelEvent event{};
+    int count = 7;
+
+    EXPECT_EQ(Libraries::Kernel::ValidateEqueueWaitArguments(&event, 0, &count),
+              ORBIS_KERNEL_ERROR_EINVAL);
+    EXPECT_EQ(count, 0);
+
+    count = 7;
+    EXPECT_EQ(Libraries::Kernel::ValidateEqueueWaitArguments(&event, -1, &count),
+              ORBIS_KERNEL_ERROR_EINVAL);
+    EXPECT_EQ(count, 0);
+}
+
+TEST(EqueueWaitValidation, AcceptsWritableBuffersAndPositiveCapacity) {
+    OrbisKernelEvent event{};
+    int count = 7;
+
+    EXPECT_EQ(Libraries::Kernel::ValidateEqueueWaitArguments(&event, 1, &count),
+              ORBIS_OK);
+    EXPECT_EQ(count, 7);
 }

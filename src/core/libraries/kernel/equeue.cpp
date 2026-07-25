@@ -10,6 +10,7 @@
 #include "common/singleton.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/equeue.h"
+#include "core/libraries/kernel/equeue_validation.h"
 #include "core/libraries/kernel/equeue_wait_policy.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
@@ -484,13 +485,9 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
     TRACE_HINT(equeue->GetName());
     LOG_TRACE(Kernel_Event, "equeue = {} num = {}", equeue->GetName(), num);
 
-    if (ev == nullptr) {
-        return ORBIS_KERNEL_ERROR_EFAULT;
-    }
-
-    if (num < 1) {
-        *out = 0;
-        return ORBIS_KERNEL_ERROR_EINVAL;
+    const int validation_result = ValidateEqueueWaitArguments(ev, num, out);
+    if (validation_result != ORBIS_OK) {
+        return validation_result;
     }
 
     *out = equeue->WaitForEvents(ev, num, timo);
