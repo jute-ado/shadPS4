@@ -76,5 +76,21 @@ TEST(AvPlayerFileStreamer, ReinitializationIsRejectedWithoutReopeningTheFile) {
     EXPECT_EQ(callbacks.opened_path, "first.pmf");
 }
 
+TEST(AvPlayerFileStreamer, IncompleteReplacementIsRejectedBeforeOpeningTheFile) {
+    FileCallbacks callbacks;
+    const AvPlayerFileReplacement replacement{
+        .object_ptr = &callbacks,
+        .open = OpenFile,
+        .close = CloseFile,
+        .read_offset = nullptr,
+        .size = FileSize,
+    };
+
+    AvPlayerFileStreamer streamer{replacement};
+    EXPECT_FALSE(streamer.Init("game.pmf"));
+    EXPECT_EQ(callbacks.open_count, 0u);
+    EXPECT_FALSE(callbacks.closed);
+}
+
 } // namespace
 } // namespace Libraries::AvPlayer
