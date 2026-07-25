@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <climits>
 #include <string>
 #include <string_view>
 
@@ -9,12 +10,17 @@
 
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
 
+extern "C" {
+#include <libavutil/mem.h>
+}
+
 namespace Libraries::AvPlayer {
 namespace {
 
 struct FileCallbacks {
     std::string opened_path;
     u32 open_count{};
+    u32 close_count{};
     bool closed{};
 };
 
@@ -28,6 +34,7 @@ s32 PS4_SYSV_ABI OpenFile(void* opaque, const char* path) {
 s32 PS4_SYSV_ABI CloseFile(void* opaque) {
     auto* callbacks = static_cast<FileCallbacks*>(opaque);
     callbacks->closed = true;
+    ++callbacks->close_count;
     return 0;
 }
 
@@ -90,6 +97,30 @@ TEST(AvPlayerFileStreamer, IncompleteReplacementIsRejectedBeforeOpeningTheFile) 
     EXPECT_FALSE(streamer.Init("game.pmf"));
     EXPECT_EQ(callbacks.open_count, 0u);
     EXPECT_FALSE(callbacks.closed);
+}
+
+TEST(AvPlayerFileStreamer, AllocationFailureClosesTheFileAndAllowsRetry) {
+    FileCallbacks callbacks;
+    const AvPlayerFileReplacement replacement{
+        .object_ptr = &callbacks,
+        .open = OpenFile,
+        .close = CloseFile,
+        .read_offset = ReadFile,
+        .size = FileSize,
+    };
+
+    {
+        AvPlayerFileStreamer streamer{replacement};
+        av_max_alloc(1);
+        EXPECT_FALSE(streamer.Init("game.pmf"));
+        av_max_alloc(INT_MAX);
+
+        EXPECT_EQ(callbacks.open_count, 1u);
+        EXPECT_EQ(callbacks.close_count, 1u);
+        EXPECT_TRUE(streamer.Init("game.pmf"));
+        EXPECT_EQ(callbacks.open_count, 2u);
+    }
+    EXPECT_EQ(callbacks.close_count, 2u);
 }
 
 } // namespace

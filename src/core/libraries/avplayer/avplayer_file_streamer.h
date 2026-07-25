@@ -24,6 +24,8 @@ public:
     }
 
 private:
+    void Close();
+
     static s32 ReadPacket(void* opaque, u8* buffer, s32 size);
     static s64 Seek(void* opaque, s64 buffer, int whence);
 

@@ -25,11 +25,18 @@ AvPlayerFileStreamer::~AvPlayerFileStreamer() {
     if (m_avio_context != nullptr) {
         avio_context_free(&m_avio_context);
     }
+    Close();
+}
+
+void AvPlayerFileStreamer::Close() {
     if (m_file_replacement.close != nullptr && m_fd >= 0) {
         const auto close = m_file_replacement.close;
         const auto ptr = m_file_replacement.object_ptr;
         close(ptr);
     }
+    m_fd = -1;
+    m_position = 0;
+    m_file_size = 0;
 }
 
 bool AvPlayerFileStreamer::Init(std::string_view path) {
@@ -49,9 +56,18 @@ bool AvPlayerFileStreamer::Init(std::string_view path) {
     m_file_size = m_file_replacement.size(ptr);
     // avio_buffer is deallocated in `avio_context_free`
     const auto avio_buffer = reinterpret_cast<u8*>(av_malloc(AVPLAYER_AVIO_BUFFER_SIZE));
+    if (avio_buffer == nullptr) {
+        Close();
+        return false;
+    }
     m_avio_context =
         avio_alloc_context(avio_buffer, AVPLAYER_AVIO_BUFFER_SIZE, 0, this,
                            &AvPlayerFileStreamer::ReadPacket, nullptr, &AvPlayerFileStreamer::Seek);
+    if (m_avio_context == nullptr) {
+        av_free(avio_buffer);
+        Close();
+        return false;
+    }
     return true;
 }
 
