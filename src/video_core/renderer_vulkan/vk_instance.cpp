@@ -202,6 +202,7 @@ bool Instance::CreateDevice() {
             .getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
                           vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
                           vk::PhysicalDeviceRobustness2FeaturesEXT,
+                          vk::PhysicalDeviceMaintenance8FeaturesKHR,
                           vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT,
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
@@ -273,7 +274,12 @@ bool Instance::CreateDevice() {
                "Required Vulkan feature unavailable: nullDescriptor");
 
     // Optional
-    maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    const bool maintenance_8_extension = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    const auto maintenance_8_features =
+        feature_chain.get<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
+    maintenance_8 =
+        ShouldEnableMaintenance8(maintenance_8_extension, maintenance_8_features.maintenance8);
+    LOG_INFO(Render_Vulkan, "- maintenance8: {}", maintenance_8_features.maintenance8);
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -469,7 +475,7 @@ bool Instance::CreateDevice() {
             .vertexAttributeInstanceRateDivisor = true,
         },
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
-            .maintenance8 = true,
+            .maintenance8 = maintenance_8,
         },
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT{
             .attachmentFeedbackLoopLayout = true,
