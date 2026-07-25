@@ -81,6 +81,16 @@ TEST(KernelMemoryValidation, RejectsWrappedGpuAddressRange) {
         std::numeric_limits<VAddr>::max() - 1, 4));
 }
 
+TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
+    EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x400, 0x600));
+    EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1000, 0));
+
+    EXPECT_FALSE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1001, 0));
+    EXPECT_FALSE(Core::IsMemoryRangeWithinLimit(0x1000, 0xf00, 0x101));
+    EXPECT_FALSE(Core::IsMemoryRangeWithinLimit(
+        std::numeric_limits<u64>::max(), std::numeric_limits<u64>::max() - 1, 2));
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedPhysicalAreaAdjacency) {
     Core::PhysicalMemoryArea area{
         .base = std::numeric_limits<PAddr>::max() - 0xff,
