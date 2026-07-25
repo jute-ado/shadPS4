@@ -179,41 +179,93 @@ static std::string_view GetMachine(e_machine_es machine) {
 
 Elf::~Elf() = default;
 
-void Elf::Open(const std::filesystem::path& file_name) {
-    m_f.Open(file_name, FileAccessMode::Read);
+bool Elf::Open(const std::filesystem::path& file_name) {
+    is_self = false;
+    m_self = {};
+    m_self_segments.clear();
+    m_elf_header = {};
+    m_elf_phdr.clear();
+    m_elf_shdr.clear();
+    m_self_id_header = {};
+
+    if (m_f.Open(file_name, FileAccessMode::Read) != 0) {
+        return false;
+    }
+    const u64 file_size = m_f.GetSize();
     if (!m_f.ReadObject(m_self)) {
         LOG_ERROR(Loader, "Unable to read self header!");
-        return;
+        return false;
     }
 
     if (is_self = IsSelfFile(); !is_self) {
-        m_f.Seek(0, SeekOrigin::SetOrigin);
+        if (!m_f.Seek(0, SeekOrigin::SetOrigin)) {
+            return false;
+        }
     } else {
+        const auto segment_table_offset =
+            ResolveFileTableOffset(file_size, 0, sizeof(self_header),
+                                   sizeof(self_segment_header), m_self.segment_count);
+        if (!segment_table_offset ||
+            !m_f.Seek(*segment_table_offset, SeekOrigin::SetOrigin)) {
+            LOG_ERROR(Loader, "SELF segment header table is outside the file");
+            return false;
+        }
         m_self_segments.resize(m_self.segment_count);
-        m_f.Read(m_self_segments);
+        if (m_f.Read(m_self_segments) != m_self_segments.size()) {
+            LOG_ERROR(Loader, "Unable to read complete SELF segment header table");
+            return false;
+        }
     }
 
-    const u64 elf_header_pos = m_f.Tell();
-    m_f.Read(m_elf_header);
+    const s64 elf_header_position = m_f.Tell();
+    if (elf_header_position < 0) {
+        return false;
+    }
+    const u64 elf_header_pos = static_cast<u64>(elf_header_position);
+    if (!IsFileRangeValid(file_size, elf_header_pos, sizeof(elf_header)) ||
+        !m_f.ReadObject(m_elf_header)) {
+        LOG_ERROR(Loader, "Unable to read complete ELF header");
+        return false;
+    }
     if (!IsElfFile()) {
-        return;
+        return false;
     }
 
-    const auto load_headers = [this]<typename T>(std::vector<T>& out, u64 offset, u16 num) {
+    const auto load_headers =
+        [this, file_size, elf_header_pos]<typename T>(std::vector<T>& out, u64 relative_offset,
+                                                      u16 declared_entry_size, u16 num) {
         if (!num) {
-            return;
+            return true;
         }
 
-        out.resize(num);
-        if (!m_f.Seek(offset, SeekOrigin::SetOrigin)) {
-            LOG_CRITICAL(Loader, "Failed to seek to header tables");
-            return;
+        const auto offset =
+            ResolveElfHeaderTableOffset(file_size, elf_header_pos, relative_offset,
+                                        declared_entry_size, sizeof(T), num);
+        if (!offset) {
+            LOG_ERROR(Loader, "ELF header table is outside the file or has an invalid entry size");
+            return false;
         }
-        m_f.Read(out);
+        out.resize(num);
+        if (!m_f.Seek(*offset, SeekOrigin::SetOrigin)) {
+            LOG_ERROR(Loader, "Failed to seek to ELF header table");
+            return false;
+        }
+        if (m_f.Read(out) != out.size()) {
+            LOG_ERROR(Loader, "Unable to read complete ELF header table");
+            return false;
+        }
+        return true;
     };
 
-    load_headers(m_elf_phdr, elf_header_pos + m_elf_header.e_phoff, m_elf_header.e_phnum);
-    load_headers(m_elf_shdr, elf_header_pos + m_elf_header.e_shoff, m_elf_header.e_shnum);
+    if (!load_headers(m_elf_phdr, m_elf_header.e_phoff, m_elf_header.e_phentsize,
+                      m_elf_header.e_phnum) ||
+        !load_headers(m_elf_shdr, m_elf_header.e_shoff, m_elf_header.e_shentsize,
+                      m_elf_header.e_shnum)) {
+        m_elf_header = {};
+        m_elf_phdr.clear();
+        m_elf_shdr.clear();
+        return false;
+    }
 
     if (is_self) {
         u64 header_size = 0;
@@ -225,11 +277,17 @@ void Elf::Open(const std::filesystem::path& file_name) {
         header_size += 15;
         header_size &= ~15; // Align
 
-        if (m_elf_header.e_ehsize - header_size >= sizeof(elf_program_id_header)) {
-            m_f.Seek(header_size, SeekOrigin::SetOrigin);
-            m_f.ReadObject(m_self_id_header);
+        const auto program_id_offset =
+            ResolveSelfProgramIdOffset(file_size, m_self.header_size, header_size,
+                                       sizeof(elf_program_id_header));
+        if (program_id_offset && m_f.Seek(*program_id_offset, SeekOrigin::SetOrigin)) {
+            elf_program_id_header program_id{};
+            if (m_f.ReadObject(program_id)) {
+                m_self_id_header = program_id;
+            }
         }
     }
+    return true;
 }
 
 bool Elf::IsSelfFile() const {

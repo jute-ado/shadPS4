@@ -465,7 +465,7 @@ public:
     Elf() = default;
     ~Elf();
 
-    void Open(const std::filesystem::path& file_name);
+    [[nodiscard]] bool Open(const std::filesystem::path& file_name);
     bool IsSelfFile() const;
     bool IsElfFile() const;
 

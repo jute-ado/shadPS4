@@ -127,4 +127,40 @@ constexpr std::optional<u64> ResolveSelfSegmentFileOffset(
     return std::nullopt;
 }
 
+constexpr std::optional<u64> ResolveFileTableOffset(u64 file_size, u64 base_offset,
+                                                    u64 relative_offset, u64 entry_size,
+                                                    u64 entry_count) {
+    if (base_offset > std::numeric_limits<u64>::max() - relative_offset ||
+        (entry_size != 0 && entry_count > std::numeric_limits<u64>::max() / entry_size)) {
+        return std::nullopt;
+    }
+    const u64 table_offset = base_offset + relative_offset;
+    const u64 table_size = entry_size * entry_count;
+    if (!IsFileRangeValid(file_size, table_offset, table_size)) {
+        return std::nullopt;
+    }
+    return table_offset;
+}
+
+constexpr std::optional<u64> ResolveElfHeaderTableOffset(
+    u64 file_size, u64 elf_header_offset, u64 relative_offset, u64 declared_entry_size,
+    u64 expected_entry_size, u64 entry_count) {
+    if (entry_count != 0 && declared_entry_size != expected_entry_size) {
+        return std::nullopt;
+    }
+    return ResolveFileTableOffset(file_size, elf_header_offset, relative_offset,
+                                  expected_entry_size, entry_count);
+}
+
+constexpr std::optional<u64> ResolveSelfProgramIdOffset(u64 file_size, u64 declared_header_size,
+                                                        u64 calculated_offset,
+                                                        u64 program_id_size) {
+    if (calculated_offset > declared_header_size ||
+        program_id_size > declared_header_size - calculated_offset ||
+        !IsFileRangeValid(file_size, calculated_offset, program_id_size)) {
+        return std::nullopt;
+    }
+    return calculated_offset;
+}
+
 } // namespace Core::Loader

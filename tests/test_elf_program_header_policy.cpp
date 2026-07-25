@@ -151,3 +151,39 @@ TEST(ElfProgramHeaderPolicy, IdentifiesHeadersReadDirectlyFromTheFile) {
     EXPECT_FALSE(IsDirectlyLoadedFromFile(PT_SCE_PROCPARAM));
     EXPECT_FALSE(IsDirectlyLoadedFromFile(PT_GNU_EH_FRAME));
 }
+
+TEST(ElfProgramHeaderPolicy, ResolvesBoundedFileTableOffsets) {
+    EXPECT_EQ(ResolveFileTableOffset(0x1000, 0x40, 0x80, 0x20, 4), 0xc0u);
+    EXPECT_EQ(ResolveFileTableOffset(0x1000, 0x40, 0x80, 0x20, 0), 0xc0u);
+
+    EXPECT_FALSE(ResolveFileTableOffset(0x100, 0x40, 0x80, 0x20, 3).has_value());
+    EXPECT_FALSE(ResolveFileTableOffset(std::numeric_limits<u64>::max(),
+                                        std::numeric_limits<u64>::max() - 1, 2, 1, 1)
+                     .has_value());
+    EXPECT_FALSE(ResolveFileTableOffset(std::numeric_limits<u64>::max(), 0, 0,
+                                        std::numeric_limits<u64>::max(), 2)
+                     .has_value());
+}
+
+TEST(ElfProgramHeaderPolicy, RequiresMatchingElfHeaderEntrySizes) {
+    EXPECT_EQ(ResolveElfHeaderTableOffset(0x1000, 0x40, 0x80, sizeof(elf_program_header),
+                                          sizeof(elf_program_header), 2),
+              0xc0u);
+
+    EXPECT_FALSE(ResolveElfHeaderTableOffset(0x1000, 0x40, 0x80,
+                                             sizeof(elf_program_header) - 1,
+                                             sizeof(elf_program_header), 2)
+                     .has_value());
+    EXPECT_FALSE(ResolveElfHeaderTableOffset(0x100, 0x40, 0x80,
+                                             sizeof(elf_program_header),
+                                             sizeof(elf_program_header), 2)
+                     .has_value());
+}
+
+TEST(ElfProgramHeaderPolicy, BoundsOptionalSelfProgramIdInsideDeclaredHeader) {
+    EXPECT_EQ(ResolveSelfProgramIdOffset(0x1000, 0x200, 0x180, 0x40), 0x180u);
+
+    EXPECT_FALSE(ResolveSelfProgramIdOffset(0x1000, 0x17f, 0x180, 0x40).has_value());
+    EXPECT_FALSE(ResolveSelfProgramIdOffset(0x1000, 0x1a0, 0x180, 0x40).has_value());
+    EXPECT_FALSE(ResolveSelfProgramIdOffset(0x190, 0x200, 0x180, 0x40).has_value());
+}

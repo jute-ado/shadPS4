@@ -73,8 +73,7 @@ static std::string StringToNid(std::string_view symbol) {
 
 Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_, u32& max_tls_index)
     : memory{memory_}, file{file_}, name{file.filename().string()} {
-    elf.Open(file);
-    if (elf.IsElfFile() && LoadModuleToMemory(max_tls_index)) {
+    if (elf.Open(file) && LoadModuleToMemory(max_tls_index)) {
         LoadDynamicInfo();
         LoadSymbols();
     }
