@@ -133,6 +133,33 @@ struct MemorySpan {
     u64 size;
 };
 
+constexpr std::optional<MemorySpan> ResolvePageAlignedMemorySpan(u64 address, u64 size,
+                                                                u64 alignment) {
+    if (alignment == 0) {
+        return std::nullopt;
+    }
+
+    const u64 page_offset = address % alignment;
+    const u64 aligned_address = address - page_offset;
+    if (size > std::numeric_limits<u64>::max() - page_offset) {
+        return std::nullopt;
+    }
+
+    const u64 size_with_offset = size + page_offset;
+    const u64 remainder = size_with_offset % alignment;
+    const u64 padding = remainder == 0 ? 0 : alignment - remainder;
+    if (size_with_offset > std::numeric_limits<u64>::max() - padding) {
+        return std::nullopt;
+    }
+
+    const u64 aligned_size = size_with_offset + padding;
+    if (!IsMemoryRangeWithinLimit(std::numeric_limits<u64>::max(), aligned_address,
+                                  aligned_size)) {
+        return std::nullopt;
+    }
+    return MemorySpan{.base = aligned_address, .size = aligned_size};
+}
+
 constexpr std::optional<MemorySpan> ClipMemorySpanToLimit(u64 base, u64 size, u64 limit) {
     if (size == 0 || base >= limit) {
         return std::nullopt;
