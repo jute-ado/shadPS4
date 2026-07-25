@@ -11,6 +11,7 @@
 #include "common/singleton.h"
 #include "common/slab_heap.h"
 #include "common/types.h"
+#include "core/libraries/kernel/threads/thread_cache.h"
 
 namespace Libraries::Kernel {
 
@@ -70,9 +71,8 @@ struct ThreadState {
 
     Common::SlabHeap<Pthread> thread_heap;
     std::set<Pthread*> threads;
-    std::list<Pthread*> free_threads;
+    BoundedThreadCache<Pthread, MaxCachedThreads> free_threads;
     std::list<Pthread*> gc_list;
-    std::mutex free_thread_lock;
     std::mutex tcb_lock;
     std::mutex thread_list_lock;
     std::atomic<s32> total_threads{};
