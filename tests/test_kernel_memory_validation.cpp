@@ -91,6 +91,28 @@ TEST(KernelMemoryValidation, FixedMappingsAlwaysRequireAValidVirtualRange) {
         MemoryMapFlags::Fixed | MemoryMapFlags::NoOverwrite, false));
 }
 
+TEST(KernelMemoryValidation, PoolDecommitValidatesEveryOverlappingArea) {
+    const std::map<VAddr, Core::VirtualMemoryArea> areas{
+        {0x1000,
+         Core::VirtualMemoryArea{
+             .base = 0x1000,
+             .size = 0x1000,
+             .type = Core::VMAType::PoolReserved,
+         }},
+        {0x2000,
+         Core::VirtualMemoryArea{
+             .base = 0x2000,
+             .size = 0x1000,
+             .type = Core::VMAType::Direct,
+         }},
+    };
+
+    EXPECT_TRUE(Core::ArePoolDecommitAreasValid(areas.begin(), areas.end(), 0x1800, 0x800));
+    EXPECT_FALSE(Core::ArePoolDecommitAreasValid(areas.begin(), areas.end(), 0x1800, 0x801));
+    EXPECT_FALSE(Core::ArePoolDecommitAreasValid(std::next(areas.begin()), areas.end(), 0x2400,
+                                                 0x100));
+}
+
 TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x400, 0x600));
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1000, 0));
