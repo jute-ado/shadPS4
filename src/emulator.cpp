@@ -93,8 +93,7 @@ void Emulator::Shutdown() {
 
 s32 ReadCompiledSdkVersion(const std::filesystem::path& file) {
     Core::Loader::Elf elf;
-    elf.Open(file);
-    if (!elf.IsElfFile()) {
+    if (!elf.Open(file)) {
         return 0;
     }
     const auto elf_pheader = elf.GetProgramHeader();
