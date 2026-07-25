@@ -584,25 +584,14 @@ s32 PS4_SYSV_ABI sceKernelSetVirtualRangeName(const void* addr, u64 len, const c
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolExpand(u64 searchStart, u64 searchEnd, u64 len, u64 alignment,
                                            u64* physAddrOut) {
-    if (searchStart < 0 || searchEnd <= searchStart) {
-        LOG_ERROR(Kernel_Vmm, "Provided address range is invalid!");
-        return ORBIS_KERNEL_ERROR_EINVAL;
-    }
-    if (len <= 0 || !Common::Is64KBAligned(len)) {
-        LOG_ERROR(Kernel_Vmm, "Provided length {:#x} is invalid!", len);
-        return ORBIS_KERNEL_ERROR_EINVAL;
-    }
-    if (alignment != 0 && !Common::Is64KBAligned(alignment)) {
-        LOG_ERROR(Kernel_Vmm, "Alignment {:#x} is invalid!", alignment);
-        return ORBIS_KERNEL_ERROR_EINVAL;
-    }
-    if (physAddrOut == nullptr) {
-        LOG_ERROR(Kernel_Vmm, "Result physical address pointer is null!");
+    if (!IsMemoryPoolExpandRequestValid(searchStart, searchEnd, len, alignment, physAddrOut)) {
+        LOG_ERROR(Kernel_Vmm,
+                  "Address range, length, alignment, or output violates the pool expand contract");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
     const bool is_in_range = searchEnd - searchStart >= len;
-    if (searchEnd <= searchStart || searchEnd < len || !is_in_range) {
+    if (!is_in_range) {
         LOG_ERROR(Kernel_Vmm,
                   "Provided address range is too small!"
                   " searchStart = {:#x}, searchEnd = {:#x}, length = {:#x}",

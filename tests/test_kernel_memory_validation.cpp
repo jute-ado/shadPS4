@@ -40,6 +40,21 @@ TEST(KernelMemoryValidation, ValidatesMemoryPoolReserveContract) {
     EXPECT_FALSE(IsMemoryPoolReserveRequestValid(&address, 2_MB, 6_MB));
 }
 
+TEST(KernelMemoryValidation, ValidatesMemoryPoolExpandContract) {
+    u64 physical_address{};
+
+    EXPECT_TRUE(IsMemoryPoolExpandRequestValid(0, 4_MB, 64_KB, 0, &physical_address));
+    EXPECT_TRUE(IsMemoryPoolExpandRequestValid(0, 4_MB, 64_KB, 64_KB, &physical_address));
+    EXPECT_TRUE(IsMemoryPoolExpandRequestValid(0, 4_MB, 64_KB, 128_KB, &physical_address));
+
+    EXPECT_FALSE(IsMemoryPoolExpandRequestValid(0, 4_MB, 64_KB, 192_KB, &physical_address));
+    EXPECT_FALSE(IsMemoryPoolExpandRequestValid(0, 4_MB, 16_KB, 64_KB, &physical_address));
+    EXPECT_FALSE(IsMemoryPoolExpandRequestValid(0, 4_MB, 0, 64_KB, &physical_address));
+    EXPECT_FALSE(IsMemoryPoolExpandRequestValid(4_MB, 4_MB, 64_KB, 64_KB,
+                                                &physical_address));
+    EXPECT_FALSE(IsMemoryPoolExpandRequestValid(0, 4_MB, 64_KB, 64_KB, nullptr));
+}
+
 TEST(KernelMemoryValidation, AlignmentMustMatchGranularityAndBeAPowerOfTwo) {
     EXPECT_TRUE(IsMemoryAlignmentValid(0, 16_KB));
     EXPECT_TRUE(IsMemoryAlignmentValid(16_KB, 16_KB));

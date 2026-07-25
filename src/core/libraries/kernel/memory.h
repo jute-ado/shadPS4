@@ -91,6 +91,12 @@ constexpr bool IsMemoryPoolReserveRequestValid(void* const* addr_out, u64 len, u
            IsMemoryAlignmentValid(alignment, 2_MB);
 }
 
+constexpr bool IsMemoryPoolExpandRequestValid(u64 search_start, u64 search_end, u64 len,
+                                              u64 alignment, const u64* phys_addr_out) {
+    return phys_addr_out != nullptr && search_end > search_start && len != 0 &&
+           len % 64_KB == 0 && IsMemoryAlignmentValid(alignment, 64_KB);
+}
+
 struct OrbisQueryInfo {
     uintptr_t start;
     uintptr_t end;
