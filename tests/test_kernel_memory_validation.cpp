@@ -115,6 +115,14 @@ TEST(KernelMemoryValidation, ResolvesAlignedMemoryRangesWithoutOverflow) {
         Core::ResolveAlignedMemoryRangeStart(0x3f000, 0x1000, 0x2000, 0x40000).has_value());
 }
 
+TEST(KernelMemoryValidation, AlignsMemoryValuesWithoutOverflow) {
+    EXPECT_EQ(Core::AlignMemoryValueUp(0x4100, 0x4000), 0x8000u);
+    EXPECT_EQ(Core::AlignMemoryValueUp(0x8000, 0x4000), 0x8000u);
+
+    EXPECT_FALSE(Core::AlignMemoryValueUp(0x4000, 0).has_value());
+    EXPECT_FALSE(Core::AlignMemoryValueUp(std::numeric_limits<u64>::max(), 0x4000).has_value());
+}
+
 TEST(KernelMemoryValidation, ResolvesPageAlignedProtectionSpansWithoutOverflow) {
     const auto span = Core::ResolvePageAlignedMemorySpan(0x4100, 0x4000, 0x4000);
     ASSERT_TRUE(span.has_value());
