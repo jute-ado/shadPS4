@@ -1257,14 +1257,39 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 rasterizer->ProcessDownloadImages();
+                SubmitReleaseMem(
+                    *release_mem,
+                    [this](Common::UniqueFunction<void>&& completion) {
+                        rasterizer->DeferGpuCompletion(std::move(completion));
+                    },
+                    [this] { rasterizer->Flush(); },
+                    [](void* address, u64 data, u32 num_bytes) {
+                        auto* memory = Core::Memory::Instance();
+                        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+                            memcpy(address, &data, num_bytes);
+                        }
+                    },
+                    [pipe_id = queue.pipe_id] {
+                        Platform::IrqC::Instance()->Signal(
+                            static_cast<Platform::InterruptId>(pipe_id));
+                    },
+                    [this](VAddr dst, u16 gds_index, u16 num_dwords) {
+                        rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false,
+                                               true);
+                    });
+                break;
             }
             release_mem->SignalFence(
+                [](void* address, u64 data, u32 num_bytes) {
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+                        memcpy(address, &data, num_bytes);
+                    }
+                },
                 [pipe_id = queue.pipe_id] {
                     Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
                 },
-                [this](VAddr dst, u16 gds_index, u16 num_dwords) {
-                    rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
-                });
+                [](VAddr, u16, u16) { UNREACHABLE_MSG("GDS store requires a rasterizer"); });
             break;
         }
         case PM4ItOpcode::EventWrite: {
