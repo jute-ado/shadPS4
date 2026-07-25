@@ -32,4 +32,23 @@ constexpr void CompleteFlip(s32& pending_flips, s32& eop_flips, bool is_eop) {
     }
 }
 
+class FlipLabelGeneration {
+public:
+    [[nodiscard]] constexpr u64 Reserve() {
+        return ++latest_reservation;
+    }
+
+    constexpr void Display(u64 generation) {
+        displayed_reservation = generation;
+    }
+
+    [[nodiscard]] constexpr bool CanReleaseDisplayed() const {
+        return displayed_reservation == latest_reservation;
+    }
+
+private:
+    u64 latest_reservation{};
+    u64 displayed_reservation{};
+};
+
 } // namespace Libraries::VideoOut
