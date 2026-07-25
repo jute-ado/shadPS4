@@ -37,7 +37,7 @@ VdecDecoder::~VdecDecoder() {
     avcodec_free_context(&mCodecContext);
     sws_freeContext(mSwsContext);
 
-    gPictureInfo.Clear();
+    gPictureInfo.Clear(this);
 }
 
 s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
@@ -146,7 +146,7 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
     pictureInfo.frameCropRightOffset = pitch - frame->width;
     pictureInfo.frameCropBottomOffset = height - frame->height;
 
-    gPictureInfo.Set(pictureInfo);
+    gPictureInfo.Set(this, outputInfo.frameBuffer, pictureInfo);
 
     av_frame_free(&frame);
     return ORBIS_OK;
@@ -234,7 +234,7 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
     pictureInfo.frameCropRightOffset = pitch - frame->width;
     pictureInfo.frameCropBottomOffset = height - frame->height;
 
-    gPictureInfo.Set(pictureInfo);
+    gPictureInfo.Set(this, outputInfo.frameBuffer, pictureInfo);
 
     av_frame_free(&frame);
     return ORBIS_OK;
@@ -242,7 +242,7 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
 
 s32 VdecDecoder::Reset() {
     avcodec_flush_buffers(mCodecContext);
-    gPictureInfo.Clear();
+    gPictureInfo.Clear(this);
     return ORBIS_OK;
 }
 
