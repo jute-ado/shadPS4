@@ -11,6 +11,7 @@
 #include "core/aerolib/aerolib.h"
 #include "core/cpu_patches.h"
 #include "core/libraries/error_codes.h"
+#include "core/loader/dynamic_table_policy.h"
 #include "core/loader/dwarf.h"
 #include "core/loader/program_header_policy.h"
 #include "core/memory.h"
@@ -268,8 +269,22 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
 }
 
 void Module::LoadDynamicInfo() {
-    for (const auto* dyn = reinterpret_cast<elf_dynamic*>(m_dynamic.data()); dyn->d_tag != DT_NULL;
-         dyn++) {
+    if (!Loader::IsDynamicTableSizeAligned(m_dynamic.size())) {
+        LOG_ERROR(Core_Linker, "Dynamic table has a partial entry: {} bytes", m_dynamic.size());
+        return;
+    }
+    const auto dynamic_entries =
+        std::span{reinterpret_cast<const elf_dynamic*>(m_dynamic.data()),
+                  m_dynamic.size() / sizeof(elf_dynamic)};
+    const auto terminator = Loader::FindDynamicTerminator(dynamic_entries);
+    if (!terminator) {
+        LOG_ERROR(Core_Linker, "Dynamic table is missing DT_NULL within {} entries",
+                  dynamic_entries.size());
+        return;
+    }
+
+    for (const auto& dynamic_entry : dynamic_entries.first(*terminator)) {
+        const auto* dyn = &dynamic_entry;
         switch (dyn->d_tag) {
         case DT_SCE_HASH: // Offset of the hash table.
             dynamic_info.hash_table =
