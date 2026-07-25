@@ -26,6 +26,33 @@ TEST(KernelMemoryValidation, AcceptsAddressStorageAndName) {
     EXPECT_TRUE(AreNamedMemoryPointersValid(&address, "anon"));
 }
 
+TEST(KernelMemoryValidation, ValidatesMemoryPoolReserveContract) {
+    void* address{};
+
+    EXPECT_TRUE(IsMemoryPoolReserveRequestValid(&address, 2_MB, 0));
+    EXPECT_TRUE(IsMemoryPoolReserveRequestValid(&address, 2_MB, 2_MB));
+    EXPECT_TRUE(IsMemoryPoolReserveRequestValid(&address, 4_MB, 4_MB));
+
+    EXPECT_FALSE(IsMemoryPoolReserveRequestValid(nullptr, 2_MB, 0));
+    EXPECT_FALSE(IsMemoryPoolReserveRequestValid(&address, 0, 0));
+    EXPECT_FALSE(IsMemoryPoolReserveRequestValid(&address, 1_MB, 0));
+    EXPECT_FALSE(IsMemoryPoolReserveRequestValid(&address, 2_MB, 1_MB));
+    EXPECT_FALSE(IsMemoryPoolReserveRequestValid(&address, 2_MB, 6_MB));
+}
+
+TEST(KernelMemoryValidation, AlignmentMustMatchGranularityAndBeAPowerOfTwo) {
+    EXPECT_TRUE(IsMemoryAlignmentValid(0, 16_KB));
+    EXPECT_TRUE(IsMemoryAlignmentValid(16_KB, 16_KB));
+    EXPECT_TRUE(IsMemoryAlignmentValid(32_KB, 16_KB));
+    EXPECT_TRUE(IsMemoryAlignmentValid(4_MB, 2_MB));
+
+    EXPECT_FALSE(IsMemoryAlignmentValid(0, 0));
+    EXPECT_FALSE(IsMemoryAlignmentValid(8_KB, 16_KB));
+    EXPECT_FALSE(IsMemoryAlignmentValid(48_KB, 16_KB));
+    EXPECT_FALSE(IsMemoryAlignmentValid(1_MB, 2_MB));
+    EXPECT_FALSE(IsMemoryAlignmentValid(6_MB, 2_MB));
+}
+
 TEST(KernelMemoryValidation, RejectsWrappedVirtualMemoryContainmentRange) {
     const Core::VirtualMemoryArea area{
         .base = std::numeric_limits<VAddr>::max() - 0xff,
