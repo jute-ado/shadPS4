@@ -1077,6 +1077,20 @@ set_tests_properties(game_harness_tests PROPERTIES
     TIMEOUT 60
 )
 
+if(WIN32)
+    add_test(
+        NAME windows_long_path_manifest_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_windows_long_path_manifest.py
+            --manifest ${CMAKE_SOURCE_DIR}/src/dist/shadps4.manifest
+            --resource ${CMAKE_SOURCE_DIR}/src/dist/shadps4.rc
+    )
+    set_tests_properties(windows_long_path_manifest_test PROPERTIES
+        TIMEOUT 30
+    )
+endif()
+
 # ===========================================================================
 # HTTP tests (libSceHttp - URI helpers and status-line parsing)
 # ===========================================================================

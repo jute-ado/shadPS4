@@ -1371,6 +1371,9 @@ if (WIN32)
 
     if (MSVC)
         target_link_libraries(shadps4 PRIVATE clang_rt.builtins-x86_64.lib)
+        # shadps4.rc embeds the complete application manifest, including
+        # longPathAware. Do not replace it with link.exe's default manifest.
+        target_link_options(shadps4 PRIVATE /MANIFEST:NO)
     endif()
 
     # Disable ASLR so we can reserve the user area
