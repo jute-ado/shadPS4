@@ -53,12 +53,41 @@ function(get_git_head_revision _refspecvar _hashvar)
 		endif()
 		set(GIT_DIR "${GIT_PARENT_DIR}/.git")
 	endwhile()
-	# check if this is a submodule
-	if(NOT IS_DIRECTORY ${GIT_DIR})
-		file(READ ${GIT_DIR} submodule)
-		string(REGEX REPLACE "gitdir: (.*)\n$" "\\1" GIT_DIR_RELATIVE ${submodule})
-		get_filename_component(SUBMODULE_DIR ${GIT_DIR} PATH)
-		get_filename_component(GIT_DIR ${SUBMODULE_DIR}/${GIT_DIR_RELATIVE} ABSOLUTE)
+	# Submodules and linked worktrees use a text file instead of a .git
+	# directory. Git accepts both absolute paths and paths relative to that
+	# file, with or without a trailing newline.
+	if(NOT IS_DIRECTORY "${GIT_DIR}")
+		file(READ "${GIT_DIR}" gitfile LIMIT 1024)
+		string(STRIP "${gitfile}" gitfile)
+		if(NOT gitfile MATCHES "^gitdir:[ \t]*(.+)$")
+			set(${_refspecvar} "GITDIR-NOTFOUND" PARENT_SCOPE)
+			set(${_hashvar} "GITDIR-NOTFOUND" PARENT_SCOPE)
+			return()
+		endif()
+		set(GIT_DIR_PATH "${CMAKE_MATCH_1}")
+		if(IS_ABSOLUTE "${GIT_DIR_PATH}")
+			set(GIT_DIR "${GIT_DIR_PATH}")
+		else()
+			get_filename_component(GIT_FILE_DIR "${GIT_DIR}" DIRECTORY)
+			get_filename_component(GIT_DIR "${GIT_FILE_DIR}/${GIT_DIR_PATH}" ABSOLUTE)
+		endif()
+	endif()
+
+	# A linked worktree stores HEAD in its per-worktree directory, while the
+	# branch refs live in the common repository directory.
+	set(GIT_COMMON_DIR "${GIT_DIR}")
+	if(EXISTS "${GIT_DIR}/commondir")
+		file(READ "${GIT_DIR}/commondir" GIT_COMMON_DIR_PATH LIMIT 1024)
+		string(STRIP "${GIT_COMMON_DIR_PATH}" GIT_COMMON_DIR_PATH)
+		if(IS_ABSOLUTE "${GIT_COMMON_DIR_PATH}")
+			set(GIT_COMMON_DIR "${GIT_COMMON_DIR_PATH}")
+		else()
+			get_filename_component(
+				GIT_COMMON_DIR
+				"${GIT_DIR}/${GIT_COMMON_DIR_PATH}"
+				ABSOLUTE
+			)
+		endif()
 	endif()
 	set(GIT_DATA "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/git-data")
 	if(NOT EXISTS "${GIT_DATA}")
