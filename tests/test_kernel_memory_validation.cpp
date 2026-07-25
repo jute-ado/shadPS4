@@ -104,6 +104,26 @@ TEST(KernelMemoryValidation, ResolvesAlignedMemoryRangesWithoutOverflow) {
         Core::ResolveAlignedMemoryRangeStart(0x3f000, 0x1000, 0x2000, 0x40000).has_value());
 }
 
+TEST(KernelMemoryValidation, ResolvesPageAlignedProtectionSpansWithoutOverflow) {
+    const auto span = Core::ResolvePageAlignedMemorySpan(0x4100, 0x4000, 0x4000);
+    ASSERT_TRUE(span.has_value());
+    EXPECT_EQ(span->base, 0x4000u);
+    EXPECT_EQ(span->size, 0x8000u);
+
+    const auto empty = Core::ResolvePageAlignedMemorySpan(0x4000, 0, 0x4000);
+    ASSERT_TRUE(empty.has_value());
+    EXPECT_EQ(empty->base, 0x4000u);
+    EXPECT_EQ(empty->size, 0u);
+
+    EXPECT_FALSE(Core::ResolvePageAlignedMemorySpan(0x4000, 0x1000, 0).has_value());
+    EXPECT_FALSE(Core::ResolvePageAlignedMemorySpan(
+                     1, std::numeric_limits<u64>::max(), 0x4000)
+                     .has_value());
+    EXPECT_FALSE(Core::ResolvePageAlignedMemorySpan(
+                     std::numeric_limits<u64>::max() - 0xff, 0x100, 0x4000)
+                     .has_value());
+}
+
 TEST(KernelMemoryValidation, ResolvesBoundedAvailableMemorySpansAfterAlignment) {
     const auto aligned =
         Core::ResolveAvailableMemorySpan(0x1000, 0x9000, 0x2500, 0x8000, 0x2000);
