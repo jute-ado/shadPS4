@@ -28,3 +28,10 @@ TEST(DeviceFeaturePolicy, ImageViewMinLodRequiresExtensionAndFeatureSupport) {
     EXPECT_FALSE(Vulkan::ShouldEnableImageViewMinLod(false, true));
     EXPECT_FALSE(Vulkan::ShouldEnableImageViewMinLod(false, false));
 }
+
+TEST(DeviceFeaturePolicy, Maintenance8RequiresExtensionAndFeatureSupport) {
+    EXPECT_TRUE(Vulkan::ShouldEnableMaintenance8(true, true));
+    EXPECT_FALSE(Vulkan::ShouldEnableMaintenance8(true, false));
+    EXPECT_FALSE(Vulkan::ShouldEnableMaintenance8(false, true));
+    EXPECT_FALSE(Vulkan::ShouldEnableMaintenance8(false, false));
+}
