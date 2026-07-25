@@ -113,6 +113,12 @@ TEST(KernelMemoryValidation, PoolDecommitValidatesEveryOverlappingArea) {
                                                  0x100));
 }
 
+TEST(KernelMemoryValidation, PoolCommitAllowsAnExactBudgetFit) {
+    EXPECT_TRUE(Core::CanCommitPoolBudget(0x1000, 0x1000));
+    EXPECT_TRUE(Core::CanCommitPoolBudget(0x1001, 0x1000));
+    EXPECT_FALSE(Core::CanCommitPoolBudget(0xfff, 0x1000));
+}
+
 TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x400, 0x600));
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1000, 0));

@@ -65,6 +65,10 @@ constexpr bool IsRequestedMappingRangeValid(MemoryMapFlags flags, bool range_is_
     return False(flags & MemoryMapFlags::Fixed) || range_is_valid;
 }
 
+constexpr bool CanCommitPoolBudget(u64 available, u64 requested) {
+    return requested <= available;
+}
+
 enum class PhysicalMemoryType : u32 {
     Free = 0,
     Allocated = 1,

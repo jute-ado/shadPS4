@@ -411,7 +411,7 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    if (pool_budget <= size) {
+    if (!CanCommitPoolBudget(pool_budget, size)) {
         // If there isn't enough pooled memory to perform the mapping, return ENOMEM
         LOG_ERROR(Kernel_Vmm, "Not enough pooled memory to perform mapping");
         return ORBIS_KERNEL_ERROR_ENOMEM;
