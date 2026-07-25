@@ -196,6 +196,18 @@ TEST(KernelMemoryValidation, PoolCommitAllowsAnExactBudgetFit) {
     EXPECT_FALSE(Core::CanCommitPoolBudget(0xfff, 0x1000));
 }
 
+TEST(KernelMemoryValidation, PoolBlockStatsKeepAvailableAndAllocatedCountsDistinct) {
+    const auto counts = Core::ResolveMemoryPoolBlockCounts(3 * 64_KB, 2 * 64_KB);
+
+    EXPECT_EQ(counts.available, 3);
+    EXPECT_EQ(counts.allocated, 2);
+
+    const auto partial_counts =
+        Core::ResolveMemoryPoolBlockCounts(64_KB - 1, 2 * 64_KB - 1);
+    EXPECT_EQ(partial_counts.available, 0);
+    EXPECT_EQ(partial_counts.allocated, 1);
+}
+
 TEST(KernelMemoryValidation, ValidatesRangesAndBudgetsWithoutOverflow) {
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x400, 0x600));
     EXPECT_TRUE(Core::IsMemoryRangeWithinLimit(0x1000, 0x1000, 0));

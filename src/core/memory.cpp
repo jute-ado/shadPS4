@@ -1362,7 +1362,6 @@ s32 MemoryManager::GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPool
     std::shared_lock lk{mutex};
 
     // Run through dmem_map, determine how much physical memory is currently committed
-    constexpr u64 block_size = 64_KB;
     u64 committed_size = 0;
 
     auto dma_handle = dmem_map.begin();
@@ -1373,8 +1372,9 @@ s32 MemoryManager::GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPool
         dma_handle++;
     }
 
-    stats->allocated_flushed_blocks = committed_size / block_size;
-    stats->available_flushed_blocks = committed_size / block_size;
+    const auto counts = ResolveMemoryPoolBlockCounts(pool_budget, committed_size);
+    stats->allocated_flushed_blocks = counts.allocated;
+    stats->available_flushed_blocks = counts.available;
     // TODO: Determine how "cached blocks" work
     stats->allocated_cached_blocks = 0;
     stats->available_cached_blocks = 0;
