@@ -124,6 +124,22 @@ struct EqueueEvent {
         is_triggered = true;
     }
 
+    int DrainTriggers(OrbisKernelEvent* output, int capacity) {
+        int count = 0;
+        while (count < capacity && is_triggered) {
+            output[count++] = event;
+            if (event.flags & OrbisKernelEvent::Flags::OneShot) {
+                break;
+            }
+            if (event.flags & OrbisKernelEvent::Flags::Clear) {
+                ConsumeTrigger();
+            } else {
+                break;
+            }
+        }
+        return count;
+    }
+
     void TriggerUser(void* data) {
         is_triggered = true;
         event.udata = data;
