@@ -7,6 +7,7 @@
 #include "core/libraries/videodec/videodec2.h"
 #include "core/libraries/videodec/videodec2_compute_validation.h"
 #include "core/libraries/videodec/videodec2_decode_validation.h"
+#include "core/libraries/videodec/videodec2_decoder_validation.h"
 #include "core/libraries/videodec/videodec_error.h"
 
 namespace Libraries::Videodec2 {
@@ -40,6 +41,26 @@ struct ValidComputeArguments {
         .cpuGpuMemory = reinterpret_cast<void*>(0x10000),
     };
 };
+
+OrbisVideodec2DecoderConfigInfo ValidDecoderConfig() {
+    return {
+        .thisSize = sizeof(OrbisVideodec2DecoderConfigInfo),
+        .codecType = 1,
+    };
+}
+
+TEST(Videodec2DecoderValidation, AcceptsSupportedAvcCodec) {
+    EXPECT_EQ(ValidateDecoderConfig(ValidDecoderConfig()), ORBIS_OK);
+}
+
+TEST(Videodec2DecoderValidation, RejectsUnsupportedCodecBeforeConstruction) {
+    auto config = ValidDecoderConfig();
+    config.codecType = 0;
+    EXPECT_EQ(ValidateDecoderConfig(config), ORBIS_VIDEODEC2_ERROR_CODEC_TYPE);
+
+    config.codecType = 2;
+    EXPECT_EQ(ValidateDecoderConfig(config), ORBIS_VIDEODEC2_ERROR_CODEC_TYPE);
+}
 
 TEST(Videodec2ComputeValidation, AcceptsAdvertisedMinimumMemory) {
     ValidComputeArguments args;

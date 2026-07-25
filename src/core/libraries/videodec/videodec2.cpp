@@ -7,6 +7,7 @@
 #include "core/libraries/videodec/videodec2.h"
 #include "core/libraries/videodec/videodec2_compute_validation.h"
 #include "core/libraries/videodec/videodec2_decode_validation.h"
+#include "core/libraries/videodec/videodec2_decoder_validation.h"
 #include "core/libraries/videodec/videodec2_impl.h"
 #include "core/libraries/videodec/videodec_error.h"
 
@@ -71,6 +72,11 @@ sceVideodec2QueryDecoderMemoryInfo(const OrbisVideodec2DecoderConfigInfo* decode
         LOG_ERROR(Lib_Vdec2, "Invalid struct size");
         return ORBIS_VIDEODEC2_ERROR_STRUCT_SIZE;
     }
+    const s32 validation_result = ValidateDecoderConfig(*decoderCfgInfo);
+    if (validation_result != ORBIS_OK) {
+        LOG_ERROR(Lib_Vdec2, "Invalid decoder configuration: {:#x}", validation_result);
+        return validation_result;
+    }
 
     decoderMemInfo->cpuMemory = nullptr;
     decoderMemInfo->gpuMemory = nullptr;
@@ -99,6 +105,11 @@ s32 PS4_SYSV_ABI sceVideodec2CreateDecoder(const OrbisVideodec2DecoderConfigInfo
         decoderMemInfo->thisSize != sizeof(OrbisVideodec2DecoderMemoryInfo)) {
         LOG_ERROR(Lib_Vdec2, "Invalid struct size");
         return ORBIS_VIDEODEC2_ERROR_STRUCT_SIZE;
+    }
+    const s32 validation_result = ValidateDecoderConfig(*decoderCfgInfo);
+    if (validation_result != ORBIS_OK) {
+        LOG_ERROR(Lib_Vdec2, "Invalid decoder configuration: {:#x}", validation_result);
+        return validation_result;
     }
 
     *decoder = new VdecDecoder(*decoderCfgInfo, *decoderMemInfo);
