@@ -973,6 +973,17 @@ endforeach()
 # Private game dumps are never required for the normal unit-test suite.
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 add_test(
+    NAME git_revision_worktree_test
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_git_revision_worktree.py
+        --cmake ${CMAKE_COMMAND}
+        --module ${CMAKE_SOURCE_DIR}/externals/cmake-modules/GetGitRevisionDescription.cmake
+)
+set_tests_properties(git_revision_worktree_test PROPERTIES
+    TIMEOUT 30
+)
+add_test(
     NAME game_harness_tests
     COMMAND
         ${Python3_EXECUTABLE}
