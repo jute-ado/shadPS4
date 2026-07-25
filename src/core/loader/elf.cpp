@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/loader/elf.h"
+#include "core/loader/program_header_policy.h"
 
 namespace Core::Loader {
 
@@ -465,36 +466,54 @@ std::string Elf::ElfPHeaderStr(u16 no) {
     return header;
 }
 
-void Elf::LoadSegment(u64 virtual_addr, u64 file_offset, u64 size) {
+bool Elf::CanLoadSegment(u64 file_offset, u64 size) const {
+    const u64 file_size = m_f.GetSize();
+    if (!is_self) {
+        return IsFileRangeValid(file_size, file_offset, size);
+    }
+    return ResolveSelfSegmentFileOffset(m_self_segments, m_elf_phdr, file_size, file_offset, size)
+        .has_value();
+}
+
+bool Elf::LoadSegment(u64 virtual_addr, u64 file_offset, u64 size) {
+    const u64 file_size = m_f.GetSize();
     if (!is_self) {
         // It's elf file
+        if (!CanLoadSegment(file_offset, size)) {
+            LOG_ERROR(Loader, "ELF segment range is outside the file: offset={:#x}, size={:#x}, "
+                              "file_size={:#x}",
+                      file_offset, size, file_size);
+            return false;
+        }
         if (!m_f.Seek(file_offset, SeekOrigin::SetOrigin)) {
-            LOG_CRITICAL(Loader, "Failed to seek to ELF header");
-            return;
+            LOG_ERROR(Loader, "Failed to seek to ELF segment");
+            return false;
         }
-        m_f.ReadRaw<u8>(reinterpret_cast<u8*>(virtual_addr), size);
-        return;
+        if (m_f.ReadRaw<u8>(reinterpret_cast<u8*>(virtual_addr), size) != size) {
+            LOG_ERROR(Loader, "Failed to read complete ELF segment");
+            return false;
+        }
+        return true;
     }
 
-    for (uint16_t i = 0; i < m_self.segment_count; i++) {
-        const auto& seg = m_self_segments[i];
-
-        if (seg.IsBlocked()) {
-            auto phdr_id = seg.GetId();
-            const auto& phdr = m_elf_phdr[phdr_id];
-
-            if (file_offset >= phdr.p_offset && file_offset < phdr.p_offset + phdr.p_filesz) {
-                auto offset = file_offset - phdr.p_offset;
-                if (!m_f.Seek(offset + seg.file_offset, SeekOrigin::SetOrigin)) {
-                    LOG_CRITICAL(Loader, "Failed to seek to segment");
-                    return;
-                }
-                m_f.ReadRaw<u8>(reinterpret_cast<u8*>(virtual_addr), size);
-                return;
-            }
-        }
+    const auto physical_offset = ResolveSelfSegmentFileOffset(
+        m_self_segments, m_elf_phdr, file_size, file_offset, size);
+    if (!physical_offset) {
+        LOG_ERROR(Loader,
+                  "SELF segment range is unmapped or truncated: offset={:#x}, size={:#x}, "
+                  "file_size={:#x}",
+                  file_offset, size, file_size);
+        return false;
     }
-    UNREACHABLE();
+    if (!m_f.Seek(*physical_offset, SeekOrigin::SetOrigin)) {
+        LOG_ERROR(Loader, "Failed to seek to SELF segment");
+        return false;
+    }
+    if (m_f.ReadRaw<u8>(reinterpret_cast<u8*>(virtual_addr), size) != size) {
+        LOG_ERROR(Loader, "Failed to read complete SELF segment");
+        return false;
+    }
+    return true;
 }
 
 bool Elf::IsSharedLib() {

@@ -500,7 +500,8 @@ public:
     std::string_view ElfPheaderTypeStr(u32 type);
     std::string ElfPheaderFlagsStr(u32 flags);
 
-    void LoadSegment(u64 virtual_addr, u64 file_offset, u64 size);
+    bool CanLoadSegment(u64 file_offset, u64 size) const;
+    bool LoadSegment(u64 virtual_addr, u64 file_offset, u64 size);
     bool IsSharedLib();
     void ElfHeaderDebugDump(const std::filesystem::path& file_name);
     void SelfHeaderDebugDump(const std::filesystem::path& file_name);

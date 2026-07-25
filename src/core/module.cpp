@@ -74,8 +74,7 @@ static std::string StringToNid(std::string_view symbol) {
 Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_, u32& max_tls_index)
     : memory{memory_}, file{file_}, name{file.filename().string()} {
     elf.Open(file);
-    if (elf.IsElfFile()) {
-        LoadModuleToMemory(max_tls_index);
+    if (elf.IsElfFile() && LoadModuleToMemory(max_tls_index)) {
         LoadDynamicInfo();
         LoadSymbols();
     }
@@ -89,7 +88,7 @@ s32 Module::Start(u64 args, const void* argp, void* param) {
     return reinterpret_cast<EntryFunc>(addr)(args, argp, param);
 }
 
-void Module::LoadModuleToMemory(u32& max_tls_index) {
+bool Module::LoadModuleToMemory(u32& max_tls_index) {
     static constexpr size_t BlockAlign = 0x1000;
     static constexpr u64 TrampolineSize = 8_MB;
 
@@ -99,23 +98,32 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
     const auto base_size_result = Loader::CalculateLoadImageSize(elf_pheader);
     if (!base_size_result) {
         LOG_ERROR(Core_Linker, "Program headers have invalid alignment or overflow the load image");
-        return;
+        return false;
     }
     const u64 base_size = *base_size_result;
     const elf_program_header image_header{.p_memsz = base_size, .p_align = BlockAlign};
     const auto aligned_base_size_result = Loader::GetAlignedSegmentSize(image_header);
     if (!aligned_base_size_result) {
         LOG_ERROR(Core_Linker, "Module load image cannot be aligned");
-        return;
+        return false;
     }
     aligned_base_size = *aligned_base_size_result;
 
     for (const auto& header : elf_pheader) {
-        if (Loader::ClassifyProgramHeader(header.p_type) ==
-                Loader::ProgramHeaderAction::Process &&
-            !Loader::GetAlignedSegmentSize(header)) {
+        if (Loader::ClassifyProgramHeader(header.p_type) !=
+            Loader::ProgramHeaderAction::Process) {
+            continue;
+        }
+        if (!Loader::GetAlignedSegmentSize(header) ||
+            !Loader::IsProgramHeaderFileSizeValid(header)) {
             LOG_ERROR(Core_Linker, "Program header has invalid size or alignment");
-            return;
+            return false;
+        }
+        if (header.p_filesz != 0 && Loader::IsDirectlyLoadedFromFile(header.p_type) &&
+            !elf.CanLoadSegment(header.p_offset, header.p_filesz)) {
+            LOG_ERROR(Core_Linker,
+                      "Program header file range is unmapped or outside the executable");
+            return false;
         }
     }
 
@@ -166,7 +174,9 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
                                            MemoryMapFlags::Fixed, memory_type, name);
             ASSERT_MSG(result == ORBIS_OK, "Failed to map segment at {:#x} for module {}",
                        segment_vaddr, name);
-            elf.LoadSegment(segment_vaddr, phdr.p_offset, phdr.p_filesz);
+            if (!elf.LoadSegment(segment_vaddr, phdr.p_offset, phdr.p_filesz)) {
+                return false;
+            }
         }
         if (info.num_segments < 4) {
             auto& segment = info.segments[info.num_segments++];
@@ -176,6 +186,7 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
         } else {
             LOG_ERROR(Core_Linker, "Attempting to add too many segments!");
         }
+        return true;
     };
 
     for (u16 i = 0; i < elf_header.e_phnum; i++) {
@@ -202,7 +213,10 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             LOG_INFO(Core_Linker, "segment_memory_size ...: {:#018x}", segment_memory_size);
             LOG_INFO(Core_Linker, "segment_mode ..........: {}", segment_mode);
 
-            add_segment(elf_pheader[i]);
+            if (!add_segment(elf_pheader[i])) {
+                base_virtual_addr = 0;
+                return false;
+            }
 #ifdef ARCH_X86_64
             if (elf_pheader[i].p_flags & PF_EXEC) {
                 PrePatchInstructions(segment_addr, segment_file_size);
@@ -211,11 +225,18 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             break;
         }
         case PT_DYNAMIC:
-            add_segment(elf_pheader[i], false);
+            if (!add_segment(elf_pheader[i], false)) {
+                base_virtual_addr = 0;
+                return false;
+            }
             if (elf_pheader[i].p_filesz != 0) {
                 m_dynamic.resize(elf_pheader[i].p_filesz);
                 const VAddr segment_addr = std::bit_cast<VAddr>(m_dynamic.data());
-                elf.LoadSegment(segment_addr, elf_pheader[i].p_offset, elf_pheader[i].p_filesz);
+                if (!elf.LoadSegment(segment_addr, elf_pheader[i].p_offset,
+                                     elf_pheader[i].p_filesz)) {
+                    base_virtual_addr = 0;
+                    return false;
+                }
             } else {
                 LOG_ERROR(Core_Linker, "p_filesz==0 in type {}", header_type);
             }
@@ -224,7 +245,11 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             if (elf_pheader[i].p_filesz != 0) {
                 m_dynamic_data.resize(elf_pheader[i].p_filesz);
                 const VAddr segment_addr = std::bit_cast<VAddr>(m_dynamic_data.data());
-                elf.LoadSegment(segment_addr, elf_pheader[i].p_offset, elf_pheader[i].p_filesz);
+                if (!elf.LoadSegment(segment_addr, elf_pheader[i].p_offset,
+                                     elf_pheader[i].p_filesz)) {
+                    base_virtual_addr = 0;
+                    return false;
+                }
             } else {
                 LOG_ERROR(Core_Linker, "p_filesz==0 in type {}", header_type);
             }
@@ -272,6 +297,7 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             MemoryPatcher::OnGameLoaded();
         }
     }
+    return true;
 }
 
 void Module::LoadDynamicInfo() {
