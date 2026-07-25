@@ -65,7 +65,7 @@ int PS4_SYSV_ABI posix_pthread_attr_getguardsize(const PthreadAttrT* attr, size_
 }
 
 int PS4_SYSV_ABI posix_pthread_attr_getinheritsched(const PthreadAttrT* attr, int* sched_inherit) {
-    if (attr == nullptr || *attr == nullptr) {
+    if (attr == nullptr || *attr == nullptr || sched_inherit == nullptr) {
         return POSIX_EINVAL;
     }
     *sched_inherit = (*attr)->sched_inherit;
@@ -126,6 +126,9 @@ int PS4_SYSV_ABI posix_pthread_attr_getstacksize(const PthreadAttrT* attr, size_
 }
 
 int PS4_SYSV_ABI posix_pthread_attr_init(PthreadAttrT* attr) {
+    if (attr == nullptr) {
+        return POSIX_EINVAL;
+    }
     auto pattr = new (std::nothrow) PthreadAttr{};
     if (pattr == nullptr) {
         return POSIX_ENOMEM;
@@ -270,7 +273,7 @@ int PS4_SYSV_ABI posix_pthread_attr_get_np(PthreadT pthread, PthreadAttrT* dstat
 
 int PS4_SYSV_ABI posix_pthread_attr_getaffinity_np(const PthreadAttrT* pattr, size_t cpusetsize,
                                                    Cpuset* cpusetp) {
-    if (pattr == nullptr) {
+    if (pattr == nullptr || cpusetp == nullptr) {
         return POSIX_EINVAL;
     }
     PthreadAttrT attr = *pattr;
@@ -310,6 +313,9 @@ int PS4_SYSV_ABI posix_pthread_attr_setaffinity_np(PthreadAttrT* pattr, size_t c
 }
 
 int PS4_SYSV_ABI scePthreadAttrGetaffinity(PthreadAttrT* attr, u64* mask) {
+    if (mask == nullptr) {
+        return POSIX_EINVAL;
+    }
     Cpuset cpuset;
     const int ret = posix_pthread_attr_getaffinity_np(attr, sizeof(Cpuset), &cpuset);
     if (ret == 0) {
