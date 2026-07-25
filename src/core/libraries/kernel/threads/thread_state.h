@@ -12,6 +12,7 @@
 #include "common/slab_heap.h"
 #include "common/types.h"
 #include "core/libraries/kernel/threads/thread_cache.h"
+#include "core/libraries/kernel/threads/thread_gc.h"
 
 namespace Libraries::Kernel {
 
@@ -32,7 +33,7 @@ struct ThreadState {
     explicit ThreadState();
 
     bool GcNeeded() const noexcept {
-        return gc_list.size() >= GcThreshold;
+        return gc_accounting.NeedsCollection(GcThreshold);
     }
 
     void Collect(Pthread* curthread);
@@ -73,6 +74,7 @@ struct ThreadState {
     std::set<Pthread*> threads;
     BoundedThreadCache<Pthread, MaxCachedThreads> free_threads;
     std::list<Pthread*> gc_list;
+    ThreadGcAccounting gc_accounting;
     std::mutex tcb_lock;
     std::mutex thread_list_lock;
     std::atomic<s32> total_threads{};
