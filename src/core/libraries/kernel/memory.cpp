@@ -9,6 +9,7 @@
 #include "common/logging/log.h"
 #include "common/scope_exit.h"
 #include "common/singleton.h"
+#include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/libraries/kernel/orbis_error.h"
@@ -227,6 +228,9 @@ s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s
     if (True(mem_prot & Core::MemoryProt::CpuExec)) {
         LOG_ERROR(Kernel_Vmm, "Executable permissions are not allowed.");
         return ORBIS_KERNEL_ERROR_EACCES;
+    }
+    if (Core::RequiresSubmissionBoundaryBeforeMapping(mem_prot)) {
+        GnmDriver::WaitForSubmissionBoundary();
     }
 
     auto map_flags = static_cast<Core::MemoryMapFlags>(flags);

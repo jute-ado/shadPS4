@@ -44,6 +44,22 @@ TEST(GnmSubmissionGate, SubmitDoneClosesIdleGateUntilGpuAcknowledgesIt) {
     EXPECT_TRUE(entrant.get());
 }
 
+TEST(GnmSubmissionGate, BoundaryWaitBlocksNonSubmissionGuestWorkUntilGpuAcknowledgesIt) {
+    SubmissionGate gate;
+    auto complete_boundary = gate.BeginBoundary();
+
+    auto guest_work = std::async(std::launch::async, [&] {
+        gate.WaitForBoundary();
+        return true;
+    });
+    EXPECT_EQ(guest_work.wait_for(20ms), std::future_status::timeout);
+
+    complete_boundary();
+
+    EXPECT_EQ(guest_work.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(guest_work.get());
+}
+
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
     SubmissionGate gate;
     auto submission = gate.Enter();
