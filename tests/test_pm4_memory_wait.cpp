@@ -62,10 +62,12 @@ TEST(Pm4MemoryWait, CorrelatesPendingFenceWritesByAddress) {
 
     tracker.Schedule(0x1234);
     tracker.Schedule(0x1234);
+    tracker.Start(0x1234);
     tracker.Complete(0x1234);
 
     const auto progress = tracker.Snapshot(0x1234);
     EXPECT_EQ(progress.scheduled, 2u);
+    EXPECT_EQ(progress.started, 1u);
     EXPECT_EQ(progress.completed, 1u);
     EXPECT_EQ(tracker.Snapshot(0x5678).scheduled, 0u);
 }

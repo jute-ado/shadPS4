@@ -14,6 +14,7 @@ class FenceWriteProgressTracker {
 public:
     struct Progress {
         u64 scheduled{};
+        u64 started{};
         u64 completed{};
     };
 
@@ -25,6 +26,11 @@ public:
     void Complete(VAddr address) {
         std::scoped_lock lock{mutex};
         ++progress_by_address[address].completed;
+    }
+
+    void Start(VAddr address) {
+        std::scoped_lock lock{mutex};
+        ++progress_by_address[address].started;
     }
 
     [[nodiscard]] Progress Snapshot(VAddr address) const {
