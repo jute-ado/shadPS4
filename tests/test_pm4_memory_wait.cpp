@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/pm4_memory_wait.h"
+#include "video_core/amdgpu/wait_yield_tracker.h"
 
 TEST(Pm4MemoryWait, PublishesGpuWritesBeforeRecheckingAnUnsatisfiedWait) {
     unsigned label = 0;
@@ -37,4 +38,13 @@ TEST(Pm4MemoryWait, ReportsAnUnsatisfiedWaitAfterPublishingCurrentGpuWrites) {
 
     EXPECT_FALSE(satisfied);
     EXPECT_EQ(publications, 1u);
+}
+
+TEST(Pm4MemoryWait, ReportsAWaitOnlyOnceAfterItsYieldThreshold) {
+    AmdGpu::WaitYieldTracker tracker{3};
+
+    EXPECT_FALSE(tracker.ObserveYield());
+    EXPECT_FALSE(tracker.ObserveYield());
+    EXPECT_TRUE(tracker.ObserveYield());
+    EXPECT_FALSE(tracker.ObserveYield());
 }
