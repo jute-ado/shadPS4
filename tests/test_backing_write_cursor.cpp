@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <chrono>
+#include <future>
+#include <shared_mutex>
 #include <span>
 
 #include <gtest/gtest.h>
 
 #include "core/backing_write_cursor.h"
+#include "core/nonblocking_shared_lock.h"
 
 TEST(BackingWriteCursor, AdvancesSourceAcrossFragmentedBackingRanges) {
     constexpr std::array<u8, 10> Source{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
@@ -48,4 +52,19 @@ TEST(BackingWriteCursor, RejectsIncompleteBackingWithoutModifyingAValidPrefix) {
     EXPECT_EQ(first, (std::array<u8, 2>{0xAA, 0xAA}));
     EXPECT_EQ(second, (std::array<u8, 3>{0xBB, 0xBB, 0xBB}));
     EXPECT_EQ(cursor.Remaining(), Source.size());
+}
+
+TEST(NonBlockingSharedLock, DoesNotWaitForAnExclusiveOwner) {
+    using namespace std::chrono_literals;
+
+    std::shared_mutex mutex;
+    std::unique_lock exclusive_lock{mutex};
+
+    auto attempt = std::async(std::launch::async, [&] {
+        auto lock = Core::TryAcquireSharedLock(mutex);
+        return lock.owns_lock();
+    });
+
+    EXPECT_EQ(attempt.wait_for(100ms), std::future_status::ready);
+    EXPECT_FALSE(attempt.get());
 }

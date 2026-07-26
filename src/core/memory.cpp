@@ -13,6 +13,7 @@
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/memory.h"
+#include "core/nonblocking_shared_lock.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace Core {
@@ -160,10 +161,21 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
-    BackingWriteCursor writer{
-        std::span{static_cast<const u8*>(data), static_cast<size_t>(size)}};
     std::shared_lock lk{mutex};
+    return TryWriteBackingLocked(address, data, size);
+}
+
+bool MemoryManager::TryWriteBackingNonBlocking(void* address, const void* data, u64 size) {
+    auto lk = TryAcquireSharedLock(mutex);
+    if (!lk.owns_lock()) {
+        return false;
+    }
+    return TryWriteBackingLocked(address, data, size);
+}
+
+bool MemoryManager::TryWriteBackingLocked(void* address, const void* data, u64 size) {
+    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    BackingWriteCursor writer{std::span{static_cast<const u8*>(data), static_cast<size_t>(size)}};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
 
