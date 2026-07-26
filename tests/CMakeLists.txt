@@ -1179,7 +1179,10 @@ add_test(
 )
 set_tests_properties(game_harness_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    TIMEOUT 60
+    # The synthetic protocol tests intentionally exercise real timeout and
+    # process-tree cleanup paths. Keep the aggregate gate bounded without
+    # making its result depend on host scheduling near a 60-second cliff.
+    TIMEOUT 120
 )
 
 if(WIN32)
