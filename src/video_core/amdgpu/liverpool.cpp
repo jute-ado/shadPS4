@@ -983,22 +983,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
-                bool forced_pending_fence_completion = false;
                 const auto wait_satisfied = [&] {
                     if (!rasterizer ||
                         wait_reg_mem->mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory) {
                         return wait_reg_mem->Test(regs.reg_array);
                     }
-                    return PollGpuMemoryWait(
-                        [&] { return wait_reg_mem->Test(regs.reg_array); },
-                        [&] {
-                            const VAddr address = wait_reg_mem->Address<VAddr>();
-                            const auto progress = fence_write_progress_tracker.Snapshot(address);
-                            PublishGpuMemoryWait(
-                                progress.scheduled > progress.completed,
-                                forced_pending_fence_completion, [&] { rasterizer->Finish(); },
-                                [&] { rasterizer->ReadMemory(address, sizeof(u32)); });
-                        });
+                    return PollGpuMemoryWait([&] { return wait_reg_mem->Test(regs.reg_array); },
+                                             [&] {
+                                                 rasterizer->ReadMemory(
+                                                     wait_reg_mem->Address<VAddr>(), sizeof(u32));
+                                             });
                 };
                 WaitYieldTracker wait_tracker{100'000};
                 while (!wait_satisfied()) {
