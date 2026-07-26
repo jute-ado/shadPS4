@@ -803,8 +803,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     fence_write_progress_tracker.Schedule(fence_address);
                 }
                 const bool interrupting_eop = event_eop->int_sel != InterruptSelect::None;
+                u64 interrupting_eop_sequence{};
                 if (interrupting_eop) {
-                    submission_progress_tracker.ObserveInterruptingEop();
+                    interrupting_eop_sequence =
+                        submission_progress_tracker.ObserveInterruptingEop();
+                    LOG_WARNING(Lib_GnmDriver, "Parsed interrupting EOP sequence={}",
+                                interrupting_eop_sequence);
                 }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
@@ -825,9 +829,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                     reinterpret_cast<VAddr>(address));
                             }
                         },
-                        [this, interrupting_eop] {
+                        [this, interrupting_eop, interrupting_eop_sequence] {
                             if (interrupting_eop) {
-                                submission_progress_tracker.ObserveInterruptingEopCompletion();
+                                const auto completed =
+                                    submission_progress_tracker.ObserveInterruptingEopCompletion();
+                                LOG_WARNING(Lib_GnmDriver,
+                                            "Completed interrupting EOP sequence={} "
+                                            "total_completed={}",
+                                            interrupting_eop_sequence, completed);
                             }
                             Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
                         },
@@ -846,9 +855,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             fence_write_progress_tracker.Complete(reinterpret_cast<VAddr>(address));
                         }
                     },
-                    [this, interrupting_eop] {
+                    [this, interrupting_eop, interrupting_eop_sequence] {
                         if (interrupting_eop) {
-                            submission_progress_tracker.ObserveInterruptingEopCompletion();
+                            const auto completed =
+                                submission_progress_tracker.ObserveInterruptingEopCompletion();
+                            LOG_WARNING(Lib_GnmDriver,
+                                        "Completed interrupting EOP sequence={} total_completed={}",
+                                        interrupting_eop_sequence, completed);
                         }
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
                     });

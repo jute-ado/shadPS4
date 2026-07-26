@@ -232,8 +232,8 @@ TEST(SubmissionProgressTracker, ReportsWorkSinceThePreviousBoundary) {
 
     tracker.ObserveGfxSubmission();
     tracker.ObserveGfxSubmission();
-    tracker.ObserveInterruptingEop();
-    tracker.ObserveInterruptingEopCompletion();
+    static_cast<void>(tracker.ObserveInterruptingEop());
+    static_cast<void>(tracker.ObserveInterruptingEopCompletion());
 
     const auto progress = tracker.CompleteBoundary();
     EXPECT_EQ(progress.gfx_submissions, 2u);
@@ -245,8 +245,8 @@ TEST(SubmissionProgressTracker, ResetsOnlyBoundaryDeltas) {
     AmdGpu::SubmissionProgressTracker tracker;
 
     tracker.ObserveGfxSubmission();
-    tracker.ObserveInterruptingEop();
-    tracker.ObserveInterruptingEopCompletion();
+    static_cast<void>(tracker.ObserveInterruptingEop());
+    static_cast<void>(tracker.ObserveInterruptingEopCompletion());
     static_cast<void>(tracker.CompleteBoundary());
 
     tracker.ObserveGfxSubmission();
@@ -255,5 +255,6 @@ TEST(SubmissionProgressTracker, ResetsOnlyBoundaryDeltas) {
     EXPECT_EQ(progress.gfx_submissions, 1u);
     EXPECT_EQ(progress.interrupting_eops, 0u);
     EXPECT_EQ(progress.completed_interrupting_eops, 0u);
+    EXPECT_EQ(tracker.TotalInterruptingEops(), 1u);
     EXPECT_EQ(tracker.TotalCompletedInterruptingEops(), 1u);
 }

@@ -21,12 +21,12 @@ public:
         ++gfx_submissions;
     }
 
-    void ObserveInterruptingEop() noexcept {
-        ++interrupting_eops;
+    [[nodiscard]] u64 ObserveInterruptingEop() noexcept {
+        return ++interrupting_eops;
     }
 
-    void ObserveInterruptingEopCompletion() noexcept {
-        completed_interrupting_eops.fetch_add(1, std::memory_order_relaxed);
+    [[nodiscard]] u64 ObserveInterruptingEopCompletion() noexcept {
+        return completed_interrupting_eops.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     [[nodiscard]] SubmissionProgress CompleteBoundary() noexcept {
@@ -44,6 +44,10 @@ public:
 
     [[nodiscard]] u64 TotalCompletedInterruptingEops() const noexcept {
         return completed_interrupting_eops.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] u64 TotalInterruptingEops() const noexcept {
+        return interrupting_eops;
     }
 
 private:
