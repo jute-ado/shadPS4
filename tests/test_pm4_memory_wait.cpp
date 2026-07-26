@@ -40,11 +40,18 @@ TEST(Pm4MemoryWait, ReportsAnUnsatisfiedWaitAfterPublishingCurrentGpuWrites) {
     EXPECT_EQ(publications, 1u);
 }
 
-TEST(Pm4MemoryWait, ReportsAWaitOnlyOnceAfterItsYieldThreshold) {
+TEST(Pm4MemoryWait, ReportsAWaitAtIncreasingYieldThresholds) {
     AmdGpu::WaitYieldTracker tracker{3};
 
     EXPECT_FALSE(tracker.ObserveYield());
     EXPECT_FALSE(tracker.ObserveYield());
     EXPECT_TRUE(tracker.ObserveYield());
     EXPECT_FALSE(tracker.ObserveYield());
+    EXPECT_FALSE(tracker.ObserveYield());
+    EXPECT_TRUE(tracker.ObserveYield());
+    for (int yield = 0; yield < 5; ++yield) {
+        EXPECT_FALSE(tracker.ObserveYield());
+    }
+    EXPECT_TRUE(tracker.ObserveYield());
+    EXPECT_EQ(tracker.YieldCount(), 12u);
 }

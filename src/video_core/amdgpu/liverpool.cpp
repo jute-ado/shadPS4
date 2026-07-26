@@ -904,12 +904,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
                 } else {
-                    WaitYieldTracker wait_tracker{1'000};
+                    WaitYieldTracker wait_tracker{100'000};
                     while (!mem_semaphore->Signaled()) {
                         if (wait_tracker.ObserveYield()) {
                             LOG_WARNING(
                                 Lib_GnmDriver,
-                                "Graphics task stalled at MEM_SEMAPHORE address={:#x} value={:#x}",
+                                "Graphics task stalled for {} yields at MEM_SEMAPHORE "
+                                "address={:#x} value={:#x}",
+                                wait_tracker.YieldCount(),
                                 reinterpret_cast<VAddr>(mem_semaphore->Address<const u64*>()),
                                 *mem_semaphore->Address<const u64*>());
                         }
@@ -928,12 +930,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
-                WaitYieldTracker wait_tracker{1'000};
+                WaitYieldTracker wait_tracker{100'000};
                 while (!rewind->Valid()) {
                     if (wait_tracker.ObserveYield()) {
                         LOG_WARNING(Lib_GnmDriver,
-                                    "Graphics task stalled at REWIND packet={:#x} raw={:#x}",
-                                    reinterpret_cast<VAddr>(rewind), rewind->raw);
+                                    "Graphics task stalled for {} yields at REWIND packet={:#x} "
+                                    "raw={:#x}",
+                                    wait_tracker.YieldCount(), reinterpret_cast<VAddr>(rewind),
+                                    rewind->raw);
                     }
                     YIELD_GFX();
                 }
@@ -963,7 +967,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                      wait_reg_mem->Address<VAddr>(), sizeof(u32));
                                              });
                 };
-                WaitYieldTracker wait_tracker{1'000};
+                WaitYieldTracker wait_tracker{100'000};
                 while (!wait_satisfied()) {
                     if (wait_tracker.ObserveYield()) {
                         const u32 value =
@@ -972,8 +976,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 : regs.reg_array[wait_reg_mem->Reg()];
                         LOG_WARNING(
                             Lib_GnmDriver,
-                            "Graphics task stalled at WAIT_REG_MEM address={:#x} value={:#x} "
-                            "reference={:#x} mask={:#x} function={}",
+                            "Graphics task stalled for {} yields at WAIT_REG_MEM address={:#x} "
+                            "value={:#x} reference={:#x} mask={:#x} function={}",
+                            wait_tracker.YieldCount(),
                             wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory
                                 ? reinterpret_cast<VAddr>(wait_reg_mem->Address<const u32*>())
                                 : static_cast<VAddr>(wait_reg_mem->Reg()),

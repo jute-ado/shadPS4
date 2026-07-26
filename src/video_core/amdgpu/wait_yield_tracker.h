@@ -9,15 +9,23 @@ namespace AmdGpu {
 
 class WaitYieldTracker {
 public:
-    explicit WaitYieldTracker(u64 report_threshold_) : report_threshold{report_threshold_} {}
+    explicit WaitYieldTracker(u64 report_threshold_) : next_report_threshold{report_threshold_} {}
 
     [[nodiscard]] bool ObserveYield() noexcept {
         ++yield_count;
-        return yield_count == report_threshold;
+        if (yield_count != next_report_threshold) {
+            return false;
+        }
+        next_report_threshold *= 2;
+        return true;
+    }
+
+    [[nodiscard]] u64 YieldCount() const noexcept {
+        return yield_count;
     }
 
 private:
-    u64 report_threshold;
+    u64 next_report_threshold;
     u64 yield_count{};
 };
 
