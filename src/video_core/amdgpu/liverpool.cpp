@@ -178,10 +178,10 @@ void Liverpool::Process(std::stop_token stoken) {
                 rasterizer->OnSubmit();
                 SubmitSubmissionBoundary(
                     std::move(complete_boundary),
-                    [this](Common::UniqueFunction<void>&& completion) {
-                        rasterizer->DeferGpuCompletion(std::move(completion));
+                    [this](Common::UniqueFunction<void>&& completion, u64 tick) {
+                        rasterizer->DeferGpuCompletion(std::move(completion), tick);
                     },
-                    [this] { rasterizer->Flush(); });
+                    [this] { return rasterizer->Flush(); });
             } else {
                 complete_boundary();
             }
@@ -815,10 +815,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     rasterizer->ProcessDownloadImages();
                     SubmitEop(
                         *event_eop,
-                        [this](Common::UniqueFunction<void>&& completion) {
-                            rasterizer->DeferGpuCompletion(std::move(completion));
+                        [this](Common::UniqueFunction<void>&& completion, u64 tick) {
+                            rasterizer->DeferGpuCompletion(std::move(completion), tick);
                         },
-                        [this] { rasterizer->Flush(); },
+                        [this] { return rasterizer->Flush(); },
                         [this](void* address, u64 data, u32 num_bytes) {
                             if (num_bytes == sizeof(u32) && data == 1) {
                                 fence_write_progress_tracker.Start(
@@ -1371,10 +1371,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 rasterizer->ProcessDownloadImages();
                 SubmitReleaseMem(
                     *release_mem,
-                    [this](Common::UniqueFunction<void>&& completion) {
-                        rasterizer->DeferGpuCompletion(std::move(completion));
+                    [this](Common::UniqueFunction<void>&& completion, u64 tick) {
+                        rasterizer->DeferGpuCompletion(std::move(completion), tick);
                     },
-                    [this] { rasterizer->Flush(); },
+                    [this] { return rasterizer->Flush(); },
                     [this](void* address, u64 data, u32 num_bytes) {
                         if (num_bytes == sizeof(u32) && data == 1) {
                             fence_write_progress_tracker.Start(reinterpret_cast<VAddr>(address));

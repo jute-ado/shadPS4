@@ -68,7 +68,7 @@ public:
     void UnmapMemory(VAddr addr, u64 size);
 
     void CpSync();
-    void DeferGpuCompletion(Common::UniqueFunction<void>&& completion);
+    void DeferGpuCompletion(Common::UniqueFunction<void>&& completion, u64 tick);
     u64 Flush();
     void Finish();
     void OnSubmit();

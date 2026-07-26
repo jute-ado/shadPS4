@@ -474,8 +474,8 @@ u64 Rasterizer::Flush() {
     return current_tick;
 }
 
-void Rasterizer::DeferGpuCompletion(Common::UniqueFunction<void>&& completion) {
-    scheduler.DeferPriorityOperation(std::move(completion));
+void Rasterizer::DeferGpuCompletion(Common::UniqueFunction<void>&& completion, u64 tick) {
+    scheduler.DeferPriorityOperationAtTick(std::move(completion), tick);
 }
 
 void Rasterizer::Finish() {
