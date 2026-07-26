@@ -22,6 +22,7 @@ std::string_view TestLabProbeJson() {
     "presented_frame_timing_trace",
     "render_resolution",
     "renderdoc_capture",
+    "stereo_pcm16_audio_capture",
     "touch_input"
   ]
 })";
