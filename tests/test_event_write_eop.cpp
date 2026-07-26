@@ -133,16 +133,19 @@ TEST(EventWriteEop, LatePrecedingFlipRunsAfterItsEopAlreadyCompleted) {
     EXPECT_TRUE(flip_signalled);
 }
 
-TEST(EventWriteEop, RejectsASecondFlipForTheSameEop) {
+TEST(EventWriteEop, DefersEveryFlipSharingTheSameEop) {
+    std::vector<int> signalled_flips;
     AmdGpu::EopFlipTracker tracker;
 
     auto complete_eop = tracker.BeginEop();
-    EXPECT_TRUE(
-        tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding, Common::UniqueFunction<void>{[] {}}));
-    EXPECT_FALSE(
-        tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding, Common::UniqueFunction<void>{[] {}}));
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                 [&] { signalled_flips.push_back(1); }));
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                 [&] { signalled_flips.push_back(2); }));
+    EXPECT_TRUE(signalled_flips.empty());
 
     complete_eop();
+    EXPECT_EQ(signalled_flips, (std::vector<int>{1, 2}));
 }
 
 TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include "common/types.h"
 #include "common/unique_function.h"
@@ -51,13 +52,10 @@ private:
             Common::UniqueFunction<void> ready_callback;
             {
                 std::scoped_lock lock{mutex};
-                if (flip) {
-                    return false;
-                }
                 if (completed) {
                     ready_callback = std::move(callback);
                 } else {
-                    flip = std::move(callback);
+                    flips.emplace_back(std::move(callback));
                 }
             }
             if (ready_callback) {
@@ -67,24 +65,24 @@ private:
         }
 
         void Complete() {
-            Common::UniqueFunction<void> ready_callback;
+            std::vector<Common::UniqueFunction<void>> ready_callbacks;
             {
                 std::scoped_lock lock{mutex};
                 if (completed) {
                     return;
                 }
                 completed = true;
-                ready_callback = std::move(flip);
+                ready_callbacks = std::move(flips);
             }
-            if (ready_callback) {
-                ready_callback();
+            for (auto& callback : ready_callbacks) {
+                callback();
             }
         }
 
     private:
         std::mutex mutex;
         bool completed{};
-        Common::UniqueFunction<void> flip;
+        std::vector<Common::UniqueFunction<void>> flips;
     };
 
     std::shared_ptr<Eop> last_eop;
