@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "core/libraries/kernel/threads/guest_thread_priority.h"
+#include "video_core/amdgpu/gpu_thread_priority.h"
 
 using Common::ThreadPriority;
 using Libraries::Kernel::MapGuestThreadPriority;
@@ -27,4 +28,10 @@ TEST(GuestThreadPriority, LowerRealtimeValuesMapAboveTheDefault) {
 TEST(GuestThreadPriority, HigherRealtimeValuesMapBelowTheDefault) {
     EXPECT_EQ(MapGuestThreadPriority(SchedPolicy::Fifo, 701), ThreadPriority::Low);
     EXPECT_EQ(MapGuestThreadPriority(SchedPolicy::RoundRobin, 767), ThreadPriority::Low);
+}
+
+TEST(GuestThreadPriority, GpuCommandProcessingOutranksGuestWorkers) {
+    EXPECT_GT(static_cast<u32>(AmdGpu::GpuCommandProcessorPriority()),
+              static_cast<u32>(MapGuestThreadPriority(SchedPolicy::Fifo, 699)));
+    EXPECT_NE(AmdGpu::GpuCommandProcessorPriority(), ThreadPriority::Critical);
 }
