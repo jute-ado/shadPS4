@@ -825,7 +825,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                     reinterpret_cast<VAddr>(address));
                             }
                             auto* memory = Core::Memory::Instance();
-                            if (!memory->TryWriteBackingNonBlocking(address, &data, num_bytes)) {
+                            if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                                 memcpy(address, &data, num_bytes);
                             }
                             if (num_bytes == sizeof(u32) && data == 1) {
@@ -1380,7 +1380,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                             fence_write_progress_tracker.Start(reinterpret_cast<VAddr>(address));
                         }
                         auto* memory = Core::Memory::Instance();
-                        if (!memory->TryWriteBackingNonBlocking(address, &data, num_bytes)) {
+                        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                             memcpy(address, &data, num_bytes);
                         }
                         if (num_bytes == sizeof(u32) && data == 1) {
