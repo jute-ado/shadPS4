@@ -73,5 +73,15 @@ TEST(FlipLabelGeneration, LatestPresentationCanReleaseItsReservation) {
     EXPECT_NE(older, latest);
 }
 
+TEST(FlipLabelGeneration, OlderPresentationCannotHideDisplayedLatestReservation) {
+    FlipLabelGeneration generation;
+    const auto older = generation.Reserve();
+    const auto latest = generation.Reserve();
+    generation.Display(latest);
+    generation.Display(older);
+
+    EXPECT_TRUE(generation.CanReleaseDisplayed());
+}
+
 } // namespace
 } // namespace Libraries::VideoOut

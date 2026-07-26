@@ -39,7 +39,9 @@ public:
     }
 
     constexpr void Display(u64 generation) {
-        displayed_reservation = generation;
+        if (generation > displayed_reservation) {
+            displayed_reservation = generation;
+        }
     }
 
     [[nodiscard]] constexpr bool CanReleaseDisplayed() const {
