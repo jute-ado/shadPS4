@@ -337,6 +337,10 @@ s64 PS4_SYSV_ABI write(s32 fd, const void* buf, u64 nbytes) {
         *__Error() = POSIX_EBADF;
         return -1;
     }
+    if (!file->f.IsWritable()) {
+        *__Error() = POSIX_EBADF;
+        return -1;
+    }
 
     return file->f.WriteRaw<u8>(buf, nbytes);
 }
@@ -391,7 +395,7 @@ s64 PS4_SYSV_ABI readv(s32 fd, const OrbisKernelIovec* iov, s32 iovcnt) {
         return result;
     }
 
-    if (file->f.IsWriteOnly()) {
+    if (!file->f.IsReadable()) {
         *__Error() = POSIX_EBADF;
         return -1;
     }
@@ -434,6 +438,10 @@ s64 PS4_SYSV_ABI writev(s32 fd, const OrbisKernelIovec* iov, s32 iovcnt) {
         }
         return result;
     } else if (file->type == Core::FileSys::FileType::Directory) {
+        *__Error() = POSIX_EBADF;
+        return -1;
+    }
+    if (!file->f.IsWritable()) {
         *__Error() = POSIX_EBADF;
         return -1;
     }
@@ -556,7 +564,7 @@ s64 PS4_SYSV_ABI read(s32 fd, void* buf, u64 nbytes) {
         return file->socket->ReceivePacket(buf, nbytes, 0, nullptr, 0);
     }
 
-    if (file->f.IsWriteOnly()) {
+    if (!file->f.IsReadable()) {
         *__Error() = POSIX_EBADF;
         return -1;
     }
@@ -968,7 +976,7 @@ s64 PS4_SYSV_ABI posix_preadv(s32 fd, OrbisKernelIovec* iov, s32 iovcnt, s64 off
         return result;
     }
 
-    if (file->f.IsWriteOnly()) {
+    if (!file->f.IsReadable()) {
         *__Error() = POSIX_EBADF;
         return -1;
     }
@@ -1133,6 +1141,10 @@ s64 PS4_SYSV_ABI posix_pwritev(s32 fd, const OrbisKernelIovec* iov, s32 iovcnt, 
         }
         return result;
     } else if (file->type == Core::FileSys::FileType::Directory) {
+        *__Error() = POSIX_EBADF;
+        return -1;
+    }
+    if (!file->f.IsWritable()) {
         *__Error() = POSIX_EBADF;
         return -1;
     }

@@ -646,6 +646,19 @@ target_compile_features(shadps4_file_read_staging_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_file_read_staging_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_file_read_staging_test)
 
+add_executable(shadps4_io_file_access_test
+    test_io_file_access.cpp
+)
+target_include_directories(shadps4_io_file_access_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_io_file_access_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_io_file_access_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_io_file_access_test)
+
 add_executable(shadps4_event_flag_policy_test
     test_event_flag_policy.cpp
 )
