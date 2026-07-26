@@ -13,8 +13,9 @@
 #include <array>
 #include <functional>
 #include <mutex>
-#include <unordered_map>
 #include <queue>
+#include <unordered_map>
+#include <vector>
 
 namespace Platform {
 
@@ -67,19 +68,28 @@ struct IrqController {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Unexpected IRQ signaled");
         auto& ctx = irq_contexts[static_cast<size_t>(irq)];
-        std::unique_lock lock{ctx.m_lock};
+        std::unique_lock signal_lock{ctx.m_signal_lock};
+        std::vector<IrqHandler> persistent_handlers;
+        IrqHandler one_time_handler;
+        {
+            std::unique_lock lock{ctx.m_lock};
+            persistent_handlers.reserve(ctx.persistent_handlers.size());
+            for (const auto& [uid, handler] : ctx.persistent_handlers) {
+                persistent_handlers.emplace_back(handler);
+            }
+            if (!ctx.one_time_subscribers.empty()) {
+                one_time_handler = std::move(ctx.one_time_subscribers.front());
+                ctx.one_time_subscribers.pop();
+            }
+        }
 
         LOG_TRACE(Core, "IRQ signaled: {}", magic_enum::enum_name(irq));
 
-        for (auto& [uid, h] : ctx.persistent_handlers) {
-            h(irq);
+        for (auto& handler : persistent_handlers) {
+            handler(irq);
         }
-
-        if (!ctx.one_time_subscribers.empty()) {
-            const auto& h = ctx.one_time_subscribers.front();
-            h(irq);
-
-            ctx.one_time_subscribers.pop();
+        if (one_time_handler) {
+            one_time_handler(irq);
         }
     }
 
@@ -88,6 +98,7 @@ private:
         std::unordered_map<void*, IrqHandler> persistent_handlers{};
         std::queue<IrqHandler> one_time_subscribers{};
         std::mutex m_lock{};
+        std::mutex m_signal_lock{};
     };
     static constexpr size_t NumInterrupts = static_cast<size_t>(InterruptId::InterruptIdMax) + 1;
     std::array<IrqContext, NumInterrupts> irq_contexts{};
