@@ -53,13 +53,14 @@ TEST(FlipQueueCapacity, CompletingReservedEopFlipReleasesBothCounters) {
     EXPECT_EQ(eop_flips, 0);
 }
 
-TEST(FlipLabelGeneration, OlderPresentationCannotReleaseNewerReservation) {
+TEST(FlipLabelGeneration, OlderPresentationCanReleaseBeforeNewerReservationCompletes) {
     FlipLabelGeneration generation;
     const auto first = generation.Reserve();
+    generation.Complete(first);
     generation.Display(first);
     const auto newer = generation.Reserve();
 
-    EXPECT_FALSE(generation.CanReleaseDisplayed());
+    EXPECT_TRUE(generation.CanReleaseDisplayed());
     EXPECT_NE(first, newer);
 }
 
@@ -67,6 +68,7 @@ TEST(FlipLabelGeneration, LatestPresentationCanReleaseItsReservation) {
     FlipLabelGeneration generation;
     const auto older = generation.Reserve();
     const auto latest = generation.Reserve();
+    generation.Complete(latest);
     generation.Display(latest);
 
     EXPECT_TRUE(generation.CanReleaseDisplayed());
@@ -77,10 +79,21 @@ TEST(FlipLabelGeneration, OlderPresentationCannotHideDisplayedLatestReservation)
     FlipLabelGeneration generation;
     const auto older = generation.Reserve();
     const auto latest = generation.Reserve();
+    generation.Complete(latest);
     generation.Display(latest);
     generation.Display(older);
 
     EXPECT_TRUE(generation.CanReleaseDisplayed());
+}
+
+TEST(FlipLabelGeneration, OlderPresentationCannotReleaseNewerCompletedGeneration) {
+    FlipLabelGeneration generation;
+    const auto older = generation.Reserve();
+    const auto latest = generation.Reserve();
+    generation.Complete(latest);
+    generation.Display(older);
+
+    EXPECT_FALSE(generation.CanReleaseDisplayed());
 }
 
 } // namespace

@@ -307,7 +307,7 @@ bool VideoOutDriver::ReserveFlip(VideoOutPort* port, s32 index, bool is_eop, u64
         LOG_ERROR(Lib_VideoOut, "Flip queue is full");
         return false;
     }
-    if (index != -1) {
+    if (index != -1 && is_eop) {
         const auto reserved_generation = port->flip_label_generations[index].Reserve();
         if (generation != nullptr) {
             *generation = reserved_generation;
@@ -335,6 +335,10 @@ void VideoOutDriver::SubmitReservedFlip(VideoOutPort* port, s32 index, s64 flip_
         liverpool->SendCommand(
             [=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop, generation); });
     } else {
+        {
+            std::unique_lock lock{port->port_mutex};
+            port->flip_label_generations[index].Complete(generation);
+        }
         SubmitFlipInternal(port, index, flip_arg, is_eop, generation);
     }
 }
