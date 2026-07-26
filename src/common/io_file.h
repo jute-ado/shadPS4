@@ -108,9 +108,31 @@ public:
         return file != nullptr;
     }
 
+    static constexpr bool IsReadableMode(FileAccessMode mode) {
+        return mode == FileAccessMode::Read || mode == FileAccessMode::ReadWrite ||
+               mode == FileAccessMode::ReadAppend;
+    }
+
+    static constexpr bool IsWritableMode(FileAccessMode mode) {
+        return mode == FileAccessMode::Write || mode == FileAccessMode::ReadWrite ||
+               mode == FileAccessMode::Append || mode == FileAccessMode::ReadAppend ||
+               mode == FileAccessMode::Create;
+    }
+
+    static constexpr bool IsWriteOnlyMode(FileAccessMode mode) {
+        return IsWritableMode(mode) && !IsReadableMode(mode);
+    }
+
+    bool IsReadable() const {
+        return IsReadableMode(file_access_mode);
+    }
+
+    bool IsWritable() const {
+        return IsWritableMode(file_access_mode);
+    }
+
     bool IsWriteOnly() const {
-        return file_access_mode == FileAccessMode::Append ||
-               file_access_mode == FileAccessMode::Write;
+        return IsWriteOnlyMode(file_access_mode);
     }
 
     uintptr_t GetFileMapping();
