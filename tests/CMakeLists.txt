@@ -52,6 +52,26 @@ target_compile_features(shadps4_renderdoc_path_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
 
+add_executable(shadps4_renderdoc_capture_state_test
+    test_renderdoc_capture_state.cpp
+)
+target_include_directories(shadps4_renderdoc_capture_state_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_renderdoc_capture_state_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_renderdoc_capture_state_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_renderdoc_capture_state_test)
+
+add_executable(shadps4_ipc_capabilities_test
+    test_ipc_capabilities.cpp
+)
+target_include_directories(shadps4_ipc_capabilities_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
+
 set(SETTINGS_TEST_SOURCES
     # Under test
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp

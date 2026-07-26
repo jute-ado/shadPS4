@@ -2,6 +2,7 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "ipc.h"
+#include "ipc_capabilities.h"
 
 #include <iostream>
 #include <string>
@@ -82,6 +83,11 @@ void IPC::Init() {
         return;
     }
 
+    // The IPC handshake must describe capabilities available in this process,
+    // not merely features compiled into the binary. Explicitly injected or
+    // configured RenderDoc runtimes can be loaded before settings exist.
+    VideoCore::LoadRenderDoc(false);
+
     EmulatorState::GetInstance()->SetAutoPatchesLoadEnabled(false);
 
     input_thread = std::jthread([this] {
@@ -90,11 +96,9 @@ void IPC::Init() {
     });
 
     std::cerr << ";#IPC_ENABLED\n";
-    std::cerr << ";ENABLE_MEMORY_PATCH\n";
-    std::cerr << ";ENABLE_EMU_CONTROL\n";
-    std::cerr << ";ENABLE_SCREENSHOT\n";
-    std::cerr << ";ENABLE_RENDERDOC_CAPTURE\n";
-    std::cerr << ";ENABLE_GAMEPAD\n";
+    for (const auto capability : Core::Ipc::IpcCapabilities(VideoCore::IsRenderDocLoaded())) {
+        std::cerr << ';' << capability << '\n';
+    }
     std::cerr << ";#IPC_END\n";
     std::cerr.flush();
 

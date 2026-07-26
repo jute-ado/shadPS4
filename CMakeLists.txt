@@ -880,6 +880,7 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/file_sys/fs.h
          src/core/ipc/ipc.cpp
          src/core/ipc/ipc.h
+         src/core/ipc/ipc_capabilities.h
          src/core/test_lab_probe.cpp
          src/core/test_lab_probe.h
          src/core/loader/dwarf.cpp
@@ -1142,6 +1143,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/multi_level_page_table.h
                src/video_core/renderdoc.cpp
                src/video_core/renderdoc.h
+               src/video_core/renderdoc_capture_state.h
                src/video_core/renderdoc_path.cpp
                src/video_core/renderdoc_path.h
 )
