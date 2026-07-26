@@ -484,6 +484,19 @@ target_link_libraries(shadps4_test_lab_probe_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_test_lab_probe_test)
 
+add_executable(shadps4_test_lab_audio_capture_test
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/audio/test_lab_audio_capture.cpp
+    test_test_lab_audio_capture.cpp
+)
+target_include_directories(shadps4_test_lab_audio_capture_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_audio_capture_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_audio_capture_test PRIVATE
+    GTest::gtest_main
+)
+list(APPEND TEST_TARGETS shadps4_test_lab_audio_capture_test)
+
 add_executable(shadps4_presenter_sync_test
     test_presenter_sync.cpp
 )
