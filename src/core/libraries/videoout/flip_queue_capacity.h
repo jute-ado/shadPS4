@@ -38,16 +38,25 @@ public:
         return ++latest_reservation;
     }
 
+    constexpr void Complete(u64 generation) {
+        if (generation > latest_completion) {
+            latest_completion = generation;
+        }
+    }
+
     constexpr void Display(u64 generation) {
-        displayed_reservation = generation;
+        if (generation > displayed_reservation) {
+            displayed_reservation = generation;
+        }
     }
 
     [[nodiscard]] constexpr bool CanReleaseDisplayed() const {
-        return displayed_reservation == latest_reservation;
+        return displayed_reservation == latest_completion;
     }
 
 private:
     u64 latest_reservation{};
+    u64 latest_completion{};
     u64 displayed_reservation{};
 };
 
