@@ -6,11 +6,11 @@
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/range_lock.h"
-#include "common/signal_context.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/windows_fault_access.h"
 
 #ifndef _WIN64
 #include <sys/mman.h>
@@ -209,12 +209,24 @@ struct PageManager::Impl {
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
-        if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, 8);
-        } else {
-            return rasterizer->ReadMemory(addr, 8);
+        const auto* exception = static_cast<const EXCEPTION_POINTERS*>(context);
+        if (exception == nullptr || exception->ExceptionRecord == nullptr) {
+            return false;
         }
-        return false;
+
+        const auto access =
+            DecodeWindowsFaultAccess(exception->ExceptionRecord->ExceptionInformation[0]);
+        bool handled = false;
+        if (access == WindowsFaultAccess::Write) {
+            handled = rasterizer->InvalidateMemory(addr, 8);
+        } else if (access == WindowsFaultAccess::Read) {
+            handled = rasterizer->ReadMemory(addr, 8);
+        }
+
+        // A CPU can enter this handler after another thread removed the final watcher and restored
+        // host access. The cache no longer owns that delayed fault, so retry the instruction only
+        // when the page's current protection independently permits the requested data access.
+        return handled || IsWindowsFaultAccessAllowed(fault_address, access);
     }
 #endif
 

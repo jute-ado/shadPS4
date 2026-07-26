@@ -403,6 +403,17 @@ if(WIN32)
     target_compile_features(shadps4_windows_sparse_backing_test PRIVATE cxx_std_23)
     target_link_libraries(shadps4_windows_sparse_backing_test PRIVATE GTest::gtest_main)
     list(APPEND TEST_TARGETS shadps4_windows_sparse_backing_test)
+
+    add_executable(shadps4_windows_fault_access_test
+        test_windows_fault_access.cpp
+        ${CMAKE_SOURCE_DIR}/src/video_core/windows_fault_access.cpp
+    )
+    target_include_directories(shadps4_windows_fault_access_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_compile_features(shadps4_windows_fault_access_test PRIVATE cxx_std_23)
+    target_link_libraries(shadps4_windows_fault_access_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_fault_access_test)
 endif()
 
 add_executable(shadps4_pm4_lod_stats_test
