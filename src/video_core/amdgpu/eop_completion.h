@@ -19,8 +19,8 @@ void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&
         packet.SignalFence(write_memory, signal_interrupt);
         notify_completion();
     };
-    const auto tick = std::forward<SubmitGpuWork>(submit_gpu_work)();
-    std::forward<DeferCompletion>(defer_completion)(std::move(completion), tick);
+    std::forward<DeferCompletion>(defer_completion)(std::move(completion));
+    std::forward<SubmitGpuWork>(submit_gpu_work)();
 }
 
 template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,
@@ -37,13 +37,14 @@ template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typ
 void SubmitReleaseMem(Packet packet, DeferCompletion&& defer_completion,
                       SubmitGpuWork&& submit_gpu_work, WriteMemory&& write_memory,
                       SignalInterrupt&& signal_interrupt, GdsToMemory&& gds_to_memory) {
-    auto completion = [packet, write_memory = std::forward<WriteMemory>(write_memory),
-                       signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
-                       gds_to_memory = std::forward<GdsToMemory>(gds_to_memory)]() mutable {
-        packet.SignalFence(write_memory, signal_interrupt, gds_to_memory);
-    };
-    const auto tick = std::forward<SubmitGpuWork>(submit_gpu_work)();
-    std::forward<DeferCompletion>(defer_completion)(std::move(completion), tick);
+    auto completion =
+        [packet, write_memory = std::forward<WriteMemory>(write_memory),
+         signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+         gds_to_memory = std::forward<GdsToMemory>(gds_to_memory)]() mutable {
+            packet.SignalFence(write_memory, signal_interrupt, gds_to_memory);
+        };
+    std::forward<DeferCompletion>(defer_completion)(std::move(completion));
+    std::forward<SubmitGpuWork>(submit_gpu_work)();
 }
 
 } // namespace AmdGpu

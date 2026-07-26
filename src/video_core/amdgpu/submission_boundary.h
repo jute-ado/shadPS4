@@ -10,8 +10,8 @@ namespace AmdGpu {
 template <typename Completion, typename DeferCompletion, typename SubmitGpuWork>
 void SubmitSubmissionBoundary(Completion&& completion, DeferCompletion&& defer_completion,
                               SubmitGpuWork&& submit_gpu_work) {
-    const auto tick = std::forward<SubmitGpuWork>(submit_gpu_work)();
-    std::forward<DeferCompletion>(defer_completion)(std::forward<Completion>(completion), tick);
+    std::forward<DeferCompletion>(defer_completion)(std::forward<Completion>(completion));
+    std::forward<SubmitGpuWork>(submit_gpu_work)();
 }
 
 } // namespace AmdGpu
