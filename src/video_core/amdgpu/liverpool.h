@@ -22,6 +22,7 @@
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
+#include "video_core/amdgpu/submission_progress_tracker.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -206,6 +207,8 @@ private:
     u64 pixel_counter{};
     bool predicate_skip{};
     EopFlipTracker eop_flip_tracker;
+    SubmissionProgressTracker submission_progress_tracker;
+    u64 submission_boundary_sequence{};
 
     struct ConstantEngine {
         void Reset() {

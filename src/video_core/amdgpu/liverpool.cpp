@@ -133,6 +133,9 @@ void Liverpool::Process(std::stop_token stoken) {
 
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
+                if (curr_qid == GfxQueueId) {
+                    submission_progress_tracker.ObserveGfxSubmission();
+                }
 
                 --num_submits;
                 std::scoped_lock lock2{submit_mutex};
@@ -151,16 +154,35 @@ void Liverpool::Process(std::stop_token stoken) {
         }
         if (has_submit_done) {
             VideoCore::EndCapture();
+            const auto boundary_sequence = submission_boundary_sequence++;
+            const auto progress = submission_progress_tracker.CompleteBoundary();
+            const auto completed_before_gpu =
+                submission_progress_tracker.TotalCompletedInterruptingEops();
+            LOG_WARNING(Lib_GnmDriver,
+                        "Submission progress boundary={} gfx_submissions={} interrupting_eops={} "
+                        "completed_eops={} total_completed_before_gpu={}",
+                        boundary_sequence, progress.gfx_submissions, progress.interrupting_eops,
+                        progress.completed_interrupting_eops, completed_before_gpu);
+            auto complete_boundary = [this, boundary_sequence,
+                                      completion = std::move(submit_done_callback)]() mutable {
+                LOG_WARNING(Lib_GnmDriver,
+                            "Submission progress GPU boundary={} total_completed_eops={}",
+                            boundary_sequence,
+                            submission_progress_tracker.TotalCompletedInterruptingEops());
+                if (completion) {
+                    completion();
+                }
+            };
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 SubmitSubmissionBoundary(
-                    std::move(submit_done_callback),
+                    std::move(complete_boundary),
                     [this](Common::UniqueFunction<void>&& completion) {
                         rasterizer->DeferGpuCompletion(std::move(completion));
                     },
                     [this] { rasterizer->Flush(); });
-            } else if (submit_done_callback) {
-                submit_done_callback();
+            } else {
+                complete_boundary();
             }
         }
 
@@ -772,6 +794,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                const bool interrupting_eop = event_eop->int_sel != InterruptSelect::None;
+                if (interrupting_eop) {
+                    submission_progress_tracker.ObserveInterruptingEop();
+                }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
@@ -787,7 +813,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 memcpy(address, &data, num_bytes);
                             }
                         },
-                        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
+                        [this, interrupting_eop] {
+                            if (interrupting_eop) {
+                                submission_progress_tracker.ObserveInterruptingEopCompletion();
+                            }
+                            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                        },
                         [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
                             complete_eop_flip();
                         });
@@ -800,7 +831,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             memcpy(address, &data, num_bytes);
                         }
                     },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                    [this, interrupting_eop] {
+                        if (interrupting_eop) {
+                            submission_progress_tracker.ObserveInterruptingEopCompletion();
+                        }
+                        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                    });
                 complete_eop_flip();
                 break;
             }

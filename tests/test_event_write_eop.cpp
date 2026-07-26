@@ -12,6 +12,7 @@
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
+#include "video_core/amdgpu/submission_progress_tracker.h"
 
 namespace {
 
@@ -224,4 +225,35 @@ TEST(SubmissionBoundaryQueue, PreservesConsecutiveCallbacksInFifoOrder) {
 
     EXPECT_TRUE(queue.Empty());
     EXPECT_EQ(order, (std::vector<int>{1, 2}));
+}
+
+TEST(SubmissionProgressTracker, ReportsWorkSinceThePreviousBoundary) {
+    AmdGpu::SubmissionProgressTracker tracker;
+
+    tracker.ObserveGfxSubmission();
+    tracker.ObserveGfxSubmission();
+    tracker.ObserveInterruptingEop();
+    tracker.ObserveInterruptingEopCompletion();
+
+    const auto progress = tracker.CompleteBoundary();
+    EXPECT_EQ(progress.gfx_submissions, 2u);
+    EXPECT_EQ(progress.interrupting_eops, 1u);
+    EXPECT_EQ(progress.completed_interrupting_eops, 1u);
+}
+
+TEST(SubmissionProgressTracker, ResetsOnlyBoundaryDeltas) {
+    AmdGpu::SubmissionProgressTracker tracker;
+
+    tracker.ObserveGfxSubmission();
+    tracker.ObserveInterruptingEop();
+    tracker.ObserveInterruptingEopCompletion();
+    static_cast<void>(tracker.CompleteBoundary());
+
+    tracker.ObserveGfxSubmission();
+    const auto progress = tracker.CompleteBoundary();
+
+    EXPECT_EQ(progress.gfx_submissions, 1u);
+    EXPECT_EQ(progress.interrupting_eops, 0u);
+    EXPECT_EQ(progress.completed_interrupting_eops, 0u);
+    EXPECT_EQ(tracker.TotalCompletedInterruptingEops(), 1u);
 }
