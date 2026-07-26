@@ -115,3 +115,11 @@ to make the branch pass.
 Git cannot atomically merge two repositories. Local development therefore uses
 a final clean paired run followed by consecutive merges. Cross-repository CI
 coordination is a separate future concern.
+
+## Audio capture contract
+
+When `EMULATOR_TEST_LAB_AUDIO_PCM16` contains an absolute output path,
+shadPS4 writes the normalized main AudioOut stream there as append-only
+48 kHz stereo signed PCM16. Capture occurs before the host audio backend, so
+it is independent of the selected sound device, speaker volume, and host
+mixer. The file is private run evidence and must never be committed.

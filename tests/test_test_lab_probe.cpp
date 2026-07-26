@@ -25,6 +25,7 @@ TEST(TestLabProbe, EmitsCanonicalProtocolOneCapabilityDocument) {
                   "presented_frame_screenshot",
                   "presented_frame_timing_trace",
                   "renderdoc_capture",
+                  "stereo_pcm16_audio_capture",
                   "touch_input",
               }));
 }
