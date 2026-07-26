@@ -69,3 +69,28 @@ TEST(Pm4MemoryWait, CorrelatesPendingFenceWritesByAddress) {
     EXPECT_EQ(progress.completed, 1u);
     EXPECT_EQ(tracker.Snapshot(0x5678).scheduled, 0u);
 }
+
+TEST(Pm4MemoryWait, ForcesGpuCompletionOnceForAPendingFenceAtTheWaitAddress) {
+    bool forced_completion = false;
+    unsigned finishes = 0;
+    unsigned reads = 0;
+
+    AmdGpu::PublishGpuMemoryWait(true, forced_completion, [&] { ++finishes; }, [&] { ++reads; });
+    AmdGpu::PublishGpuMemoryWait(true, forced_completion, [&] { ++finishes; }, [&] { ++reads; });
+
+    EXPECT_TRUE(forced_completion);
+    EXPECT_EQ(finishes, 1u);
+    EXPECT_EQ(reads, 1u);
+}
+
+TEST(Pm4MemoryWait, ReadsMemoryNormallyWhenNoFenceWriteIsPending) {
+    bool forced_completion = false;
+    unsigned finishes = 0;
+    unsigned reads = 0;
+
+    AmdGpu::PublishGpuMemoryWait(false, forced_completion, [&] { ++finishes; }, [&] { ++reads; });
+
+    EXPECT_FALSE(forced_completion);
+    EXPECT_EQ(finishes, 0u);
+    EXPECT_EQ(reads, 1u);
+}

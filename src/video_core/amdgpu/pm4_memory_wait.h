@@ -17,4 +17,15 @@ bool PollGpuMemoryWait(IsSatisfied&& is_satisfied, PublishGpuWrites&& publish_gp
     return std::invoke(is_satisfied);
 }
 
+template <typename FinishGpu, typename ReadMemory>
+void PublishGpuMemoryWait(bool has_pending_fence, bool& forced_completion, FinishGpu&& finish_gpu,
+                          ReadMemory&& read_memory) {
+    if (has_pending_fence && !forced_completion) {
+        forced_completion = true;
+        std::invoke(std::forward<FinishGpu>(finish_gpu));
+        return;
+    }
+    std::invoke(std::forward<ReadMemory>(read_memory));
+}
+
 } // namespace AmdGpu
