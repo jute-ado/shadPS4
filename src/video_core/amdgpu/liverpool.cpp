@@ -153,12 +153,10 @@ void Liverpool::Process(std::stop_token stoken) {
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
-                SubmitSubmissionBoundary(
-                    std::move(submit_done_callback),
-                    [this](Common::UniqueFunction<void>&& completion) {
-                        rasterizer->DeferGpuCompletion(std::move(completion));
-                    },
-                    [this] { rasterizer->Flush(); });
+                SubmitSubmissionBoundary(std::move(submit_done_callback),
+                                         [this](Common::UniqueFunction<void>&& completion) {
+                                             rasterizer->SubmitGpuCompletion(std::move(completion));
+                                         });
             } else if (submit_done_callback) {
                 submit_done_callback();
             }
@@ -775,12 +773,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
-                    SubmitEop(
+                    SubmitEopAtomically(
                         *event_eop,
                         [this](Common::UniqueFunction<void>&& completion) {
-                            rasterizer->DeferGpuCompletion(std::move(completion));
+                            rasterizer->SubmitGpuCompletion(std::move(completion));
                         },
-                        [this] { rasterizer->Flush(); },
                         [](void* address, u64 data, u32 num_bytes) {
                             auto* memory = Core::Memory::Instance();
                             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
@@ -1252,12 +1249,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 rasterizer->ProcessDownloadImages();
-                SubmitReleaseMem(
+                SubmitReleaseMemAtomically(
                     *release_mem,
                     [this](Common::UniqueFunction<void>&& completion) {
-                        rasterizer->DeferGpuCompletion(std::move(completion));
+                        rasterizer->SubmitGpuCompletion(std::move(completion));
                     },
-                    [this] { rasterizer->Flush(); },
                     [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
                         if (!memory->TryWriteBacking(address, &data, num_bytes)) {

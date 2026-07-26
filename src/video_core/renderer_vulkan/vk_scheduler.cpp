@@ -12,6 +12,7 @@
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
+GpuCompletionSubmission Scheduler::gpu_completion_submission{Scheduler::submit_mutex};
 
 Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, master_semaphore{instance}, command_pool{instance, &master_semaphore} {
@@ -102,6 +103,16 @@ void Scheduler::Flush() {
     Flush(info);
 }
 
+void Scheduler::FlushWithGpuCompletion(Common::UniqueFunction<void>&& completion) {
+    SubmitInfo info{};
+    gpu_completion_submission.Submit(
+        std::move(completion), [this] { return CurrentTick(); },
+        [this](Common::UniqueFunction<void>&& callback, u64 tick) {
+            DeferPriorityOperationAtTick(std::move(callback), tick);
+        },
+        [this, &info] { SubmitExecutionWithSubmitLockHeld(info); });
+}
+
 void Scheduler::Finish() {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
@@ -151,6 +162,10 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
+    SubmitExecutionWithSubmitLockHeld(info);
+}
+
+void Scheduler::SubmitExecutionWithSubmitLockHeld(SubmitInfo& info) {
     const u64 signal_value = master_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED

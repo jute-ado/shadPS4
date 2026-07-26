@@ -32,19 +32,53 @@ void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&
               std::forward<SignalInterrupt>(signal_interrupt), [] {});
 }
 
+template <typename Packet, typename SubmitGpuWork, typename WriteMemory, typename SignalInterrupt,
+          typename NotifyCompletion>
+void SubmitEopAtomically(Packet packet, SubmitGpuWork&& submit_gpu_work, WriteMemory&& write_memory,
+                         SignalInterrupt&& signal_interrupt, NotifyCompletion&& notify_completion) {
+    auto completion = [packet, write_memory = std::forward<WriteMemory>(write_memory),
+                       signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+                       notify_completion =
+                           std::forward<NotifyCompletion>(notify_completion)]() mutable {
+        packet.SignalFence(write_memory, signal_interrupt);
+        notify_completion();
+    };
+    std::forward<SubmitGpuWork>(submit_gpu_work)(std::move(completion));
+}
+
+template <typename Packet, typename SubmitGpuWork, typename WriteMemory, typename SignalInterrupt>
+void SubmitEopAtomically(Packet packet, SubmitGpuWork&& submit_gpu_work, WriteMemory&& write_memory,
+                         SignalInterrupt&& signal_interrupt) {
+    SubmitEopAtomically(std::move(packet), std::forward<SubmitGpuWork>(submit_gpu_work),
+                        std::forward<WriteMemory>(write_memory),
+                        std::forward<SignalInterrupt>(signal_interrupt), [] {});
+}
+
 template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,
           typename SignalInterrupt, typename GdsToMemory>
 void SubmitReleaseMem(Packet packet, DeferCompletion&& defer_completion,
                       SubmitGpuWork&& submit_gpu_work, WriteMemory&& write_memory,
                       SignalInterrupt&& signal_interrupt, GdsToMemory&& gds_to_memory) {
-    auto completion =
-        [packet, write_memory = std::forward<WriteMemory>(write_memory),
-         signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
-         gds_to_memory = std::forward<GdsToMemory>(gds_to_memory)]() mutable {
-            packet.SignalFence(write_memory, signal_interrupt, gds_to_memory);
-        };
+    auto completion = [packet, write_memory = std::forward<WriteMemory>(write_memory),
+                       signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+                       gds_to_memory = std::forward<GdsToMemory>(gds_to_memory)]() mutable {
+        packet.SignalFence(write_memory, signal_interrupt, gds_to_memory);
+    };
     std::forward<DeferCompletion>(defer_completion)(std::move(completion));
     std::forward<SubmitGpuWork>(submit_gpu_work)();
+}
+
+template <typename Packet, typename SubmitGpuWork, typename WriteMemory, typename SignalInterrupt,
+          typename GdsToMemory>
+void SubmitReleaseMemAtomically(Packet packet, SubmitGpuWork&& submit_gpu_work,
+                                WriteMemory&& write_memory, SignalInterrupt&& signal_interrupt,
+                                GdsToMemory&& gds_to_memory) {
+    auto completion = [packet, write_memory = std::forward<WriteMemory>(write_memory),
+                       signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+                       gds_to_memory = std::forward<GdsToMemory>(gds_to_memory)]() mutable {
+        packet.SignalFence(write_memory, signal_interrupt, gds_to_memory);
+    };
+    std::forward<SubmitGpuWork>(submit_gpu_work)(std::move(completion));
 }
 
 } // namespace AmdGpu

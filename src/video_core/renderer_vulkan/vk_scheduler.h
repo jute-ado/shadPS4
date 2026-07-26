@@ -11,6 +11,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/gpu_completion_submission.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_submit_info.h"
@@ -335,6 +336,9 @@ public:
     /// and increments the scheduler timeline semaphore.
     void Flush();
 
+    /// Atomically associates a completion with this exact GPU submission.
+    void FlushWithGpuCompletion(Common::UniqueFunction<void>&& completion);
+
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish();
 
@@ -393,23 +397,31 @@ public:
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
-        {
-            std::unique_lock lk(priority_pending_ops_mutex);
-            priority_pending_ops.emplace(std::move(func), CurrentTick());
-        }
-        priority_pending_ops_cv.notify_one();
+        DeferPriorityOperationAtTick(std::move(func), CurrentTick());
     }
 
     static std::mutex submit_mutex;
 
 private:
+    void DeferPriorityOperationAtTick(Common::UniqueFunction<void>&& func, u64 tick) {
+        {
+            std::unique_lock lk(priority_pending_ops_mutex);
+            priority_pending_ops.emplace(std::move(func), tick);
+        }
+        priority_pending_ops_cv.notify_one();
+    }
+
     void AllocateWorkerCommandBuffers();
 
     void SubmitExecution(SubmitInfo& info);
 
+    void SubmitExecutionWithSubmitLockHeld(SubmitInfo& info);
+
     void PriorityPendingOpsThread(std::stop_token stoken);
 
 private:
+    static GpuCompletionSubmission gpu_completion_submission;
+
     const Instance& instance;
     MasterSemaphore master_semaphore;
     CommandPool command_pool;
