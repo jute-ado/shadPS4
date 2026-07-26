@@ -795,6 +795,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                if (event_eop->data_sel == DataSelect::Data32Low && event_eop->DataDWord() == 1) {
+                    LOG_WARNING(Lib_GnmDriver, "Scheduled graphics EOP write-one address={:#x}",
+                                reinterpret_cast<VAddr>(event_eop->Address<u32>()));
+                }
                 const bool interrupting_eop = event_eop->int_sel != InterruptSelect::None;
                 if (interrupting_eop) {
                     submission_progress_tracker.ObserveInterruptingEop();
@@ -809,6 +813,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         },
                         [this] { rasterizer->Flush(); },
                         [](void* address, u64 data, u32 num_bytes) {
+                            if (num_bytes == sizeof(u32) && data == 1) {
+                                LOG_WARNING(Lib_GnmDriver,
+                                            "Completed graphics EOP write-one address={:#x}",
+                                            reinterpret_cast<VAddr>(address));
+                            }
                             auto* memory = Core::Memory::Instance();
                             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                                 memcpy(address, &data, num_bytes);
@@ -883,6 +892,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u32 data_size = (header->type3.count.Value() - 2) * 4;
                 u64* address = write_data->Address<u64*>();
                 if (!write_data->wr_one_addr.Value()) {
+                    if (data_size >= sizeof(u32) && write_data->data[0] == 1) {
+                        LOG_WARNING(Lib_GnmDriver,
+                                    "Completed graphics WRITE_DATA write-one address={:#x}",
+                                    reinterpret_cast<VAddr>(address));
+                    }
                     std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
@@ -1285,6 +1299,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
             if (!write_data->wr_one_addr.Value()) {
+                if (data_size >= sizeof(u32) && write_data->data[0] == 1) {
+                    LOG_WARNING(Lib_GnmDriver,
+                                "Completed compute WRITE_DATA write-one address={:#x}",
+                                reinterpret_cast<VAddr>(write_data->Address<u32*>()));
+                }
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
@@ -1322,6 +1341,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+            if (release_mem->data_sel == DataSelect::Data32Low && release_mem->DataDWord() == 1) {
+                LOG_WARNING(Lib_GnmDriver, "Scheduled compute RELEASE_MEM write-one address={:#x}",
+                            release_mem->Address<VAddr>());
+            }
             if (rasterizer) {
                 rasterizer->ProcessDownloadImages();
                 SubmitReleaseMem(
@@ -1331,6 +1354,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     },
                     [this] { rasterizer->Flush(); },
                     [](void* address, u64 data, u32 num_bytes) {
+                        if (num_bytes == sizeof(u32) && data == 1) {
+                            LOG_WARNING(Lib_GnmDriver,
+                                        "Completed compute RELEASE_MEM write-one address={:#x}",
+                                        reinterpret_cast<VAddr>(address));
+                        }
                         auto* memory = Core::Memory::Instance();
                         if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                             memcpy(address, &data, num_bytes);
