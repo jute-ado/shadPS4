@@ -14,6 +14,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
+#include "video_core/host_work_pause.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -328,9 +329,14 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
 
         GraphicsPipeline::SerializationSupport sdata{};
-        it.value() = std::make_unique<GraphicsPipeline>(
-            instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false);
+        VideoCore::RunWithGuestThreadsPaused(
+            [] { return DebugState.TryPauseGuestThreads(); },
+            [] { DebugState.ResumeGuestThreads(); },
+            [&] {
+                it.value() = std::make_unique<GraphicsPipeline>(
+                    instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
+                    runtime_infos, fetch_shader, modules, sdata, false);
+            });
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -358,9 +364,14 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
-        it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
-                                                       *pipeline_cache, compute_key, *infos[0],
-                                                       modules[0], sdata, false);
+        VideoCore::RunWithGuestThreadsPaused([] { return DebugState.TryPauseGuestThreads(); },
+                                             [] { DebugState.ResumeGuestThreads(); },
+                                             [&] {
+                                                 it.value() = std::make_unique<ComputePipeline>(
+                                                     instance, scheduler, desc_heap, profile,
+                                                     *pipeline_cache, compute_key, *infos[0],
+                                                     modules[0], sdata, false);
+                                             });
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
@@ -609,8 +620,14 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    std::vector<u32> spv;
+    VideoCore::RunWithGuestThreadsPaused(
+        [] { return DebugState.TryPauseGuestThreads(); }, [] { DebugState.ResumeGuestThreads(); },
+        [&] {
+            const auto ir_program =
+                Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+            spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+        });
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
     vk::ShaderModule module;

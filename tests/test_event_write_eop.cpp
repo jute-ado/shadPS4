@@ -13,6 +13,7 @@
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
 #include "video_core/amdgpu/submission_progress_tracker.h"
+#include "video_core/host_work_pause.h"
 
 namespace {
 
@@ -68,6 +69,50 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(fence, 0x12345678u);
     EXPECT_TRUE(interrupt_signalled);
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
+}
+
+TEST(HostWorkPause, PausesGuestThreadsOnlyWhileUncachedHostWorkRuns) {
+    std::vector<std::string> operations;
+
+    VideoCore::RunWithGuestThreadsPaused(
+        [&] {
+            operations.emplace_back("pause");
+            return true;
+        },
+        [&] { operations.emplace_back("resume"); }, [&] { operations.emplace_back("compile"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"pause", "compile", "resume"}));
+}
+
+TEST(HostWorkPause, ResumesGuestThreadsWhenHostWorkThrows) {
+    std::vector<std::string> operations;
+
+    EXPECT_THROW(VideoCore::RunWithGuestThreadsPaused(
+                     [&] {
+                         operations.emplace_back("pause");
+                         return true;
+                     },
+                     [&] { operations.emplace_back("resume"); },
+                     [&] {
+                         operations.emplace_back("compile");
+                         throw std::runtime_error{"compile failed"};
+                     }),
+                 std::runtime_error);
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"pause", "compile", "resume"}));
+}
+
+TEST(HostWorkPause, DoesNotResumePauseOwnedByAnotherCaller) {
+    std::vector<std::string> operations;
+
+    VideoCore::RunWithGuestThreadsPaused(
+        [&] {
+            operations.emplace_back("pause");
+            return false;
+        },
+        [&] { operations.emplace_back("resume"); }, [&] { operations.emplace_back("compile"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"pause", "compile"}));
 }
 
 TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {

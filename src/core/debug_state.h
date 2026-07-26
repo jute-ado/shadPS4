@@ -181,6 +181,8 @@ public:
 
     void PauseGuestThreads();
 
+    [[nodiscard]] bool TryPauseGuestThreads();
+
     void ResumeGuestThreads();
 
     bool IsGuestThreadsPaused() const {
