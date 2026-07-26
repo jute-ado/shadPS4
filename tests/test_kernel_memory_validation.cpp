@@ -188,6 +188,17 @@ TEST(KernelMemoryValidation, MappedMemoryOperationsRejectRangesOutsideTheAddress
     EXPECT_FALSE(Core::IsMappedMemoryOperationRangeValid(false));
 }
 
+TEST(KernelMemoryValidation, GpuVisibleMappingsRequireCompletedSubmissionBoundary) {
+    using Core::MemoryProt;
+
+    EXPECT_FALSE(Core::RequiresSubmissionBoundaryBeforeMapping(MemoryProt::NoAccess));
+    EXPECT_FALSE(Core::RequiresSubmissionBoundaryBeforeMapping(MemoryProt::CpuReadWrite));
+    EXPECT_TRUE(Core::RequiresSubmissionBoundaryBeforeMapping(MemoryProt::GpuRead));
+    EXPECT_TRUE(Core::RequiresSubmissionBoundaryBeforeMapping(MemoryProt::GpuWrite));
+    EXPECT_TRUE(Core::RequiresSubmissionBoundaryBeforeMapping(MemoryProt::CpuReadWrite |
+                                                              MemoryProt::GpuReadWrite));
+}
+
 TEST(KernelMemoryValidation, PoolDecommitValidatesEveryOverlappingArea) {
     const std::map<VAddr, Core::VirtualMemoryArea> areas{
         {0x1000,

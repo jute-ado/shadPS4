@@ -73,6 +73,10 @@ static s32 sdk_version{0};
 
 static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
 
+void WaitForSubmissionBoundary() {
+    submission_gate.WaitForBoundary();
+}
+
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;

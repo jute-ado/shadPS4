@@ -34,6 +34,11 @@ public:
         return open;
     }
 
+    void WaitForBoundary() {
+        Guard lock{mutex};
+        boundary_completed.wait(lock, [this] { return open; });
+    }
+
 private:
     void CompleteBoundary(std::uint64_t boundary) {
         {
