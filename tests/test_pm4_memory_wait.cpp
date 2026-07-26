@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/amdgpu/fence_write_progress_tracker.h"
 #include "video_core/amdgpu/pm4_memory_wait.h"
 #include "video_core/amdgpu/wait_yield_tracker.h"
 
@@ -54,4 +55,17 @@ TEST(Pm4MemoryWait, ReportsAWaitAtIncreasingYieldThresholds) {
     }
     EXPECT_TRUE(tracker.ObserveYield());
     EXPECT_EQ(tracker.YieldCount(), 12u);
+}
+
+TEST(Pm4MemoryWait, CorrelatesPendingFenceWritesByAddress) {
+    AmdGpu::FenceWriteProgressTracker tracker;
+
+    tracker.Schedule(0x1234);
+    tracker.Schedule(0x1234);
+    tracker.Complete(0x1234);
+
+    const auto progress = tracker.Snapshot(0x1234);
+    EXPECT_EQ(progress.scheduled, 2u);
+    EXPECT_EQ(progress.completed, 1u);
+    EXPECT_EQ(tracker.Snapshot(0x5678).scheduled, 0u);
 }

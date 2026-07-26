@@ -795,6 +795,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                const bool writes_one =
+                    event_eop->data_sel == DataSelect::Data32Low && event_eop->DataDWord() == 1;
+                const VAddr fence_address =
+                    writes_one ? reinterpret_cast<VAddr>(event_eop->Address<u32>()) : 0;
+                if (writes_one) {
+                    fence_write_progress_tracker.Schedule(fence_address);
+                }
                 const bool interrupting_eop = event_eop->int_sel != InterruptSelect::None;
                 if (interrupting_eop) {
                     submission_progress_tracker.ObserveInterruptingEop();
@@ -808,10 +815,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             rasterizer->DeferGpuCompletion(std::move(completion));
                         },
                         [this] { rasterizer->Flush(); },
-                        [](void* address, u64 data, u32 num_bytes) {
+                        [this](void* address, u64 data, u32 num_bytes) {
                             auto* memory = Core::Memory::Instance();
                             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                                 memcpy(address, &data, num_bytes);
+                            }
+                            if (num_bytes == sizeof(u32) && data == 1) {
+                                fence_write_progress_tracker.Complete(
+                                    reinterpret_cast<VAddr>(address));
                             }
                         },
                         [this, interrupting_eop] {
@@ -826,10 +837,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 event_eop->SignalFence(
-                    [](void* address, u64 data, u32 num_bytes) {
+                    [this](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
                         if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                             memcpy(address, &data, num_bytes);
+                        }
+                        if (num_bytes == sizeof(u32) && data == 1) {
+                            fence_write_progress_tracker.Complete(reinterpret_cast<VAddr>(address));
                         }
                     },
                     [this, interrupting_eop] {
@@ -970,20 +984,23 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 WaitYieldTracker wait_tracker{100'000};
                 while (!wait_satisfied()) {
                     if (wait_tracker.ObserveYield()) {
+                        const VAddr address =
+                            wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory
+                                ? reinterpret_cast<VAddr>(wait_reg_mem->Address<const u32*>())
+                                : static_cast<VAddr>(wait_reg_mem->Reg());
                         const u32 value =
                             wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory
                                 ? *wait_reg_mem->Address<const u32*>()
                                 : regs.reg_array[wait_reg_mem->Reg()];
+                        const auto fence_progress = fence_write_progress_tracker.Snapshot(address);
                         LOG_WARNING(
                             Lib_GnmDriver,
                             "Graphics task stalled for {} yields at WAIT_REG_MEM address={:#x} "
-                            "value={:#x} reference={:#x} mask={:#x} function={}",
-                            wait_tracker.YieldCount(),
-                            wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory
-                                ? reinterpret_cast<VAddr>(wait_reg_mem->Address<const u32*>())
-                                : static_cast<VAddr>(wait_reg_mem->Reg()),
-                            value, wait_reg_mem->ref, wait_reg_mem->mask,
-                            static_cast<u32>(wait_reg_mem->function.Value()));
+                            "value={:#x} reference={:#x} mask={:#x} function={} "
+                            "fence_writes_scheduled={} fence_writes_completed={}",
+                            wait_tracker.YieldCount(), address, value, wait_reg_mem->ref,
+                            wait_reg_mem->mask, static_cast<u32>(wait_reg_mem->function.Value()),
+                            fence_progress.scheduled, fence_progress.completed);
                     }
                     YIELD_GFX();
                 }
@@ -1322,6 +1339,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+            const bool writes_one =
+                release_mem->data_sel == DataSelect::Data32Low && release_mem->DataDWord() == 1;
+            const VAddr fence_address = writes_one ? release_mem->Address<VAddr>() : 0;
+            if (writes_one) {
+                fence_write_progress_tracker.Schedule(fence_address);
+            }
             if (rasterizer) {
                 rasterizer->ProcessDownloadImages();
                 SubmitReleaseMem(
@@ -1330,10 +1353,13 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                         rasterizer->DeferGpuCompletion(std::move(completion));
                     },
                     [this] { rasterizer->Flush(); },
-                    [](void* address, u64 data, u32 num_bytes) {
+                    [this](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
                         if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                             memcpy(address, &data, num_bytes);
+                        }
+                        if (num_bytes == sizeof(u32) && data == 1) {
+                            fence_write_progress_tracker.Complete(reinterpret_cast<VAddr>(address));
                         }
                     },
                     [pipe_id = queue.pipe_id] {
@@ -1347,10 +1373,13 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             release_mem->SignalFence(
-                [](void* address, u64 data, u32 num_bytes) {
+                [this](void* address, u64 data, u32 num_bytes) {
                     auto* memory = Core::Memory::Instance();
                     if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                         memcpy(address, &data, num_bytes);
+                    }
+                    if (num_bytes == sizeof(u32) && data == 1) {
+                        fence_write_progress_tracker.Complete(reinterpret_cast<VAddr>(address));
                     }
                 },
                 [pipe_id = queue.pipe_id] {
