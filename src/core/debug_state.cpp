@@ -61,14 +61,10 @@ void DebugStateImpl::RemoveCurrentThreadFromGuestList() {
 }
 
 void DebugStateImpl::PauseGuestThreads() {
-    static_cast<void>(TryPauseGuestThreads());
-}
-
-bool DebugStateImpl::TryPauseGuestThreads() {
     using namespace Libraries::MsgDialog;
     std::unique_lock lock{guest_threads_mutex};
     if (is_guest_threads_paused) {
-        return false;
+        return;
     }
     if (ShouldPauseInSubmit()) {
         waiting_submit_pause = false;
@@ -89,7 +85,6 @@ bool DebugStateImpl::TryPauseGuestThreads() {
     if (self_guest) {
         PauseThread(self_id);
     }
-    return true;
 }
 
 void DebugStateImpl::ResumeGuestThreads() {
