@@ -5,9 +5,9 @@
 #include "common/logging/formatter.h"
 #include "core/emulator_settings.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderdoc_capture_state.h"
 #include "video_core/renderdoc_path.h"
 
-#include <atomic>
 #include <cstdlib>
 #include <renderdoc_app.h>
 
@@ -21,17 +21,12 @@
 
 namespace VideoCore {
 
-enum class CaptureState {
-    Idle,
-    Triggered,
-    InProgress,
-};
-static CaptureState capture_state{CaptureState::Idle};
+static RenderDocCaptureState capture_state;
 static ScreenshotRequestQueue screenshot_requests;
 
 RENDERDOC_API_1_6_0* rdoc_api{};
 
-void LoadRenderDoc() {
+void LoadRenderDoc(const bool allow_offline_loading) {
     if (rdoc_api) {
         return;
     }
@@ -48,7 +43,7 @@ void LoadRenderDoc() {
             LOG_ERROR(Render, "SHADPS4_RENDERDOC_PATH does not contain a RenderDoc library");
         }
     }
-    if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
+    if (!mod && allow_offline_loading && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
         HKEY h_reg_key;
         LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
@@ -99,7 +94,7 @@ void LoadRenderDoc() {
             LOG_ERROR(Render, "SHADPS4_RENDERDOC_PATH does not contain a RenderDoc library");
         }
     }
-    if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
+    if (!mod && allow_offline_loading && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
         if (!(mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
             LOG_ERROR(Render, "Cannot load RenderDoc: {}", dlerror());
@@ -131,9 +126,9 @@ void StartCapture() {
         return;
     }
 
-    if (capture_state == CaptureState::Triggered) {
+    if (capture_state.BeginSubmission()) {
         rdoc_api->StartFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::InProgress;
+        LOG_WARNING(Common, "RenderDoc capture started");
     }
 }
 
@@ -142,16 +137,14 @@ void EndCapture() {
         return;
     }
 
-    if (capture_state == CaptureState::InProgress) {
-        rdoc_api->EndFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::Idle;
+    if (capture_state.EndSubmission()) {
+        const u32 result = rdoc_api->EndFrameCapture(nullptr, nullptr);
+        LOG_WARNING(Common, "RenderDoc capture end result: {}", result);
     }
 }
 
 void TriggerCapture() {
-    if (capture_state == CaptureState::Idle) {
-        capture_state = CaptureState::Triggered;
-    }
+    (void)capture_state.Trigger();
 }
 
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix) {

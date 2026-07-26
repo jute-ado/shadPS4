@@ -108,8 +108,6 @@ void Liverpool::Process(std::stop_token stoken) {
             break;
         }
 
-        VideoCore::StartCapture();
-
         curr_qid = -1;
 
         while (num_submits || num_commands) {
@@ -127,6 +125,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
                 task = queue.submits.front();
             }
+            VideoCore::StartCapture();
             task.resume();
 
             if (task.done()) {
