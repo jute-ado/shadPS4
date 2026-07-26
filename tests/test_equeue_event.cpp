@@ -85,6 +85,40 @@ TEST(EqueueEvent, DrainPreservesRepeatedGraphicsTriggersBeyondCallerCapacity) {
     EXPECT_FALSE(event.IsTriggered());
 }
 
+TEST(EqueueInternal, ReadyGraphicsIdsShareCallerCapacityBeforeRepeats) {
+    EqueueEvent eop{};
+    eop.event.ident = 0x40;
+    eop.event.filter = OrbisKernelEvent::Filter::GraphicsCore;
+    eop.event.flags = OrbisKernelEvent::Flags::Clear;
+    eop.Trigger(reinterpret_cast<void*>(0x40));
+    eop.Trigger(reinterpret_cast<void*>(0x40));
+    eop.Trigger(reinterpret_cast<void*>(0x40));
+
+    EqueueEvent compute{};
+    compute.event.ident = 0x1;
+    compute.event.filter = OrbisKernelEvent::Filter::GraphicsCore;
+    compute.event.flags = OrbisKernelEvent::Flags::Clear;
+    compute.Trigger(reinterpret_cast<void*>(0x1));
+
+    std::vector<EqueueEvent> events;
+    events.emplace_back(std::move(eop));
+    events.emplace_back(std::move(compute));
+
+    std::array<OrbisKernelEvent, 2> delivered{};
+    ASSERT_EQ(Libraries::Kernel::DrainReadyEvents(
+                  events, delivered.data(), static_cast<int>(delivered.size())),
+              2);
+    EXPECT_EQ(delivered[0].ident, 0x40u);
+    EXPECT_EQ(delivered[1].ident, 0x1u);
+
+    OrbisKernelEvent repeated{};
+    EXPECT_EQ(Libraries::Kernel::DrainReadyEvents(events, &repeated, 1), 1);
+    EXPECT_EQ(repeated.ident, 0x40u);
+    EXPECT_EQ(Libraries::Kernel::DrainReadyEvents(events, &repeated, 1), 1);
+    EXPECT_EQ(repeated.ident, 0x40u);
+    EXPECT_EQ(Libraries::Kernel::DrainReadyEvents(events, &repeated, 1), 0);
+}
+
 TEST(EqueueEvent, OrdinaryClearEventsStillCoalesceRepeatedTriggers) {
     EqueueEvent event{};
     event.event.filter = OrbisKernelEvent::Filter::VideoOut;

@@ -241,26 +241,7 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
 }
 
 int EqueueInternal::GetTriggeredEvents(OrbisKernelEvent* ev, int num) {
-    int count = 0;
-    for (auto it = m_events.begin(); it != m_events.end();) {
-        if (it->IsTriggered()) {
-            const bool one_shot = it->event.flags & OrbisKernelEvent::Flags::OneShot;
-            count += it->DrainTriggers(ev + count, num - count);
-            if (one_shot) {
-                it = m_events.erase(it);
-            } else {
-                ++it;
-            }
-
-            if (count == num) {
-                break;
-            }
-        } else {
-            ++it;
-        }
-    }
-
-    return count;
+    return DrainReadyEvents(m_events, ev, num);
 }
 
 bool EqueueInternal::AddSmallTimer(EqueueEvent& ev) {
