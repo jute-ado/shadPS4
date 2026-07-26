@@ -65,3 +65,24 @@ TEST(IrqController, DeliversConcurrentSignalsForDistinctInterrupts) {
         EXPECT_EQ(wrong_interrupts.load(std::memory_order_relaxed), 0u);
     }
 }
+
+TEST(IrqController, PersistentHandlerCanUnregisterItself) {
+    Platform::IrqController controller;
+    constexpr auto irq = Platform::InterruptId::GfxEop;
+    u32 deliveries = 0;
+    void* const uid = &deliveries;
+
+    controller.Register(
+        irq,
+        [&](Platform::InterruptId delivered_irq) {
+            EXPECT_EQ(delivered_irq, irq);
+            ++deliveries;
+            controller.Unregister(irq, uid);
+        },
+        uid);
+
+    controller.Signal(irq);
+    controller.Signal(irq);
+
+    EXPECT_EQ(deliveries, 1u);
+}
