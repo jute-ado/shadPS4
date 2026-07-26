@@ -181,6 +181,26 @@ private:
     bool is_triggered = false;
 };
 
+inline int DrainReadyEvents(std::vector<EqueueEvent>& events, OrbisKernelEvent* output,
+                            int capacity) {
+    int count = 0;
+    for (auto it = events.begin(); it != events.end() && count < capacity;) {
+        if (!it->IsTriggered()) {
+            ++it;
+            continue;
+        }
+
+        const bool one_shot = it->event.flags & OrbisKernelEvent::Flags::OneShot;
+        count += it->DrainTriggers(output + count, 1);
+        if (one_shot) {
+            it = events.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return count;
+}
+
 class EqueueInternal {
     struct SmallTimer {
         OrbisKernelEvent event;
