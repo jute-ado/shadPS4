@@ -121,30 +121,26 @@ void LoadRenderDoc(const bool allow_offline_loading) {
     }
 }
 
-void StartCapture() {
-    if (!rdoc_api) {
-        return;
-    }
-
-    if (capture_state.BeginSubmission()) {
-        rdoc_api->StartFrameCapture(nullptr, nullptr);
-        LOG_WARNING(Common, "RenderDoc capture started");
-    }
-}
-
-void EndCapture() {
-    if (!rdoc_api) {
-        return;
-    }
-
-    if (capture_state.EndSubmission()) {
-        const u32 result = rdoc_api->EndFrameCapture(nullptr, nullptr);
-        LOG_WARNING(Common, "RenderDoc capture end result: {}", result);
-    }
-}
-
 void TriggerCapture() {
     (void)capture_state.Trigger();
+}
+
+bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
+    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
+        return false;
+    }
+
+    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
+    rdoc_api->StartFrameCapture(device, window_handle);
+    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
+    return true;
+}
+
+void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
+    ASSERT(rdoc_api);
+    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
+    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
+    LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
 }
 
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix) {

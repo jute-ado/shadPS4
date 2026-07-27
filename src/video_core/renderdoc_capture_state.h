@@ -11,7 +11,6 @@ class RenderDocCaptureState {
     enum class State {
         Idle,
         Triggered,
-        InProgress,
     };
 
 public:
@@ -20,13 +19,8 @@ public:
         return state.compare_exchange_strong(expected, State::Triggered);
     }
 
-    [[nodiscard]] bool BeginSubmission() {
+    [[nodiscard]] bool ConsumePresentedFrameTrigger() {
         auto expected = State::Triggered;
-        return state.compare_exchange_strong(expected, State::InProgress);
-    }
-
-    [[nodiscard]] bool EndSubmission() {
-        auto expected = State::InProgress;
         return state.compare_exchange_strong(expected, State::Idle);
     }
 

@@ -1120,6 +1120,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
+    void* const vulkan_instance =
+        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
+    void* const window_handle = window.GetWindowInfo().render_surface;
+    const bool is_renderdoc_capture =
+        VideoCore::BeginNextPresentedFrameCapture(vulkan_instance, window_handle);
     scheduler.Flush(info);
 
     // Present to swapchain.
@@ -1128,6 +1133,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         if (!swapchain.Present()) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
+    }
+    if (is_renderdoc_capture) {
+        VideoCore::EndPresentedFrameCapture(vulkan_instance, window_handle);
     }
 
     free_frame();
