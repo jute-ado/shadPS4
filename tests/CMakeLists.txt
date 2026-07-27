@@ -23,7 +23,12 @@ set(TEST_TARGETS
 )
 
 add_executable(shadps4_controller_trace_test
+    ${CMAKE_SOURCE_DIR}/src/input/controller_axis.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
     ${CMAKE_SOURCE_DIR}/src/input/controller_trace.cpp
+    test_controller_axis.cpp
+    test_controller_button.cpp
+    test_controller_connection.cpp
     test_controller_trace.cpp
 )
 target_include_directories(shadps4_controller_trace_test PRIVATE

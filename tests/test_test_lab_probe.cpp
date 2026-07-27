@@ -21,6 +21,7 @@ TEST(TestLabProbe, EmitsCanonicalProtocolOneCapabilityDocument) {
                   "console_profile_ps4",
                   "console_profile_ps4_pro",
                   "controller_recording",
+                  "controller_replay",
                   "emulator_control",
                   "output_resolution",
                   "render_resolution",
