@@ -9,6 +9,12 @@ include(FetchContent)
 )
 FetchContent_MakeAvailable(googletest)
 
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Clang 22 diagnoses a conversion inside GoogleTest 1.17 while this
+    # project promotes dependency warnings to errors.
+    target_compile_options(gtest PRIVATE /clang:-Wno-character-conversion)
+endif()
+
 set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
