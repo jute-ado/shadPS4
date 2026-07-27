@@ -22,6 +22,7 @@
 #include "input/input_handler.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
+#include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
