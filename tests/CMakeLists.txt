@@ -16,10 +16,21 @@ if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 set(TEST_TARGETS
+    shadps4_controller_trace_test
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
 )
+
+add_executable(shadps4_controller_trace_test
+    ${CMAKE_SOURCE_DIR}/src/input/controller_trace.cpp
+    test_controller_trace.cpp
+)
+target_include_directories(shadps4_controller_trace_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_controller_trace_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_controller_trace_test PRIVATE GTest::gtest_main)
 
 set(SETTINGS_TEST_SOURCES
     # Under test
