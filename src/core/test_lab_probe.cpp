@@ -16,13 +16,16 @@ std::string_view TestLabProbeJson() {
     "controller_recording",
     "controller_replay",
     "emulator_control",
+    "extra_direct_memory",
     "game_frame_screenshot",
+    "overlay_controller_replay",
     "output_resolution",
     "presented_frame_screenshot",
     "presented_frame_timing_trace",
     "render_resolution",
     "renderdoc_capture",
-    "touch_input"
+    "touch_input",
+    "vulkan_validation"
   ]
 })";
 }
