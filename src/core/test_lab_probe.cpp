@@ -11,12 +11,11 @@ std::string_view TestLabProbeJson() {
   "emulator": "shadps4",
   "adapterVersion": "1.0.0",
   "capabilities": [
-    "controller_replay",
+    "console_profile_ps4",
+    "console_profile_ps4_pro",
     "emulator_control",
-    "game_frame_screenshot",
-    "presented_frame_screenshot",
-    "renderdoc_capture",
-    "touch_input"
+    "output_resolution",
+    "render_resolution"
   ]
 })";
 }
