@@ -16,6 +16,8 @@
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
 #include "core/libraries/audio/audioout.h"
+#include "input/controller_axis.h"
+#include "input/controller_button.h"
 #include "input/input_handler.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
@@ -82,6 +84,7 @@ void IPC::Init() {
     std::cerr << ";#IPC_ENABLED\n";
     std::cerr << ";ENABLE_MEMORY_PATCH\n";
     std::cerr << ";ENABLE_EMU_CONTROL\n";
+    std::cerr << ";ENABLE_GAMEPAD\n";
     std::cerr << ";#IPC_END\n";
     std::cerr.flush();
 
@@ -150,6 +153,36 @@ void IPC::InputLoop() {
             SDL_Event event;
             SDL_memset(&event, 0, sizeof(event));
             event.type = SDL_EVENT_TOGGLE_FULLSCREEN;
+            SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_BUTTON") {
+            const std::string name = next_str();
+            const auto button = Input::ParseControllerButton(name);
+            const bool pressed = next_u64() != 0;
+            if (!button) {
+                std::cerr << ";INVALID GAMEPAD BUTTON: " << name << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_BUTTON;
+            event.user.code = static_cast<Sint32>(*button);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(pressed));
+            SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_AXIS") {
+            const std::string name = next_str();
+            const auto axis = Input::ParseControllerAxis(name);
+            const u64 value = next_u64();
+            if (!axis || value > 255) {
+                std::cerr << ";INVALID GAMEPAD AXIS: " << name << ' ' << value << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_AXIS;
+            event.user.code = static_cast<Sint32>(*axis);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(value));
             SDL_PushEvent(&event);
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());

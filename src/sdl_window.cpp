@@ -353,6 +353,18 @@ void WindowSDL::WaitEvent() {
     case SDL_EVENT_SCREENSHOT_WITH_OVERLAYS:
         VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
         break;
+    case SDL_EVENT_INJECT_GAMEPAD_BUTTON:
+        controllers[0]->ConnectVirtualController();
+        controllers[0]->Button(
+            static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(event.user.code),
+            reinterpret_cast<uintptr_t>(event.user.data1) != 0);
+        break;
+    case SDL_EVENT_INJECT_GAMEPAD_AXIS:
+        controllers[0]->ConnectVirtualController();
+        controllers[0]->Axis(static_cast<Input::Axis>(event.user.code),
+                             static_cast<int>(reinterpret_cast<uintptr_t>(event.user.data1)),
+                             false);
+        break;
     default:
         break;
     }
