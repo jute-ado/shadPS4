@@ -18,11 +18,10 @@ TEST(TestLabProbe, EmitsCanonicalProtocolOneCapabilityDocument) {
     EXPECT_EQ(document.at("adapterVersion"), "1.0.0");
     EXPECT_EQ(document.at("capabilities"),
               (std::vector<std::string>{
-                  "controller_replay",
+                  "console_profile_ps4",
+                  "console_profile_ps4_pro",
                   "emulator_control",
-                  "game_frame_screenshot",
-                  "presented_frame_screenshot",
-                  "renderdoc_capture",
-                  "touch_input",
+                  "output_resolution",
+                  "render_resolution",
               }));
 }
