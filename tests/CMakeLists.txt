@@ -284,6 +284,22 @@ gtest_discover_tests(shadps4_test_lab_probe_test
     DISCOVERY_TIMEOUT 60
 )
 
+add_executable(shadps4_presented_frame_timing_trace_test
+    test_presented_frame_timing_trace.cpp
+)
+target_include_directories(shadps4_presented_frame_timing_trace_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_presented_frame_timing_trace_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_presented_frame_timing_trace_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(shadps4_presented_frame_timing_trace_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
 # ===========================================================================
 # HTTP tests (libSceHttp - URI helpers and status-line parsing)
 # ===========================================================================
