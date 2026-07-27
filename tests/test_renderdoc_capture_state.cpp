@@ -7,14 +7,12 @@
 
 #include "video_core/renderdoc_capture_state.h"
 
-TEST(RenderDocCaptureState, TriggerStartsAndCompletesExactlyOneSubmission) {
+TEST(RenderDocCaptureState, TriggerSchedulesExactlyOnePresentedFrame) {
     VideoCore::RenderDocCaptureState state;
 
     EXPECT_TRUE(state.Trigger());
-    EXPECT_TRUE(state.BeginSubmission());
-    EXPECT_FALSE(state.BeginSubmission());
-    EXPECT_TRUE(state.EndSubmission());
-    EXPECT_FALSE(state.EndSubmission());
+    EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
+    EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
 }
 
 TEST(RenderDocCaptureState, TriggerIsPublishedAcrossThreads) {
@@ -23,16 +21,14 @@ TEST(RenderDocCaptureState, TriggerIsPublishedAcrossThreads) {
     std::thread trigger_thread{[&state] { EXPECT_TRUE(state.Trigger()); }};
     trigger_thread.join();
 
-    EXPECT_TRUE(state.BeginSubmission());
-    EXPECT_TRUE(state.EndSubmission());
+    EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
 }
 
-TEST(RenderDocCaptureState, TriggerDuringCaptureDoesNotQueueAnotherCapture) {
+TEST(RenderDocCaptureState, RepeatedTriggerDoesNotQueueAnotherCapture) {
     VideoCore::RenderDocCaptureState state;
 
     ASSERT_TRUE(state.Trigger());
-    ASSERT_TRUE(state.BeginSubmission());
     EXPECT_FALSE(state.Trigger());
-    ASSERT_TRUE(state.EndSubmission());
-    EXPECT_FALSE(state.BeginSubmission());
+    ASSERT_TRUE(state.ConsumePresentedFrameTrigger());
+    EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
 }
