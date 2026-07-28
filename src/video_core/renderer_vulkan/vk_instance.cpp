@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -775,39 +774,58 @@ void Instance::LogDeviceFault() const {
         return;
     }
 
-    vk::DeviceFaultCountsEXT counts{};
-    auto result = device->getFaultInfoEXT(&counts, nullptr);
-    if (result != vk::Result::eSuccess) {
-        LOG_ERROR(Render_Vulkan, "Failed to query Vulkan device fault counts: {}",
-                  vk::to_string(result));
+    const auto get_fault_info = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
+    if (get_fault_info == nullptr) {
+        LOG_ERROR(Render_Vulkan, "vkGetDeviceFaultInfoEXT is unavailable");
         return;
     }
 
-    vk::DeviceFaultInfoEXT info{};
-    info.pAddressInfos = static_cast<vk::DeviceFaultAddressInfoEXT*>(
-        std::calloc(counts.addressInfoCount, sizeof(vk::DeviceFaultAddressInfoEXT)));
-    info.pVendorInfos = static_cast<vk::DeviceFaultVendorInfoEXT*>(
-        std::calloc(counts.vendorInfoCount, sizeof(vk::DeviceFaultVendorInfoEXT)));
-    info.pVendorBinaryData =
-        counts.vendorBinarySize ? std::calloc(1, counts.vendorBinarySize) : nullptr;
+    VkDeviceFaultCountsEXT counts{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT,
+    };
+    LOG_ERROR(Render_Vulkan, "Querying Vulkan device fault counts");
+    VkResult result = get_fault_info(static_cast<VkDevice>(*device), &counts, nullptr);
+    LOG_ERROR(Render_Vulkan,
+              "Vulkan device fault count query={} addresses={} vendor_infos={} "
+              "vendor_binary_size={}",
+              vk::to_string(static_cast<vk::Result>(result)), counts.addressInfoCount,
+              counts.vendorInfoCount, counts.vendorBinarySize);
+    if (result != VK_SUCCESS) {
+        return;
+    }
 
-    result = device->getFaultInfoEXT(&counts, &info);
+    static constexpr u32 MaxFaultRecords = 1024;
+    if (counts.addressInfoCount > MaxFaultRecords || counts.vendorInfoCount > MaxFaultRecords) {
+        LOG_ERROR(Render_Vulkan, "Refusing unreasonable Vulkan device fault record counts");
+        return;
+    }
+
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor_infos(counts.vendorInfoCount);
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor_infos.data(),
+    };
+    result = get_fault_info(static_cast<VkDevice>(*device), &counts, &info);
     LOG_ERROR(Render_Vulkan,
               "Vulkan device fault query={} description=\"{}\" addresses={} vendor_infos={} "
               "vendor_binary_size={}",
-              vk::to_string(result), info.description.data(), counts.addressInfoCount,
+              vk::to_string(static_cast<vk::Result>(result)), info.description,
+              counts.addressInfoCount,
               counts.vendorInfoCount, counts.vendorBinarySize);
     for (u32 index = 0; index < counts.addressInfoCount; ++index) {
-        const auto& address = info.pAddressInfos[index];
+        const auto& address = addresses[index];
         LOG_ERROR(Render_Vulkan, "Vulkan fault address[{}] type={} address={:#x} precision={:#x}",
-                  index, vk::to_string(address.addressType), address.reportedAddress,
-                  address.addressPrecision);
+                  index, vk::to_string(static_cast<vk::DeviceFaultAddressTypeEXT>(
+                             address.addressType)),
+                  address.reportedAddress, address.addressPrecision);
     }
     for (u32 index = 0; index < counts.vendorInfoCount; ++index) {
-        const auto& vendor = info.pVendorInfos[index];
+        const auto& vendor = vendor_infos[index];
         LOG_ERROR(Render_Vulkan,
                   "Vulkan fault vendor[{}] description=\"{}\" code={:#x} data={:#x}", index,
-                  vendor.description.data(), vendor.vendorFaultCode, vendor.vendorFaultData);
+                  vendor.description, vendor.vendorFaultCode, vendor.vendorFaultData);
     }
 }
 
