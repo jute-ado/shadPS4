@@ -20,8 +20,6 @@ namespace Core {
 
 using EntryFunc = PS4_SYSV_ABI int (*)(size_t args, const void* argp, void* param);
 
-static constexpr u64 ModuleLoadBase = 0x800000000;
-
 static u64 GetAlignedSize(const elf_program_header& phdr) {
     return (phdr.p_align != 0 ? (phdr.p_memsz + (phdr.p_align - 1)) & ~(phdr.p_align - 1)
                               : phdr.p_memsz);
@@ -83,11 +81,12 @@ static std::string StringToNid(std::string_view symbol) {
     return dst;
 }
 
-Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_, u32& max_tls_index)
+Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_,
+               ModuleMappingRole mapping_role, u32& max_tls_index)
     : memory{memory_}, file{file_}, name{file.filename().string()} {
     elf.Open(file);
     if (elf.IsElfFile()) {
-        LoadModuleToMemory(max_tls_index);
+        LoadModuleToMemory(mapping_role, max_tls_index);
         LoadDynamicInfo();
         LoadSymbols();
     }
@@ -101,7 +100,7 @@ s32 Module::Start(u64 args, const void* argp, void* param) {
     return reinterpret_cast<EntryFunc>(addr)(args, argp, param);
 }
 
-void Module::LoadModuleToMemory(u32& max_tls_index) {
+void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_index) {
     static constexpr size_t BlockAlign = 0x1000;
     static constexpr u64 TrampolineSize = 8_MB;
 
@@ -113,9 +112,11 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
 
     // Reserve memory area for module
     void** out_addr = reinterpret_cast<void**>(&base_virtual_addr);
-    s32 result =
-        memory->MapMemory(out_addr, ModuleLoadBase, aligned_base_size + TrampolineSize,
-                          MemoryProt::NoAccess, MemoryMapFlags::NoFlags, VMAType::Reserved, name);
+    const VAddr preferred_address =
+        PreferredModuleLoadAddress(mapping_role, memory->SystemManagedVirtualBase());
+    s32 result = memory->MapMemory(out_addr, preferred_address, aligned_base_size + TrampolineSize,
+                                   MemoryProt::NoAccess, MemoryMapFlags::NoFlags,
+                                   VMAType::Reserved, name);
     ASSERT_MSG(result == ORBIS_OK, "Failed to reserve memory for module {}", name);
     LOG_INFO(Core_Linker, "Loading module {} to {}", name, fmt::ptr(*out_addr));
 
