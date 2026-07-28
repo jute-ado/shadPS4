@@ -166,23 +166,6 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         info.uses_dma = false;
         info.readconst_types = Info::ReadConstType::None;
     }
-    switch (info.pgm_hash) {
-    case 0xfd8032b5ULL:
-    case 0xbcd90443ULL:
-    case 0x36cca2f5ULL:
-    case 0x9fe4aa5aULL:
-    case 0x8fb26fd2ULL:
-    case 0x0047a3bcULL:
-    case 0x7d8214e1ULL:
-    case 0xf48f4dabULL:
-    case 0xe9952877ULL:
-        info.uses_dma = false;
-        info.readconst_types = Info::ReadConstType::None;
-        break;
-    default:
-        break;
-    }
-
     if (info.uses_dma) {
         info.buffers.push_back({
             .used_types = IR::Type::U64,

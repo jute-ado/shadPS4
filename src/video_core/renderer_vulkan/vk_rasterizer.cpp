@@ -20,6 +20,43 @@
 
 namespace Vulkan {
 
+static bool ShouldLogTransitionImageBindings(const u64 hash) {
+    static std::array<bool, 9> logged{};
+    u32 index{};
+    switch (hash) {
+    case 0xfd8032b5ULL:
+        index = 0;
+        break;
+    case 0xbcd90443ULL:
+        index = 1;
+        break;
+    case 0x36cca2f5ULL:
+        index = 2;
+        break;
+    case 0x9fe4aa5aULL:
+        index = 3;
+        break;
+    case 0x8fb26fd2ULL:
+        index = 4;
+        break;
+    case 0x0047a3bcULL:
+        index = 5;
+        break;
+    case 0x7d8214e1ULL:
+        index = 6;
+        break;
+    case 0xf48f4dabULL:
+        index = 7;
+        break;
+    case 0xe9952877ULL:
+        index = 8;
+        break;
+    default:
+        return false;
+    }
+    return !std::exchange(logged[index], true);
+}
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -675,6 +712,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     image_bindings.clear();
+    const bool log_transition_bindings = ShouldLogTransitionImageBindings(stage.pgm_hash);
     const u32 first_image_idx = image_infos.size();
     // For loading/storing to explicit mip levels, when no native instruction support, bind an array
     // of descriptors consecutively, 1 for each mip level. The shader can index this with LOD
@@ -718,6 +756,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 // Redirect the access to the actual depth-stencil buffer.
                 image_id = depth_image_id;
                 image = &texture_cache.GetImage(image_id);
+            }
+            if (log_transition_bindings) {
+                LOG_WARNING(
+                    Render_Vulkan,
+                    "Transition image shader={:#x} sharp={} binding={} image={} addr={:#x} "
+                    "size={:#x} extent={}x{}x{} pitch={} format={} type={} tile={} "
+                    "mips={}+{} layers={}+{}",
+                    stage.pgm_hash, image_desc.sharp_idx, i, image_id.index,
+                    image->info.guest_address, image->info.guest_size, image->info.size.width,
+                    image->info.size.height, image->info.size.depth, image->info.pitch,
+                    vk::to_string(image->info.pixel_format), static_cast<u32>(image->info.type),
+                    static_cast<u32>(image->info.tile_mode), desc.view_info.range.base.level,
+                    desc.view_info.range.extent.levels, desc.view_info.range.base.layer,
+                    desc.view_info.range.extent.layers);
             }
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we
