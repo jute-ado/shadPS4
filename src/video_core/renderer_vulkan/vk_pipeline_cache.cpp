@@ -28,6 +28,16 @@ using Shader::Stage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
+constexpr static std::array TransitionDiagnosticShaders = {
+    0xfd8032b5ULL, 0xbcd90443ULL, 0x36cca2f5ULL, 0x9fe4aa5aULL, 0x8fb26fd2ULL,
+    0x0047a3bcULL, 0x7d8214e1ULL, 0xf48f4dabULL, 0xe9952877ULL,
+};
+
+static bool IsTransitionDiagnosticShader(const u64 hash) {
+    return std::ranges::find(TransitionDiagnosticShaders, hash) !=
+           TransitionDiagnosticShaders.end();
+}
+
 constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 8192},
@@ -608,6 +618,13 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    if (IsTransitionDiagnosticShader(info.pgm_hash)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Transition shader resources hash={:#x} stage={} buffers={} images={} "
+                    "samplers={} fmasks={} uses_dma={}",
+                    info.pgm_hash, info.stage, info.buffers.size(), info.images.size(),
+                    info.samplers.size(), info.fmasks.size(), info.uses_dma);
+    }
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
@@ -738,7 +755,7 @@ std::string PipelineCache::GetShaderName(Shader::Stage stage, u64 hash,
 
 void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage,
                                size_t perm_idx, std::string_view ext) {
-    if (!EmulatorSettings.IsDumpShaders()) {
+    if (!EmulatorSettings.IsDumpShaders() && !IsTransitionDiagnosticShader(hash)) {
         return;
     }
 
