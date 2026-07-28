@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -203,7 +204,8 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
+                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
+                          vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -336,6 +338,10 @@ bool Instance::CreateDevice() {
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    supports_device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    const auto device_fault_features =
+        feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
+    supports_device_fault &= static_cast<bool>(device_fault_features.deviceFault);
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
@@ -503,6 +509,10 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
             .minLod = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
+            .deviceFaultVendorBinary = false,
+        },
     };
 
     if (!custom_border_color) {
@@ -547,6 +557,9 @@ bool Instance::CreateDevice() {
     }
     if (!image_view_min_lod) {
         device_chain.unlink<vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();
+    }
+    if (!supports_device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
@@ -754,6 +767,48 @@ u64 Instance::GetDeviceMemoryUsage() const {
         total_usage += memory_budget_props.heapUsage[heap];
     }
     return total_usage;
+}
+
+void Instance::LogDeviceFault() const {
+    if (!supports_device_fault) {
+        LOG_ERROR(Render_Vulkan, "VK_EXT_device_fault is unavailable");
+        return;
+    }
+
+    vk::DeviceFaultCountsEXT counts{};
+    auto result = device->getFaultInfoEXT(&counts, nullptr);
+    if (result != vk::Result::eSuccess) {
+        LOG_ERROR(Render_Vulkan, "Failed to query Vulkan device fault counts: {}",
+                  vk::to_string(result));
+        return;
+    }
+
+    vk::DeviceFaultInfoEXT info{};
+    info.pAddressInfos = static_cast<vk::DeviceFaultAddressInfoEXT*>(
+        std::calloc(counts.addressInfoCount, sizeof(vk::DeviceFaultAddressInfoEXT)));
+    info.pVendorInfos = static_cast<vk::DeviceFaultVendorInfoEXT*>(
+        std::calloc(counts.vendorInfoCount, sizeof(vk::DeviceFaultVendorInfoEXT)));
+    info.pVendorBinaryData =
+        counts.vendorBinarySize ? std::calloc(1, counts.vendorBinarySize) : nullptr;
+
+    result = device->getFaultInfoEXT(&counts, &info);
+    LOG_ERROR(Render_Vulkan,
+              "Vulkan device fault query={} description=\"{}\" addresses={} vendor_infos={} "
+              "vendor_binary_size={}",
+              vk::to_string(result), info.description.data(), counts.addressInfoCount,
+              counts.vendorInfoCount, counts.vendorBinarySize);
+    for (u32 index = 0; index < counts.addressInfoCount; ++index) {
+        const auto& address = info.pAddressInfos[index];
+        LOG_ERROR(Render_Vulkan, "Vulkan fault address[{}] type={} address={:#x} precision={:#x}",
+                  index, vk::to_string(address.addressType), address.reportedAddress,
+                  address.addressPrecision);
+    }
+    for (u32 index = 0; index < counts.vendorInfoCount; ++index) {
+        const auto& vendor = info.pVendorInfos[index];
+        LOG_ERROR(Render_Vulkan,
+                  "Vulkan fault vendor[{}] description=\"{}\" code={:#x} data={:#x}", index,
+                  vendor.description.data(), vendor.vendorFaultCode, vendor.vendorFaultData);
+    }
 }
 
 vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {

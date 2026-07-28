@@ -442,6 +442,9 @@ public:
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
+    /// Logs driver-provided details for a lost Vulkan device when supported.
+    void LogDeviceFault() const;
+
     /// Returns the total memory budget available to the device.
     [[nodiscard]] u64 GetTotalMemoryBudget() const {
         return total_memory_budget;
@@ -521,6 +524,7 @@ private:
     bool image_view_min_lod{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
+    bool supports_device_fault{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
 };
