@@ -664,6 +664,25 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
 
     vk::ShaderModule module{};
 
+    if (stage == Stage::Compute) {
+        static u32 diagnostic_count{};
+        for (const auto& candidate : program->modules) {
+            const auto& cached = candidate.spec.runtime_info.cs_info;
+            const auto& requested = runtime_info.cs_info;
+            if (cached.workgroup_size == requested.workgroup_size &&
+                cached.tgid_enable == requested.tgid_enable &&
+                cached.shared_memory_size != requested.shared_memory_size &&
+                diagnostic_count++ < 64) {
+                LOG_ERROR(Render_Vulkan,
+                          "Compute permutation LDS mismatch shader={:#x} cached={} requested={} "
+                          "workgroup={}x{}x{}",
+                          params.hash, cached.shared_memory_size, requested.shared_memory_size,
+                          requested.workgroup_size[0], requested.workgroup_size[1],
+                          requested.workgroup_size[2]);
+            }
+        }
+    }
+
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
         auto new_info = Shader::Info(stage, l_stage, params);
