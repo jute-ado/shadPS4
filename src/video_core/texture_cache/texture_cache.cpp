@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_candidate_selection.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -513,6 +514,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
 
     ImageId image_id{};
+    int view_mip{-1};
+    int view_slice{-1};
 
     // Check for a perfect match first
     for (const auto& cache_id : image_ids) {
@@ -536,9 +539,50 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         image_id = cache_id;
     }
 
+    // A standalone image can be an exact match while also representing a mip or slice of a
+    // larger cached image. Prefer the containing image so aliased guest memory has one backing.
+    if (image_id) {
+        boost::container::small_vector<ImageCandidateMatch, 16> candidates;
+        candidates.reserve(image_ids.size());
+        for (const auto& cache_id : image_ids) {
+            auto& cache_image = slot_images[cache_id];
+            ImageCandidateMatch candidate{.exact = cache_id == image_id};
+            const bool format_matches =
+                !exact_fmt || info.pixel_format == cache_image.info.pixel_format;
+            if (!candidate.exact && format_matches &&
+                info.guest_address > cache_image.info.guest_address) {
+                candidate.parent_mip = info.MipOf(cache_image.info);
+                if (candidate.parent_mip >= 0) {
+                    candidate.parent_slice = info.SliceOf(cache_image.info, candidate.parent_mip);
+                }
+            }
+            candidates.push_back(candidate);
+        }
+
+        const auto selection = SelectCanonicalImageCandidate(candidates);
+        if (selection && selection->mip >= 0) {
+            const ImageId exact_image_id = image_id;
+            const ImageId parent_image_id = image_ids[selection->index];
+            auto& exact_image = slot_images[exact_image_id];
+            auto& parent_image = slot_images[parent_image_id];
+
+            if (exact_image.binding.is_bound || exact_image.binding.is_target) {
+                exact_image.binding.needs_rebind = 1u;
+            }
+            if (exact_image.binding.is_target) {
+                parent_image.binding.is_target = 1u;
+            } else {
+                parent_image.CopyMip(exact_image, selection->mip, selection->slice);
+            }
+
+            FreeImage(exact_image_id);
+            image_id = parent_image_id;
+            view_mip = selection->mip;
+            view_slice = selection->slice;
+        }
+    }
+
     // Try to resolve overlaps (if any)
-    int view_mip{-1};
-    int view_slice{-1};
     if (!image_id) {
         for (const auto& cache_id : image_ids) {
             view_mip = -1;

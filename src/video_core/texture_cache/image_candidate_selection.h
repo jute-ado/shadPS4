@@ -25,11 +25,6 @@ struct ImageCandidateSelection {
 inline std::optional<ImageCandidateSelection> SelectCanonicalImageCandidate(
     std::span<const ImageCandidateMatch> candidates) {
     for (size_t index = 0; index < candidates.size(); ++index) {
-        if (candidates[index].exact) {
-            return ImageCandidateSelection{.index = index};
-        }
-    }
-    for (size_t index = 0; index < candidates.size(); ++index) {
         const auto& candidate = candidates[index];
         if (candidate.parent_mip >= 0 && candidate.parent_slice >= 0) {
             return ImageCandidateSelection{
@@ -37,6 +32,11 @@ inline std::optional<ImageCandidateSelection> SelectCanonicalImageCandidate(
                 .mip = candidate.parent_mip,
                 .slice = candidate.parent_slice,
             };
+        }
+    }
+    for (size_t index = 0; index < candidates.size(); ++index) {
+        if (candidates[index].exact) {
+            return ImageCandidateSelection{.index = index};
         }
     }
     return std::nullopt;
