@@ -23,11 +23,11 @@ namespace Vulkan {
 class Instance;
 
 struct RenderAttachment {
-    vk::ImageView image_view;
-    vk::ImageLayout image_layout;
-    std::array<u32, 4> clear_value;
+    vk::ImageView image_view{};
+    vk::ImageLayout image_layout{};
+    std::array<u32, 4> clear_value{};
     union {
-        u32 is_clear;
+        u32 is_clear{};
         struct {
             bool has_depth;
             bool depth_clear;
@@ -39,12 +39,12 @@ struct RenderAttachment {
 static_assert(std::has_unique_object_representations_v<RenderAttachment>);
 
 struct RenderState {
-    std::array<RenderAttachment, 8> color_attachments;
-    RenderAttachment depth_stencil_attachment;
-    u16 width;
-    u16 height;
-    u16 num_layers;
-    u16 num_color_attachments;
+    std::array<RenderAttachment, 8> color_attachments{};
+    RenderAttachment depth_stencil_attachment{};
+    u16 width{};
+    u16 height{};
+    u16 num_layers{};
+    u16 num_color_attachments{};
 
     bool operator==(const RenderState& other) const noexcept {
         return std::memcmp(this, &other, sizeof(RenderState)) == 0;
