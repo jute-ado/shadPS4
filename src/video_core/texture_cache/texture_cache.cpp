@@ -840,7 +840,9 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     const auto [buffer, offset] =
-        tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
+        image.info.props.is_block
+            ? TileManager::Result{in_buffer->Handle(), in_offset}
+            : tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
     for (auto& copy : image_copies) {
         copy.bufferOffset += offset;
     }
