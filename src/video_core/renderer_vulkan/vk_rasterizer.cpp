@@ -20,33 +20,6 @@
 
 namespace Vulkan {
 
-static bool IsLateTransitionFragmentShader(const u64 hash) {
-    switch (hash) {
-    case 0x36cca2f5ULL:
-    case 0x8fb26fd2ULL:
-    case 0x0047a3bcULL:
-    case 0xf48f4dabULL:
-    case 0xe9952877ULL:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool SkipLateTransitionFragmentShader(const GraphicsPipeline* pipeline) {
-    const auto stages = pipeline->GetStages();
-    const auto* fragment = stages[u32(Shader::LogicalStage::Fragment)];
-    if (!fragment || !IsLateTransitionFragmentShader(fragment->pgm_hash)) {
-        return false;
-    }
-    static u32 diagnostic_count{};
-    if (diagnostic_count++ < 32) {
-        LOG_WARNING(Render_Vulkan, "Skipping late transition fragment shader {:#x}",
-                    fragment->pgm_hash);
-    }
-    return true;
-}
-
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -226,10 +199,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
-    if (SkipLateTransitionFragmentShader(pipeline)) {
-        return;
-    }
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
@@ -277,10 +246,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline) {
         return;
     }
-    if (SkipLateTransitionFragmentShader(pipeline)) {
-        return;
-    }
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
