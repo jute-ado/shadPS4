@@ -102,6 +102,19 @@ target_compile_features(shadps4_image_candidate_selection_test PRIVATE cxx_std_2
 target_link_libraries(shadps4_image_candidate_selection_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_image_candidate_selection_test)
 
+add_executable(shadps4_tiling_dispatch_test
+    test_tiling_dispatch.cpp
+)
+target_include_directories(shadps4_tiling_dispatch_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_tiling_dispatch_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_tiling_dispatch_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_tiling_dispatch_test)
+
 add_executable(shadps4_module_mapping_test
     test_module_mapping.cpp
 )
