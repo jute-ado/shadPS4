@@ -654,8 +654,10 @@ Frame* Presenter::PrepareLastFrame() {
         if (result == vk::Result::eTimeout) {
             continue;
         }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
+        if (result == vk::Result::eErrorDeviceLost) {
+            instance.LogDeviceFault();
+            ASSERT_MSG(false, "Device lost during waiting for a frame");
+        }
     }
 
     auto& scheduler = flip_scheduler;
