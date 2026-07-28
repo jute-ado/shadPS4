@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/texture_cache/image.h"
 
 TEST(RenderState, DefaultConstructionClearsAttachmentState) {
     alignas(Vulkan::RenderState)
@@ -34,4 +35,14 @@ TEST(RenderState, DefaultConstructionClearsAttachmentState) {
     }
 
     std::destroy_at(state);
+}
+
+TEST(ImageBarrier, RecognizesAttachmentWritesAsHazards) {
+    EXPECT_TRUE(VideoCore::IsImageWriteAccess(vk::AccessFlagBits2::eColorAttachmentWrite));
+    EXPECT_TRUE(VideoCore::IsImageWriteAccess(vk::AccessFlagBits2::eDepthStencilAttachmentWrite));
+}
+
+TEST(ImageBarrier, DoesNotTreatReadOnlyAccessAsAWriteHazard) {
+    EXPECT_FALSE(VideoCore::IsImageWriteAccess(vk::AccessFlagBits2::eShaderRead));
+    EXPECT_FALSE(VideoCore::IsImageWriteAccess(vk::AccessFlagBits2::eTransferRead));
 }
