@@ -566,6 +566,17 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             auto& exact_image = slot_images[exact_image_id];
             auto& parent_image = slot_images[parent_image_id];
 
+            static u32 diagnostic_count{};
+            if (diagnostic_count++ < 64) {
+                LOG_INFO(Render_Vulkan,
+                         "Canonicalizing image id={} addr={:#x} size={:#x} as parent id={} "
+                         "addr={:#x} size={:#x} mip={} slice={} binding={}",
+                         exact_image_id.index, exact_image.info.guest_address,
+                         exact_image.info.guest_size, parent_image_id.index,
+                         parent_image.info.guest_address, parent_image.info.guest_size,
+                         selection->mip, selection->slice, static_cast<u32>(desc.type));
+            }
+
             if (exact_image.binding.is_bound || exact_image.binding.is_target) {
                 exact_image.binding.needs_rebind = 1u;
             }
