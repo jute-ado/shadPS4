@@ -104,6 +104,7 @@ layout (set = 0, binding = 2, scalar) uniform TilingInfo {
     uint bank_swizzle;
     uint num_slices;
     uint num_mips;
+    uint num_elements;
     MipInfo mips[16];
 } info;
 
@@ -422,6 +423,9 @@ uint GetMipLevel(inout uint texel) {
 
 void main() {
     uint texel = gl_GlobalInvocationID.x;
+    if (texel >= info.num_elements) {
+        return;
+    }
     uint mip = GetMipLevel(texel);
     uint pitch = info.mips[mip].pitch;
     uint height = info.mips[mip].height;

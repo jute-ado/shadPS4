@@ -288,6 +288,16 @@ constexpr std::array macro_tile_extents_alt{
 
 constexpr std::pair micro_tile_extent{8u, 8u};
 constexpr auto hw_pipe_interleave = 256u;
+constexpr u32 tiling_workgroup_size = 64;
+
+constexpr u32 TilingElementCount(size_t byte_size, u32 bits_per_element) {
+    return static_cast<u32>(byte_size / (bits_per_element / 8));
+}
+
+constexpr u32 TilingWorkgroupCount(size_t byte_size, u32 bits_per_element) {
+    const u32 num_elements = TilingElementCount(byte_size, bits_per_element);
+    return (num_elements + tiling_workgroup_size - 1) / tiling_workgroup_size;
+}
 
 constexpr std::pair<u32, u32> GetMacroTileExtents(AmdGpu::TileMode tile_mode, u32 bpp,
                                                   u32 num_samples, bool alt) {
