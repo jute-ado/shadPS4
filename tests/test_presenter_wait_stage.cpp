@@ -3,7 +3,19 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/renderer_vulkan/presenter_sync.h"
 #include "video_core/renderer_vulkan/vk_submit_info.h"
+
+TEST(PresenterWaitStage, MakesCompletedFrameWritesVisibleToFragmentSampling) {
+    const auto barrier = Vulkan::FrameToPresentationBarrier({});
+
+    EXPECT_EQ(barrier.srcStageMask, vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+    EXPECT_EQ(barrier.srcAccessMask, vk::AccessFlagBits2::eColorAttachmentWrite);
+    EXPECT_EQ(barrier.dstStageMask, vk::PipelineStageFlagBits2::eFragmentShader);
+    EXPECT_EQ(barrier.dstAccessMask, vk::AccessFlagBits2::eShaderSampledRead);
+    EXPECT_EQ(barrier.oldLayout, vk::ImageLayout::eGeneral);
+    EXPECT_EQ(barrier.newLayout, vk::ImageLayout::eShaderReadOnlyOptimal);
+}
 
 TEST(PresenterWaitStage, PreservesTheConsumerStageForEachSemaphore) {
     Vulkan::SubmitInfo submit{};
