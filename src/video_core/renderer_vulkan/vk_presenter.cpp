@@ -20,6 +20,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -657,6 +658,30 @@ Frame* Presenter::PrepareLastFrame() {
         }
         if (result == vk::Result::eErrorDeviceLost) {
             instance.LogDeviceFault();
+            if (instance.SupportsDiagnosticCheckpoints()) {
+                std::scoped_lock submit_lock{Scheduler::submit_mutex};
+                for (const auto& checkpoint : instance.GetGraphicsQueue().getCheckpointDataNV()) {
+                    const auto command = FindCommandCheckpoint(checkpoint.pCheckpointMarker);
+                    if (command) {
+                        LOG_CRITICAL(
+                            Render_Vulkan,
+                            "GPU command checkpoint: stage={}, sequence={}, type={}, "
+                            "pipeline={:#018x}, shader={:#010x}, "
+                            "args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+                            vk::to_string(checkpoint.stage), command->sequence,
+                            static_cast<u64>(command->type), command->pipeline_hash,
+                            command->shader_hash, command->arguments[0], command->arguments[1],
+                            command->arguments[2], command->arguments[3], command->arguments[4],
+                            command->arguments[5]);
+                    } else {
+                        LOG_CRITICAL(
+                            Render_Vulkan,
+                            "GPU command checkpoint: stage={}, marker={:#x} (history expired)",
+                            vk::to_string(checkpoint.stage),
+                            reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker));
+                    }
+                }
+            }
             ASSERT_MSG(false, "Device lost during waiting for a frame");
         }
     }

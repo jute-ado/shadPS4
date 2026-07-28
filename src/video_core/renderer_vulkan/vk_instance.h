@@ -67,6 +67,10 @@ public:
         return queue_family_index;
     }
 
+    bool SupportsDiagnosticCheckpoints() const {
+        return diagnostic_checkpoints;
+    }
+
     vk::Queue GetGraphicsQueue() const {
         return graphics_queue;
     }
@@ -523,6 +527,7 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool supports_memory_budget{};
+    bool diagnostic_checkpoints{};
     bool supports_block_texel_view{};
     bool supports_device_fault{};
     u64 total_memory_budget{};

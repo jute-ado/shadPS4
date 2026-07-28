@@ -239,6 +239,9 @@ bool Instance::CreateDevice() {
         return false;
     };
 
+    diagnostic_checkpoints =
+        add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+
     // Required
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
