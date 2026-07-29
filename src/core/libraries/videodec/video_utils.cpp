@@ -61,10 +61,9 @@ bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
 
     const auto layout = GetNV12FrameLayout(width, height);
     auto* memory = Core::Memory::Instance();
-    return memory &&
-           memory->WithAccessibleRange(reinterpret_cast<VAddr>(dst), layout.size,
-                                       Core::MemoryProt::CpuWrite,
-                                       [&] { CopyNV12DataUnchecked(dst, src, layout); });
+    return memory && memory->WithWritableRange(reinterpret_cast<VAddr>(dst), layout.size, [&] {
+        CopyNV12DataUnchecked(dst, src, layout);
+    });
 }
 
 } // namespace Libraries::Videodec

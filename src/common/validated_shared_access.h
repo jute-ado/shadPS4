@@ -18,4 +18,16 @@ bool WithValidatedSharedAccess(Mutex& mutex, Validate&& validate, Access&& acces
     return true;
 }
 
+template <typename Mutex, typename Validate, typename Prepare, typename Access>
+bool WithPreparedValidatedSharedAccess(Mutex& mutex, Validate&& validate, Prepare&& prepare,
+                                       Access&& access) {
+    std::shared_lock lock{mutex};
+    if (!std::forward<Validate>(validate)()) {
+        return false;
+    }
+    std::forward<Prepare>(prepare)();
+    std::forward<Access>(access)();
+    return true;
+}
+
 } // namespace Common

@@ -236,13 +236,13 @@ public:
     }
 
     template <typename Access>
-    bool WithAccessibleRange(VAddr virtual_addr, u64 size, MemoryProt required_prot,
-                             Access&& access) {
-        return Common::WithValidatedSharedAccess(
+    bool WithWritableRange(VAddr virtual_addr, u64 size, Access&& access) {
+        return Common::WithPreparedValidatedSharedAccess(
             mutex,
-            [this, virtual_addr, size, required_prot] {
-                return IsAccessibleRangeLocked(virtual_addr, size, required_prot);
+            [this, virtual_addr, size] {
+                return IsAccessibleRangeLocked(virtual_addr, size, MemoryProt::CpuWrite);
             },
+            [this, virtual_addr, size] { InvalidateMemory(virtual_addr, size); },
             std::forward<Access>(access));
     }
 
