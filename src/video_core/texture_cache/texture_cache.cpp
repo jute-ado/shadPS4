@@ -13,9 +13,10 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/texture_cache/host_compatibility.h"
-#include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/depth_color_copy.h"
+#include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_subresource_merge.h"
+#include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
@@ -241,9 +242,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         if (cache_image.info.num_samples == 1 && new_info.num_samples == 1) {
             // Perform depth<->color copy using the intermediate copy buffer.
             if (CanCopyImageDirectly(instance.IsMaintenance8Supported(),
-                                     cache_image.info.props.is_depth,
-                                     cache_image.info.pixel_format, new_image.info.props.is_depth,
-                                     new_image.info.pixel_format)) {
+                                     cache_image.info.props.is_depth, cache_image.info.pixel_format,
+                                     new_image.info.props.is_depth, new_image.info.pixel_format)) {
                 new_image.CopyImage(cache_image);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
@@ -460,23 +460,25 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Left overlap, the image from cache is a possible subresource of the image requested
         if (auto mip = cache_image.info.MipOf(image_info); mip >= 0) {
             if (auto slice = cache_image.info.SliceOf(image_info, mip); slice >= 0) {
-                // We have a larger image created and a separate one, representing a subres of it
-                // bound as render target. In this case we need to rebind render target.
-                if (cache_image.binding.is_target) {
+                const bool source_is_target = cache_image.binding.is_target;
+                const auto plan =
+                    PlanImageSubresourceMerge(static_cast<bool>(cache_image.binding.is_bound),
+                                              source_is_target, static_cast<bool>(merged_image_id));
+                if (plan.rebind_source) {
                     cache_image.binding.needs_rebind = 1u;
-                    if (merged_image_id) {
-                        GetImage(merged_image_id).binding.is_target = 1u;
-                    }
-
-                    FreeImage(cache_image_id);
-                    return {merged_image_id, -1, -1};
                 }
-
-                // We need to have a larger, already allocated image to copy this one into
-                if (merged_image_id) {
+                if (plan.propagate_target) {
+                    GetImage(merged_image_id).binding.is_target = 1u;
+                }
+                if (plan.copy_contents) {
                     auto& merged_image = slot_images[merged_image_id];
                     merged_image.CopyMip(cache_image, mip, slice);
+                }
+                if (plan.release_source) {
                     FreeImage(cache_image_id);
+                }
+                if (source_is_target) {
+                    return {merged_image_id, -1, -1};
                 }
             }
         }

@@ -1128,6 +1128,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/texture_cache/image_info.cpp
                src/video_core/texture_cache/image_info.h
                src/video_core/texture_cache/image_subresource.cpp
+               src/video_core/texture_cache/image_subresource_merge.h
                src/video_core/texture_cache/image_view.cpp
                src/video_core/texture_cache/image_view.h
                src/video_core/texture_cache/sampler.cpp
