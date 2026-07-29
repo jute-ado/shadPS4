@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <span>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp11>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +27,39 @@ struct F32x2 {
     float a;
     float b;
 };
+
+namespace {
+
+bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
+    constexpr size_t SpirvHeaderWords = 5;
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const size_t word_count = instruction >> 16;
+        if (word_count == 0 || word_count > spirv.size() - offset) {
+            return false;
+        }
+        if ((instruction & 0xffffU) == static_cast<u32>(opcode)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+} // Anonymous namespace
+
+TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
+    // s_load_dword s4, s[0:1], 0
+    constexpr u64 load_dword = 0xc0020100U;
+    const std::array<u64, 2> instructions{
+        load_dword,
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S4).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions);
+
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpAtomicOr));
+}
 
 // Example
 // TEST_F(GcnTest, test_name) {
