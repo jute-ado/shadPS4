@@ -29,9 +29,9 @@ public:
         return [this, boundary] { CompleteBoundary(boundary); };
     }
 
-    [[nodiscard]] bool IsOpen() const {
+    [[nodiscard]] bool AreSubmitsAllowed(bool gpu_idle) const {
         std::scoped_lock lock{mutex};
-        return open;
+        return open && gpu_idle;
     }
 
 private:
