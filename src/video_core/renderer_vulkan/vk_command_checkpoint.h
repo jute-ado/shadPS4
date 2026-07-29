@@ -30,7 +30,7 @@ struct CommandCheckpoint {
 
 namespace CommandCheckpointDetail {
 
-constexpr size_t HistorySize = 4096;
+constexpr size_t HistorySize = 65536;
 
 struct AtomicCommandCheckpoint {
     std::atomic<u64> sequence{};
