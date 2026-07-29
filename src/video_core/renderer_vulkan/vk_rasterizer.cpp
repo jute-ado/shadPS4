@@ -14,6 +14,7 @@
 #include "video_core/texture_cache/depth_association.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/depth_color_copy.h"
 
 #ifdef MemoryBarrier
 #undef MemoryBarrier
@@ -523,8 +524,10 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Perform image copy
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
-    if (instance.IsMaintenance8Supported() ||
-        src_image.info.props.is_depth == dst_image.info.props.is_depth) {
+    if (VideoCore::CanCopyImageDirectly(
+            instance.IsMaintenance8Supported(), src_image.info.props.is_depth,
+            src_image.info.pixel_format, dst_image.info.props.is_depth,
+            dst_image.info.pixel_format)) {
         dst_image.CopyImage(src_image);
     } else {
         const auto& copy_buffer =

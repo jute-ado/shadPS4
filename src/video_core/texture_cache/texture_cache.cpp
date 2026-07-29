@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/depth_color_copy.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
@@ -239,7 +240,10 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 
         if (cache_image.info.num_samples == 1 && new_info.num_samples == 1) {
             // Perform depth<->color copy using the intermediate copy buffer.
-            if (instance.IsMaintenance8Supported()) {
+            if (CanCopyImageDirectly(instance.IsMaintenance8Supported(),
+                                     cache_image.info.props.is_depth,
+                                     cache_image.info.pixel_format, new_image.info.props.is_depth,
+                                     new_image.info.pixel_format)) {
                 new_image.CopyImage(cache_image);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
