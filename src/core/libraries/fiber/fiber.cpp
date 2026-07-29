@@ -5,8 +5,10 @@
 
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "core/execution_stack_registry.h"
 #include "core/libraries/fiber/fiber_error.h"
 #include "core/libraries/libs.h"
+#include "core/memory.h"
 #include "core/tls.h"
 
 namespace Libraries::Fiber {
@@ -18,6 +20,24 @@ static constexpr u64 kFiberStackSignature = 0x7149f2ca7149f2ca;
 static constexpr u64 kFiberStackSizeCheck = 0xdeadbeefdeadbeef;
 
 static std::atomic<u32> context_size_check = false;
+
+#ifdef _WIN32
+[[nodiscard]] bool RegisterExecutionStack(void* address, u64 size) {
+    auto& registry = Core::GetExecutionStackRegistry();
+    if (!registry.Register(reinterpret_cast<VAddr>(address), size)) {
+        return false;
+    }
+    Core::Memory::Instance()->InvalidateMemory(reinterpret_cast<VAddr>(address), size);
+    return true;
+}
+
+void UnregisterExecutionStack(void* address, u64 size) {
+    auto& registry = Core::GetExecutionStackRegistry();
+    ASSERT_MSG(registry.Unregister(reinterpret_cast<VAddr>(address), size),
+               "Attempted to unregister an unknown fiber stack");
+    Core::Memory::Instance()->InvalidateMemory(reinterpret_cast<VAddr>(address), size);
+}
+#endif
 
 OrbisFiberContext* GetFiberContext() {
     return Core::GetTcbBase()->tcb_fiber;
@@ -56,6 +76,12 @@ s32 PS4_SYSV_ABI _sceFiberAttachContext(OrbisFiber* fiber, void* addr_context, u
     if (fiber->addr_context) {
         return ORBIS_FIBER_ERROR_INVALID;
     }
+
+#ifdef _WIN32
+    if (!RegisterExecutionStack(addr_context, size_context)) {
+        return ORBIS_FIBER_ERROR_RANGE;
+    }
+#endif
 
     fiber->addr_context = addr_context;
     fiber->size_context = size_context;
@@ -176,6 +202,12 @@ s32 PS4_SYSV_ABI sceFiberInitializeImpl(OrbisFiber* fiber, const char* name, Orb
         return ORBIS_FIBER_ERROR_INVALID;
     }
 
+#ifdef _WIN32
+    if (addr_context != nullptr && !RegisterExecutionStack(addr_context, size_context)) {
+        return ORBIS_FIBER_ERROR_RANGE;
+    }
+#endif
+
     u32 user_flags = flags;
     if (build_ver >= Common::ElfInfo::FW_350) {
         user_flags |= FiberFlags::SetFpuRegs;
@@ -253,6 +285,12 @@ s32 PS4_SYSV_ABI sceFiberFinalize(OrbisFiber* fiber) {
     if (!fiber->state.compare_exchange_strong(expected, FiberState::Terminated)) {
         return ORBIS_FIBER_ERROR_STATE;
     }
+
+#ifdef _WIN32
+    if (fiber->addr_context != nullptr) {
+        UnregisterExecutionStack(fiber->addr_context, fiber->size_context);
+    }
+#endif
 
     return ORBIS_OK;
 }

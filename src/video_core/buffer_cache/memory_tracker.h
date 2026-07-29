@@ -12,6 +12,7 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "core/execution_stack_registry.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -28,6 +29,11 @@ public:
 
     /// Returns true if a region has been modified from the CPU
     bool IsRegionCpuModified(VAddr query_cpu_addr, u64 query_size) noexcept {
+#ifdef _WIN32
+        if (Core::GetExecutionStackRegistry().Overlaps(query_cpu_addr, query_size)) {
+            return true;
+        }
+#endif
         return IteratePages<true>(
             query_cpu_addr, query_size, [](RegionManager* manager, u64 offset, size_t size) {
                 std::scoped_lock lk{manager->lock};
@@ -91,6 +97,12 @@ public:
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
                             auto&& on_upload) {
+#ifdef _WIN32
+        for (const auto& range :
+             Core::GetExecutionStackRegistry().GetExcludedRanges(query_cpu_range, query_size)) {
+            MarkRegionAsCpuModified(range.address, range.size);
+        }
+#endif
         IteratePages<true>(query_cpu_range, query_size,
                            [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
                                manager->lock.lock();

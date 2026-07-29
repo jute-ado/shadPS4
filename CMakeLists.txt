@@ -843,6 +843,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/aerolib/aerolib.h
          src/core/address_space.cpp
          src/core/address_space.h
+         src/core/execution_stack_registry.cpp
+         src/core/execution_stack_registry.h
          src/core/windows_memory_protection.cpp
          src/core/windows_memory_protection.h
          src/core/file_sys/devices/base_device.cpp

@@ -8,6 +8,7 @@
 #include "common/div_ceil.h"
 #include "common/scope_exit.h"
 #include "core/emulator_settings.h"
+#include "core/execution_stack_registry.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
@@ -855,6 +856,15 @@ void TextureCache::TrackImage(ImageId image_id) {
     }
     const auto image_begin = image.info.guest_address;
     const auto image_end = image.info.guest_address + image.info.guest_size;
+#ifdef _WIN32
+    if (Core::GetExecutionStackRegistry().Overlaps(image_begin, image.info.guest_size)) {
+        if (image.IsTracked()) {
+            UntrackImage(image_id);
+        }
+        image.flags |= ImageFlagBits::CpuDirty;
+        return;
+    }
+#endif
     if (image_begin == image.track_addr && image_end == image.track_addr_end) {
         return;
     }

@@ -6,6 +6,7 @@
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/range_lock.h"
+#include "core/execution_stack_registry.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
@@ -205,7 +206,19 @@ struct PageManager::Impl {
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
 #ifdef _WIN64
-        impl.ProtectDataAccessPreservingExecute(address, size, perms);
+        if (perms == Core::MemoryPermission::ReadWrite) {
+            impl.ProtectDataAccessPreservingExecute(address, size, perms);
+            return;
+        }
+
+        auto& stacks = Core::GetExecutionStackRegistry();
+        if (!stacks.Overlaps(address, size)) {
+            impl.ProtectDataAccessPreservingExecute(address, size, perms);
+            return;
+        }
+        for (const auto& range : stacks.GetWatchableRanges(address, size)) {
+            impl.ProtectDataAccessPreservingExecute(range.address, range.size, perms);
+        }
 #else
         impl.Protect(address, size, perms);
 #endif
