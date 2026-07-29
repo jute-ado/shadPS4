@@ -15,13 +15,14 @@ using namespace std::chrono_literals;
 namespace Libraries::GnmDriver {
 namespace {
 
-TEST(GnmSubmissionGate, SubmitEligibilityRequiresAnOpenGateAndAnIdleGpu) {
+TEST(GnmSubmissionGate, SubmitEligibilityReflectsBoundaryNotTransientGpuBusy) {
     SubmissionGate gate;
 
-    EXPECT_FALSE(gate.AreSubmitsAllowed(false));
+    EXPECT_TRUE(gate.AreSubmitsAllowed(false));
     EXPECT_TRUE(gate.AreSubmitsAllowed(true));
 
     auto complete_boundary = gate.BeginBoundary();
+    EXPECT_FALSE(gate.AreSubmitsAllowed(false));
     EXPECT_FALSE(gate.AreSubmitsAllowed(true));
     complete_boundary();
 }
