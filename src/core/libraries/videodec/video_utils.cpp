@@ -11,9 +11,10 @@
 
 namespace Libraries::Videodec {
 
-void CopyNV12Data(u8* dst, const AVFrame& src) {
-    const auto dst_pitch = Common::AlignUp<u32>(src.width, 64);
-    const auto dst_height = Common::AlignUp<u32>(src.height, 16);
+bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
+    const auto layout = GetNV12FrameLayout(src.width, src.height);
+    const auto dst_pitch = layout.pitch;
+    const auto dst_height = layout.height;
 
     const auto luma_dst = dst;
     const auto chroma_dst = dst + dst_pitch * dst_height;
@@ -41,6 +42,7 @@ void CopyNV12Data(u8* dst, const AVFrame& src) {
             std::memcpy(chroma_dst + y * dst_pitch, src.data[1] + cy * src.linesize[1], src.width);
         }
     }
+    return true;
 }
 
 } // namespace Libraries::Videodec

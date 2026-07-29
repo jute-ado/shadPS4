@@ -47,6 +47,7 @@ public:
         : m_memory_replacement(memory_replacement),
           m_data(is_texture ? AllocateTexture(memory_replacement, align, size)
                             : Allocate(memory_replacement, align, size)),
+          m_size(size),
           m_is_texture(is_texture) {
         ASSERT_MSG(m_data, "Could not allocate frame buffer.");
     }
@@ -67,17 +68,23 @@ public:
 
     GuestBuffer(GuestBuffer&& r) noexcept
         : m_memory_replacement(r.m_memory_replacement), m_data(r.m_data),
-          m_is_texture(r.m_is_texture) {
+          m_size(r.m_size), m_is_texture(r.m_is_texture) {
         r.m_data = nullptr;
+        r.m_size = 0;
     };
 
     GuestBuffer& operator=(GuestBuffer&& r) noexcept {
         std::swap(m_data, r.m_data);
+        std::swap(m_size, r.m_size);
         return *this;
     }
 
     u8* GetBuffer() const noexcept {
         return m_data;
+    }
+
+    u32 GetSize() const noexcept {
+        return m_size;
     }
 
 private:
@@ -102,6 +109,7 @@ private:
 
     const AvPlayerMemAllocator& m_memory_replacement;
     u8* m_data = nullptr;
+    u32 m_size = 0;
     bool m_is_texture = false;
 };
 
