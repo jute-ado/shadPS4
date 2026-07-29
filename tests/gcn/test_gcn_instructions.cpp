@@ -30,20 +30,25 @@ struct F32x2 {
 
 namespace {
 
-bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
+size_t CountSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
     constexpr size_t SpirvHeaderWords = 5;
+    size_t count{};
     for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
         const u32 instruction = spirv[offset];
         const size_t word_count = instruction >> 16;
         if (word_count == 0 || word_count > spirv.size() - offset) {
-            return false;
+            return 0;
         }
         if ((instruction & 0xffffU) == static_cast<u32>(opcode)) {
-            return true;
+            ++count;
         }
         offset += word_count;
     }
-    return false;
+    return count;
+}
+
+bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
+    return CountSpirvOpcode(spirv, opcode) != 0;
 }
 
 } // Anonymous namespace
@@ -73,9 +78,39 @@ TEST_F(GcnTest, fixed_wave64_readlane_uses_workgroup_exchange_on_wave32_hosts) {
 
         EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast))
             << "guest lane " << lane;
-        EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpControlBarrier))
+        EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpControlBarrier), 2)
             << "guest lane " << lane;
+
+        if (lane == 32) {
+            auto runner = gcn_test::Runner::instance().value();
+            const auto result = runner->run<u32>(spirv);
+            ASSERT_TRUE(result.has_value());
+            EXPECT_EQ(*result, lane);
+        }
     }
+}
+
+TEST_F(GcnTest, adjacent_fixed_wave64_readlanes_share_one_barrier_pair) {
+    const std::array<u64, 4> instructions{
+        VOP2(OpcodeVOP2::V_READLANE_B32, VOperand8::V0, SOperand9::V0,
+             static_cast<VOperand8>(std::to_underlying(SOperand9::Const0)))
+            .Get(),
+        VOP2(OpcodeVOP2::V_READLANE_B32, VOperand8::V1, SOperand9::V0,
+             static_cast<VOperand8>(std::to_underlying(SOperand9::Const32)))
+            .Get(),
+        SOP2(OpcodeSOP2::S_ADD_U32, SOperand7::S0, SOperand8::S0, SOperand8::S1).Get(),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S0).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions, {64, 1, 1});
+
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast), 0);
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpControlBarrier), 2);
+
+    auto runner = gcn_test::Runner::instance().value();
+    const auto result = runner->run<u32>(spirv);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 32U);
 }
 
 // Example

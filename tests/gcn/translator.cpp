@@ -82,8 +82,10 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
     program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
 
     Profile profile{};
+    profile.max_shared_memory_size = 64 * 1024;
     profile.supported_spirv = 0x00010600;
     profile.subgroup_size = 32;
+    profile.needs_lds_barriers = true;
 
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);
@@ -93,15 +95,16 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
     Gcn::Translator translator(program.info, runtime_info, profile);
     translator.EmitPrologue(block);
 
-    for (int i = 0; i < 4; ++i) {
-        // copy user data from SGPR to VGPR as (most?) instructions cannot access
-        // two SGPRs
-        Shader::Gcn::GcnInst mov{};
-        mov.src[0].field = Shader::Gcn::OperandField::ScalarGPR;
-        mov.src[0].code = i;
-        mov.dst[0].field = Shader::Gcn::OperandField::VectorGPR;
-        mov.dst[0].code = i;
-        translator.S_MOV(mov);
+    if (workgroup_size == std::array{1U, 1U, 1U}) {
+        for (int i = 0; i < 4; ++i) {
+            // Copy user data from SGPR to VGPR as (most?) instructions cannot access two SGPRs.
+            Shader::Gcn::GcnInst mov{};
+            mov.src[0].field = Shader::Gcn::OperandField::ScalarGPR;
+            mov.src[0].code = i;
+            mov.dst[0].field = Shader::Gcn::OperandField::VectorGPR;
+            mov.dst[0].code = i;
+            translator.S_MOV(mov);
+        }
     }
     for (const Gcn::GcnInst& inst : instructions) {
         translator.TranslateInstruction(inst);
@@ -111,6 +114,8 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
     Shader::Optimization::SsaRewritePass(program.post_order_blocks);
     Shader::Optimization::IdentityRemovalPass(program.blocks);
     Shader::Optimization::ResourceTrackingPassStub(program, profile);
+    Shader::Optimization::ReadLaneWorkgroupPass(program, runtime_info, profile);
+    Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::ConstantPropagationPass(program.blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::CollectShaderInfoPass(program, profile);

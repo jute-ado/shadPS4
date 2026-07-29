@@ -30,6 +30,10 @@ static void EmitBarrierInBlock(IR::Block* block) {
     };
     BarrierAction action{};
     for (IR::Inst& inst : block->Instructions()) {
+        if (inst.GetOpcode() == IR::Opcode::Barrier) {
+            action = BarrierAction::None;
+            continue;
+        }
         if (IsLoadShared(inst)) {
             if (action == BarrierAction::BarrierOnRead) {
                 IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
