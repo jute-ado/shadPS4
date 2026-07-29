@@ -7,6 +7,7 @@
 
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "video_core/renderer_vulkan/image_descriptor.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -455,10 +456,13 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         }
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);
+            const auto descriptor_kind =
+                ImageDescriptorKindForShaderAccess(image.is_written);
             bindings.push_back({
                 .binding = binding,
-                .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
-                                                   : vk::DescriptorType::eSampledImage,
+                .descriptorType = descriptor_kind == ImageDescriptorKind::Storage
+                                      ? vk::DescriptorType::eStorageImage
+                                      : vk::DescriptorType::eSampledImage,
                 .descriptorCount = num_bindings,
                 .stageFlags = stage_bit,
             });
