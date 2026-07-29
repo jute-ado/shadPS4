@@ -10,6 +10,9 @@
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
+#include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
+#include "shader_recompiler/recompiler.h"
 #include "translator.hpp"
 
 class GcnTest : public ::testing::Test {
@@ -59,6 +62,58 @@ constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
 }
 
 } // Anonymous namespace
+
+TEST(GcnIrPass, devirtualizes_wave_serialized_vgpr_selector) {
+    Shader::Info info{};
+    Shader::Pools pools;
+    Shader::IR::Program program{info};
+    Shader::IR::Block* const block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+
+    Shader::IR::IREmitter ir{*block};
+    const Shader::IR::U32 per_lane_index =
+        ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
+    const Shader::IR::U32 first_index = ir.ReadFirstLane(per_lane_index);
+    Shader::IR::Inst* const read_first = first_index.Inst();
+
+    const Shader::IR::U1 selected_lane = ir.IEqual(first_index, per_lane_index);
+    Shader::IR::Inst* const selected_lane_compare = selected_lane.Inst();
+    const Shader::IR::U1 active_selected_lane = ir.LogicalAnd(ir.Imm1(true), selected_lane);
+    static_cast<void>(ir.ConditionRef(active_selected_lane));
+
+    const Shader::IR::U1 index_zero = ir.IEqual(first_index, ir.Imm32(0));
+    const Shader::IR::U1 index_one = ir.IEqual(first_index, ir.Imm32(1));
+    const Shader::IR::U1 index_two = ir.IEqual(first_index, ir.Imm32(2));
+    Shader::IR::Inst* const index_zero_compare = index_zero.Inst();
+    static_cast<void>(
+        ir.Select(index_zero, ir.Imm32(10), ir.Select(index_one, ir.Imm32(11), ir.Imm32(12))));
+    static_cast<void>(ir.Select(index_two, ir.Imm32(20), ir.Imm32(21)));
+
+    Shader::Optimization::WaveSerializedVgprIndexPass(program);
+
+    EXPECT_FALSE(read_first->HasUses());
+    EXPECT_FALSE(selected_lane_compare->HasUses());
+    EXPECT_EQ(index_zero_compare->Arg(0).Resolve(), per_lane_index.Resolve());
+}
+
+TEST(GcnIrPass, preserves_semantic_read_first_lane) {
+    Shader::Info info{};
+    Shader::Pools pools;
+    Shader::IR::Program program{info};
+    Shader::IR::Block* const block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+
+    Shader::IR::IREmitter ir{*block};
+    const Shader::IR::U32 per_lane_value =
+        ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
+    const Shader::IR::U32 first_value = ir.ReadFirstLane(per_lane_value);
+    Shader::IR::Inst* const read_first = first_value.Inst();
+    static_cast<void>(ir.IAdd(first_value, ir.Imm32(1)));
+
+    Shader::Optimization::WaveSerializedVgprIndexPass(program);
+
+    EXPECT_TRUE(read_first->HasUses());
+}
 
 TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
     // s_load_dword s4, s[0:1], 0
