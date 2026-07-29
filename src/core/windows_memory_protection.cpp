@@ -11,7 +11,25 @@
 namespace Core {
 namespace {
 
-[[nodiscard]] DWORD DataProtection(bool read, bool write) noexcept {
+[[nodiscard]] bool AllowsExecute(DWORD protection) noexcept {
+    switch (protection & 0xff) {
+    case PAGE_EXECUTE:
+    case PAGE_EXECUTE_READ:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] DWORD DataProtection(bool read, bool write, bool execute) noexcept {
+    if (execute) {
+        if (write) {
+            return PAGE_EXECUTE_READWRITE;
+        }
+        return read ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
+    }
     if (write) {
         return PAGE_READWRITE;
     }
@@ -35,7 +53,7 @@ bool ProtectWindowsDataAccessPreservingExecute(HANDLE process, VAddr address, u6
         MEMORY_BASIC_INFORMATION info{};
         if (VirtualQueryEx(process, reinterpret_cast<const void*>(cursor), &info, sizeof(info)) ==
                 0 ||
-            info.State != MEM_COMMIT) {
+            info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD) != 0) {
             return false;
         }
 
@@ -48,7 +66,8 @@ bool ProtectWindowsDataAccessPreservingExecute(HANDLE process, VAddr address, u6
 
         DWORD old_protection{};
         if (!VirtualProtectEx(process, reinterpret_cast<void*>(cursor), protect_end - cursor,
-                              DataProtection(read, write), &old_protection)) {
+                              DataProtection(read, write, AllowsExecute(info.Protect)),
+                              &old_protection)) {
             return false;
         }
         cursor = protect_end;

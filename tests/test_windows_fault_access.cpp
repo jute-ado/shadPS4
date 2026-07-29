@@ -28,8 +28,8 @@ LONG CALLBACK DelayedFaultHandler(EXCEPTION_POINTERS* exception) {
         SwitchToThread();
     }
 
-    const auto access = VideoCore::DecodeWindowsFaultAccess(
-        exception->ExceptionRecord->ExceptionInformation[0]);
+    const auto access =
+        VideoCore::DecodeWindowsFaultAccess(exception->ExceptionRecord->ExceptionInformation[0]);
     const auto* address =
         reinterpret_cast<const void*>(exception->ExceptionRecord->ExceptionInformation[1]);
     delayed_fault_allowed.store(VideoCore::IsWindowsFaultAccessAllowed(address, access),
@@ -61,11 +61,13 @@ TEST(WindowsFaultAccess, MatchesCommittedPageProtection) {
     DWORD old_protection{};
     ASSERT_TRUE(VirtualProtect(page, page_size, PAGE_READONLY, &old_protection));
     EXPECT_TRUE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Read));
-    EXPECT_FALSE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Write));
+    EXPECT_FALSE(
+        VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Write));
 
     ASSERT_TRUE(VirtualProtect(page, page_size, PAGE_NOACCESS, &old_protection));
     EXPECT_FALSE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Read));
-    EXPECT_FALSE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Write));
+    EXPECT_FALSE(
+        VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Write));
 
     ASSERT_TRUE(VirtualProtect(page, page_size, PAGE_EXECUTE_READWRITE, &old_protection));
     EXPECT_TRUE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Read));
@@ -75,7 +77,8 @@ TEST(WindowsFaultAccess, MatchesCommittedPageProtection) {
 
     ASSERT_TRUE(VirtualProtect(page, page_size, PAGE_READWRITE | PAGE_GUARD, &old_protection));
     EXPECT_FALSE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Read));
-    EXPECT_FALSE(VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Write));
+    EXPECT_FALSE(
+        VideoCore::IsWindowsFaultAccessAllowed(page, VideoCore::WindowsFaultAccess::Write));
     EXPECT_TRUE(VirtualFree(page, 0, MEM_RELEASE));
 
     auto* reserved = VirtualAlloc(nullptr, page_size, MEM_RESERVE, PAGE_NOACCESS);
@@ -96,8 +99,8 @@ TEST(WindowsFaultAccess, AcceptsDelayedWriteAfterAnotherThreadRestoresAccess) {
     ASSERT_NE(page, nullptr);
 
     DWORD old_protection{};
-    ASSERT_TRUE(VirtualProtect(const_cast<std::uint8_t*>(page), page_size, PAGE_NOACCESS,
-                               &old_protection));
+    ASSERT_TRUE(
+        VirtualProtect(const_cast<std::uint8_t*>(page), page_size, PAGE_NOACCESS, &old_protection));
     auto* handler = AddVectoredExceptionHandler(1, DelayedFaultHandler);
     ASSERT_NE(handler, nullptr);
     fault_entered.store(false, std::memory_order_release);

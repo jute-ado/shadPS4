@@ -11,8 +11,9 @@
 
 namespace Core {
 
-[[nodiscard]] bool ProtectWindowsDataAccessPreservingExecute(
-    HANDLE process, VAddr address, u64 size, bool read, bool write) noexcept;
+[[nodiscard]] bool ProtectWindowsDataAccessPreservingExecute(HANDLE process, VAddr address,
+                                                             u64 size, bool read,
+                                                             bool write) noexcept;
 
 } // namespace Core
 

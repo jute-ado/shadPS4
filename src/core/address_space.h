@@ -84,6 +84,11 @@ public:
     /// Protects requested region.
     void Protect(VAddr virtual_addr, u64 size, MemoryPermission perms);
 
+#ifdef _WIN32
+    /// Protects data access while retaining each page's current execute permission.
+    void ProtectDataAccessPreservingExecute(VAddr virtual_addr, u64 size, MemoryPermission perms);
+#endif
+
     // Returns an interval set containing all usable regions.
     boost::icl::interval_set<VAddr> GetUsableRegions();
 

@@ -15,6 +15,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include "core/windows_memory_protection.h"
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -563,6 +564,32 @@ struct AddressSpace::Impl {
         }
     }
 
+    void ProtectDataAccessPreservingExecute(VAddr virtual_addr, u64 size, bool read, bool write) {
+        std::scoped_lock lk{mutex};
+
+        if (write && !read) {
+            LOG_WARNING(Core, "Converting write-only protection to read-write");
+        }
+
+        const VAddr virtual_end = virtual_addr + size;
+        auto it = --regions.upper_bound(virtual_addr);
+        ASSERT_MSG(it != regions.end(), "addr {:#x} out of bounds", virtual_addr);
+        for (; it->first < virtual_end; it++) {
+            if (!it->second.is_mapped) {
+                continue;
+            }
+            const auto& region = it->second;
+            const u64 range_addr = std::max(region.base, virtual_addr);
+            const u64 range_size = std::min(region.base + region.size, virtual_end) - range_addr;
+            if (!ProtectWindowsDataAccessPreservingExecute(process, range_addr, range_size, read,
+                                                           write)) {
+                UNREACHABLE_MSG("Failed to change data access protection for address {:#x}, size "
+                                "{:#x}, error {}",
+                                range_addr, range_size, Common::GetLastErrorMsg());
+            }
+        }
+    }
+
     boost::icl::interval_set<VAddr> GetUsableRegions() {
         boost::icl::interval_set<VAddr> reserved_regions;
         for (auto region : regions) {
@@ -847,6 +874,15 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
     const bool execute = True(perms & MemoryPermission::Execute);
     return impl->Protect(virtual_addr, size, read, write, execute);
 }
+
+#ifdef _WIN32
+void AddressSpace::ProtectDataAccessPreservingExecute(VAddr virtual_addr, u64 size,
+                                                      MemoryPermission perms) {
+    const bool read = True(perms & MemoryPermission::Read);
+    const bool write = True(perms & MemoryPermission::Write);
+    return impl->ProtectDataAccessPreservingExecute(virtual_addr, size, read, write);
+}
+#endif
 
 boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {
 #ifdef _WIN32
