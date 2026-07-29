@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
@@ -45,6 +47,28 @@ DECLARE_ENUM_FLAG_OPERATORS(MemoryProt)
 
 constexpr bool RequiresSubmissionBoundaryBeforeMapping(MemoryProt prot) {
     return True(prot & MemoryProt::GpuReadWrite);
+}
+
+template <typename QueryProtection>
+bool RequiresSubmissionBoundaryBeforeUnmapping(VAddr address, u64 size,
+                                               QueryProtection&& query_protection) {
+    if (size == 0 || address > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+
+    const VAddr range_end = address + size;
+    while (address < range_end) {
+        MemoryProt prot{};
+        VAddr area_end{};
+        if (!query_protection(address, prot, area_end) || area_end <= address) {
+            return false;
+        }
+        if (RequiresSubmissionBoundaryBeforeMapping(prot)) {
+            return true;
+        }
+        address = std::min(area_end, range_end);
+    }
+    return false;
 }
 
 enum class MemoryMapFlags : u32 {
