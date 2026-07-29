@@ -25,6 +25,15 @@ TEST(GnmSubmissionGate, SubmitEligibilityReflectsOnlySubmissionBoundary) {
     complete_boundary();
 }
 
+TEST(GnmSubmissionGate, GuestEligibilityIgnoresPendingInternalBoundary) {
+    SubmissionGate gate;
+    auto complete_boundary = gate.BeginBoundary();
+
+    EXPECT_TRUE(gate.AreGuestSubmitsAllowed());
+
+    complete_boundary();
+}
+
 TEST(GnmSubmissionGate, SubmitDoneClosesIdleGateUntilGpuAcknowledgesIt) {
     SubmissionGate gate;
 
