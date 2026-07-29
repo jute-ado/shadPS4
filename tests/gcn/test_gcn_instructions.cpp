@@ -61,6 +61,23 @@ TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
     EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpAtomicOr));
 }
 
+TEST_F(GcnTest, fixed_wave64_readlane_uses_workgroup_exchange_on_wave32_hosts) {
+    for (const u32 lane : {0U, 32U}) {
+        const auto lane_operand = static_cast<VOperand8>(std::to_underlying(SOperand9::Const0) + lane);
+        const std::array<u64, 2> instructions{
+            VOP2(OpcodeVOP2::V_READLANE_B32, VOperand8::V0, SOperand9::V0, lane_operand).Get(),
+            VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S0).Get(),
+        };
+
+        const auto spirv = TranslateToSpirv(instructions, {64, 1, 1});
+
+        EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast))
+            << "guest lane " << lane;
+        EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpControlBarrier))
+            << "guest lane " << lane;
+    }
+}
+
 // Example
 // TEST_F(GcnTest, test_name) {
 //     // Runner sets the vulkan context

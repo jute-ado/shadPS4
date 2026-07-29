@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <span>
 #include <vector>
 
@@ -10,4 +11,6 @@
 
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst);
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts);
+std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
+                                  std::array<u32, 3> workgroup_size);
 std::vector<u32> TranslateToSpirvWithDma(std::span<const u64> raw_gcn_insts);

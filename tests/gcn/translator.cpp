@@ -39,6 +39,11 @@ std::vector<u32> TranslateToSpirvWithDma(std::span<const u64> raw_gcn_insts) {
 }
 
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
+    return TranslateToSpirv(raw_gcn_insts, {1, 1, 1});
+}
+
+std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
+                                  std::array<u32, 3> workgroup_size) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -83,7 +88,7 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);
     runtime_info.num_user_data = 4;
-    runtime_info.cs_info.workgroup_size = {1, 1, 1};
+    runtime_info.cs_info.workgroup_size = workgroup_size;
 
     Gcn::Translator translator(program.info, runtime_info, profile);
     translator.EmitPrologue(block);
