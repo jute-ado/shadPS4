@@ -15,15 +15,13 @@ using namespace std::chrono_literals;
 namespace Libraries::GnmDriver {
 namespace {
 
-TEST(GnmSubmissionGate, SubmitEligibilityReflectsBoundaryNotTransientGpuBusy) {
+TEST(GnmSubmissionGate, SubmitEligibilityReflectsOnlySubmissionBoundary) {
     SubmissionGate gate;
 
-    EXPECT_TRUE(gate.AreSubmitsAllowed(false));
-    EXPECT_TRUE(gate.AreSubmitsAllowed(true));
+    EXPECT_TRUE(gate.AreSubmitsAllowed());
 
     auto complete_boundary = gate.BeginBoundary();
-    EXPECT_FALSE(gate.AreSubmitsAllowed(false));
-    EXPECT_FALSE(gate.AreSubmitsAllowed(true));
+    EXPECT_FALSE(gate.AreSubmitsAllowed());
     complete_boundary();
 }
 
@@ -32,7 +30,7 @@ TEST(GnmSubmissionGate, SubmitDoneClosesIdleGateUntilGpuAcknowledgesIt) {
 
     auto complete_boundary = gate.BeginBoundary();
 
-    EXPECT_FALSE(gate.AreSubmitsAllowed(true));
+    EXPECT_FALSE(gate.AreSubmitsAllowed());
 
     auto entrant = std::async(std::launch::async, [&] {
         auto guard = gate.Enter();
@@ -82,7 +80,7 @@ TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
 
     EXPECT_EQ(closer.wait_for(1s), std::future_status::ready);
     auto complete_boundary = closer.get();
-    EXPECT_FALSE(gate.AreSubmitsAllowed(true));
+    EXPECT_FALSE(gate.AreSubmitsAllowed());
     complete_boundary();
 }
 
@@ -105,7 +103,7 @@ TEST(GnmSubmissionGate, ConsecutiveSubmitDoneBoundariesDoNotCoalesce) {
 
     EXPECT_EQ(second_closer.wait_for(1s), std::future_status::ready);
     auto complete_second_boundary = second_closer.get();
-    EXPECT_FALSE(gate.AreSubmitsAllowed(true));
+    EXPECT_FALSE(gate.AreSubmitsAllowed());
     complete_second_boundary();
 }
 
@@ -118,9 +116,9 @@ TEST(GnmSubmissionGate, StaleCompletionCannotAcknowledgeANewerBoundary) {
 
     complete_first_boundary();
 
-    EXPECT_FALSE(gate.AreSubmitsAllowed(true));
+    EXPECT_FALSE(gate.AreSubmitsAllowed());
     complete_second_boundary();
-    EXPECT_TRUE(gate.AreSubmitsAllowed(true));
+    EXPECT_TRUE(gate.AreSubmitsAllowed());
 }
 
 } // namespace
