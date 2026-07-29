@@ -33,6 +33,17 @@ target_compile_features(shadps4_user_migration_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_user_migration_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_user_migration_test)
 
+add_executable(shadps4_execution_stack_registry_test
+    ${CMAKE_SOURCE_DIR}/src/core/execution_stack_registry.cpp
+    test_execution_stack_registry.cpp
+)
+target_include_directories(shadps4_execution_stack_registry_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_execution_stack_registry_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_execution_stack_registry_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_execution_stack_registry_test)
+
 add_executable(shadps4_controller_trace_test
     ${CMAKE_SOURCE_DIR}/src/input/controller_axis.cpp
     ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
