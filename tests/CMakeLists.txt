@@ -131,6 +131,24 @@ target_link_libraries(shadps4_depth_color_copy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_depth_color_copy_test)
 
+add_executable(shadps4_image_subresource_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/host_compatibility.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image_subresource.cpp
+    test_image_subresource.cpp
+)
+target_include_directories(shadps4_image_subresource_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_image_subresource_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_image_subresource_test PRIVATE
+    Boost::headers
+    GTest::gtest_main
+    magic_enum::magic_enum
+    spdlog::spdlog
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_image_subresource_test)
+
 add_executable(shadps4_videodec_frame_buffer_test
     test_videodec_frame_buffer.cpp
 )
