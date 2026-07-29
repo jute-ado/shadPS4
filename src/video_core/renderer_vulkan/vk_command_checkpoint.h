@@ -18,6 +18,8 @@ enum class CommandCheckpointType : u64 {
     DrawIndexedIndirect,
     Dispatch,
     DispatchIndirect,
+    DispatchComplete,
+    DispatchIndirectComplete,
 };
 
 struct CommandCheckpoint {

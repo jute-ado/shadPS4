@@ -423,6 +423,13 @@ void Rasterizer::DispatchDirect() {
         cmdbuf.setCheckpointNV(marker);
     }
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchComplete, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
 
     ResetBindings();
 }
@@ -463,6 +470,14 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         cmdbuf.setCheckpointNV(marker);
     }
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchIndirectComplete, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {address + offset, size, 0, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
 
     ResetBindings();
 }
