@@ -367,6 +367,15 @@ add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
 
+if (WIN32)
+    add_executable(shadps4_windows_fault_access_test
+        test_windows_fault_access.cpp
+        ${CMAKE_SOURCE_DIR}/src/video_core/windows_fault_access.cpp
+    )
+    target_link_libraries(shadps4_windows_fault_access_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_fault_access_test)
+endif()
+
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE
         ${CMAKE_SOURCE_DIR}/src
