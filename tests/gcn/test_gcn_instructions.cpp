@@ -56,7 +56,7 @@ TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
         VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S4).Get(),
     };
 
-    const auto spirv = TranslateToSpirv(instructions);
+    const auto spirv = TranslateToSpirvWithDma(instructions);
 
     EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpAtomicOr));
 }

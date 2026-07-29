@@ -6,6 +6,8 @@
 #include <iostream>
 
 #include "common/io_file.h"
+#include "common/scope_exit.h"
+#include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/translate/translate.h"
@@ -25,6 +27,15 @@ void ResourceTrackingPassStub(IR::Program& program, const Profile& profile);
 
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
     return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1});
+}
+
+std::vector<u32> TranslateToSpirvWithDma(std::span<const u64> raw_gcn_insts) {
+    const bool was_enabled = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    EmulatorSettings.SetDirectMemoryAccessEnabled(true);
+    SCOPE_EXIT {
+        EmulatorSettings.SetDirectMemoryAccessEnabled(was_enabled);
+    };
+    return TranslateToSpirv(raw_gcn_insts);
 }
 
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
