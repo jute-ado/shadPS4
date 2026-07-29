@@ -56,6 +56,17 @@ TEST(ExecutionStackRegistry, ExcludesWholePagesForUnalignedStacks) {
     EXPECT_TRUE(registry.Unregister(0x2800, 0x100));
 }
 
+TEST(ExecutionStackRegistry, ReturnsOnlyExcludedIntersectionsForConservativeRefresh) {
+    Core::ExecutionStackRegistry registry;
+
+    ASSERT_TRUE(registry.Register(0x2800, 0x100));
+    ASSERT_TRUE(registry.Register(0x4800, 0x100));
+    EXPECT_TRUE(registry.GetExcludedRanges(0x1800, 0x3800) ==
+                (std::vector<Core::ExecutionStackRange>{{0x2000, 0x1000}, {0x4000, 0x1000}}));
+    EXPECT_TRUE(registry.GetExcludedRanges(0x2800, 0x1000) ==
+                (std::vector<Core::ExecutionStackRange>{{0x2800, 0x800}}));
+}
+
 TEST(ExecutionStackRegistry, RejectsEmptyAndOverflowingRanges) {
     Core::ExecutionStackRegistry registry;
     constexpr VAddr max = std::numeric_limits<VAddr>::max();
