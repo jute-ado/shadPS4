@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <windows.h>
 
+#include "core/windows_memory_protection.h"
 #include "video_core/windows_fault_access.h"
 
 namespace {
@@ -121,4 +122,39 @@ TEST(WindowsFaultAccess, AcceptsDelayedWriteAfterAnotherThreadRestoresAccess) {
     EXPECT_EQ(page[0], 0x5a);
     EXPECT_TRUE(RemoveVectoredExceptionHandler(handler));
     EXPECT_TRUE(VirtualFree(const_cast<std::uint8_t*>(page), 0, MEM_RELEASE));
+}
+
+TEST(WindowsMemoryProtection, DataWatchesPreservePerPageExecutePermission) {
+    SYSTEM_INFO system_info{};
+    GetSystemInfo(&system_info);
+    const auto page_size = static_cast<SIZE_T>(system_info.dwPageSize);
+    auto* pages = static_cast<std::uint8_t*>(
+        VirtualAlloc(nullptr, page_size * 2, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    ASSERT_NE(pages, nullptr);
+
+    DWORD old_protection{};
+    ASSERT_TRUE(VirtualProtect(pages + page_size, page_size, PAGE_READWRITE, &old_protection));
+
+    const auto protection_at = [](const void* address) {
+        MEMORY_BASIC_INFORMATION info{};
+        EXPECT_NE(VirtualQuery(address, &info, sizeof(info)), 0U);
+        return info.Protect & 0xff;
+    };
+
+    EXPECT_TRUE(Core::ProtectWindowsDataAccessPreservingExecute(
+        GetCurrentProcess(), reinterpret_cast<VAddr>(pages), page_size * 2, true, false));
+    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE_READ);
+    EXPECT_EQ(protection_at(pages + page_size), PAGE_READONLY);
+
+    EXPECT_TRUE(Core::ProtectWindowsDataAccessPreservingExecute(
+        GetCurrentProcess(), reinterpret_cast<VAddr>(pages), page_size * 2, false, false));
+    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE);
+    EXPECT_EQ(protection_at(pages + page_size), PAGE_NOACCESS);
+
+    EXPECT_TRUE(Core::ProtectWindowsDataAccessPreservingExecute(
+        GetCurrentProcess(), reinterpret_cast<VAddr>(pages), page_size * 2, true, true));
+    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE_READWRITE);
+    EXPECT_EQ(protection_at(pages + page_size), PAGE_READWRITE);
+
+    EXPECT_TRUE(VirtualFree(pages, 0, MEM_RELEASE));
 }

@@ -370,6 +370,7 @@ add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
 if (WIN32)
     add_executable(shadps4_windows_fault_access_test
         test_windows_fault_access.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/windows_memory_protection.cpp
         ${CMAKE_SOURCE_DIR}/src/video_core/windows_fault_access.cpp
     )
     target_link_libraries(shadps4_windows_fault_access_test PRIVATE GTest::gtest_main)
