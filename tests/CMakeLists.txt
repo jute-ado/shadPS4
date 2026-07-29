@@ -23,6 +23,7 @@ set(TEST_TARGETS
 )
 
 add_executable(shadps4_user_migration_test
+    ${CMAKE_SOURCE_DIR}/src/core/user_migration.cpp
     test_user_migration.cpp
 )
 target_include_directories(shadps4_user_migration_test PRIVATE
