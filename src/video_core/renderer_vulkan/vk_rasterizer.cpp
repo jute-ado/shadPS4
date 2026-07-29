@@ -718,8 +718,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto* image = &texture_cache.GetImage(image_id);
             if (VideoCore::ShouldUseAssociatedDepthForView(desc.view_info.format)) {
                 if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
-                // If this image has an associated depth image, it's a stencil attachment.
-                // Redirect the access to the actual depth-stencil buffer.
+                    // If this image has an associated depth image, it's a stencil attachment.
+                    // Redirect the access to the actual depth-stencil buffer.
                     image_id = depth_image_id;
                     image = &texture_cache.GetImage(image_id);
                 }

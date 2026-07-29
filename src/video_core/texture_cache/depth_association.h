@@ -7,9 +7,15 @@
 
 namespace VideoCore {
 
-// A linked image currently redirects every shader view to its associated depth image.
-constexpr bool ShouldUseAssociatedDepthForView(vk::Format) {
-    return true;
+constexpr bool ShouldUseAssociatedDepthForView(vk::Format view_format) {
+    switch (view_format) {
+    case vk::Format::eS8Uint:
+    case vk::Format::eR8Uint:
+    case vk::Format::eR8Unorm:
+        return true;
+    default:
+        return false;
+    }
 }
 
 } // namespace VideoCore
