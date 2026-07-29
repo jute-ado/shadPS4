@@ -15,25 +15,16 @@ struct ImageSubresourceMergePlan {
 constexpr ImageSubresourceMergePlan PlanImageSubresourceMerge(const bool source_is_bound,
                                                               const bool source_is_target,
                                                               const bool parent_available) {
-    if (source_is_target) {
-        return {
-            .copy_contents = false,
-            .rebind_source = true,
-            .propagate_target = parent_available,
-            .release_source = true,
-        };
+    if (!parent_available) {
+        return {};
     }
 
-    if (parent_available) {
-        return {
-            .copy_contents = true,
-            .rebind_source = false,
-            .propagate_target = false,
-            .release_source = true,
-        };
-    }
-
-    return {};
+    return {
+        .copy_contents = true,
+        .rebind_source = source_is_bound || source_is_target,
+        .propagate_target = source_is_target,
+        .release_source = true,
+    };
 }
 
 } // namespace VideoCore
