@@ -105,6 +105,19 @@ target_link_libraries(shadps4_gnm_graphics_event_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_gnm_graphics_event_test)
 
+add_executable(shadps4_depth_association_test
+    test_depth_association.cpp
+)
+target_include_directories(shadps4_depth_association_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_depth_association_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_depth_association_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_depth_association_test)
+
 add_executable(shadps4_module_mapping_test
     test_module_mapping.cpp
 )
