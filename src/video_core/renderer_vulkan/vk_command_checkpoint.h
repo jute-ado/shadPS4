@@ -24,7 +24,7 @@ struct CommandCheckpoint {
     u64 sequence{};
     CommandCheckpointType type{};
     u64 pipeline_hash{};
-    u64 shader_hash{};
+    std::array<u64, 6> shader_hashes{};
     std::array<u64, 6> arguments{};
 };
 
@@ -36,7 +36,7 @@ struct AtomicCommandCheckpoint {
     std::atomic<u64> sequence{};
     std::atomic<u64> type{};
     std::atomic<u64> pipeline_hash{};
-    std::atomic<u64> shader_hash{};
+    std::array<std::atomic<u64>, 6> shader_hashes{};
     std::array<std::atomic<u64>, 6> arguments{};
 };
 
@@ -46,13 +46,16 @@ inline std::array<AtomicCommandCheckpoint, HistorySize> history{};
 } // namespace CommandCheckpointDetail
 
 inline const void* RecordCommandCheckpoint(CommandCheckpointType type, u64 pipeline_hash,
-                                           u64 shader_hash, std::array<u64, 6> arguments) {
+                                           std::array<u64, 6> shader_hashes,
+                                           std::array<u64, 6> arguments) {
     using namespace CommandCheckpointDetail;
     const u64 sequence = next_sequence.fetch_add(1, std::memory_order_relaxed);
     auto& slot = history[sequence % HistorySize];
     slot.type.store(static_cast<u64>(type), std::memory_order_relaxed);
     slot.pipeline_hash.store(pipeline_hash, std::memory_order_relaxed);
-    slot.shader_hash.store(shader_hash, std::memory_order_relaxed);
+    for (size_t index = 0; index < shader_hashes.size(); ++index) {
+        slot.shader_hashes[index].store(shader_hashes[index], std::memory_order_relaxed);
+    }
     for (size_t index = 0; index < arguments.size(); ++index) {
         slot.arguments[index].store(arguments[index], std::memory_order_relaxed);
     }
@@ -74,8 +77,11 @@ inline std::optional<CommandCheckpoint> FindCommandCheckpoint(const void* marker
         .sequence = sequence,
         .type = static_cast<CommandCheckpointType>(slot.type.load(std::memory_order_relaxed)),
         .pipeline_hash = slot.pipeline_hash.load(std::memory_order_relaxed),
-        .shader_hash = slot.shader_hash.load(std::memory_order_relaxed),
     };
+    for (size_t index = 0; index < result.shader_hashes.size(); ++index) {
+        result.shader_hashes[index] =
+            slot.shader_hashes[index].load(std::memory_order_relaxed);
+    }
     for (size_t index = 0; index < result.arguments.size(); ++index) {
         result.arguments[index] = slot.arguments[index].load(std::memory_order_relaxed);
     }

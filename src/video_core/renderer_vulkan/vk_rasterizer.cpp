@@ -226,11 +226,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
     if (instance.SupportsDiagnosticCheckpoints()) {
-        u64 shader_hash{};
+        std::array<u64, 6> shader_hashes{};
+        size_t stage_index{};
         for (const auto* stage : pipeline->GetStages()) {
             if (stage) {
-                shader_hash = stage->pgm_hash;
+                shader_hashes[stage_index] = stage->pgm_hash;
             }
+            ++stage_index;
         }
         const auto type = is_indexed ? CommandCheckpointType::DrawIndexed
                                      : CommandCheckpointType::Draw;
@@ -240,7 +242,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             (static_cast<u64>(key.num_color_attachments) << 16) |
             (static_cast<u64>(key.mrt_mask) << 24) | (static_cast<u64>(key.num_samples) << 56);
         const auto marker = RecordCommandCheckpoint(
-            type, std::hash<GraphicsPipelineKey>{}(key), shader_hash,
+            type, std::hash<GraphicsPipelineKey>{}(key), shader_hashes,
             {regs.num_indices, regs.num_instances.NumInstances(), index_offset,
              regs.index_base_address.Address<VAddr>(), packed_key, regs.index_buffer_type.raw});
         cmdbuf.setCheckpointNV(marker);
@@ -313,11 +315,13 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
     if (instance.SupportsDiagnosticCheckpoints()) {
-        u64 shader_hash{};
+        std::array<u64, 6> shader_hashes{};
+        size_t stage_index{};
         for (const auto* stage : pipeline->GetStages()) {
             if (stage) {
-                shader_hash = stage->pgm_hash;
+                shader_hashes[stage_index] = stage->pgm_hash;
             }
+            ++stage_index;
         }
         const auto type = is_indexed ? CommandCheckpointType::DrawIndexedIndirect
                                      : CommandCheckpointType::DrawIndirect;
@@ -327,7 +331,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
             (static_cast<u64>(key.num_color_attachments) << 16) |
             (static_cast<u64>(key.mrt_mask) << 24) | (static_cast<u64>(key.num_samples) << 56);
         const auto marker = RecordCommandCheckpoint(
-            type, std::hash<GraphicsPipelineKey>{}(key), shader_hash,
+            type, std::hash<GraphicsPipelineKey>{}(key), shader_hashes,
             {arg_address + offset, max_count, stride, count_address, packed_key, 0});
         cmdbuf.setCheckpointNV(marker);
     }
@@ -382,7 +386,8 @@ void Rasterizer::DispatchDirect() {
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     if (instance.SupportsDiagnosticCheckpoints()) {
         const auto marker = RecordCommandCheckpoint(
-            CommandCheckpointType::Dispatch, cs.pgm_hash, cs.pgm_hash,
+            CommandCheckpointType::Dispatch, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
             {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0});
         cmdbuf.setCheckpointNV(marker);
     }
@@ -421,7 +426,8 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     if (instance.SupportsDiagnosticCheckpoints()) {
         const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
         const auto marker = RecordCommandCheckpoint(
-            CommandCheckpointType::DispatchIndirect, cs.pgm_hash, cs.pgm_hash,
+            CommandCheckpointType::DispatchIndirect, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
             {address + offset, size, 0, 0, 0, 0});
         cmdbuf.setCheckpointNV(marker);
     }
