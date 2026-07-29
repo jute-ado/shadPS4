@@ -80,6 +80,11 @@ s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
         return -1;
     }
 
+    if (mip < 0 || mip >= info.resources.levels || resources.layers == 0 ||
+        info.resources.layers == 0 || resources.layers > info.resources.layers) {
+        return -1;
+    }
+
     // Array slices should be of the same type.
     if (type != info.type) {
         return -1;
@@ -99,19 +104,38 @@ s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
         return -1;
     }
 
-    // Check for size alignment.
-    const u32 slice_size = info.mips_layout[mip].size / info.resources.layers;
-    if (guest_size % slice_size != 0) {
+    const auto& mip_layout = info.mips_layout[mip];
+    if (mip_layout.size % info.resources.layers != 0) {
         return -1;
     }
 
-    // Ensure that address is aligned too.
-    const auto addr_diff = guest_address - (info.guest_address + info.mips_layout[mip].offset);
-    if ((addr_diff % guest_size) != 0) {
+    const u32 slice_size = mip_layout.size / info.resources.layers;
+    const u64 full_view_size = static_cast<u64>(slice_size) * resources.layers;
+    // Render targets may expose only the logical footprint of a padded texture mip. This is safe
+    // for one layer when the range stays within that parent slice. Multi-layer views must retain
+    // the parent stride so every layer starts at the same address in both descriptions.
+    const bool is_logical_single_slice =
+        resources.layers == 1 && guest_size > 0 && guest_size <= slice_size;
+    if (!is_logical_single_slice && guest_size != full_view_size) {
         return -1;
     }
 
-    return addr_diff / guest_size;
+    const VAddr mip_address = info.guest_address + mip_layout.offset;
+    if (guest_address < mip_address) {
+        return -1;
+    }
+
+    const u64 addr_diff = guest_address - mip_address;
+    if (slice_size == 0 || addr_diff % slice_size != 0) {
+        return -1;
+    }
+
+    const u64 base_slice = addr_diff / slice_size;
+    if (base_slice + resources.layers > info.resources.layers) {
+        return -1;
+    }
+
+    return static_cast<s32>(base_slice);
 }
 
 } // namespace VideoCore
