@@ -132,7 +132,7 @@ TEST_F(GcnTest, ds_swizzle_uses_nonuniform_subgroup_shuffle) {
 
     const auto spirv = TranslateToSpirv(instructions);
 
-    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformShuffle));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformShuffleXor));
     EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast));
 }
 

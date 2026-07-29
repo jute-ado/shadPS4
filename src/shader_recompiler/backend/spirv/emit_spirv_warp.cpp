@@ -27,7 +27,11 @@ Id EmitReadFirstLane(EmitContext& ctx, Id value) {
 }
 
 Id EmitReadLane(EmitContext& ctx, Id value, Id lane) {
-    return ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, lane);
+    // ReadLane also represents DS swizzles, whose source lane varies per invocation. SPIR-V
+    // broadcast makes a non-uniform invocation id undefined; shuffle-xor permits the permutation.
+    const Id invocation_id = ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id);
+    const Id xor_mask = ctx.OpBitwiseXor(ctx.U32[1], invocation_id, lane);
+    return ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, xor_mask);
 }
 
 Id EmitWriteLane(EmitContext& ctx, Id value, Id write_value, u32 lane) {

@@ -307,7 +307,7 @@ void EmitContext::DefineWorkgroupIndex() {
 }
 
 void EmitContext::DefineInputs() {
-    if (info.uses_lane_id) {
+    if (info.uses_lane_id || info.uses_group_shuffle) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
         Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
