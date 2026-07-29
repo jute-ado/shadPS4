@@ -44,6 +44,18 @@ TEST(ExecutionStackRegistry, ReferenceCountsExactRegistrationsAndMergesOverlaps)
     EXPECT_FALSE(registry.Overlaps(0x1000, 0x6000));
 }
 
+TEST(ExecutionStackRegistry, ExcludesWholePagesForUnalignedStacks) {
+    Core::ExecutionStackRegistry registry;
+
+    ASSERT_TRUE(registry.Register(0x2800, 0x100));
+    EXPECT_TRUE(registry.Overlaps(0x2000, 1));
+    EXPECT_TRUE(registry.Overlaps(0x2fff, 1));
+    EXPECT_FALSE(registry.Overlaps(0x3000, 1));
+    EXPECT_TRUE(registry.GetWatchableRanges(0x1000, 0x4000) ==
+                (std::vector<Core::ExecutionStackRange>{{0x1000, 0x1000}, {0x3000, 0x2000}}));
+    EXPECT_TRUE(registry.Unregister(0x2800, 0x100));
+}
+
 TEST(ExecutionStackRegistry, RejectsEmptyAndOverflowingRanges) {
     Core::ExecutionStackRegistry registry;
     constexpr VAddr max = std::numeric_limits<VAddr>::max();
