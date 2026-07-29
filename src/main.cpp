@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -144,6 +145,9 @@ int main(int argc, char* argv[]) {
     std::shared_ptr<EmulatorSettingsImpl> emu_settings = std::make_shared<EmulatorSettingsImpl>();
     EmulatorSettingsImpl::SetInstance(emu_settings);
     emu_settings->Load();
+    if (std::getenv("SHADPS4_DIAGNOSTIC_DUMP_SHADERS") != nullptr) {
+        EmulatorSettings.SetDumpShaders(true);
+    }
 
     // Configure logger appropriately
     Common::Log::g_should_append |= EmulatorSettings.IsLogAppend();
