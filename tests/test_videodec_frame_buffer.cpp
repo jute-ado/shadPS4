@@ -5,7 +5,9 @@
 #include <chrono>
 #include <future>
 #include <shared_mutex>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -61,4 +63,26 @@ TEST(VideodecFrameBuffer, HoldsMappingLockForEntireValidatedAccess) {
     reader.join();
     writer.join();
     EXPECT_EQ(writer_ready.wait_for(1s), std::future_status::ready);
+}
+
+TEST(VideodecFrameBuffer, ClearsHostWriteBarrierBeforeAccess) {
+    std::shared_mutex mutex;
+    std::vector<std::string_view> events;
+    bool write_barrier_active = true;
+
+    EXPECT_TRUE(Common::WithPreparedValidatedSharedAccess(
+        mutex,
+        [&] {
+            events.emplace_back("validate");
+            return true;
+        },
+        [&] {
+            events.emplace_back("prepare");
+            write_barrier_active = false;
+        },
+        [&] {
+            events.emplace_back("access");
+            EXPECT_FALSE(write_barrier_active);
+        }));
+    EXPECT_EQ(events, (std::vector<std::string_view>{"validate", "prepare", "access"}));
 }
