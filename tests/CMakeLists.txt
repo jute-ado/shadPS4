@@ -159,6 +159,16 @@ target_compile_features(shadps4_image_subresource_merge_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_image_subresource_merge_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_image_subresource_merge_test)
 
+add_executable(shadps4_image_descriptor_test
+    test_image_descriptor.cpp
+)
+target_include_directories(shadps4_image_descriptor_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_image_descriptor_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_image_descriptor_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_image_descriptor_test)
+
 add_executable(shadps4_videodec_frame_buffer_test
     test_videodec_frame_buffer.cpp
 )
