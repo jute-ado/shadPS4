@@ -51,6 +51,13 @@ bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
     return CountSpirvOpcode(spirv, opcode) != 0;
 }
 
+constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
+    return u64{offset0} | (u64{offset1} << 8) |
+           (u64{std::to_underlying(Shader::Gcn::OpcodeDS::DS_SWIZZLE_B32)} << 18) |
+           u64{std::to_underlying(Shader::Gcn::InstEncoding::DS)} | (u64{source} << 32) |
+           (u64{destination} << 56);
+}
+
 } // Anonymous namespace
 
 TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
@@ -111,6 +118,22 @@ TEST_F(GcnTest, adjacent_fixed_wave64_readlanes_share_one_barrier_pair) {
     const auto result = runner->run<u32>(spirv);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, 32U);
+}
+
+TEST_F(GcnTest, ds_swizzle_uses_nonuniform_subgroup_shuffle) {
+    // DS swizzle computes a different source lane for each invocation. SPIR-V broadcast requires
+    // its invocation id to be dynamically uniform, while shuffle permits this lane permutation.
+    constexpr u8 and_mask = 0x1f;
+    constexpr u8 xor_one = 0x04;
+    const std::array<u64, 2> instructions{
+        MakeDsSwizzle(0, 1, and_mask, xor_one),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::V1).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions);
+
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformShuffle));
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast));
 }
 
 // Example
