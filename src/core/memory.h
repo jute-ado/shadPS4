@@ -43,6 +43,10 @@ enum class MemoryProt : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(MemoryProt)
 
+constexpr bool RequiresSubmissionBoundaryBeforeMapping(MemoryProt prot) {
+    return True(prot & MemoryProt::GpuReadWrite);
+}
+
 enum class MemoryMapFlags : u32 {
     NoFlags = 0,
     Shared = 1,
