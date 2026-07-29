@@ -29,9 +29,15 @@ public:
         return [this, boundary] { CompleteBoundary(boundary); };
     }
 
-    [[nodiscard]] bool AreSubmitsAllowed() const {
+    [[nodiscard]] bool IsBoundaryOpen() const {
         std::scoped_lock lock{mutex};
         return open;
+    }
+
+    // This gate is host-side backpressure. A guest that is told to skip a frame cannot recreate
+    // that frame's EOP later, so the public eligibility query must not expose a pending boundary.
+    [[nodiscard]] constexpr bool AreGuestSubmitsAllowed() const noexcept {
+        return true;
     }
 
     void WaitForBoundary() {
