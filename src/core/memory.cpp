@@ -117,6 +117,30 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     return clamped_size;
 }
 
+bool MemoryManager::IsAccessibleRangeLocked(VAddr virtual_addr, u64 size,
+                                            MemoryProt required_prot) {
+    if (size == 0 || virtual_addr + size < virtual_addr ||
+        !IsValidMapping(virtual_addr, size)) {
+        return false;
+    }
+
+    auto vma = FindVMA(virtual_addr);
+    VAddr current_addr = virtual_addr;
+    u64 remaining = size;
+    while (remaining != 0 && vma != vma_map.end()) {
+        const auto& area = vma->second;
+        if (current_addr < area.base || !area.IsMapped() ||
+            (area.prot & required_prot) != required_prot) {
+            return false;
+        }
+        const u64 area_size = std::min(area.base + area.size - current_addr, remaining);
+        current_addr += area_size;
+        remaining -= area_size;
+        ++vma;
+    }
+    return remaining == 0;
+}
+
 void MemoryManager::SetPrtArea(u32 id, VAddr address, u64 size) {
     PrtArea& area = prt_areas[id];
     if (area.mapped) {

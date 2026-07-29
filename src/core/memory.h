@@ -11,6 +11,7 @@
 #include "common/shared_first_mutex.h"
 #include "common/singleton.h"
 #include "common/types.h"
+#include "common/validated_shared_access.h"
 #include "core/address_space.h"
 #include "core/libraries/kernel/memory.h"
 
@@ -234,6 +235,17 @@ public:
         return size_to_validate <= 0;
     }
 
+    template <typename Access>
+    bool WithAccessibleRange(VAddr virtual_addr, u64 size, MemoryProt required_prot,
+                             Access&& access) {
+        return Common::WithValidatedSharedAccess(
+            mutex,
+            [this, virtual_addr, size, required_prot] {
+                return IsAccessibleRangeLocked(virtual_addr, size, required_prot);
+            },
+            std::forward<Access>(access));
+    }
+
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
 
     VAddr SystemManagedVirtualBase() noexcept {
@@ -332,6 +344,8 @@ private:
     u64 UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma_base, u64 size);
 
     s32 UnmapMemoryImpl(VAddr virtual_addr, u64 size);
+
+    bool IsAccessibleRangeLocked(VAddr virtual_addr, u64 size, MemoryProt required_prot);
 
 private:
     AddressSpace impl;

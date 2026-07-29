@@ -27,7 +27,7 @@ constexpr NV12FrameLayout GetNV12FrameLayout(u32 width, u32 height) {
 }
 
 constexpr bool CanCopyNV12Data(u64 dst_size, u32 width, u32 height) {
-    return true;
+    return dst_size >= GetNV12FrameLayout(width, height).size;
 }
 
 bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src);

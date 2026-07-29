@@ -4,6 +4,7 @@
 #include "video_utils.h"
 
 #include "common/alignment.h"
+#include "core/memory.h"
 
 #include <libavutil/frame.h>
 
@@ -11,8 +12,9 @@
 
 namespace Libraries::Videodec {
 
-bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
-    const auto layout = GetNV12FrameLayout(src.width, src.height);
+namespace {
+
+void CopyNV12DataUnchecked(u8* dst, const AVFrame& src, const NV12FrameLayout& layout) {
     const auto dst_pitch = layout.pitch;
     const auto dst_height = layout.height;
 
@@ -42,7 +44,27 @@ bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
             std::memcpy(chroma_dst + y * dst_pitch, src.data[1] + cy * src.linesize[1], src.width);
         }
     }
-    return true;
+}
+
+} // namespace
+
+bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
+    if (!dst || src.width <= 0 || src.height <= 0) {
+        return false;
+    }
+
+    const auto width = static_cast<u32>(src.width);
+    const auto height = static_cast<u32>(src.height);
+    if (!CanCopyNV12Data(dst_size, width, height)) {
+        return false;
+    }
+
+    const auto layout = GetNV12FrameLayout(width, height);
+    auto* memory = Core::Memory::Instance();
+    return memory &&
+           memory->WithAccessibleRange(reinterpret_cast<VAddr>(dst), layout.size,
+                                       Core::MemoryProt::CpuWrite,
+                                       [&] { CopyNV12DataUnchecked(dst, src, layout); });
 }
 
 } // namespace Libraries::Videodec
