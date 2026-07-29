@@ -226,6 +226,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
     if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto pack_range = [](const VideoCore::SubresourceRange& range) {
+            return static_cast<u64>(range.base.level) |
+                   (static_cast<u64>(range.extent.levels) << 8) |
+                   (static_cast<u64>(range.base.layer) << 24) |
+                   (static_cast<u64>(range.extent.layers) << 40);
+        };
         std::array<u64, 6> shader_hashes{};
         size_t stage_index{};
         for (const auto* stage : pipeline->GetStages()) {
@@ -241,10 +247,35 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             static_cast<u64>(key.prim_type) | (static_cast<u64>(key.patch_control_points) << 8) |
             (static_cast<u64>(key.num_color_attachments) << 16) |
             (static_cast<u64>(key.mrt_mask) << 24) | (static_cast<u64>(key.num_samples) << 56);
+        std::array<u64, 22> arguments{
+            regs.num_indices, regs.num_instances.NumInstances(), index_offset,
+            regs.index_base_address.Address<VAddr>(), packed_key, regs.index_buffer_type.raw};
+        const auto& [target_id, target_desc] = cb_descs[0];
+        if (target_id) {
+            const auto& target = texture_cache.GetImage(target_id);
+            arguments[6] = regs.color_buffers[0].Address();
+            arguments[7] = target.info.guest_address;
+            arguments[8] = target_id.index;
+            arguments[9] = reinterpret_cast<uintptr_t>(static_cast<VkImage>(target.GetImage()));
+            arguments[10] = pack_range(target_desc.view_info.range);
+            arguments[11] = static_cast<u64>(target.backing->state.layout);
+            arguments[12] = static_cast<u64>(target.backing->state.access_mask);
+            arguments[20] = target.info.guest_size;
+        }
+        const auto& [sample_id, sample_desc] = checkpoint_sample_image;
+        if (sample_id) {
+            const auto& sample = texture_cache.GetImage(sample_id);
+            arguments[13] = sample_desc.info.guest_address;
+            arguments[14] = sample.info.guest_address;
+            arguments[15] = sample_id.index;
+            arguments[16] = reinterpret_cast<uintptr_t>(static_cast<VkImage>(sample.GetImage()));
+            arguments[17] = pack_range(sample_desc.view_info.range);
+            arguments[18] = static_cast<u64>(sample.backing->state.layout);
+            arguments[19] = static_cast<u64>(sample.backing->state.access_mask);
+            arguments[21] = sample.info.guest_size;
+        }
         const auto marker = RecordCommandCheckpoint(
-            type, std::hash<GraphicsPipelineKey>{}(key), shader_hashes,
-            {regs.num_indices, regs.num_instances.NumInstances(), index_offset,
-             regs.index_base_address.Address<VAddr>(), packed_key, regs.index_buffer_type.raw});
+            type, std::hash<GraphicsPipelineKey>{}(key), shader_hashes, arguments);
         cmdbuf.setCheckpointNV(marker);
     }
 
@@ -468,6 +499,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    checkpoint_sample_image = {};
 
     bool uses_dma = false;
 
@@ -849,6 +881,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
+            if (!checkpoint_sample_image.first && !is_storage) {
+                checkpoint_sample_image = {image_id, desc};
+            }
         }
     }
 

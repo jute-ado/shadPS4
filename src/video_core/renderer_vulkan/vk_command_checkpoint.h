@@ -25,7 +25,7 @@ struct CommandCheckpoint {
     CommandCheckpointType type{};
     u64 pipeline_hash{};
     std::array<u64, 6> shader_hashes{};
-    std::array<u64, 6> arguments{};
+    std::array<u64, 22> arguments{};
 };
 
 namespace CommandCheckpointDetail {
@@ -37,7 +37,7 @@ struct AtomicCommandCheckpoint {
     std::atomic<u64> type{};
     std::atomic<u64> pipeline_hash{};
     std::array<std::atomic<u64>, 6> shader_hashes{};
-    std::array<std::atomic<u64>, 6> arguments{};
+    std::array<std::atomic<u64>, 22> arguments{};
 };
 
 inline std::atomic<u64> next_sequence{1};
@@ -47,7 +47,7 @@ inline std::array<AtomicCommandCheckpoint, HistorySize> history{};
 
 inline const void* RecordCommandCheckpoint(CommandCheckpointType type, u64 pipeline_hash,
                                            std::array<u64, 6> shader_hashes,
-                                           std::array<u64, 6> arguments) {
+                                           std::array<u64, 22> arguments) {
     using namespace CommandCheckpointDetail;
     const u64 sequence = next_sequence.fetch_add(1, std::memory_order_relaxed);
     auto& slot = history[sequence % HistorySize];
