@@ -258,6 +258,8 @@ public:
 
     bool TryWriteBacking(void* address, const void* data, u64 size);
 
+    bool TryWriteHostMemory(void* address, const void* data, u64 size);
+
     void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
 
     PAddr PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment);
@@ -319,7 +321,7 @@ private:
         return std::prev(fmem_map.upper_bound(target));
     }
 
-    bool HasPhysicalBacking(VirtualMemoryArea vma) {
+    bool HasPhysicalBacking(const VirtualMemoryArea& vma) {
         return vma.type == VMAType::Direct || vma.type == VMAType::Flexible ||
                vma.type == VMAType::Pooled;
     }
@@ -346,6 +348,8 @@ private:
     s32 UnmapMemoryImpl(VAddr virtual_addr, u64 size);
 
     bool IsAccessibleRangeLocked(VAddr virtual_addr, u64 size, MemoryProt required_prot);
+
+    bool TryWriteBackingLocked(VAddr virtual_addr, const void* data, u64 size);
 
 private:
     AddressSpace impl;

@@ -3,53 +3,16 @@
 
 #include "video_utils.h"
 
-#include "common/alignment.h"
 #include "core/memory.h"
 
 #include <libavutil/frame.h>
 
-#include <cstring>
+#include <vector>
 
 namespace Libraries::Videodec {
 
-namespace {
-
-void CopyNV12DataUnchecked(u8* dst, const AVFrame& src, const NV12FrameLayout& layout) {
-    const auto dst_pitch = layout.pitch;
-    const auto dst_height = layout.height;
-
-    const auto luma_dst = dst;
-    const auto chroma_dst = dst + dst_pitch * dst_height;
-
-    if (src.width != dst_pitch) {
-        for (u32 y = 0; y < src.height; ++y) {
-            std::memcpy(luma_dst + y * dst_pitch, src.data[0] + y * src.linesize[0], src.width);
-        }
-        for (u32 y = 0; y < src.height / 2; ++y) {
-            std::memcpy(chroma_dst + y * dst_pitch, src.data[1] + y * src.linesize[1], src.width);
-        }
-    } else {
-        std::memcpy(luma_dst, src.data[0], src.width * src.height);
-        std::memcpy(chroma_dst, src.data[1], (src.width * src.height) / 2);
-    }
-
-    if (src.height != dst_height) {
-        // Extend the data vertically to the crop space
-        const auto ly = src.height - 1;
-        for (u32 y = src.height; y < dst_height; ++y) {
-            std::memcpy(luma_dst + y * dst_pitch, src.data[0] + ly * src.linesize[0], src.width);
-        }
-        const auto cy = (src.height / 2) - 1;
-        for (u32 y = src.height / 2; y < dst_height / 2; ++y) {
-            std::memcpy(chroma_dst + y * dst_pitch, src.data[1] + cy * src.linesize[1], src.width);
-        }
-    }
-}
-
-} // namespace
-
 bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
-    if (!dst || src.width <= 0 || src.height <= 0) {
+    if (!dst || src.width <= 0 || src.height <= 0 || src.linesize[0] <= 0 || src.linesize[1] <= 0) {
         return false;
     }
 
@@ -60,10 +23,21 @@ bool CopyNV12Data(u8* dst, u64 dst_size, const AVFrame& src) {
     }
 
     const auto layout = GetNV12FrameLayout(width, height);
+    thread_local std::vector<u8> staging;
+    staging.resize(layout.size);
+    if (!PackNV12Data(staging, NV12SourceView{
+                                   .width = width,
+                                   .height = height,
+                                   .luma = src.data[0],
+                                   .luma_pitch = static_cast<u32>(src.linesize[0]),
+                                   .chroma = src.data[1],
+                                   .chroma_pitch = static_cast<u32>(src.linesize[1]),
+                               })) {
+        return false;
+    }
+
     auto* memory = Core::Memory::Instance();
-    return memory && memory->WithWritableRange(reinterpret_cast<VAddr>(dst), layout.size, [&] {
-        CopyNV12DataUnchecked(dst, src, layout);
-    });
+    return memory && memory->TryWriteHostMemory(dst, staging.data(), layout.size);
 }
 
 } // namespace Libraries::Videodec

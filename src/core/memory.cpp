@@ -3,6 +3,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/backing_copy.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "core/emulator_settings.h"
@@ -12,6 +13,9 @@
 #include "core/libraries/kernel/process.h"
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+
+#include <span>
+#include <vector>
 
 namespace Core {
 
@@ -119,8 +123,7 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 
 bool MemoryManager::IsAccessibleRangeLocked(VAddr virtual_addr, u64 size,
                                             MemoryProt required_prot) {
-    if (size == 0 || virtual_addr + size < virtual_addr ||
-        !IsValidMapping(virtual_addr, size)) {
+    if (size == 0 || virtual_addr + size < virtual_addr || !IsValidMapping(virtual_addr, size)) {
         return false;
     }
 
@@ -176,43 +179,78 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     }
 }
 
-bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
-    std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
-               virtual_addr);
-
-    std::vector<VirtualMemoryArea> vmas_to_write;
-    auto current_vma = FindVMA(virtual_addr);
-    while (current_vma->second.Overlaps(virtual_addr, size)) {
-        if (!HasPhysicalBacking(current_vma->second)) {
-            break;
-        }
-        vmas_to_write.emplace_back(current_vma->second);
-        current_vma++;
-    }
-
-    if (vmas_to_write.empty()) {
+bool MemoryManager::TryWriteBackingLocked(VAddr virtual_addr, const void* data, u64 size) {
+    if (!data || size == 0 || virtual_addr + size < virtual_addr) {
         return false;
     }
 
-    for (auto& vma : vmas_to_write) {
-        auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
-        auto phys_handle = std::prev(vma.phys_areas.upper_bound(start_in_vma));
-        for (; phys_handle != vma.phys_areas.end(); phys_handle++) {
-            if (!size) {
-                break;
+    std::vector<std::span<u8>> destinations;
+    VAddr current_addr = virtual_addr;
+    u64 remaining = size;
+    while (remaining != 0) {
+        const auto vma_handle = FindVMA(current_addr);
+        const auto& vma = vma_handle->second;
+        if (current_addr < vma.base || !vma.IsMapped() || !HasPhysicalBacking(vma) ||
+            vma.phys_areas.empty()) {
+            return false;
+        }
+
+        const u64 offset_in_vma = current_addr - vma.base;
+        auto phys_handle = vma.phys_areas.upper_bound(offset_in_vma);
+        if (phys_handle == vma.phys_areas.begin()) {
+            return false;
+        }
+        --phys_handle;
+
+        while (remaining != 0 && current_addr < vma.base + vma.size) {
+            const u64 current_offset = current_addr - vma.base;
+            const u64 physical_offset = phys_handle->first;
+            const auto& physical = phys_handle->second;
+            if (current_offset < physical_offset ||
+                current_offset >= physical_offset + physical.size) {
+                return false;
             }
-            const u64 start_in_dma =
-                std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
-            u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
-            u64 copy_size = std::min<u64>(size, phys_handle->second.size - start_in_dma);
-            memcpy(backing, data, copy_size);
-            size -= copy_size;
+
+            const u64 offset_in_physical = current_offset - physical_offset;
+            const u64 copy_size = std::min({remaining, physical.size - offset_in_physical,
+                                            vma.base + vma.size - current_addr});
+            destinations.emplace_back(impl.BackingBase() + physical.base + offset_in_physical,
+                                      static_cast<size_t>(copy_size));
+            current_addr += copy_size;
+            remaining -= copy_size;
+
+            if (remaining != 0 && current_addr < vma.base + vma.size) {
+                ++phys_handle;
+                if (phys_handle == vma.phys_areas.end() ||
+                    phys_handle->first != current_addr - vma.base) {
+                    return false;
+                }
+            }
         }
     }
 
-    return true;
+    return Common::CopyToWritableSpans(
+        std::span{static_cast<const u8*>(data), static_cast<size_t>(size)}, destinations);
+}
+
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
+    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    std::shared_lock lk{mutex};
+    return TryWriteBackingLocked(virtual_addr, data, size);
+}
+
+bool MemoryManager::TryWriteHostMemory(void* address, const void* data, u64 size) {
+    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    bool write_succeeded = false;
+    const bool range_accessible = Common::WithPreparedValidatedSharedAccess(
+        mutex,
+        [this, virtual_addr, size] {
+            return IsAccessibleRangeLocked(virtual_addr, size, MemoryProt::CpuWrite);
+        },
+        [this, virtual_addr, size] { InvalidateMemory(virtual_addr, size); },
+        [&] { write_succeeded = TryWriteBackingLocked(virtual_addr, data, size); },
+        [this, virtual_addr, size] { InvalidateMemory(virtual_addr, size); });
+    return range_accessible && write_succeeded;
 }
 
 PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment) {
