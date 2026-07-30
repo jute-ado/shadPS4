@@ -409,6 +409,7 @@ TEST(GcnIrPass, synchronizes_divergent_wave64_readfirstlane_in_lane_retiring_loo
     EXPECT_GT(CountSpirvOpcode(spirv, spv::Op::OpAtomicLoad), 0);
     EXPECT_GT(CountSpirvOpcode(spirv, spv::Op::OpAtomicExchange), 0);
     EXPECT_GT(CountSpirvOpcode(spirv, spv::Op::OpLoopMerge), 0);
+    EXPECT_GE(CountSpirvOpcode(spirv, spv::Op::OpUGreaterThanEqual), 4);
 }
 
 TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
