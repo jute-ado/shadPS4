@@ -140,7 +140,7 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     auto vma = FindVMA(virtual_addr);
     while (size) {
         u64 copy_size = std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
-        if (vma->second.IsMapped()) {
+        if (vma->second.HasReadableBacking()) {
             std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
         } else {
             std::memset(dest, 0, copy_size);

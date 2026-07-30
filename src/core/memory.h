@@ -130,6 +130,10 @@ struct VirtualMemoryArea {
         return type != VMAType::Free && type != VMAType::Reserved && type != VMAType::PoolReserved;
     }
 
+    bool HasReadableBacking() const noexcept {
+        return IsMapped() && True(prot & (MemoryProt::CpuRead | MemoryProt::GpuRead));
+    }
+
     bool CanMergeWith(VirtualMemoryArea& next) {
         if (disallow_merge || next.disallow_merge) {
             return false;
