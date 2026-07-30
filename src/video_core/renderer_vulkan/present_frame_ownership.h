@@ -16,9 +16,18 @@ template <typename Frame>
         return false;
     }
 
+    if (!was_presented) {
+        free_queue.push(frame);
+        return true;
+    }
+
+    bool released_frame = false;
+    if (last_presented_frame != nullptr) {
+        free_queue.push(last_presented_frame);
+        released_frame = true;
+    }
     last_presented_frame = frame;
-    free_queue.push(frame);
-    return true;
+    return released_frame;
 }
 
 } // namespace Vulkan
