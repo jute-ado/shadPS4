@@ -70,6 +70,29 @@ size_t CountIrOpcode(const Shader::IR::Program& program, Shader::IR::Opcode opco
     return count;
 }
 
+bool BlockLocalDefinitionsPrecedeUses(const Shader::IR::Program& program) {
+    for (const Shader::IR::Block* const block : program.blocks) {
+        std::vector<const Shader::IR::Inst*> definitions;
+        for (const Shader::IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() != Shader::IR::Opcode::Phi) {
+                for (size_t index = 0; index < inst.NumArgs(); ++index) {
+                    const Shader::IR::Value arg = inst.Arg(index);
+                    if (arg.IsImmediate()) {
+                        continue;
+                    }
+                    const Shader::IR::Inst* const definition = arg.Inst();
+                    if (definition->GetParent() == block &&
+                        std::ranges::find(definitions, definition) == definitions.end()) {
+                        return false;
+                    }
+                }
+            }
+            definitions.push_back(&inst);
+        }
+    }
+    return true;
+}
+
 constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
     return u64{offset0} | (u64{offset1} << 8) |
            (u64{std::to_underlying(Shader::Gcn::OpcodeDS::DS_SWIZZLE_B32)} << 18) |
@@ -298,7 +321,6 @@ TEST(GcnIrPass, synchronizes_divergent_wave64_readfirstlane_in_lane_retiring_loo
         entry_ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
     const Shader::IR::U1 outer_cond =
         entry_ir.ConditionRef(entry_ir.IGreaterThanEqual(invocation, entry_ir.Imm32(5U), false));
-    entry_ir.Epilogue();
     Shader::IR::IREmitter{*outer_body}.Epilogue();
     Shader::IR::IREmitter{*loop_header}.Epilogue();
 
@@ -306,7 +328,6 @@ TEST(GcnIrPass, synchronizes_divergent_wave64_readfirstlane_in_lane_retiring_loo
     const Shader::IR::U1 lane_continues =
         body_ir.IGreaterThanEqual(invocation, body_ir.Imm32(10U), false);
     const Shader::IR::U1 break_cond = body_ir.ConditionRef(body_ir.LogicalNot(lane_continues));
-    body_ir.Epilogue();
 
     Shader::IR::IREmitter read_ir{*read_block};
     const Shader::IR::U32 first_active_lane = read_ir.ReadFirstLane(invocation);
@@ -374,6 +395,7 @@ TEST(GcnIrPass, synchronizes_divergent_wave64_readfirstlane_in_lane_retiring_loo
     profile.subgroup_size = 32;
     Shader::Optimization::ReadLaneWorkgroupPass(program, runtime_info, profile);
 
+    ASSERT_TRUE(BlockLocalDefinitionsPrecedeUses(program));
     EXPECT_EQ(CountIrOpcode(program, Shader::IR::Opcode::ReadFirstLane), 0);
     EXPECT_GT(CountIrOpcode(program, Shader::IR::Opcode::Barrier), 0);
     EXPECT_GT(runtime_info.cs_info.shared_memory_size, 0U);
