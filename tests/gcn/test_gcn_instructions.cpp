@@ -135,6 +135,8 @@ TEST(GcnIrPass, devirtualizes_wave_serialized_selector_with_equivalent_phi_masks
     const Shader::IR::U1 remaining_lanes =
         ir.LogicalAnd(Shader::IR::U1{remaining_mask_phi}, ir.LogicalNot(active_selected_lane));
     static_cast<void>(ir.ConditionRef(remaining_lanes));
+    active_mask_phi->SetArg(1, remaining_lanes);
+    remaining_mask_phi->SetArg(1, remaining_lanes);
 
     const Shader::IR::U1 index_zero = ir.IEqual(first_index, ir.Imm32(0));
     const Shader::IR::U1 index_one = ir.IEqual(first_index, ir.Imm32(1));
