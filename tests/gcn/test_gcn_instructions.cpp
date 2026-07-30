@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cmath>
 #include <span>
 
@@ -12,7 +13,9 @@
 #include "instructions.hpp"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
+#include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
+#include "shader_recompiler/runtime_info.h"
 #include "translator.hpp"
 
 class GcnTest : public ::testing::Test {
@@ -52,6 +55,17 @@ size_t CountSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
 
 bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
     return CountSpirvOpcode(spirv, opcode) != 0;
+}
+
+size_t CountIrOpcode(const Shader::IR::Program& program, Shader::IR::Opcode opcode) {
+    size_t count{};
+    for (const Shader::IR::Block* const block : program.blocks) {
+        count +=
+            std::ranges::count_if(block->Instructions(), [opcode](const Shader::IR::Inst& inst) {
+                return inst.GetOpcode() == opcode;
+            });
+    }
+    return count;
 }
 
 constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
@@ -254,6 +268,113 @@ TEST(GcnIrPass, preserves_semantic_read_first_lane) {
     Shader::Optimization::WaveSerializedVgprIndexPass(program);
 
     EXPECT_TRUE(read_first->HasUses());
+}
+
+TEST(GcnIrPass, synchronizes_divergent_wave64_readfirstlane_in_lane_retiring_loop) {
+    Shader::Info info{};
+    info.stage = Shader::Stage::Compute;
+    info.l_stage = Shader::LogicalStage::Compute;
+    Shader::IR::Program program{info};
+    Shader::Pools pools;
+
+    const auto make_block = [&] {
+        Shader::IR::Block* const block = pools.block_pool.Create(pools.inst_pool);
+        program.blocks.push_back(block);
+        return block;
+    };
+    Shader::IR::Block* const entry = make_block();
+    Shader::IR::Block* const outer_body = make_block();
+    Shader::IR::Block* const loop_header = make_block();
+    Shader::IR::Block* const loop_body = make_block();
+    Shader::IR::Block* const read_block = make_block();
+    Shader::IR::Block* const loop_continue = make_block();
+    Shader::IR::Block* const loop_merge = make_block();
+    Shader::IR::Block* const outer_merge = make_block();
+
+    Shader::IR::IREmitter entry_ir{*entry};
+    const Shader::IR::U32 invocation =
+        entry_ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
+    const Shader::IR::U1 outer_cond =
+        entry_ir.ConditionRef(entry_ir.IGreaterThanEqual(invocation, entry_ir.Imm32(5U), false));
+    entry_ir.Epilogue();
+    Shader::IR::IREmitter{*outer_body}.Epilogue();
+    Shader::IR::IREmitter{*loop_header}.Epilogue();
+
+    Shader::IR::IREmitter body_ir{*loop_body};
+    const Shader::IR::U1 lane_continues =
+        body_ir.IGreaterThanEqual(invocation, body_ir.Imm32(10U), false);
+    const Shader::IR::U1 break_cond = body_ir.ConditionRef(body_ir.LogicalNot(lane_continues));
+    body_ir.Epilogue();
+
+    Shader::IR::IREmitter read_ir{*read_block};
+    const Shader::IR::U32 first_active_lane = read_ir.ReadFirstLane(invocation);
+    read_ir.Reference(first_active_lane);
+    read_ir.Epilogue();
+
+    Shader::IR::IREmitter continue_ir{*loop_continue};
+    const Shader::IR::U1 repeat_cond = continue_ir.ConditionRef(continue_ir.Imm1(true));
+    continue_ir.Epilogue();
+    Shader::IR::IREmitter{*loop_merge}.Epilogue();
+    Shader::IR::IREmitter{*outer_merge}.Epilogue();
+
+    const auto add_block = [&](Shader::IR::Block* block) {
+        auto& node = program.syntax_list.emplace_back();
+        node.type = Shader::IR::AbstractSyntaxNode::Type::Block;
+        node.data.block = block;
+    };
+    add_block(entry);
+    auto& outer_if = program.syntax_list.emplace_back();
+    outer_if.type = Shader::IR::AbstractSyntaxNode::Type::If;
+    outer_if.data.if_node = {
+        .cond = outer_cond,
+        .body = outer_body,
+        .merge = outer_merge,
+    };
+    add_block(outer_body);
+    add_block(loop_header);
+    auto& loop = program.syntax_list.emplace_back();
+    loop.type = Shader::IR::AbstractSyntaxNode::Type::Loop;
+    loop.data.loop = {
+        .body = loop_body,
+        .continue_block = loop_continue,
+        .merge = loop_merge,
+    };
+    add_block(loop_body);
+    auto& break_node = program.syntax_list.emplace_back();
+    break_node.type = Shader::IR::AbstractSyntaxNode::Type::Break;
+    break_node.data.break_node = {
+        .cond = break_cond,
+        .merge = loop_merge,
+        .skip = read_block,
+    };
+    add_block(read_block);
+    add_block(loop_continue);
+    auto& repeat = program.syntax_list.emplace_back();
+    repeat.type = Shader::IR::AbstractSyntaxNode::Type::Repeat;
+    repeat.data.repeat = {
+        .cond = repeat_cond,
+        .loop_header = loop_header,
+        .merge = loop_merge,
+    };
+    add_block(loop_merge);
+    auto& outer_end = program.syntax_list.emplace_back();
+    outer_end.type = Shader::IR::AbstractSyntaxNode::Type::EndIf;
+    outer_end.data.end_if.merge = outer_merge;
+    add_block(outer_merge);
+    program.syntax_list.emplace_back().type = Shader::IR::AbstractSyntaxNode::Type::Return;
+
+    Shader::RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Shader::Stage::Compute);
+    runtime_info.cs_info.workgroup_size = {64, 1, 1};
+
+    Shader::Profile profile{};
+    profile.max_shared_memory_size = 64 * 1024;
+    profile.subgroup_size = 32;
+    Shader::Optimization::ReadLaneWorkgroupPass(program, runtime_info, profile);
+
+    EXPECT_EQ(CountIrOpcode(program, Shader::IR::Opcode::ReadFirstLane), 0);
+    EXPECT_GT(CountIrOpcode(program, Shader::IR::Opcode::Barrier), 0);
+    EXPECT_GT(runtime_info.cs_info.shared_memory_size, 0U);
 }
 
 TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
