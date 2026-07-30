@@ -102,6 +102,19 @@ target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
 
+add_executable(shadps4_sparse_memory_test
+    test_sparse_memory.cpp
+)
+target_include_directories(shadps4_sparse_memory_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_sparse_memory_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_sparse_memory_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_sparse_memory_test)
+
 add_executable(shadps4_depth_association_test
     test_depth_association.cpp
 )
