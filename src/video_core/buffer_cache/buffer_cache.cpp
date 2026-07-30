@@ -590,7 +590,7 @@ BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
     PublishDmaBufferAfterSynchronization(
         new_buffer,
         [this](Buffer& buffer, VAddr address, u32 size) {
-            SynchronizeBuffer(buffer, address, size, false, false);
+            SynchronizeBuffer(buffer, address, size, false, false, false);
         },
         [this, new_buffer_id] { Register(new_buffer_id); });
     return new_buffer_id;
@@ -646,7 +646,7 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 }
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
-                                    bool is_texel_buffer) {
+                                    bool is_texel_buffer, bool is_registered) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes = 0;
     VAddr buffer_start = buffer.CpuAddr();
@@ -693,7 +693,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .bufferMemoryBarrierCount = 1,
             .pBufferMemoryBarriers = &post_barrier,
         });
-        TouchBuffer(buffer);
+        TouchBufferAfterUploadIfRegistered(is_registered, [&] { TouchBuffer(buffer); });
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeBufferFromImage(buffer, device_addr, size);

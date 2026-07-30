@@ -14,4 +14,11 @@ void PublishDmaBufferAfterSynchronization(Buffer& buffer, Synchronize&& synchron
     publish();
 }
 
+template <typename Touch>
+void TouchBufferAfterUploadIfRegistered(bool is_registered, Touch&& touch) {
+    if (is_registered) {
+        touch();
+    }
+}
+
 } // namespace VideoCore
