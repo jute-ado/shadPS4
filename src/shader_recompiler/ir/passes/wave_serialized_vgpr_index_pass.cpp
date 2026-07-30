@@ -36,10 +36,17 @@ bool IsVgprSelectorCompare(const IR::Inst& compare) {
     });
 }
 
-bool FeedsConditionRef(const IR::Inst& inst) {
-    return std::ranges::any_of(inst.Uses(), [](const IR::Use& use) {
-        return use.user->GetOpcode() == IR::Opcode::ConditionRef;
-    });
+std::optional<IR::Value> OtherLogicalAndArgument(IR::Inst& logical_and,
+                                                 const IR::Inst& producer) {
+    if (logical_and.GetOpcode() != IR::Opcode::LogicalAnd) {
+        return std::nullopt;
+    }
+    const bool first_is_producer = IsProducedBy(logical_and.Arg(0), producer);
+    const bool second_is_producer = IsProducedBy(logical_and.Arg(1), producer);
+    if (first_is_producer == second_is_producer) {
+        return std::nullopt;
+    }
+    return (first_is_producer ? logical_and.Arg(1) : logical_and.Arg(0)).Resolve();
 }
 
 bool GatesSerializedLoop(const IR::Inst& compare) {
@@ -47,25 +54,46 @@ bool GatesSerializedLoop(const IR::Inst& compare) {
         return false;
     }
     IR::Inst* const active_selected = compare.Uses().begin()->user;
-    if (active_selected->GetOpcode() != IR::Opcode::LogicalAnd ||
-        !FeedsConditionRef(*active_selected)) {
+    const std::optional<IR::Value> active_mask =
+        OtherLogicalAndArgument(*active_selected, compare);
+    if (!active_mask || std::ranges::distance(active_selected->Uses()) != 2) {
         return false;
     }
 
+    bool feeds_selected_condition{};
+    IR::Inst* logical_not{};
     for (const IR::Use& active_use : active_selected->Uses()) {
-        IR::Inst* const logical_not = active_use.user;
-        if (logical_not->GetOpcode() != IR::Opcode::LogicalNot) {
+        if (active_use.operand == 0 &&
+            active_use.user->GetOpcode() == IR::Opcode::ConditionRef) {
+            if (feeds_selected_condition) {
+                return false;
+            }
+            feeds_selected_condition = true;
             continue;
         }
-        for (const IR::Use& not_use : logical_not->Uses()) {
-            IR::Inst* const remaining_lanes = not_use.user;
-            if (remaining_lanes->GetOpcode() == IR::Opcode::LogicalAnd &&
-                FeedsConditionRef(*remaining_lanes)) {
-                return true;
-            }
+        if (active_use.operand != 0 ||
+            active_use.user->GetOpcode() != IR::Opcode::LogicalNot ||
+            logical_not != nullptr) {
+            return false;
         }
+        logical_not = active_use.user;
     }
-    return false;
+    if (!feeds_selected_condition || logical_not == nullptr ||
+        std::ranges::distance(logical_not->Uses()) != 1) {
+        return false;
+    }
+
+    IR::Inst* const remaining_lanes = logical_not->Uses().begin()->user;
+    const std::optional<IR::Value> remaining_mask =
+        OtherLogicalAndArgument(*remaining_lanes, *logical_not);
+    if (!remaining_mask || remaining_mask->Resolve() != active_mask->Resolve() ||
+        std::ranges::distance(remaining_lanes->Uses()) != 1) {
+        return false;
+    }
+
+    const IR::Use& remaining_use = *remaining_lanes->Uses().begin();
+    return remaining_use.operand == 0 &&
+           remaining_use.user->GetOpcode() == IR::Opcode::ConditionRef;
 }
 
 bool TryEliminate(IR::Inst& read_first) {
