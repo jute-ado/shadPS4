@@ -80,6 +80,9 @@ TEST(GcnIrPass, devirtualizes_wave_serialized_vgpr_selector) {
     Shader::IR::Inst* const selected_lane_compare = selected_lane.Inst();
     const Shader::IR::U1 active_selected_lane = ir.LogicalAnd(ir.Imm1(true), selected_lane);
     static_cast<void>(ir.ConditionRef(active_selected_lane));
+    const Shader::IR::U1 remaining_lanes =
+        ir.LogicalAnd(ir.Imm1(true), ir.LogicalNot(active_selected_lane));
+    static_cast<void>(ir.ConditionRef(remaining_lanes));
 
     const Shader::IR::U1 index_zero = ir.IEqual(first_index, ir.Imm32(0));
     const Shader::IR::U1 index_one = ir.IEqual(first_index, ir.Imm32(1));
@@ -94,6 +97,32 @@ TEST(GcnIrPass, devirtualizes_wave_serialized_vgpr_selector) {
     EXPECT_FALSE(read_first->HasUses());
     EXPECT_FALSE(selected_lane_compare->HasUses());
     EXPECT_EQ(index_zero_compare->Arg(0).Resolve(), per_lane_index.Resolve());
+}
+
+TEST(GcnIrPass, preserves_selector_without_remaining_lane_loop) {
+    Shader::Info info{};
+    Shader::Pools pools;
+    Shader::IR::Program program{info};
+    Shader::IR::Block* const block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+
+    Shader::IR::IREmitter ir{*block};
+    const Shader::IR::U32 per_lane_index =
+        ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
+    const Shader::IR::U32 first_index = ir.ReadFirstLane(per_lane_index);
+    Shader::IR::Inst* const read_first = first_index.Inst();
+
+    const Shader::IR::U1 selected_lane = ir.IEqual(first_index, per_lane_index);
+    const Shader::IR::U1 active_selected_lane = ir.LogicalAnd(ir.Imm1(true), selected_lane);
+    static_cast<void>(ir.ConditionRef(active_selected_lane));
+    const Shader::IR::U1 index_zero = ir.IEqual(first_index, ir.Imm32(0));
+    const Shader::IR::U1 index_one = ir.IEqual(first_index, ir.Imm32(1));
+    static_cast<void>(ir.Select(index_zero, ir.Imm32(10), ir.Imm32(11)));
+    static_cast<void>(ir.Select(index_one, ir.Imm32(20), ir.Imm32(21)));
+
+    Shader::Optimization::WaveSerializedVgprIndexPass(program);
+
+    EXPECT_TRUE(read_first->HasUses());
 }
 
 TEST(GcnIrPass, preserves_semantic_read_first_lane) {
