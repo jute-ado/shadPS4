@@ -102,6 +102,7 @@ target_compile_features(shadps4_depth_association_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_depth_association_test PRIVATE
     GTest::gtest_main
     Vulkan::Headers
+    spdlog::spdlog
 )
 list(APPEND TEST_TARGETS shadps4_depth_association_test)
 

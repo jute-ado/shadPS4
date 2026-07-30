@@ -3,13 +3,12 @@
 
 #pragma once
 
-#include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/liverpool_to_vk.h"
 
 namespace VideoCore {
 
-// Preserve the current redirect behavior while the format invariant is under test.
-constexpr bool ShouldUseAssociatedDepthForView(vk::Format) {
-    return true;
+inline bool ShouldUseAssociatedDepthForView(vk::Format view_format) {
+    return Vulkan::LiverpoolToVK::IsFormatStencilCompatible(view_format);
 }
 
 } // namespace VideoCore
