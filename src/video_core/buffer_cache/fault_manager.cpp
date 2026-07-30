@@ -184,7 +184,7 @@ void FaultManager::ProcessFaultBuffer() {
                             start, end);
                 return;
             }
-            buffer_cache.FindBuffer(start, static_cast<u32>(end - start));
+            MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));
         });
         fault_areas[area] = 0;
     });

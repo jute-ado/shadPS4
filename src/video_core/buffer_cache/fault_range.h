@@ -14,4 +14,10 @@ constexpr bool IsCacheableFaultRange(VAddr start, VAddr end, VAddr address_space
            end - start <= std::numeric_limits<u32>::max();
 }
 
+template <typename BufferCache>
+void MakeDmaFaultRangeResident(BufferCache& buffer_cache, VAddr start, u32 size) {
+    buffer_cache.FindBuffer(start, size);
+    buffer_cache.SynchronizeBuffersInRange(start, size);
+}
+
 } // namespace VideoCore
