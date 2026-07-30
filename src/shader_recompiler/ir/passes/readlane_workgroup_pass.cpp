@@ -57,9 +57,15 @@ BlockSet FindConvergedBlocks(const IR::Program& program) {
     return blocks;
 }
 
-bool IsFixedReadLane(const IR::Inst& inst) {
-    return inst.GetOpcode() == IR::Opcode::ReadLane && inst.HasUses() &&
-           inst.Arg(1).IsImmediate() && inst.Arg(1).U32() < GcnWaveSize;
+bool IsWorkgroupRead(const IR::Inst& inst) {
+    if (!inst.HasUses()) {
+        return false;
+    }
+    if (inst.GetOpcode() == IR::Opcode::ReadFirstLane) {
+        return true;
+    }
+    return inst.GetOpcode() == IR::Opcode::ReadLane && inst.Arg(1).IsImmediate() &&
+           inst.Arg(1).U32() < GcnWaveSize;
 }
 
 bool DependsOnBatch(const IR::Value& value, const ReadBatch& batch) {
@@ -88,7 +94,7 @@ std::vector<ReadBatch> FindBatches(IR::Program& program, const BlockSet& converg
             }
         };
         for (IR::Inst& inst : block->Instructions()) {
-            if (!IsFixedReadLane(inst)) {
+            if (!IsWorkgroupRead(inst)) {
                 // SSA register setters remain in the list until dead-code elimination. They have
                 // no observable effect and should not prevent adjacent guest lane reads from
                 // sharing one exchange.
@@ -138,7 +144,8 @@ void LowerBatch(const ReadBatch& batch, size_t begin, size_t count, u32 scratch_
     replacements.reserve(count);
     for (size_t index = 0; index < count; ++index) {
         IR::Inst* const read = batch[begin + index];
-        const u32 lane_byte_offset = read->Arg(1).U32() * DwordSize;
+        const u32 lane_byte_offset =
+            read->GetOpcode() == IR::Opcode::ReadFirstLane ? 0 : read->Arg(1).U32() * DwordSize;
         const u32 bank_base = scratch_base + static_cast<u32>(index) * bank_size;
         const IR::U32 read_offset =
             ir.IAdd(ir.Imm32(bank_base + lane_byte_offset), wave_byte_offset);
@@ -155,11 +162,12 @@ void LowerBatch(const ReadBatch& batch, size_t begin, size_t count, u32 scratch_
 
 void ReadLaneWorkgroupPass(IR::Program& program, RuntimeInfo& runtime_info,
                            const Profile& profile) {
-    // A fixed GCN lane number addresses the whole 64-lane guest wave. Native SPIR-V subgroup
-    // broadcast cannot preserve that meaning when the host splits the wave into smaller
-    // subgroups: lane 0 in the second host subgroup is guest lane 32, for example. At converged
-    // points in a one-wave compute workgroup, shared memory provides an exact cross-subgroup
-    // exchange without relying on an out-of-range subgroup lane.
+    // A fixed GCN lane number addresses the whole 64-lane guest wave. ReadFirstLane at a converged
+    // point likewise selects guest lane zero. Native SPIR-V subgroup broadcast cannot preserve
+    // either meaning when the host splits the wave into smaller subgroups: lane 0 in the second
+    // host subgroup is guest lane 32, for example. At converged points in a one-wave compute
+    // workgroup, shared memory provides an exact cross-subgroup exchange without relying on an
+    // out-of-range subgroup lane.
     if (program.info.stage != Stage::Compute || profile.subgroup_size == 0 ||
         profile.subgroup_size >= GcnWaveSize || profile.supports_compute_subgroup_size_64) {
         return;
