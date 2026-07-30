@@ -184,6 +184,12 @@ public:
     [[nodiscard]] Value Ballot(const U1& bit);
     [[nodiscard]] U32 BallotFindLsb(const Value& mask);
     [[nodiscard]] U1 GroupAny(const U1& bit);
+    void Wave64LaneRetirementInit(const U1& active, const U32& invocation,
+                                  const U32& scratch_base);
+    void Wave64LaneRetirementSync(const U1& continues, const U32& invocation,
+                                  const U32& scratch_base);
+    [[nodiscard]] U32 Wave64ReadFirstLane(const U32& value, const U32& invocation,
+                                          const U32& scratch_base);
 
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2);
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2, const Value& e3);

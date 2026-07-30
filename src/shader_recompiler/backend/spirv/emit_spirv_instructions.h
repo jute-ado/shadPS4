@@ -472,6 +472,9 @@ Id EmitWriteLane(EmitContext& ctx, Id value, Id write_value, u32 lane);
 Id EmitBallot(EmitContext& ctx, Id bit);
 Id EmitBallotFindLsb(EmitContext& ctx, Id mask);
 Id EmitGroupAny(EmitContext& ctx, Id bit);
+void EmitWave64LaneRetirementInit(EmitContext& ctx, Id active, Id invocation, Id scratch_base);
+void EmitWave64LaneRetirementSync(EmitContext& ctx, Id continues, Id invocation, Id scratch_base);
+Id EmitWave64ReadFirstLane(EmitContext& ctx, Id value, Id invocation, Id scratch_base);
 Id EmitDataAppend(EmitContext& ctx, u32 gds_addr, u32 binding);
 Id EmitDataConsume(EmitContext& ctx, u32 gds_addr, u32 binding);
 
