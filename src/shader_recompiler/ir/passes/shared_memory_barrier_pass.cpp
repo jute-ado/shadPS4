@@ -3,8 +3,9 @@
 
 #include <limits>
 #include <optional>
-#include <queue>
 #include <unordered_set>
+#include <vector>
+#include <queue>
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
@@ -200,6 +201,71 @@ static bool IsDivergentCondition(const IR::U1& cond, const std::array<u32, 3>& w
     return false;
 }
 
+static void EmitBarrierAtMerge(IR::Block* merge) {
+    auto insert_point = std::ranges::find_if_not(merge->Instructions(), IR::IsPhi);
+    IR::IREmitter ir{*merge, insert_point};
+    ir.Barrier();
+}
+
+static NodeSet FindDivergentLoops(const IR::Program& program,
+                                  const std::array<u32, 3>& workgroup_size) {
+    struct LoopScope {
+        IR::Block* merge;
+        bool divergent;
+    };
+
+    using Type = IR::AbstractSyntaxNode::Type;
+    std::vector<LoopScope> loop_stack;
+    std::vector<bool> if_divergence_stack;
+    u32 if_divergence_depth{};
+    NodeSet divergent_loops;
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        if (node.type == Type::If) {
+            const bool divergent = IsDivergentCondition(node.data.if_node.cond, workgroup_size);
+            if_divergence_stack.push_back(divergent);
+            if_divergence_depth += divergent;
+            continue;
+        }
+        if (node.type == Type::EndIf) {
+            ASSERT(!if_divergence_stack.empty());
+            if_divergence_depth -= if_divergence_stack.back();
+            if_divergence_stack.pop_back();
+            continue;
+        }
+        if (node.type == Type::Loop) {
+            loop_stack.push_back({
+                .merge = node.data.loop.merge,
+                .divergent = false,
+            });
+            continue;
+        }
+        if (node.type == Type::Break &&
+            (if_divergence_depth != 0 ||
+             IsDivergentCondition(node.data.break_node.cond, workgroup_size))) {
+            for (auto scope = loop_stack.rbegin(); scope != loop_stack.rend(); ++scope) {
+                if (scope->merge == node.data.break_node.merge) {
+                    scope->divergent = true;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (node.type != Type::Repeat || loop_stack.empty()) {
+            continue;
+        }
+        LoopScope scope = loop_stack.back();
+        loop_stack.pop_back();
+        if (if_divergence_depth != 0 ||
+            IsDivergentCondition(node.data.repeat.cond, workgroup_size)) {
+            scope.divergent = true;
+        }
+        if (scope.divergent) {
+            divergent_loops.emplace(scope.merge);
+        }
+    }
+    return divergent_loops;
+}
+
 // Inserts a barrier after divergent conditional blocks to avoid undefined
 // behavior when some threads write and others read from shared memory.
 static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
@@ -208,10 +274,7 @@ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
     const IR::U1 cond = data.if_node.cond;
     if (IsDivergentCondition(cond, workgroup_size)) {
         if (divergence_depth == 0) {
-            IR::Block* const merge = data.if_node.merge;
-            auto insert_point = std::ranges::find_if_not(merge->Instructions(), IR::IsPhi);
-            IR::IREmitter ir{*merge, insert_point};
-            ir.Barrier();
+            EmitBarrierAtMerge(data.if_node.merge);
         }
         ++divergence_depth;
         divergence_end.emplace(data.if_node.merge);
@@ -236,9 +299,25 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     using Type = IR::AbstractSyntaxNode::Type;
     u32 divergence_depth{};
     NodeSet divergence_end;
+    const NodeSet divergent_loops = FindDivergentLoops(program, cs_info.workgroup_size);
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         if (node.type == Type::EndIf) {
             if (divergence_end.contains(node.data.end_if.merge)) {
+                --divergence_depth;
+            }
+            continue;
+        }
+        if (node.type == Type::Loop) {
+            if (divergent_loops.contains(node.data.loop.merge)) {
+                if (divergence_depth == 0) {
+                    EmitBarrierAtMerge(node.data.loop.merge);
+                }
+                ++divergence_depth;
+            }
+            continue;
+        }
+        if (node.type == Type::Repeat) {
+            if (divergent_loops.contains(node.data.repeat.merge)) {
                 --divergence_depth;
             }
             continue;
