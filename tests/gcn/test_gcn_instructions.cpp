@@ -316,6 +316,23 @@ TEST_F(GcnTest, adjacent_fixed_wave64_readlanes_share_one_barrier_pair) {
     EXPECT_EQ(*result, 32U);
 }
 
+TEST_F(GcnTest, converged_wave64_readfirstlane_uses_workgroup_exchange_on_wave32_hosts) {
+    const std::array<u64, 2> instructions{
+        VOP1(OpcodeVOP1::V_READFIRSTLANE_B32, VOperand8::V0, SOperand9::V0).Get(),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S0).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions, {64, 1, 1});
+
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcastFirst));
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpControlBarrier), 2);
+
+    auto runner = gcn_test::Runner::instance().value();
+    const auto result = runner->run<u32>(spirv);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 0U);
+}
+
 TEST_F(GcnTest, ds_swizzle_uses_nonuniform_subgroup_shuffle) {
     // DS swizzle computes a different source lane for each invocation. SPIR-V broadcast requires
     // its invocation id to be dynamically uniform, while shuffle permits this lane permutation.
