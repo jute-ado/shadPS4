@@ -46,5 +46,20 @@ TEST(ScreenshotRequestQueue, ConsumeClearsPendingRequests) {
     EXPECT_EQ(empty.silent_count, 0);
 }
 
+TEST(ScreenshotRequestQueue, ReportsPresentedCapturesUntilTheyAreConsumed) {
+    ScreenshotRequestQueue queue;
+
+    EXPECT_FALSE(queue.HasPendingWithOverlays());
+    queue.Push(ScreenshotRequest::GameOnly, ScreenshotRequestOrigin::Automation);
+    EXPECT_FALSE(queue.HasPendingWithOverlays());
+
+    queue.Push(ScreenshotRequest::WithOverlays, ScreenshotRequestOrigin::Automation);
+    EXPECT_TRUE(queue.HasPendingWithOverlays());
+
+    const auto consumed = queue.ConsumeWithOverlays();
+    EXPECT_EQ(consumed.silent_count, 1);
+    EXPECT_FALSE(queue.HasPendingWithOverlays());
+}
+
 } // namespace
 } // namespace VideoCore

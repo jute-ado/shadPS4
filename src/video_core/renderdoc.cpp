@@ -167,4 +167,8 @@ ScreenshotRequestBatch ConsumeWithOverlaysScreenshotRequests() {
     return screenshot_requests.ConsumeWithOverlays();
 }
 
+bool HasPendingWithOverlaysScreenshotRequests() {
+    return screenshot_requests.HasPendingWithOverlays();
+}
+
 } // namespace VideoCore

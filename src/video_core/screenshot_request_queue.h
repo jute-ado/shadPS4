@@ -56,6 +56,11 @@ public:
         return Consume(with_overlays_notifying, with_overlays_silent);
     }
 
+    [[nodiscard]] bool HasPendingWithOverlays() const {
+        return with_overlays_notifying.load(std::memory_order_acquire) != 0 ||
+               with_overlays_silent.load(std::memory_order_acquire) != 0;
+    }
+
 private:
     static ScreenshotRequestBatch Consume(std::atomic<u32>& notifying, std::atomic<u32>& silent) {
         return {

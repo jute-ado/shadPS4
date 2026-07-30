@@ -14,6 +14,9 @@ enum class PresentIdleAction {
 [[nodiscard]] constexpr PresentIdleAction SelectPresentIdleAction(
     const bool has_pacing_budget, const bool video_port_open, const bool host_requires_redraw,
     const bool presented_screenshot_pending) {
+    if (presented_screenshot_pending) {
+        return video_port_open ? PresentIdleAction::LastFrame : PresentIdleAction::BlankFrame;
+    }
     if (!has_pacing_budget) {
         return PresentIdleAction::None;
     }

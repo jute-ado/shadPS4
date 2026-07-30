@@ -37,4 +37,7 @@ ScreenshotRequestBatch ConsumeGameOnlyScreenshotRequests();
 /// Atomically consumes pending "with overlays" screenshot requests.
 ScreenshotRequestBatch ConsumeWithOverlaysScreenshotRequests();
 
+/// Returns whether a "with overlays" screenshot still needs a presented frame.
+bool HasPendingWithOverlaysScreenshotRequests();
+
 } // namespace VideoCore

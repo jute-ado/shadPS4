@@ -8,9 +8,11 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+#include "core/libraries/videoout/present_idle_policy.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -369,12 +371,14 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (!request) {
-                if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
-                    if (!main_port.is_open) {
-                        DrawBlankFrame();
-                    } else if (ImGui::Core::MustKeepDrawing()) {
-                        DrawLastFrame();
-                    }
+                const auto idle_action = SelectPresentIdleAction(
+                    timer.GetTotalWait().count() < 0, main_port.is_open,
+                    ImGui::Core::MustKeepDrawing(),
+                    VideoCore::HasPendingWithOverlaysScreenshotRequests());
+                if (idle_action == PresentIdleAction::BlankFrame) {
+                    DrawBlankFrame();
+                } else if (idle_action == PresentIdleAction::LastFrame) {
+                    DrawLastFrame();
                 }
             } else {
                 Flip(request);
