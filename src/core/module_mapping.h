@@ -14,10 +14,10 @@ enum class ModuleMappingRole {
 
 constexpr VAddr LibraryModuleLoadBase = 0x800000000;
 
-// Preserve the current loader behavior until the executable-placement
-// invariant is specified by a failing test.
-constexpr VAddr PreferredModuleLoadAddress(ModuleMappingRole, VAddr) noexcept {
-    return LibraryModuleLoadBase;
+constexpr VAddr PreferredModuleLoadAddress(ModuleMappingRole role,
+                                           VAddr system_managed_base) noexcept {
+    return role == ModuleMappingRole::MainExecutable ? system_managed_base
+                                                     : LibraryModuleLoadBase;
 }
 
 } // namespace Core
