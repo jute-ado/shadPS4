@@ -50,3 +50,13 @@ TEST(BufferResidency, PublishesExpandedDmaMappingOnlyAfterFullSpanIsResident) {
     EXPECT_EQ(calls[0].size, buffer.SizeBytes());
     EXPECT_EQ(calls[1].operation, ResidencyCall::Publish);
 }
+
+TEST(BufferResidency, DoesNotTouchUnpublishedBufferAfterResidencyUpload) {
+    u32 touch_count = 0;
+
+    VideoCore::TouchBufferAfterUploadIfRegistered(false, [&] { ++touch_count; });
+    EXPECT_EQ(touch_count, 0);
+
+    VideoCore::TouchBufferAfterUploadIfRegistered(true, [&] { ++touch_count; });
+    EXPECT_EQ(touch_count, 1);
+}
