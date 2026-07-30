@@ -11,8 +11,10 @@
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
+#include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
@@ -375,6 +377,16 @@ TEST(GcnIrPass, synchronizes_divergent_wave64_readfirstlane_in_lane_retiring_loo
     EXPECT_EQ(CountIrOpcode(program, Shader::IR::Opcode::ReadFirstLane), 0);
     EXPECT_GT(CountIrOpcode(program, Shader::IR::Opcode::Barrier), 0);
     EXPECT_GT(runtime_info.cs_info.shared_memory_size, 0U);
+
+    program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
+    profile.supported_spirv = 0x00010600;
+    Shader::Optimization::CollectShaderInfoPass(program, profile);
+    Shader::Backend::Bindings bindings{};
+    const auto spirv =
+        Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+    EXPECT_GT(CountSpirvOpcode(spirv, spv::Op::OpAtomicLoad), 0);
+    EXPECT_GT(CountSpirvOpcode(spirv, spv::Op::OpAtomicExchange), 0);
+    EXPECT_GT(CountSpirvOpcode(spirv, spv::Op::OpLoopMerge), 0);
 }
 
 TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {

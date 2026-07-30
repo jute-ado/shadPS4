@@ -110,6 +110,9 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::SharedAtomicAnd64:
     case Opcode::SharedAtomicOr64:
     case Opcode::SharedAtomicXor64:
+    case Opcode::Wave64LaneRetirementInit:
+    case Opcode::Wave64LaneRetirementSync:
+    case Opcode::Wave64ReadFirstLane:
     case Opcode::ImageWrite:
     case Opcode::ImageAtomicIAdd32:
     case Opcode::ImageAtomicSMin32:

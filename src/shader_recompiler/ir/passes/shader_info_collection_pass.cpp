@@ -92,6 +92,12 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::WriteLane:
         info.uses_group_ballot = true;
         break;
+    case IR::Opcode::Wave64LaneRetirementInit:
+    case IR::Opcode::Wave64LaneRetirementSync:
+    case IR::Opcode::Wave64ReadFirstLane:
+        info.shared_types |= IR::Type::U32;
+        info.uses_group_ballot = true;
+        break;
     case IR::Opcode::ReadLane:
         info.uses_group_shuffle = true;
         break;

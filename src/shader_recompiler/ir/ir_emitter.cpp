@@ -683,6 +683,21 @@ U1 IREmitter::GroupAny(const U1& bit) {
     return Inst<U1>(Opcode::GroupAny, bit);
 }
 
+void IREmitter::Wave64LaneRetirementInit(const U1& active, const U32& invocation,
+                                         const U32& scratch_base) {
+    Inst(Opcode::Wave64LaneRetirementInit, active, invocation, scratch_base);
+}
+
+void IREmitter::Wave64LaneRetirementSync(const U1& continues, const U32& invocation,
+                                         const U32& scratch_base) {
+    Inst(Opcode::Wave64LaneRetirementSync, continues, invocation, scratch_base);
+}
+
+U32 IREmitter::Wave64ReadFirstLane(const U32& value, const U32& invocation,
+                                   const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64ReadFirstLane, value, invocation, scratch_base);
+}
+
 F32F64 IREmitter::FPAdd(const F32F64& a, const F32F64& b) {
     if (a.Type() != b.Type()) {
         UNREACHABLE_MSG("Mismatching types {} and {}", a.Type(), b.Type());

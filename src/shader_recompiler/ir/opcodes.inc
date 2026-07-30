@@ -457,3 +457,6 @@ OPCODE(BallotFindLsb,                                       U32,            U32x
 OPCODE(DataAppend,                                          U32,            U32,            U32                                                             )
 OPCODE(DataConsume,                                         U32,            U32,            U32                                                             )
 OPCODE(GroupAny,                                            U1,             U1,                                                                             )
+OPCODE(Wave64LaneRetirementInit,                            Void,           U1,             U32,            U32                                             )
+OPCODE(Wave64LaneRetirementSync,                            Void,           U1,             U32,            U32                                             )
+OPCODE(Wave64ReadFirstLane,                                 U32,            U32,            U32,            U32                                             )
