@@ -15,10 +15,10 @@ void LoadRenderDoc(bool allow_offline_loading = true);
 /// Schedules a capture for the next frame presented by the emulator.
 void TriggerCapture();
 
-/// Begins a scheduled capture immediately before presenting a frame.
+/// Begins a scheduled capture immediately before submitting a guest frame.
 [[nodiscard]] bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle);
 
-/// Ends a capture begun by BeginNextPresentedFrameCapture.
+/// Ends a capture begun by BeginNextPresentedFrameCapture after its frame is presented.
 void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle);
 
 /// Sets output directory for captures
