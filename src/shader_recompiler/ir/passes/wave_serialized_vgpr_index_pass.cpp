@@ -44,6 +44,60 @@ bool AreEquivalentLoopMasks(IR::Value lhs, IR::Value rhs) {
     return true;
 }
 
+IR::Inst* LoopMaskPhi(IR::Value mask) {
+    mask = mask.Resolve();
+    if (mask.IsImmediate()) {
+        return nullptr;
+    }
+    IR::Inst* const inst = mask.TryInstRecursive();
+    return inst != nullptr && inst->GetOpcode() == IR::Opcode::Phi ? inst : nullptr;
+}
+
+bool FeedsOnlySerializedLoopContinuation(IR::Inst& remaining_lanes, IR::Value active_mask,
+                                         IR::Value remaining_mask) {
+    IR::Inst* const active_phi = LoopMaskPhi(active_mask);
+    IR::Inst* const remaining_phi = LoopMaskPhi(remaining_mask);
+    bool feeds_condition{};
+    bool feeds_active_phi{};
+    bool feeds_remaining_phi{};
+
+    for (const IR::Use& use : remaining_lanes.Uses()) {
+        if (use.operand == 0 && use.user->GetOpcode() == IR::Opcode::ConditionRef) {
+            if (feeds_condition) {
+                return false;
+            }
+            feeds_condition = true;
+            continue;
+        }
+        if (use.user == active_phi) {
+            if (feeds_active_phi) {
+                return false;
+            }
+            feeds_active_phi = true;
+            continue;
+        }
+        if (use.user == remaining_phi) {
+            if (feeds_remaining_phi) {
+                return false;
+            }
+            feeds_remaining_phi = true;
+            continue;
+        }
+        return false;
+    }
+
+    if (!feeds_condition) {
+        return false;
+    }
+    if (!feeds_active_phi && !feeds_remaining_phi) {
+        return true;
+    }
+    if (active_phi == remaining_phi) {
+        return feeds_active_phi;
+    }
+    return feeds_active_phi && feeds_remaining_phi;
+}
+
 std::optional<IR::Value> OtherComparisonArgument(IR::Inst& compare, const IR::Inst& read_first) {
     if (compare.GetOpcode() != IR::Opcode::IEqual32) {
         return std::nullopt;
@@ -117,13 +171,10 @@ bool GatesSerializedLoop(const IR::Inst& compare) {
     const std::optional<IR::Value> remaining_mask =
         OtherLogicalAndArgument(*remaining_lanes, *logical_not);
     if (!remaining_mask || !AreEquivalentLoopMasks(*remaining_mask, *active_mask) ||
-        std::ranges::distance(remaining_lanes->Uses()) != 1) {
+        !FeedsOnlySerializedLoopContinuation(*remaining_lanes, *active_mask, *remaining_mask)) {
         return false;
     }
-
-    const IR::Use& remaining_use = *remaining_lanes->Uses().begin();
-    return remaining_use.operand == 0 &&
-           remaining_use.user->GetOpcode() == IR::Opcode::ConditionRef;
+    return true;
 }
 
 bool TryEliminate(IR::Inst& read_first) {
