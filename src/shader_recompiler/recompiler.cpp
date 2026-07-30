@@ -78,7 +78,6 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         Shader::Optimization::DomainShaderTransform(program, runtime_info);
     }
     Shader::Optimization::RingAccessElimination(program, runtime_info);
-    Shader::Optimization::WaveSerializedVgprIndexPass(program);
     Shader::Optimization::ReadLaneEliminationPass(program);
     Shader::Optimization::FlattenExtendedUserdataPass(program);
     Shader::Optimization::ResourceTrackingPass(program, profile);
@@ -89,7 +88,13 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::IdentityRemovalPass(program.blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);
+    const bool devirtualized_vgpr_indices =
+        Shader::Optimization::WaveSerializedVgprIndexPass(program);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
+    if (devirtualized_vgpr_indices) {
+        Shader::Optimization::IdentityRemovalPass(program.blocks);
+        Shader::Optimization::DeadCodeEliminationPass(program);
+    }
     Shader::Optimization::CollectShaderInfoPass(program, profile);
 
     Shader::IR::DumpProgram(program, info);
