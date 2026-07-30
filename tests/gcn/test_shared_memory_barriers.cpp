@@ -13,6 +13,12 @@
 
 namespace {
 
+size_t CountBarriers(const Shader::IR::Block& block) {
+    return std::ranges::count_if(block.Instructions(), [](const Shader::IR::Inst& inst) {
+        return inst.GetOpcode() == Shader::IR::Opcode::Barrier;
+    });
+}
+
 size_t CountInsertedBarriers(u32 workgroup_size, u32 shared_memory_size = 256,
                              bool needs_lds_barriers = true) {
     Shader::Info info{};
@@ -39,9 +45,98 @@ size_t CountInsertedBarriers(u32 workgroup_size, u32 shared_memory_size = 256,
     profile.needs_lds_barriers = needs_lds_barriers;
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
 
-    return std::ranges::count_if(block->Instructions(), [](const Shader::IR::Inst& inst) {
-        return inst.GetOpcode() == Shader::IR::Opcode::Barrier;
-    });
+    return CountBarriers(*block);
+}
+
+struct NestedBarrierLocations {
+    size_t inner_merge;
+    size_t outer_merge;
+};
+
+NestedBarrierLocations BarriersForMaskedInvocationBranch(const std::array<u32, 3>& workgroup_size) {
+    Shader::Info info{};
+    info.stage = Shader::Stage::Compute;
+    Shader::IR::Program program{info};
+    Shader::Pools pools{};
+
+    Shader::IR::Block* const entry = pools.block_pool.Create(pools.inst_pool);
+    Shader::IR::IREmitter entry_ir{*entry};
+    const Shader::IR::U32 invocation_x =
+        entry_ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
+    const Shader::IR::U32 invocation_y =
+        entry_ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 1);
+    const Shader::IR::U32 invocation_z =
+        entry_ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 2);
+    const Shader::IR::U32 invocation_xy =
+        entry_ir.IAdd(invocation_x, entry_ir.IMul(invocation_y, entry_ir.Imm32(workgroup_size[0])));
+    const Shader::IR::U32 invocation = entry_ir.IAdd(
+        invocation_xy,
+        entry_ir.IMul(invocation_z, entry_ir.Imm32(workgroup_size[0] * workgroup_size[1])));
+    const Shader::IR::U32 wave_base = entry_ir.BitwiseAnd(invocation, entry_ir.Imm32(~63U));
+    const Shader::IR::U32 shared_value{entry_ir.LoadShared(32, false, wave_base)};
+    const Shader::IR::U1 outer_cond =
+        entry_ir.ConditionRef(entry_ir.IEqual(shared_value, entry_ir.Imm32(0U)));
+    entry_ir.Epilogue();
+
+    Shader::IR::Block* const outer_body = pools.block_pool.Create(pools.inst_pool);
+    Shader::IR::IREmitter outer_ir{*outer_body};
+    const Shader::IR::U32 inner_invocation =
+        outer_ir.GetAttributeU32(Shader::IR::Attribute::LocalInvocationId, 0);
+    const Shader::IR::U1 inner_cond =
+        outer_ir.ConditionRef(outer_ir.IEqual(inner_invocation, outer_ir.Imm32(0U)));
+    outer_ir.Epilogue();
+
+    Shader::IR::Block* const inner_body = pools.block_pool.Create(pools.inst_pool);
+    Shader::IR::IREmitter inner_ir{*inner_body};
+    static_cast<void>(inner_ir.SharedAtomicOr(inner_ir.Imm32(0U), inner_ir.Imm32(1U), false));
+    inner_ir.Epilogue();
+
+    Shader::IR::Block* const inner_merge = pools.block_pool.Create(pools.inst_pool);
+    Shader::IR::IREmitter{*inner_merge}.Epilogue();
+    Shader::IR::Block* const outer_merge = pools.block_pool.Create(pools.inst_pool);
+    Shader::IR::IREmitter{*outer_merge}.Epilogue();
+
+    auto add_block = [&](Shader::IR::Block* block) {
+        auto& node = program.syntax_list.emplace_back();
+        node.type = Shader::IR::AbstractSyntaxNode::Type::Block;
+        node.data.block = block;
+    };
+    auto add_if = [&](const Shader::IR::U1& cond, Shader::IR::Block* body,
+                      Shader::IR::Block* merge) {
+        auto& node = program.syntax_list.emplace_back();
+        node.type = Shader::IR::AbstractSyntaxNode::Type::If;
+        node.data.if_node = {cond, body, merge};
+    };
+    auto add_end_if = [&](Shader::IR::Block* merge) {
+        auto& node = program.syntax_list.emplace_back();
+        node.type = Shader::IR::AbstractSyntaxNode::Type::EndIf;
+        node.data.end_if.merge = merge;
+    };
+
+    add_block(entry);
+    add_if(outer_cond, outer_body, outer_merge);
+    add_block(outer_body);
+    add_if(inner_cond, inner_body, inner_merge);
+    add_block(inner_body);
+    add_end_if(inner_merge);
+    add_block(inner_merge);
+    add_end_if(outer_merge);
+    add_block(outer_merge);
+    program.syntax_list.emplace_back().type = Shader::IR::AbstractSyntaxNode::Type::Return;
+
+    Shader::RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Shader::Stage::Compute);
+    runtime_info.cs_info.shared_memory_size = 256;
+    runtime_info.cs_info.workgroup_size = workgroup_size;
+
+    Shader::Profile profile{};
+    profile.needs_lds_barriers = true;
+    Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
+
+    return {
+        .inner_merge = CountBarriers(*inner_merge),
+        .outer_merge = CountBarriers(*outer_merge),
+    };
 }
 
 TEST(SharedMemoryBarrierPass, SynchronizesPartialGuestWaveWorkgroups) {
@@ -66,6 +161,20 @@ TEST(SharedMemoryBarrierPass, SkipsWorkgroupsWithoutSharedMemory) {
 
 TEST(SharedMemoryBarrierPass, SkipsInvalidEmptyWorkgroups) {
     EXPECT_EQ(CountInsertedBarriers(0), 0);
+}
+
+TEST(SharedMemoryBarrierPass, SynchronizesNestedDivergenceInsideUniformGuestWave) {
+    const NestedBarrierLocations barriers = BarriersForMaskedInvocationBranch({8, 8, 1});
+
+    EXPECT_EQ(barriers.inner_merge, 1);
+    EXPECT_EQ(barriers.outer_merge, 0);
+}
+
+TEST(SharedMemoryBarrierPass, KeepsBarrierOutsideNonUniformGuestWaveSelection) {
+    const NestedBarrierLocations barriers = BarriersForMaskedInvocationBranch({65, 1, 1});
+
+    EXPECT_EQ(barriers.inner_merge, 0);
+    EXPECT_EQ(barriers.outer_merge, 1);
 }
 
 } // namespace
