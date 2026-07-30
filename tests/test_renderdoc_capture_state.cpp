@@ -13,6 +13,10 @@ TEST(RenderDocCaptureState, TriggerSchedulesExactlyOnePresentedFrame) {
     EXPECT_TRUE(state.Trigger());
     EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
     EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
+    EXPECT_FALSE(state.Trigger());
+    EXPECT_TRUE(state.FinishPresentedFrameCapture());
+    EXPECT_FALSE(state.FinishPresentedFrameCapture());
+    EXPECT_TRUE(state.Trigger());
 }
 
 TEST(RenderDocCaptureState, TriggerIsPublishedAcrossThreads) {
@@ -22,13 +26,16 @@ TEST(RenderDocCaptureState, TriggerIsPublishedAcrossThreads) {
     trigger_thread.join();
 
     EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
+    EXPECT_TRUE(state.FinishPresentedFrameCapture());
 }
 
-TEST(RenderDocCaptureState, RepeatedTriggerDoesNotQueueAnotherCapture) {
+TEST(RenderDocCaptureState, RepeatedTriggerDoesNotQueueOrOverlapAnotherCapture) {
     VideoCore::RenderDocCaptureState state;
 
     ASSERT_TRUE(state.Trigger());
     EXPECT_FALSE(state.Trigger());
     ASSERT_TRUE(state.ConsumePresentedFrameTrigger());
+    EXPECT_FALSE(state.Trigger());
     EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
+    EXPECT_TRUE(state.FinishPresentedFrameCapture());
 }
