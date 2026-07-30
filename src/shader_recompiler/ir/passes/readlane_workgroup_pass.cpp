@@ -315,7 +315,7 @@ void LowerLaneRetirementPatterns(const std::vector<LaneRetirementPattern>& patte
             // Initialize before the top-level selection, while all workgroup invocations are
             // converged. Unique per-invocation writes clear the scratch bank without a data race;
             // the following atomic initialization records which host subgroups enter the branch.
-            IR::IREmitter ir{*pattern.init_block, --pattern.init_block->end()};
+            IR::IREmitter ir{*pattern.init_block};
             const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
             const IR::U32 byte_offset =
                 ir.IAdd(ir.Imm32(scratch_base), ir.IMul(invocation, ir.Imm32(DwordSize)));
@@ -326,7 +326,7 @@ void LowerLaneRetirementPatterns(const std::vector<LaneRetirementPattern>& patte
             ir.Barrier();
         }
         {
-            IR::IREmitter ir{*pattern.break_block, --pattern.break_block->end()};
+            IR::IREmitter ir{*pattern.break_block};
             const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
             const IR::U1 continues = ir.LogicalNot(pattern.break_cond);
             ir.Wave64LaneRetirementSync(continues, invocation, ir.Imm32(scratch_base));
