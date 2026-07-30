@@ -14,6 +14,36 @@ bool IsProducedBy(const IR::Value& value, const IR::Inst& producer) {
     return !value.IsImmediate() && value.TryInstRecursive() == &producer;
 }
 
+bool AreEquivalentLoopMasks(IR::Value lhs, IR::Value rhs) {
+    lhs = lhs.Resolve();
+    rhs = rhs.Resolve();
+    if (lhs == rhs) {
+        return true;
+    }
+    if (lhs.IsImmediate() || rhs.IsImmediate()) {
+        return false;
+    }
+
+    IR::Inst* const lhs_phi = lhs.TryInstRecursive();
+    IR::Inst* const rhs_phi = rhs.TryInstRecursive();
+    if (lhs_phi == nullptr || rhs_phi == nullptr ||
+        lhs_phi->GetOpcode() != IR::Opcode::Phi ||
+        rhs_phi->GetOpcode() != IR::Opcode::Phi ||
+        lhs_phi->GetParent() != rhs_phi->GetParent() ||
+        lhs_phi->Type() != rhs_phi->Type() ||
+        lhs_phi->NumArgs() != rhs_phi->NumArgs()) {
+        return false;
+    }
+
+    for (size_t index = 0; index < lhs_phi->NumArgs(); ++index) {
+        if (lhs_phi->PhiBlock(index) != rhs_phi->PhiBlock(index) ||
+            lhs_phi->Arg(index).Resolve() != rhs_phi->Arg(index).Resolve()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<IR::Value> OtherComparisonArgument(IR::Inst& compare, const IR::Inst& read_first) {
     if (compare.GetOpcode() != IR::Opcode::IEqual32) {
         return std::nullopt;
@@ -86,7 +116,7 @@ bool GatesSerializedLoop(const IR::Inst& compare) {
     IR::Inst* const remaining_lanes = logical_not->Uses().begin()->user;
     const std::optional<IR::Value> remaining_mask =
         OtherLogicalAndArgument(*remaining_lanes, *logical_not);
-    if (!remaining_mask || remaining_mask->Resolve() != active_mask->Resolve() ||
+    if (!remaining_mask || !AreEquivalentLoopMasks(*remaining_mask, *active_mask) ||
         std::ranges::distance(remaining_lanes->Uses()) != 1) {
         return false;
     }
