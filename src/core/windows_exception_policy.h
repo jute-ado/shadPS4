@@ -13,7 +13,7 @@ inline constexpr u32 MsvcCppExceptionCode = 0xe06d7363;
 // Vectored exception handlers run before language-runtime handlers. Returning true here asks the
 // emulator to begin shutdown before Windows continues searching for a handler.
 constexpr bool ShouldShutdownForUnclaimedException(u32 code) {
-    return code != BreakpointExceptionCode;
+    return code != BreakpointExceptionCode && code != MsvcCppExceptionCode;
 }
 
 } // namespace Core::WindowsException
