@@ -92,6 +92,95 @@ target_compile_features(shadps4_fault_range_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_fault_range_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_fault_range_test)
 
+add_executable(shadps4_gnm_graphics_event_test
+    test_gnm_graphics_event.cpp
+)
+target_include_directories(shadps4_gnm_graphics_event_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_gnm_graphics_event_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_gnm_graphics_event_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_gnm_graphics_event_test)
+
+add_executable(shadps4_buffer_residency_test
+    test_buffer_residency.cpp
+)
+target_include_directories(shadps4_buffer_residency_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
+
+add_executable(shadps4_buffer_access_range_test
+    test_buffer_access_range.cpp
+)
+target_include_directories(shadps4_buffer_access_range_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_access_range_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_access_range_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_buffer_access_range_test)
+
+add_executable(shadps4_cpu_page_write_snapshot_test
+    test_cpu_page_write_snapshot.cpp
+)
+target_include_directories(shadps4_cpu_page_write_snapshot_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_cpu_page_write_snapshot_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_cpu_page_write_snapshot_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_cpu_page_write_snapshot_test)
+
+add_executable(shadps4_sparse_memory_test
+    test_sparse_memory.cpp
+)
+target_include_directories(shadps4_sparse_memory_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_sparse_memory_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_sparse_memory_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_sparse_memory_test)
+
+if (WIN32)
+    add_executable(shadps4_windows_protection_snapshot_test
+        ${CMAKE_SOURCE_DIR}/src/core/windows_protection_snapshot.cpp
+        test_windows_protection_snapshot.cpp
+    )
+    target_link_libraries(shadps4_windows_protection_snapshot_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_protection_snapshot_test)
+endif()
+
+add_executable(shadps4_depth_association_test
+    test_depth_association.cpp
+)
+target_include_directories(shadps4_depth_association_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_depth_association_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_depth_association_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_depth_association_test)
+
+add_executable(shadps4_module_mapping_test
+    test_module_mapping.cpp
+)
+target_include_directories(shadps4_module_mapping_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_module_mapping_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_module_mapping_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_module_mapping_test)
+
 set(SETTINGS_TEST_SOURCES
     # Under test
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
@@ -192,6 +281,7 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ir_passes.h
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/identity_removal_pass.cpp
@@ -229,6 +319,7 @@ set(GCN_TEST_SOURCES
     gcn/translator.cpp
 
     # Tests
+    gcn/test_buffer_access_range_pass.cpp
     gcn/test_gcn_instructions.cpp
 )
 

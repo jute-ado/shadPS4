@@ -224,7 +224,9 @@ s32 Linker::LoadModule(const std::filesystem::path& elf_name, bool is_dynamic) {
         return -1;
     }
 
-    auto module = std::make_unique<Module>(memory, elf_name, max_tls_index);
+    const auto mapping_role =
+        m_modules.empty() ? ModuleMappingRole::MainExecutable : ModuleMappingRole::Library;
+    auto module = std::make_unique<Module>(memory, elf_name, mapping_role, max_tls_index);
     if (!module->IsValid()) {
         LOG_ERROR(Core_Linker, "Provided file {} is not valid ELF file", elf_name.string());
         return -1;

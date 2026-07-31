@@ -64,19 +64,43 @@ public:
                             });
     }
 
-    /// Removes all protection from a page and ensures GPU data has been flushed if requested
-    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
+    /// Removes all protection from a page while preserving GPU-owned bytes before CPU mutation.
+    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush, auto&& on_preserve) noexcept {
         IteratePages<false>(
-            cpu_addr, size, [&on_flush](RegionManager* manager, u64 offset, size_t size) {
+            cpu_addr, size,
+            [&on_flush, &on_preserve](RegionManager* manager, u64 offset, size_t size) {
                 const bool should_flush = [&] {
                     // Perform both the GPU modification check and CPU state change with the lock
                     // in case we are racing with GPU thread trying to mark the page as GPU
                     // modified. If we need to flush the flush function is going to perform CPU
                     // state change.
                     std::scoped_lock lk{manager->lock};
-                    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled &&
-                        manager->template IsRegionModified<Type::GPU>(offset, size)) {
-                        return true;
+                    if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                        if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
+                            return true;
+                        }
+
+                        const VAddr manager_addr = manager->GetCpuAddr();
+                        const VAddr write_begin = manager_addr + offset;
+                        const VAddr write_end = write_begin + size;
+                        const size_t first_page = offset / TRACKER_BYTES_PER_PAGE;
+                        const size_t page_end =
+                            (offset + size + TRACKER_BYTES_PER_PAGE - 1) / TRACKER_BYTES_PER_PAGE;
+                        for (size_t page = first_page; page < page_end; ++page) {
+                            const u64 page_offset = page * TRACKER_BYTES_PER_PAGE;
+                            if (!manager->template IsRegionModified<Type::GPU>(
+                                    page_offset, TRACKER_BYTES_PER_PAGE)) {
+                                continue;
+                            }
+                            const VAddr page_addr = manager_addr + page_offset;
+                            const VAddr page_write_begin = std::max(write_begin, page_addr);
+                            const VAddr page_write_end =
+                                std::min(write_end, page_addr + TRACKER_BYTES_PER_PAGE);
+                            if (!on_preserve(page_addr, page_write_begin - page_addr,
+                                             page_write_end - page_write_begin)) {
+                                return true;
+                            }
+                        }
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
                         manager->GetCpuAddr() + offset, size);

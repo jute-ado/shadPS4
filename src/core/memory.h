@@ -130,6 +130,10 @@ struct VirtualMemoryArea {
         return type != VMAType::Free && type != VMAType::Reserved && type != VMAType::PoolReserved;
     }
 
+    bool HasReadableBacking() const noexcept {
+        return IsMapped() && True(prot & (MemoryProt::CpuRead | MemoryProt::GpuRead));
+    }
+
     bool CanMergeWith(VirtualMemoryArea& next) {
         if (disallow_merge || next.disallow_merge) {
             return false;
@@ -235,6 +239,10 @@ public:
     }
 
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
+
+    VAddr SystemManagedVirtualBase() noexcept {
+        return impl.SystemManagedVirtualBase();
+    }
 
     void SetPrtArea(u32 id, VAddr address, u64 size);
 

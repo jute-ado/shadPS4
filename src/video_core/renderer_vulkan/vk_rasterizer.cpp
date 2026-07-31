@@ -11,6 +11,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/texture_cache/depth_association.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -602,7 +603,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
-            const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+            const u64 binding_size = desc.GetBindingSize(vsharp);
+            const u64 size = memory->ClampRangeSize(vsharp.base_address, binding_size);
             const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
             buffer_bindings.emplace_back(buffer_id, vsharp, size);
         } else {
@@ -715,11 +717,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
-            if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
-                // If this image has an associated depth image, it's a stencil attachment.
-                // Redirect the access to the actual depth-stencil buffer.
-                image_id = depth_image_id;
-                image = &texture_cache.GetImage(image_id);
+            if (VideoCore::ShouldUseAssociatedDepthForView(desc.view_info.format)) {
+                if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+                    // If this image has an associated depth image, it's a stencil attachment.
+                    // Redirect the access to the actual depth-stencil buffer.
+                    image_id = depth_image_id;
+                    image = &texture_cache.GetImage(image_id);
+                }
             }
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we

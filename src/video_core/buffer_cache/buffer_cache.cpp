@@ -8,6 +8,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -71,7 +72,16 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
         return;
     }
     memory_tracker->InvalidateRegion(
-        device_addr, size, [this, device_addr, size] { ReadMemory(device_addr, size, true); });
+        device_addr, size,
+        [this, device_addr, size] {
+            cpu_page_write_tracker.Discard(device_addr, size);
+            ReadMemory(device_addr, size, true);
+        },
+        [this](VAddr page_addr, size_t write_offset, size_t write_size) {
+            const auto page = std::span<const u8, TRACKER_BYTES_PER_PAGE>{
+                std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
+            return cpu_page_write_tracker.Capture(page_addr, page, write_offset, write_size);
+        });
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
@@ -118,6 +128,7 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
     const auto write_data = [&]() {
         auto* memory = Core::Memory::Instance();
+        cpu_page_write_tracker.Discard(device_addr, size);
         for (const auto& copy : copies) {
             const VAddr copy_device_addr = buffer.CpuAddr() + copy.srcOffset;
             const u64 dst_offset = copy.dstOffset - offset;
@@ -586,7 +597,12 @@ BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
     for (const BufferId overlap_id : overlap.ids) {
         JoinOverlap(new_buffer_id, overlap_id, !overlap.has_stream_leap);
     }
-    Register(new_buffer_id);
+    PublishDmaBufferAfterSynchronization(
+        new_buffer,
+        [this](Buffer& buffer, VAddr address, u32 size) {
+            SynchronizeBuffer(buffer, address, size, false, false, false);
+        },
+        [this, new_buffer_id] { Register(new_buffer_id); });
     return new_buffer_id;
 }
 
@@ -640,18 +656,60 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 }
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
-                                    bool is_texel_buffer) {
+                                    bool is_texel_buffer, bool is_registered) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
+    boost::container::small_vector<std::pair<VAddr, u64>, 16> uploaded_cpu_ranges;
     size_t total_size_bytes = 0;
     VAddr buffer_start = buffer.CpuAddr();
     vk::Buffer src_buffer = VK_NULL_HANDLE;
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
-        [&](u64 device_addr_out, u64 range_size) {
-            copies.emplace_back(total_size_bytes, device_addr_out - buffer_start, range_size);
-            total_size_bytes += range_size;
+        [&](VAddr device_addr_out, u64 range_size) {
+            const auto add_upload = [&](VAddr upload_addr, u64 upload_size) {
+                copies.emplace_back(total_size_bytes, upload_addr - buffer_start, upload_size);
+                uploaded_cpu_ranges.emplace_back(upload_addr, upload_size);
+                total_size_bytes += upload_size;
+            };
+
+            const VAddr range_end = device_addr_out + range_size;
+            VAddr page_addr = device_addr_out & ~(TRACKER_BYTES_PER_PAGE - 1);
+            while (page_addr < range_end) {
+                const VAddr upload_begin = std::max(device_addr_out, page_addr);
+                const VAddr upload_end = std::min(range_end, page_addr + TRACKER_BYTES_PER_PAGE);
+                const auto current_page = std::span<const u8, TRACKER_BYTES_PER_PAGE>{
+                    std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
+                const bool consumed = cpu_page_write_tracker.Consume(
+                    page_addr, current_page, upload_begin - page_addr, upload_end - upload_begin,
+                    [&](CpuPageUploadRange range) {
+                        add_upload(page_addr + range.offset, range.size);
+                    });
+                if (!consumed) {
+                    add_upload(upload_begin, upload_end - upload_begin);
+                }
+                page_addr += TRACKER_BYTES_PER_PAGE;
+            }
         },
         [&] { src_buffer = UploadCopies(buffer, copies, total_size_bytes); });
+
+    boost::container::small_vector<VAddr, 16> uploaded_pages;
+    for (const auto& [upload_addr, upload_size] : uploaded_cpu_ranges) {
+        gpu_modified_ranges.Subtract(upload_addr, upload_size);
+        const VAddr upload_end = upload_addr + upload_size;
+        for (VAddr page = upload_addr & ~(TRACKER_BYTES_PER_PAGE - 1); page < upload_end;
+             page += TRACKER_BYTES_PER_PAGE) {
+            uploaded_pages.push_back(page);
+        }
+    }
+    if (!is_written) {
+        std::ranges::sort(uploaded_pages);
+        const auto unique_end = std::ranges::unique(uploaded_pages).begin();
+        uploaded_pages.erase(unique_end, uploaded_pages.end());
+        for (const VAddr page : uploaded_pages) {
+            if (!gpu_modified_ranges.Intersects(page, TRACKER_BYTES_PER_PAGE)) {
+                memory_tracker->UnmarkRegionAsGpuModified(page, TRACKER_BYTES_PER_PAGE);
+            }
+        }
+    }
 
     if (src_buffer) {
         scheduler.EndRendering();
@@ -687,7 +745,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .bufferMemoryBarrierCount = 1,
             .pBufferMemoryBarriers = &post_barrier,
         });
-        TouchBuffer(buffer);
+        TouchBufferAfterUploadIfRegistered(is_registered, [&] { TouchBuffer(buffer); });
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeBufferFromImage(buffer, device_addr, size);
