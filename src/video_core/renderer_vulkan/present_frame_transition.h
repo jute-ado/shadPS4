@@ -18,12 +18,24 @@ struct PresentFrameTransition {
 };
 
 constexpr PresentFrameTransition GetPresentFrameTransition(const bool is_reusing_frame) {
+    if (is_reusing_frame) {
+        return {
+            .required = false,
+            .src_stage = vk::PipelineStageFlagBits2::eFragmentShader,
+            .src_access = vk::AccessFlagBits2::eShaderRead,
+            .dst_stage = vk::PipelineStageFlagBits2::eFragmentShader,
+            .dst_access = vk::AccessFlagBits2::eShaderRead,
+            .old_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .new_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
+        };
+    }
+
     return {
         .required = true,
         .src_stage = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
         .src_access = vk::AccessFlagBits2::eColorAttachmentWrite,
-        .dst_stage = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-        .dst_access = vk::AccessFlagBits2::eColorAttachmentRead,
+        .dst_stage = vk::PipelineStageFlagBits2::eFragmentShader,
+        .dst_access = vk::AccessFlagBits2::eShaderRead,
         .old_layout = vk::ImageLayout::eGeneral,
         .new_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
     };
