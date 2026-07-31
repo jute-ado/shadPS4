@@ -115,6 +115,15 @@ target_link_libraries(shadps4_sparse_memory_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_sparse_memory_test)
 
+if (WIN32)
+    add_executable(shadps4_windows_protection_snapshot_test
+        ${CMAKE_SOURCE_DIR}/src/core/windows_protection_snapshot.cpp
+        test_windows_protection_snapshot.cpp
+    )
+    target_link_libraries(shadps4_windows_protection_snapshot_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_protection_snapshot_test)
+endif()
+
 add_executable(shadps4_depth_association_test
     test_depth_association.cpp
 )

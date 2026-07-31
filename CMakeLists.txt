@@ -843,6 +843,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/aerolib/aerolib.h
          src/core/address_space.cpp
          src/core/address_space.h
+         src/core/windows_protection_snapshot.cpp
+         src/core/windows_protection_snapshot.h
          src/core/file_sys/devices/base_device.cpp
          src/core/file_sys/devices/base_device.h
          src/core/file_sys/devices/ioccom.h
