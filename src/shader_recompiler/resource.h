@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "shader_recompiler/buffer_access_range.h"
 #include "shader_recompiler/ir/type.h"
 #include "video_core/amdgpu/resource.h"
 
@@ -36,6 +37,7 @@ struct BufferResource {
     u8 instance_attrib{};
     bool is_written{};
     bool is_formatted{};
+    BufferAccessRange access_range{};
 
     bool IsSpecial() const noexcept {
         return buffer_type != BufferType::Guest;
@@ -50,6 +52,11 @@ struct BufferResource {
         // using the actual buffer size. We are assuming the performance hit from this is
         // acceptable.
         return true; // buffer.GetSize() > profile.max_ubo_size || is_written;
+    }
+
+    u64 GetBindingSize(const AmdGpu::Buffer buffer) const noexcept {
+        const u64 declared_size = buffer.GetSize();
+        return access_range.Fit(declared_size, BufferAddressLayout::From(buffer));
     }
 
     constexpr AmdGpu::Buffer GetSharp(const auto& info) const noexcept {
