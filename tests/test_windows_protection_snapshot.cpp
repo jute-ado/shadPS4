@@ -131,3 +131,27 @@ TEST(WindowsProtectionSnapshot, RestoresProtectionOverridesAfterMappedViewSplit)
     ASSERT_TRUE(Core::RestoreWindowsProtectionOverrides(GetCurrentProcess(), *protections));
     EXPECT_EQ(ProtectionAt(protected_address), PAGE_READONLY);
 }
+
+TEST(WindowsProtectionSnapshot, RestoresOverrideAcrossNewViewBoundaries) {
+    SplitFileMapping mapping;
+    ASSERT_TRUE(mapping.Initialize());
+
+    DWORD old_protection{};
+    ASSERT_TRUE(VirtualProtect(reinterpret_cast<void*>(mapping.Address()),
+                               mapping.SegmentSize() * 3, PAGE_READONLY, &old_protection));
+
+    const auto protections = Core::CaptureWindowsProtectionOverrides(
+        GetCurrentProcess(), mapping.Address(), mapping.SegmentSize() * 3, PAGE_READWRITE);
+    ASSERT_TRUE(protections.has_value());
+    ASSERT_EQ(protections->size(), 1U);
+    EXPECT_EQ(protections->front().address, mapping.Address());
+    EXPECT_EQ(protections->front().size, mapping.SegmentSize() * 3);
+
+    ASSERT_TRUE(mapping.SplitAndRemap());
+    ASSERT_EQ(ProtectionAt(mapping.Address()), PAGE_READWRITE);
+    ASSERT_EQ(ProtectionAt(mapping.Address() + mapping.SegmentSize() * 2), PAGE_READWRITE);
+
+    ASSERT_TRUE(Core::RestoreWindowsProtectionOverrides(GetCurrentProcess(), *protections));
+    EXPECT_EQ(ProtectionAt(mapping.Address()), PAGE_READONLY);
+    EXPECT_EQ(ProtectionAt(mapping.Address() + mapping.SegmentSize() * 2), PAGE_READONLY);
+}

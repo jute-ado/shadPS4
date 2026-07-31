@@ -21,7 +21,7 @@ struct WindowsProtectionSpan {
 };
 
 [[nodiscard]] std::optional<std::vector<WindowsProtectionSpan>> CaptureWindowsProtectionOverrides(
-    HANDLE process, VAddr address, u64 size, DWORD default_protection) noexcept;
+    HANDLE process, VAddr address, u64 size, DWORD default_protection);
 
 [[nodiscard]] bool RestoreWindowsProtectionOverrides(
     HANDLE process, std::span<const WindowsProtectionSpan> protections) noexcept;
