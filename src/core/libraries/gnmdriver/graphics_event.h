@@ -11,7 +11,8 @@ inline Kernel::EqueueEvent MakeGraphicsEvent(u64 id, void* user_data) {
     Kernel::EqueueEvent event{};
     event.event.ident = id;
     event.event.filter = Kernel::OrbisKernelEvent::Filter::GraphicsCore;
-    event.event.flags = Kernel::OrbisKernelEvent::Flags::Add;
+    event.event.flags =
+        Kernel::OrbisKernelEvent::Flags::Add | Kernel::OrbisKernelEvent::Flags::Clear;
     event.event.fflags = 0;
     event.event.data = id;
     event.event.udata = user_data;
