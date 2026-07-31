@@ -15,9 +15,8 @@ namespace fs = std::filesystem;
 class LegacyUserDataTest : public testing::Test {
 protected:
     void SetUp() override {
-        root = fs::temp_directory_path() /
-               ("shadps4-legacy-user-data-test-" +
-                std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        root = fs::temp_directory_path() / ("shadps4-legacy-user-data-test-" +
+                                            std::to_string(reinterpret_cast<std::uintptr_t>(this)));
         std::error_code ec;
         fs::remove_all(root, ec);
         ASSERT_TRUE(fs::create_directories(root));

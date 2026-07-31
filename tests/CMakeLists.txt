@@ -182,6 +182,7 @@ target_link_libraries(shadps4_module_mapping_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_module_mapping_test)
 
 add_executable(shadps4_legacy_user_data_test
+    ${CMAKE_SOURCE_DIR}/src/core/legacy_user_data.cpp
     test_legacy_user_data.cpp
 )
 target_include_directories(shadps4_legacy_user_data_test PRIVATE
