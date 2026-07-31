@@ -115,6 +115,16 @@ target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
 
+add_executable(shadps4_buffer_access_range_test
+    test_buffer_access_range.cpp
+)
+target_include_directories(shadps4_buffer_access_range_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_access_range_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_access_range_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_buffer_access_range_test)
+
 add_executable(shadps4_sparse_memory_test
     test_sparse_memory.cpp
 )
@@ -261,6 +271,7 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ir_passes.h
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/identity_removal_pass.cpp
@@ -298,6 +309,7 @@ set(GCN_TEST_SOURCES
     gcn/translator.cpp
 
     # Tests
+    gcn/test_buffer_access_range_pass.cpp
     gcn/test_gcn_instructions.cpp
 )
 
