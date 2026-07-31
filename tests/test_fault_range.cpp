@@ -56,6 +56,28 @@ TEST(FaultRange, RejectsRangeTooLargeForBufferCache) {
     EXPECT_FALSE(VideoCore::IsCacheableFaultRange(0x4000, 0x4000 + (1ULL << 32), 1ULL << 40));
 }
 
+TEST(FaultRange, RejectsUnmappedGpuFaultRange) {
+    bool mapping_checked = false;
+    const auto is_mapped = [&mapping_checked](VAddr address, u64 size) {
+        mapping_checked = true;
+        EXPECT_EQ(address, 0x9C000);
+        EXPECT_EQ(size, 0x4000);
+        return false;
+    };
+
+    EXPECT_FALSE(VideoCore::IsProcessableDmaFaultRange(0x9C000, 0xA0000, 1ULL << 40, is_mapped));
+    EXPECT_TRUE(mapping_checked);
+}
+
+TEST(FaultRange, AcceptsMappedGpuFaultRange) {
+    const auto is_mapped = [](VAddr address, u64 size) {
+        return address == 0x101E600000 && size == 0x4000;
+    };
+
+    EXPECT_TRUE(VideoCore::IsProcessableDmaFaultRange(0x101E600000, 0x101E604000,
+                                                      1ULL << 40, is_mapped));
+}
+
 TEST(FaultRange, MakesDmaFaultRangeResidentBeforeDirectAccess) {
     RecordingFaultRangeCache cache;
 

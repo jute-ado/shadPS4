@@ -9,13 +9,15 @@
 namespace VideoCore {
 
 class BufferCache;
+class PageManager;
 
 class FaultManager {
     static constexpr size_t MaxPendingFaults = 8;
 
 public:
     explicit FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
-                          BufferCache& buffer_cache, u32 caching_pagebits, u64 caching_num_pages);
+                          BufferCache& buffer_cache, PageManager& page_manager,
+                          u32 caching_pagebits, u64 caching_num_pages);
 
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
         return &fault_buffer;
@@ -26,6 +28,7 @@ public:
 private:
     Vulkan::Scheduler& scheduler;
     BufferCache& buffer_cache;
+    PageManager& page_manager;
     RangeSet fault_ranges;
     u64 caching_pagesize;
     u64 caching_num_pages;
