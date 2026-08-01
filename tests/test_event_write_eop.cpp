@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -29,11 +31,11 @@ TEST(EventWriteEop, InterruptFlipWaitsForFollowingEopPublication) {
                                   [&] { operations.emplace_back("flip"); }));
     EXPECT_TRUE(operations.empty());
 
-    auto complete_eop = tracker.BeginEop();
+    tracker.BeginEop();
     AmdGpu::PublishEop(
         TestEopPacket{.data = 1}, [&](u32) { operations.emplace_back("fence"); },
         [&] { operations.emplace_back("interrupt"); },
-        [complete_eop = std::move(complete_eop)]() mutable { complete_eop(); });
+        [&] { tracker.CompleteEop(); });
 
     EXPECT_EQ(operations, (std::vector<std::string>{"fence", "interrupt", "flip"}));
 }
@@ -43,11 +45,11 @@ TEST(EventWriteEop, PlainAndLabelFlipsFollowTheirPrecedingEopPublication) {
         std::vector<std::string> operations;
         AmdGpu::EopFlipTracker tracker;
 
-        auto complete_eop = tracker.BeginEop();
+        tracker.BeginEop();
         AmdGpu::PublishEop(
             TestEopPacket{.data = 1}, [&](u32) { operations.emplace_back("fence"); },
             [&] { operations.emplace_back("interrupt"); },
-            [complete_eop = std::move(complete_eop)]() mutable { complete_eop(); });
+            [&] { tracker.CompleteEop(); });
 
         ASSERT_TRUE(tracker.QueueFlip(AmdGpu::DecodeFlipEopPosition(nop_count),
                                       [&] { operations.emplace_back("flip"); }));
@@ -63,11 +65,21 @@ TEST(EventWriteEop, RetainsEveryFlipAssociatedWithTheSameEop) {
                                   [&] { flips.emplace_back(1); }));
     ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Following,
                                   [&] { flips.emplace_back(2); }));
-    auto complete_eop = tracker.BeginEop();
+    tracker.BeginEop();
 
     EXPECT_TRUE(flips.empty());
-    complete_eop();
+    tracker.CompleteEop();
     EXPECT_EQ(flips, (std::vector<int>{1, 2}));
+}
+
+TEST(EventWriteEop, RepeatedEopsUseTrackerOwnedCompletionState) {
+    static_assert(std::is_void_v<decltype(std::declval<AmdGpu::EopFlipTracker&>().BeginEop())>);
+
+    AmdGpu::EopFlipTracker tracker;
+    for (int i = 0; i < 1'000; ++i) {
+        tracker.BeginEop();
+        tracker.CompleteEop();
+    }
 }
 
 } // namespace
