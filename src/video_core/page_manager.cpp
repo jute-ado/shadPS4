@@ -377,6 +377,10 @@ void PageManager::OnGpuUnmap(VAddr address, size_t size) {
     impl->OnUnmap(address, size);
 }
 
+bool PageManager::IsGpuMapped(VAddr address, size_t size) const {
+    return impl->rasterizer->IsMapped(address, size);
+}
+
 template <bool track>
 void PageManager::UpdatePageWatchers(VAddr addr, u64 size) const {
     impl->UpdatePageWatchers<track, false>(addr, size);

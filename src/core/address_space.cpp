@@ -11,6 +11,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/memory.h"
+#include "core/windows_protection_snapshot.h"
 #include "libraries/error_codes.h"
 
 #ifdef _WIN32
@@ -319,9 +320,16 @@ struct AddressSpace::Impl {
                    "Cannot fit region into one placeholder");
 
         // If the region is mapped, we need to unmap first before we can modify the placeholders.
+        std::optional<std::vector<WindowsProtectionSpan>> protection_overrides;
         if (it->second.is_mapped) {
             ASSERT_MSG(it->second.phys_base != -1 || !it->second.is_mapped,
                        "Cannot split unbacked mapping");
+            protection_overrides = CaptureWindowsProtectionOverrides(
+                process, it->second.base, it->second.size, it->second.prot);
+            ASSERT_MSG(protection_overrides.has_value(),
+                       "Failed to capture virtual memory protection for address {:#x}, size "
+                       "{:#x}: {}",
+                       it->second.base, it->second.size, Common::GetLastErrorMsg());
             UnmapRegion(&it->second);
         }
 
@@ -392,6 +400,13 @@ struct AddressSpace::Impl {
         // If the requested region was mapped, remap it.
         if (it->second.is_mapped) {
             MapRegion(&it->second);
+        }
+
+        if (protection_overrides.has_value()) {
+            ASSERT_MSG(RestoreWindowsProtectionOverrides(process, *protection_overrides),
+                       "Failed to restore virtual memory protection after splitting address "
+                       "{:#x}, size {:#x}: {}",
+                       virtual_addr, size, Common::GetLastErrorMsg());
         }
     }
 

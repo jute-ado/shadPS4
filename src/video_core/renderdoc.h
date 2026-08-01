@@ -5,21 +5,21 @@
 
 #include <filesystem>
 #include <string>
-#include "common/types.h"
+#include "video_core/screenshot_request_queue.h"
 
 namespace VideoCore {
 
 /// Loads renderdoc dynamic library module.
-void LoadRenderDoc();
+void LoadRenderDoc(bool allow_offline_loading = true);
 
-/// Begins a capture if a renderdoc instance is attached.
-void StartCapture();
-
-/// Ends current renderdoc capture.
-void EndCapture();
-
-/// Triggers capturing process.
+/// Schedules a capture for the next frame presented by the emulator.
 void TriggerCapture();
+
+/// Begins a scheduled capture immediately before presenting a frame.
+[[nodiscard]] bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle);
+
+/// Ends a capture begun by BeginNextPresentedFrameCapture.
+void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle);
 
 /// Sets output directory for captures
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix);
@@ -27,27 +27,14 @@ void SetOutputDir(const std::filesystem::path& path, const std::string& prefix);
 /// Returns true when RenderDoc API was loaded and is usable.
 bool IsRenderDocLoaded();
 
-enum class ScreenshotRequest : u32 {
-    None = 0,
-    GameOnly = 1,
-    WithOverlays = 2,
-};
-
-struct ScreenshotRequests {
-    u32 game_only_count{};
-    u32 with_overlays_count{};
-};
-
 /// Queues an in-emulator screenshot request to be consumed by the presenter.
-void RequestScreenshot(ScreenshotRequest request);
+void RequestScreenshot(ScreenshotRequest request,
+                       ScreenshotRequestOrigin origin = ScreenshotRequestOrigin::User);
 
-/// Atomically consumes and returns pending "game only" screenshot request counter.
-u32 ConsumeGameOnlyScreenshotRequests();
+/// Atomically consumes pending "game only" screenshot requests.
+ScreenshotRequestBatch ConsumeGameOnlyScreenshotRequests();
 
-/// Atomically consumes and returns pending "with overlays" screenshot request counter.
-u32 ConsumeWithOverlaysScreenshotRequests();
-
-/// Atomically consumes and returns pending screenshot request counters.
-ScreenshotRequests ConsumeScreenshotRequests();
+/// Atomically consumes pending "with overlays" screenshot requests.
+ScreenshotRequestBatch ConsumeWithOverlaysScreenshotRequests();
 
 } // namespace VideoCore

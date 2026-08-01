@@ -42,6 +42,10 @@ enum class MemoryProt : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(MemoryProt)
 
+constexpr bool RequiresSubmissionBoundaryBeforeMapping(MemoryProt prot) {
+    return True(prot & MemoryProt::GpuReadWrite);
+}
+
 enum class MemoryMapFlags : u32 {
     NoFlags = 0,
     Shared = 1,
@@ -128,6 +132,10 @@ struct VirtualMemoryArea {
 
     bool IsMapped() const noexcept {
         return type != VMAType::Free && type != VMAType::Reserved && type != VMAType::PoolReserved;
+    }
+
+    bool HasReadableBacking() const noexcept {
+        return IsMapped() && True(prot & (MemoryProt::CpuRead | MemoryProt::GpuRead));
     }
 
     bool CanMergeWith(VirtualMemoryArea& next) {
@@ -235,6 +243,10 @@ public:
     }
 
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
+
+    VAddr SystemManagedVirtualBase() noexcept {
+        return impl.SystemManagedVirtualBase();
+    }
 
     void SetPrtArea(u32 id, VAddr address, u64 size);
 

@@ -14,6 +14,7 @@
 #include "core/libraries/system/userservice.h"
 #include "core/user_settings.h"
 #include "input/controller.h"
+#include "input/controller_trace.h"
 
 namespace Input {
 
@@ -89,21 +90,22 @@ void State::UpdateAxisSmoothing() {
     }
 }
 
-GameController::GameController() : m_states_queue(64) {}
+GameController::GameController(bool record_test_lab_input)
+    : m_states_queue(64), m_record_test_lab_input{record_test_lab_input} {}
 
 void GameController::ReadState(State* state, bool* isConnected, int* connectedCount) {
-    *isConnected = m_connected;
-    *connectedCount = m_connected_count;
+    *isConnected = m_connection.IsConnected();
+    *connectedCount = m_connection.ConnectedCount();
     *state = m_state;
 }
 
 int GameController::ReadStates(State* states, int states_num, bool* isConnected,
                                int* connectedCount) {
-    *isConnected = m_connected;
-    *connectedCount = m_connected_count;
+    *isConnected = m_connection.IsConnected();
+    *connectedCount = m_connection.ConnectedCount();
 
     int ret_num = 0;
-    if (m_connected) {
+    if (m_connection.IsConnected()) {
         std::lock_guard lg(m_states_queue_mutex);
         for (int i = 0; i < states_num; i++) {
             auto o_state = m_states_queue.Pop();
@@ -254,13 +256,16 @@ void GameControllers::CalculateOrientation(Libraries::Pad::OrbisFVector3& accele
 
 void GameController::ConnectController(SDL_Gamepad* pad) {
     m_sdl_gamepad = pad;
-    m_connected_count = 1;
-    m_connected = true;
+    m_connection.ConnectPhysical();
 }
+
+void GameController::ConnectVirtualController() {
+    m_connection.ConnectVirtual();
+}
+
 void GameController::DisconnectController() {
     m_sdl_gamepad = nullptr;
-    m_connected_count = 0;
-    m_connected = false;
+    m_connection.DisconnectPhysical();
 }
 
 bool is_first_check = true;
@@ -412,6 +417,9 @@ void GameController::PushState() {
     std::lock_guard lg(m_states_queue_mutex);
     m_state.time = Libraries::Kernel::sceKernelGetProcessTime();
     m_states_queue.Push(m_state);
+    if (m_record_test_lab_input) {
+        RecordPrimaryControllerState(m_state);
+    }
 }
 
 u8 GameControllers::GetGamepadIndexFromJoystickId(SDL_JoystickID id) {

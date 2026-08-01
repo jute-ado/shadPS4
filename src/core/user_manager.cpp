@@ -8,6 +8,7 @@
 #include <common/path_util.h>
 #include <pugixml.hpp>
 #include "emulator_settings.h"
+#include "legacy_user_data.h"
 #include "libraries/system/userservice.h"
 #include "user_manager.h"
 #include "user_settings.h"
@@ -178,6 +179,10 @@ static void CheckAndMigrateTrophies(TransferOption option) {
     auto const user_dir = EmulatorSettings.GetHomeDir() / "1000";
     auto const old_trophy_base_dir =
         Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "game_data";
+    std::error_code ec;
+    if (!fs::is_directory(old_trophy_base_dir, ec)) {
+        return;
+    }
     auto const new_trophy_global_dir = Common::FS::GetUserPath(Common::FS::PathType::TrophyDir);
     try {
         for (auto const& entry : fs::directory_iterator(old_trophy_base_dir)) {
@@ -297,9 +302,13 @@ Users UserManager::CreateDefaultUsers() {
             std::filesystem::create_directory(user_dir / "trophy");
             std::filesystem::create_directory(user_dir / "inputs");
             if (u.user_id == 1000) {
-                TransferOption user_choice = AskMigrationOption();
-                CheckAndMigrateSaves(user_choice);
-                CheckAndMigrateTrophies(user_choice);
+                const auto legacy_user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
+                if (Core::UserMigration::HasMigratableData(legacy_user_dir / "savedata" / "1",
+                                                           legacy_user_dir / "game_data")) {
+                    TransferOption user_choice = AskMigrationOption();
+                    CheckAndMigrateSaves(user_choice);
+                    CheckAndMigrateTrophies(user_choice);
+                }
             }
         }
     }

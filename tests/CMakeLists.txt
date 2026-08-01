@@ -9,11 +9,240 @@ include(FetchContent)
 )
 FetchContent_MakeAvailable(googletest)
 
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Clang 22 diagnoses a conversion inside GoogleTest 1.17 while this
+    # project promotes dependency warnings to errors.
+    target_compile_options(gtest PRIVATE /clang:-Wno-character-conversion)
+endif()
+
 set(TEST_TARGETS
+    shadps4_controller_trace_test
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
 )
+
+add_executable(shadps4_controller_trace_test
+    ${CMAKE_SOURCE_DIR}/src/input/controller_axis.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/controller_trace.cpp
+    test_controller_axis.cpp
+    test_controller_button.cpp
+    test_controller_connection.cpp
+    test_controller_trace.cpp
+)
+target_include_directories(shadps4_controller_trace_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_controller_trace_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_controller_trace_test PRIVATE
+    GTest::gtest_main
+    SDL3::SDL3
+    spdlog::spdlog
+)
+
+add_executable(shadps4_renderdoc_path_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
+    test_renderdoc_path.cpp
+)
+target_include_directories(shadps4_renderdoc_path_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_renderdoc_path_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
+
+add_executable(shadps4_renderdoc_capture_state_test
+    test_renderdoc_capture_state.cpp
+)
+target_include_directories(shadps4_renderdoc_capture_state_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_renderdoc_capture_state_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_renderdoc_capture_state_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_renderdoc_capture_state_test)
+
+add_executable(shadps4_ipc_capabilities_test
+    test_ipc_capabilities.cpp
+)
+target_include_directories(shadps4_ipc_capabilities_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
+
+add_executable(shadps4_screenshot_request_queue_test
+    test_screenshot_request_queue.cpp
+)
+target_include_directories(shadps4_screenshot_request_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_screenshot_request_queue_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_screenshot_request_queue_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_screenshot_request_queue_test)
+
+add_executable(shadps4_present_frame_ownership_test
+    test_present_frame_ownership.cpp
+)
+target_include_directories(shadps4_present_frame_ownership_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_present_frame_ownership_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_present_frame_ownership_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_present_frame_ownership_test)
+
+add_executable(shadps4_present_frame_transition_test
+    test_present_frame_transition.cpp
+)
+target_include_directories(shadps4_present_frame_transition_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_present_frame_transition_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_present_frame_transition_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_present_frame_transition_test)
+
+add_executable(shadps4_fault_range_test
+    test_fault_range.cpp
+)
+target_include_directories(shadps4_fault_range_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_fault_range_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_fault_range_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_fault_range_test)
+
+add_executable(shadps4_gnm_graphics_event_test
+    test_gnm_graphics_event.cpp
+)
+target_include_directories(shadps4_gnm_graphics_event_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_gnm_graphics_event_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_gnm_graphics_event_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_gnm_graphics_event_test)
+
+add_executable(shadps4_gnm_submission_gate_test
+    test_gnm_submission_gate.cpp
+)
+target_include_directories(shadps4_gnm_submission_gate_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_gnm_submission_gate_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_gnm_submission_gate_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_gnm_submission_gate_test)
+
+add_executable(shadps4_gpu_mapping_admission_test
+    test_gpu_mapping_admission.cpp
+)
+target_include_directories(shadps4_gpu_mapping_admission_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_gpu_mapping_admission_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_gpu_mapping_admission_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_gpu_mapping_admission_test)
+
+add_executable(shadps4_buffer_residency_test
+    test_buffer_residency.cpp
+)
+target_include_directories(shadps4_buffer_residency_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
+
+add_executable(shadps4_buffer_access_range_test
+    test_buffer_access_range.cpp
+)
+target_include_directories(shadps4_buffer_access_range_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_access_range_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_access_range_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_buffer_access_range_test)
+
+add_executable(shadps4_cpu_page_write_snapshot_test
+    test_cpu_page_write_snapshot.cpp
+)
+target_include_directories(shadps4_cpu_page_write_snapshot_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_cpu_page_write_snapshot_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_cpu_page_write_snapshot_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_cpu_page_write_snapshot_test)
+
+add_executable(shadps4_sparse_memory_test
+    test_sparse_memory.cpp
+)
+target_include_directories(shadps4_sparse_memory_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_sparse_memory_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_sparse_memory_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_sparse_memory_test)
+
+if (WIN32)
+    add_executable(shadps4_windows_protection_snapshot_test
+        ${CMAKE_SOURCE_DIR}/src/core/windows_protection_snapshot.cpp
+        test_windows_protection_snapshot.cpp
+    )
+    target_link_libraries(shadps4_windows_protection_snapshot_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_protection_snapshot_test)
+
+    add_executable(shadps4_windows_exception_policy_test
+        test_windows_exception_policy.cpp
+    )
+    target_link_libraries(shadps4_windows_exception_policy_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_exception_policy_test)
+endif()
+
+add_executable(shadps4_depth_association_test
+    test_depth_association.cpp
+)
+target_include_directories(shadps4_depth_association_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_depth_association_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_depth_association_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_depth_association_test)
+
+add_executable(shadps4_module_mapping_test
+    test_module_mapping.cpp
+)
+target_include_directories(shadps4_module_mapping_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_module_mapping_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_module_mapping_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_module_mapping_test)
+
+add_executable(shadps4_legacy_user_data_test
+    ${CMAKE_SOURCE_DIR}/src/core/legacy_user_data.cpp
+    test_legacy_user_data.cpp
+)
+target_include_directories(shadps4_legacy_user_data_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_legacy_user_data_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_legacy_user_data_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_legacy_user_data_test)
 
 set(SETTINGS_TEST_SOURCES
     # Under test
@@ -115,6 +344,7 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ir_passes.h
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/identity_removal_pass.cpp
@@ -152,6 +382,7 @@ set(GCN_TEST_SOURCES
     gcn/translator.cpp
 
     # Tests
+    gcn/test_buffer_access_range_pass.cpp
     gcn/test_gcn_instructions.cpp
 )
 
@@ -238,6 +469,57 @@ foreach(t ${TEST_TARGETS})
         DISCOVERY_TIMEOUT 60
     )
 endforeach()
+
+# The capability probe stays self-contained so the upstream adapter does not
+# pull emulator runtime dependencies into this contract test.
+add_executable(shadps4_test_lab_probe_test
+    ${CMAKE_SOURCE_DIR}/src/core/test_lab_probe.cpp
+    test_test_lab_probe.cpp
+)
+target_include_directories(shadps4_test_lab_probe_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_probe_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_probe_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(shadps4_test_lab_probe_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
+add_executable(shadps4_presented_frame_timing_trace_test
+    test_presented_frame_timing_trace.cpp
+)
+target_include_directories(shadps4_presented_frame_timing_trace_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_presented_frame_timing_trace_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_presented_frame_timing_trace_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(shadps4_presented_frame_timing_trace_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
+add_executable(shadps4_test_lab_audio_capture_test
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/audio/test_lab_audio_capture.cpp
+    test_test_lab_audio_capture.cpp
+)
+target_include_directories(shadps4_test_lab_audio_capture_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_audio_capture_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_audio_capture_test PRIVATE
+    GTest::gtest_main
+)
+gtest_discover_tests(shadps4_test_lab_audio_capture_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
 
 # ===========================================================================
 # HTTP tests (libSceHttp - URI helpers and status-line parsing)

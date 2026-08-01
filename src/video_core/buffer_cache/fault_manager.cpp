@@ -3,7 +3,9 @@
 
 #include "common/div_ceil.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/fault_range.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -17,8 +19,10 @@ static constexpr size_t MaxPageFaults = 1024;
 static constexpr size_t PageFaultAreaSize = MaxPageFaults * sizeof(u64);
 
 FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
-                           BufferCache& buffer_cache_, u32 caching_pagebits, u64 caching_num_pages_)
+                           BufferCache& buffer_cache_, PageManager& page_manager_,
+                           u32 caching_pagebits, u64 caching_num_pages_)
     : scheduler{scheduler_}, buffer_cache{buffer_cache_},
+      page_manager{page_manager_},
       caching_pagesize{1ULL << caching_pagebits}, caching_num_pages{caching_num_pages_},
       fault_buffer_size{caching_num_pages_ / 8},
       fault_buffer{instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, fault_buffer_size},
@@ -158,14 +162,40 @@ void FaultManager::ProcessFaultBuffer() {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
         const u32 fault_count = fault_buf[0];
+        const VAddr address_space_size = caching_num_pages * caching_pagesize;
+        u32 invalid_fault_count = 0;
+        VAddr first_invalid_fault = 0;
         for (u32 i = 1; i <= fault_count; ++i) {
-            fault_ranges.Add(fault_buf[i], caching_pagesize);
-            LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", fault_buf[i]);
+            const VAddr start = fault_buf[i];
+            const VAddr end = start + caching_pagesize;
+            const bool is_processable = IsProcessableDmaFaultRange(
+                start, end, address_space_size,
+                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+            if (!is_processable) {
+                if (invalid_fault_count++ == 0) {
+                    first_invalid_fault = start;
+                }
+                continue;
+            }
+            fault_ranges.Add(start, caching_pagesize);
+            LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", start);
+        }
+        if (invalid_fault_count != 0) {
+            LOG_WARNING(Render_Vulkan,
+                        "Ignored {} invalid or unmapped GPU fault page(s), first at {:#x}",
+                        invalid_fault_count, first_invalid_fault);
         }
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
-            ASSERT_MSG((end - start) <= std::numeric_limits<u32>::max(),
-                       "Buffer size is too large");
-            buffer_cache.FindBuffer(start, static_cast<u32>(end - start));
+            const bool is_processable = IsProcessableDmaFaultRange(
+                start, end, address_space_size,
+                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+            if (!is_processable) {
+                LOG_WARNING(Render_Vulkan,
+                            "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}", start,
+                            end);
+                return;
+            }
+            MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));
         });
         fault_areas[area] = 0;
     });
