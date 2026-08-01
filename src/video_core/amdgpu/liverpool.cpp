@@ -13,6 +13,7 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
@@ -272,9 +273,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
-                    // There is no evidence that GPU CP drives flip events by parsing
-                    // special NOP packets. For convenience lets assume that it does.
-                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
+                    const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    ASSERT_MSG(
+                        eop_flip_tracker.QueueFlip(eop_position,
+                                                   [this] {
+                                                       SendCommand([] {
+                                                           Platform::IrqC::Instance()->Signal(
+                                                               Platform::InterruptId::GfxFlip);
+                                                       });
+                                                   }),
+                        "A patched flip could not be associated with its EOP packet");
                     break;
                 }
                 case PM4CmdNop::PayloadType::DebugMarkerPush: {
@@ -724,14 +732,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
-                event_eop->SignalFence(
+                auto complete_eop_flip = eop_flip_tracker.BeginEop();
+                PublishEop(
+                    *event_eop,
                     [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
                         if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                             memcpy(address, &data, num_bytes);
                         }
                     },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
+                    [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
+                        complete_eop_flip();
+                    });
                 break;
             }
             case PM4ItOpcode::DmaData: {
