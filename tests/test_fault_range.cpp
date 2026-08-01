@@ -5,6 +5,7 @@
 
 #include <vector>
 
+#include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_range.h"
 
 namespace {
@@ -90,4 +91,38 @@ TEST(FaultRange, MakesDmaFaultRangeResidentBeforeDirectAccess) {
     EXPECT_EQ(cache.calls[1].operation, FaultRangeCacheCall::Synchronize);
     EXPECT_EQ(cache.calls[1].address, 0x101E600000);
     EXPECT_EQ(cache.calls[1].size, 0x4000);
+}
+
+TEST(DmaDirtyRanges, CleanFramesProduceNoSynchronizationWork) {
+    VideoCore::DmaDirtyRangeTracker tracker;
+
+    for (int frame = 0; frame < 1'000; ++frame) {
+        EXPECT_TRUE(tracker.Take().empty());
+    }
+}
+
+TEST(DmaDirtyRanges, MergesOverlappingCpuWritesAndDrainsThemOnce) {
+    VideoCore::DmaDirtyRangeTracker tracker;
+    tracker.Mark(0x10'0000, 0x4000);
+    tracker.Mark(0x10'2000, 0x6000);
+
+    const auto ranges = tracker.Take();
+
+    ASSERT_EQ(ranges.size(), 1);
+    EXPECT_EQ(ranges[0].address, 0x10'0000);
+    EXPECT_EQ(ranges[0].size, 0x8000);
+    EXPECT_TRUE(tracker.Take().empty());
+}
+
+TEST(DmaDirtyRanges, RetainsWritesMarkedAfterAPreviousDrain) {
+    VideoCore::DmaDirtyRangeTracker tracker;
+    tracker.Mark(0x20'0000, 0x4000);
+    ASSERT_EQ(tracker.Take().size(), 1);
+
+    tracker.Mark(0x30'0000, 0x8000);
+    const auto ranges = tracker.Take();
+
+    ASSERT_EQ(ranges.size(), 1);
+    EXPECT_EQ(ranges[0].address, 0x30'0000);
+    EXPECT_EQ(ranges[0].size, 0x8000);
 }
