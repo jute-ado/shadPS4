@@ -732,7 +732,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
-                auto complete_eop_flip = eop_flip_tracker.BeginEop();
+                eop_flip_tracker.BeginEop();
                 PublishEop(
                     *event_eop,
                     [](void* address, u64 data, u32 num_bytes) {
@@ -742,9 +742,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         }
                     },
                     [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                    [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
-                        complete_eop_flip();
-                    });
+                    [this] { eop_flip_tracker.CompleteEop(); });
                 break;
             }
             case PM4ItOpcode::DmaData: {
