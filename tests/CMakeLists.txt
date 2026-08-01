@@ -155,6 +155,12 @@ if (WIN32)
     )
     target_link_libraries(shadps4_windows_protection_snapshot_test PRIVATE GTest::gtest_main)
     list(APPEND TEST_TARGETS shadps4_windows_protection_snapshot_test)
+
+    add_executable(shadps4_windows_exception_policy_test
+        test_windows_exception_policy.cpp
+    )
+    target_link_libraries(shadps4_windows_exception_policy_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_exception_policy_test)
 endif()
 
 add_executable(shadps4_depth_association_test
