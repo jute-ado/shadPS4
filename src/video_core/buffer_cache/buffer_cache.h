@@ -9,6 +9,7 @@
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/cpu_page_write_snapshot.h"
+#include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
@@ -214,6 +215,7 @@ private:
     Buffer gds_buffer;
     Buffer bda_pagetable_buffer;
     CpuPageWriteTracker cpu_page_write_tracker;
+    DmaDirtyRangeTracker dma_dirty_ranges;
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
     u64 trigger_gc_memory = 0;

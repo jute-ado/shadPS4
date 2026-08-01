@@ -82,6 +82,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
                 std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
             return cpu_page_write_tracker.Capture(page_addr, page, write_offset, write_size);
         });
+    dma_dirty_ranges.Mark(device_addr, size);
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
@@ -838,6 +839,12 @@ void BufferCache::SynchronizeBuffersInRange(VAddr device_addr, u64 size) {
         u32 size = static_cast<u32>(end - start);
         SynchronizeBuffer(buffer, start, size, false, false);
     });
+}
+
+void BufferCache::SynchronizeDmaBuffers() {
+    for (const auto& range : dma_dirty_ranges.Take()) {
+        SynchronizeBuffersInRange(range.address, range.size);
+    }
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {
