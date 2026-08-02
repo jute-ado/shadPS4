@@ -24,6 +24,7 @@
 #include "core/user_settings.h"
 #include "imgui/friends_layer.h"
 #include "imgui/renderer/imgui_core.h"
+#include "imgui/renderer/imgui_impl_sdl3.h"
 #include "input/controller.h"
 #include "input/input_handler.h"
 #include "input/input_mouse.h"
@@ -355,9 +356,13 @@ void WindowSDL::WaitEvent() {
         break;
     case SDL_EVENT_INJECT_GAMEPAD_BUTTON:
         controllers[0]->ConnectVirtualController();
-        controllers[0]->Button(
-            static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(event.user.code),
-            reinterpret_cast<uintptr_t>(event.user.data1) != 0);
+        {
+            const auto button =
+                static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(event.user.code);
+            const bool pressed = reinterpret_cast<uintptr_t>(event.user.data1) != 0;
+            ImGui::Sdl::SetVirtualGamepadButton(button, pressed);
+            controllers[0]->Button(button, pressed);
+        }
         break;
     case SDL_EVENT_INJECT_GAMEPAD_AXIS:
         controllers[0]->ConnectVirtualController();
