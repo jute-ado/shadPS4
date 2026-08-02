@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "core/libraries/pad/pad.h"
+
 struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Gamepad;
@@ -27,5 +29,6 @@ enum GamepadMode {
 };
 void SetGamepadMode(GamepadMode mode, SDL_Gamepad** manual_gamepads_array = NULL,
                     int manual_gamepads_count = -1);
+void SetVirtualGamepadButton(Libraries::Pad::OrbisPadButtonDataOffset button, bool pressed);
 
 }; // namespace ImGui::Sdl
