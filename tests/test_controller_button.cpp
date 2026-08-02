@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "input/controller_button.h"
+#include "input/host_navigation_buttons.h"
 
 using Libraries::Pad::OrbisPadButtonDataOffset;
 
@@ -38,4 +39,34 @@ TEST(ControllerButton, RejectsUnknownNames) {
     EXPECT_FALSE(Input::ParseControllerButton("start").has_value());
     EXPECT_FALSE(Input::ParseControllerButton("Cross").has_value());
     EXPECT_FALSE(Input::ParseControllerButton("").has_value());
+}
+
+TEST(HostNavigationButtons, MapsVirtualGuestPadButtonsToTheHostDialog) {
+    const auto buttons = OrbisPadButtonDataOffset::Options | OrbisPadButtonDataOffset::Cross |
+                         OrbisPadButtonDataOffset::Circle | OrbisPadButtonDataOffset::Triangle |
+                         OrbisPadButtonDataOffset::Up | OrbisPadButtonDataOffset::Right |
+                         OrbisPadButtonDataOffset::Down | OrbisPadButtonDataOffset::Left |
+                         OrbisPadButtonDataOffset::L1 | OrbisPadButtonDataOffset::R1 |
+                         OrbisPadButtonDataOffset::L3 | OrbisPadButtonDataOffset::R3;
+
+    EXPECT_EQ(Input::GetHostNavigationButtons(buttons),
+              (Input::HostNavigationButtons{
+                  .start = true,
+                  .face_right = true,
+                  .face_up = true,
+                  .face_down = true,
+                  .dpad_left = true,
+                  .dpad_right = true,
+                  .dpad_up = true,
+                  .dpad_down = true,
+                  .l1 = true,
+                  .r1 = true,
+                  .l3 = true,
+                  .r3 = true,
+              }));
+}
+
+TEST(HostNavigationButtons, ReleasesEveryHostDialogButtonAtNeutral) {
+    EXPECT_EQ(Input::GetHostNavigationButtons(OrbisPadButtonDataOffset::None),
+              Input::HostNavigationButtons{});
 }
