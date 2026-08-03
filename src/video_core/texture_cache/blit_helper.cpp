@@ -122,7 +122,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
         CreateColorToMSDepthPipeline(key);
         it = --color_to_ms_depth_pl.end();
     }
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *it->second);
+    scheduler.BindPipeline(Vulkan::PipelineBindPoint::Graphics, *it->second);
 
     const vk::Viewport viewport = {
         .x = 0,
@@ -223,7 +223,7 @@ void BlitHelper::CopyBetweenMsImages(u32 width, u32 height, u32 num_samples,
         CreateMsCopyPipeline(key);
         it = --ms_image_copy_pl.end();
     }
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *it->second);
+    scheduler.BindPipeline(Vulkan::PipelineBindPoint::Graphics, *it->second);
 
     const vk::Viewport viewport = {
         .x = 0,

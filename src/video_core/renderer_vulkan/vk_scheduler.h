@@ -11,6 +11,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/pipeline_bind_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 
@@ -388,6 +389,16 @@ public:
         return current_cmdbuf;
     }
 
+    void BindPipeline(PipelineBindPoint point, vk::Pipeline pipeline) {
+        if (!pipeline_bind_tracker.NeedsBind(point, static_cast<VkPipeline>(pipeline))) {
+            return;
+        }
+        const auto vk_point = point == PipelineBindPoint::Graphics
+                                  ? vk::PipelineBindPoint::eGraphics
+                                  : vk::PipelineBindPoint::eCompute;
+        current_cmdbuf.bindPipeline(vk_point, pipeline);
+    }
+
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore.CurrentTick();
@@ -437,6 +448,7 @@ private:
     MasterSemaphore master_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;
+    PipelineBindTracker<VkPipeline> pipeline_bind_tracker;
     vk::CommandBuffer current_cmdbuf;
     std::condition_variable_any event_cv;
     struct PendingOp {
