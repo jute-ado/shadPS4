@@ -1,6 +1,6 @@
 # Uncharted 1 cave hair investigation
 
-Status: reproduced and localized; no fix yet.
+Status: candidate fix proven at the cave checkpoint; merge gates pending.
 
 ## Target
 
@@ -25,11 +25,9 @@ not a title, shader, draw, or asset special case.
 - [x] Rule out the logged `ClampHalfBorder` fallback as the hair cause. The
   hair draw uses two wrapping material samplers and one clamp-to-edge shadow
   sampler, so none uses the warning's clamp-to-border fallback.
-- [x] Rule out `ReadConst` data as the hair cause. Dynamic reads are irrelevant;
-  the CLI resolved all 124 immediate reads and showed 43 fallback mismatches
-  are one zeroed SRT-walker page while BDA holds coherent material constants.
-  Forcing the invalid fallback zeros the draw; normal execution correctly uses
-  BDA, so neither the mismatch nor the fallback path explains the artifact.
+- [x] Rule out the earlier scalar `ReadConst` fallback mismatch as the cause.
+  The CLI resolved all 124 immediate reads; the mismatches are one zeroed
+  SRT-walker page while BDA holds coherent material constants.
 - [x] Audit the vertex-stage tangent-frame transform and interface against guest
   ISA and captured data. Position, normal, tangent, handedness, both UV sets,
   all six exports, and perspective interpolation match the guest program.
@@ -43,10 +41,15 @@ not a title, shader, draw, or asset special case.
   The guest uses MUBUF `addr64`, but the decoder drops bit 15 and the translator
   ignores the 64-bit VGPR address. RenderDoc proves the resulting 64-byte
   "lighting table" is byte-for-byte the shader binary's first 64 bytes.
-- [ ] Add a focused synthetic RED test for that invariant.
-- [ ] Implement the smallest general fix and make the synthetic test green.
-- [ ] Verify the exact cave checkpoint, focused PS4 suites, GPU diagnostic, and
-  cross-game regression gates before merge or push.
+- [x] Add a focused synthetic RED test. With the production userdata-flattening
+  pass enabled, it first exits 1 on `ReadConst not from constant memory`.
+- [x] Decode MUBUF bit 15 and translate raw `addr64` loads through dynamic guest
+  memory. Leave VGPR-derived reads out of SRT flattening; all 47 GCN tests pass.
+- [x] Verify the 139-second cave checkpoint and separate RenderDoc diagnostic.
+  The bright lattice is gone. Shader `cc2d0c16` no longer binds the erroneous
+  64-byte shader-code buffer and instead uses the physical dynamic-read path.
+- [ ] Run focused PS4 suites, performance, and cross-game regression gates
+  before merge or push.
 
 ## Working rules
 
