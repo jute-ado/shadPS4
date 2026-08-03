@@ -14,6 +14,7 @@
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads.h"
+#include "core/libraries/kernel/threads/guest_thread_priority.h"
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
@@ -260,6 +261,8 @@ static void* RunThread(void* arg) {
     Core::InitializeTLS();
 
     curthread->native_thr.Initialize();
+    Common::SetCurrentThreadPriority(
+        MapGuestThreadPriority(curthread->attr.sched_policy, curthread->attr.prio));
 
 #ifndef _WIN32
     UnblockPthreadCancelSignal();
@@ -583,6 +586,13 @@ int PS4_SYSV_ABI posix_pthread_setschedparam(PthreadT pthread, SchedPolicy polic
     if (pthread->attr.sched_policy == policy &&
         (policy == SchedPolicy::Other || pthread->attr.prio == param->sched_priority)) {
         pthread->attr.prio = param->sched_priority;
+        const auto host_priority = MapGuestThreadPriority(policy, param->sched_priority);
+        if (pthread == g_curthread) {
+            Common::SetCurrentThreadPriority(host_priority);
+        } else {
+            Common::SetThreadPriority(reinterpret_cast<void*>(pthread->native_thr.GetHandle()),
+                                      host_priority);
+        }
         pthread->lock.unlock();
         return 0;
     }
@@ -590,6 +600,13 @@ int PS4_SYSV_ABI posix_pthread_setschedparam(PthreadT pthread, SchedPolicy polic
     // TODO: _thr_setscheduler
     pthread->attr.sched_policy = policy;
     pthread->attr.prio = param->sched_priority;
+    const auto host_priority = MapGuestThreadPriority(policy, param->sched_priority);
+    if (pthread == g_curthread) {
+        Common::SetCurrentThreadPriority(host_priority);
+    } else {
+        Common::SetThreadPriority(reinterpret_cast<void*>(pthread->native_thr.GetHandle()),
+                                  host_priority);
+    }
     pthread->lock.unlock();
     return 0;
 }
@@ -624,6 +641,14 @@ int PS4_SYSV_ABI posix_pthread_setprio(PthreadT thread, int prio) {
     } else {
         // TODO: _thr_setscheduler
         thread->attr.prio = prio;
+    }
+
+    const auto host_priority = MapGuestThreadPriority(thread->attr.sched_policy, prio);
+    if (thread == g_curthread) {
+        Common::SetCurrentThreadPriority(host_priority);
+    } else {
+        Common::SetThreadPriority(reinterpret_cast<void*>(thread->native_thr.GetHandle()),
+                                  host_priority);
     }
 
     thread->lock.unlock();
