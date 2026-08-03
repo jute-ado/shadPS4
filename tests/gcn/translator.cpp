@@ -94,6 +94,7 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 
     Shader::Optimization::SsaRewritePass(program.post_order_blocks);
     Shader::Optimization::IdentityRemovalPass(program.blocks);
+    Shader::Optimization::FlattenExtendedUserdataPass(program);
     Shader::Optimization::ResourceTrackingPassStub(program, profile);
     Shader::Optimization::ConstantPropagationPass(program.blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);

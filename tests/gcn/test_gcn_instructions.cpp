@@ -26,6 +26,19 @@ struct F32x2 {
     float b;
 };
 
+TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
+    // buffer_load_dword v0, v[0:1], s[0:3], 0 offset:12 addr64
+    constexpr u64 addr64_load = 0x80100000e030800cULL;
+    // Same instruction with ADDR64 clear. This descriptor-relative form must
+    // not translate to the same memory access as the 64-bit VGPR form.
+    constexpr u64 descriptor_relative_load = 0x80100000e030000cULL;
+
+    const auto addr64_spirv = TranslateToSpirv(addr64_load);
+    const auto descriptor_relative_spirv = TranslateToSpirv(descriptor_relative_load);
+
+    EXPECT_NE(addr64_spirv, descriptor_relative_spirv);
+}
+
 // Example
 // TEST_F(GcnTest, test_name) {
 //     // Runner sets the vulkan context
