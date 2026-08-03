@@ -8,6 +8,7 @@
 #include "common/elf_info.h"
 #include "common/error.h"
 #include "core/address_space.h"
+#include "core/address_space_operation_gate.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/memory.h"
@@ -411,7 +412,7 @@ struct AddressSpace::Impl {
     }
 
     void* Map(VAddr virtual_addr, PAddr phys_addr, u64 size, ULONG prot, s32 fd = -1) {
-        std::scoped_lock lk{mutex};
+        auto operation_lock = operation_gate.LockForMutation();
         // Get a pointer to the region containing virtual_addr
         auto it = std::prev(regions.upper_bound(virtual_addr));
 
@@ -480,7 +481,7 @@ struct AddressSpace::Impl {
     }
 
     void Unmap(VAddr virtual_addr, u64 size) {
-        std::scoped_lock lk{mutex};
+        auto operation_lock = operation_gate.LockForMutation();
         // Loop through all regions in the requested range
         u64 remaining_size = size;
         VAddr current_addr = virtual_addr;
@@ -520,8 +521,7 @@ struct AddressSpace::Impl {
         CoalesceFreeRegions(virtual_addr);
     }
 
-    void Protect(VAddr virtual_addr, u64 size, bool read, bool write, bool execute) {
-        std::scoped_lock lk{mutex};
+    void ProtectLocked(VAddr virtual_addr, u64 size, bool read, bool write, bool execute) {
         DWORD new_flags{};
 
         if (write && !read) {
@@ -578,6 +578,16 @@ struct AddressSpace::Impl {
         }
     }
 
+    void Protect(VAddr virtual_addr, u64 size, bool read, bool write, bool execute) {
+        auto operation_lock = operation_gate.LockForMutation();
+        ProtectLocked(virtual_addr, size, read, write, execute);
+    }
+
+    void ProtectForTracking(VAddr virtual_addr, u64 size, bool read, bool write, bool execute) {
+        auto operation_lock = operation_gate.LockForTracking();
+        ProtectLocked(virtual_addr, size, read, write, execute);
+    }
+
     boost::icl::interval_set<VAddr> GetUsableRegions() {
         boost::icl::interval_set<VAddr> reserved_regions;
         for (auto region : regions) {
@@ -586,7 +596,7 @@ struct AddressSpace::Impl {
         return reserved_regions;
     }
 
-    std::mutex mutex;
+    AddressSpaceOperationGate operation_gate;
     HANDLE process{};
     HANDLE backing_handle{};
     u8* backing_base{};
@@ -807,6 +817,10 @@ struct AddressSpace::Impl {
         ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
     }
 
+    void ProtectForTracking(VAddr virtual_addr, u64 size, bool read, bool write, bool execute) {
+        Protect(virtual_addr, size, read, write, execute);
+    }
+
     int backing_fd;
     u8* backing_base{};
     u8* system_managed_base{};
@@ -861,6 +875,13 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
     const bool write = True(perms & MemoryPermission::Write);
     const bool execute = True(perms & MemoryPermission::Execute);
     return impl->Protect(virtual_addr, size, read, write, execute);
+}
+
+void AddressSpace::ProtectForTracking(VAddr virtual_addr, u64 size, MemoryPermission perms) {
+    const bool read = True(perms & MemoryPermission::Read);
+    const bool write = True(perms & MemoryPermission::Write);
+    const bool execute = True(perms & MemoryPermission::Execute);
+    return impl->ProtectForTracking(virtual_addr, size, read, write, execute);
 }
 
 boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {

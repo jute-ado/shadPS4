@@ -204,7 +204,7 @@ struct PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
-        impl.Protect(address, size, perms);
+        impl.ProtectForTracking(address, size, perms);
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
