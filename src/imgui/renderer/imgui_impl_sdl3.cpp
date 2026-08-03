@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "input/host_navigation_buttons.h"
 #include "core/memory.h"
 #include "imgui_impl_sdl3.h"
 #include "input/controller.h"
@@ -50,6 +51,8 @@ struct SdlData {
     ImVector<SDL_Gamepad*> gamepads{};
     GamepadMode gamepad_mode{};
     bool want_update_gamepads_list{};
+    Libraries::Pad::OrbisPadButtonDataOffset virtual_gamepad_buttons{};
+    bool virtual_gamepad_connected{};
 
     // Framerate counting (based on ImGui impl)
     std::array<float, 60> framerateSecPerFrame;
@@ -712,8 +715,8 @@ void SetGamepadMode(GamepadMode mode, SDL_Gamepad** manual_gamepads_array,
 }
 
 static void UpdateGamepadButton(SdlData* bd, ImGuiIO& io, ImGuiKey key,
-                                SDL_GamepadButton button_no) {
-    bool merged_value = false;
+                                SDL_GamepadButton button_no, bool virtual_pressed = false) {
+    bool merged_value = virtual_pressed;
     for (SDL_Gamepad* gamepad : bd->gamepads)
         merged_value |= SDL_GetGamepadButton(gamepad, button_no) != 0;
     io.AddKeyEvent(key, merged_value);
@@ -762,32 +765,43 @@ static void UpdateGamepads() {
     if ((io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) == 0)
         return;
     io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
-    if (bd->gamepads.Size == 0)
+    if (bd->gamepads.Size == 0 && !bd->virtual_gamepad_connected)
         return;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
+    const auto virtual_buttons = Input::GetHostNavigationButtons(bd->virtual_gamepad_buttons);
+
     // Update gamepad inputs
     const int thumb_dead_zone = 8000; // SDL_gamepad.h suggests using this value.
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadStart, SDL_GAMEPAD_BUTTON_START);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadStart, SDL_GAMEPAD_BUTTON_START,
+                        virtual_buttons.start);
     UpdateGamepadButton(bd, io, ImGuiKey_GamepadBack, SDL_GAMEPAD_BUTTON_BACK);
     /*UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceLeft,
                         SDL_GAMEPAD_BUTTON_WEST); // Xbox X, PS Square*/ // Disable to avoid menu toggle
     UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceRight,
-                        SDL_GAMEPAD_BUTTON_EAST); // Xbox B, PS Circle
+                        SDL_GAMEPAD_BUTTON_EAST, virtual_buttons.face_right); // Xbox B, PS Circle
     UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceUp,
-                        SDL_GAMEPAD_BUTTON_NORTH); // Xbox Y, PS Triangle
+                        SDL_GAMEPAD_BUTTON_NORTH, virtual_buttons.face_up); // Xbox Y, PS Triangle
     UpdateGamepadButton(bd, io, ImGuiKey_GamepadFaceDown,
-                        SDL_GAMEPAD_BUTTON_SOUTH); // Xbox A, PS Cross
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadLeft, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadRight, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadUp, SDL_GAMEPAD_BUTTON_DPAD_UP);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadDown, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadL1, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadR1, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+                        SDL_GAMEPAD_BUTTON_SOUTH, virtual_buttons.face_down); // Xbox A, PS Cross
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadLeft, SDL_GAMEPAD_BUTTON_DPAD_LEFT,
+                        virtual_buttons.dpad_left);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadRight, SDL_GAMEPAD_BUTTON_DPAD_RIGHT,
+                        virtual_buttons.dpad_right);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadUp, SDL_GAMEPAD_BUTTON_DPAD_UP,
+                        virtual_buttons.dpad_up);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadDpadDown, SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+                        virtual_buttons.dpad_down);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadL1, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,
+                        virtual_buttons.l1);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadR1, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
+                        virtual_buttons.r1);
     UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadL2, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 0.0f, 32767);
     UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadR2, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0.0f, 32767);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadL3, SDL_GAMEPAD_BUTTON_LEFT_STICK);
-    UpdateGamepadButton(bd, io, ImGuiKey_GamepadR3, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadL3, SDL_GAMEPAD_BUTTON_LEFT_STICK,
+                        virtual_buttons.l3);
+    UpdateGamepadButton(bd, io, ImGuiKey_GamepadR3, SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+                        virtual_buttons.r3);
     UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadLStickLeft, SDL_GAMEPAD_AXIS_LEFTX,
                         -thumb_dead_zone, -32768);
     UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadLStickRight, SDL_GAMEPAD_AXIS_LEFTX,
@@ -804,6 +818,19 @@ static void UpdateGamepads() {
                         -32768);
     UpdateGamepadAnalog(bd, io, ImGuiKey_GamepadRStickDown, SDL_GAMEPAD_AXIS_RIGHTY,
                         +thumb_dead_zone, +32767);
+}
+
+void SetVirtualGamepadButton(Libraries::Pad::OrbisPadButtonDataOffset button, bool pressed) {
+    auto* bd = GetBackendData();
+    if (bd == nullptr) {
+        return;
+    }
+    bd->virtual_gamepad_connected = true;
+    if (pressed) {
+        bd->virtual_gamepad_buttons |= button;
+    } else {
+        bd->virtual_gamepad_buttons &= ~button;
+    }
 }
 
 void NewFrame(bool is_reusing_frame) {
