@@ -10,6 +10,16 @@ namespace Libraries::Kernel {
 
 [[nodiscard]] constexpr Common::ThreadPriority MapGuestThreadPriority(SchedPolicy policy,
                                                                        int priority) noexcept {
+    if (policy == SchedPolicy::Other) {
+        return Common::ThreadPriority::Normal;
+    }
+
+    if (priority < ORBIS_KERNEL_PRIO_FIFO_DEFAULT) {
+        return Common::ThreadPriority::High;
+    }
+    if (priority > ORBIS_KERNEL_PRIO_FIFO_DEFAULT) {
+        return Common::ThreadPriority::Low;
+    }
     return Common::ThreadPriority::Normal;
 }
 

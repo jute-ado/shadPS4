@@ -82,8 +82,7 @@ void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
 
 #ifdef _WIN32
 
-void SetCurrentThreadPriority(ThreadPriority new_priority) {
-    auto handle = GetCurrentThread();
+void SetThreadPriority(void* thread, ThreadPriority new_priority) {
     int windows_priority = 0;
     switch (new_priority) {
     case ThreadPriority::Low:
@@ -105,7 +104,11 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
         windows_priority = THREAD_PRIORITY_NORMAL;
         break;
     }
-    SetThreadPriority(handle, windows_priority);
+    ::SetThreadPriority(thread, windows_priority);
+}
+
+void SetCurrentThreadPriority(ThreadPriority new_priority) {
+    SetThreadPriority(GetCurrentThread(), new_priority);
 }
 
 bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
@@ -130,9 +133,7 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
 
 #else
 
-void SetCurrentThreadPriority(ThreadPriority new_priority) {
-    pthread_t this_thread = pthread_self();
-
+void SetThreadPriority(void* thread, ThreadPriority new_priority) {
     const auto scheduling_type = SCHED_OTHER;
     s32 max_prio = sched_get_priority_max(scheduling_type);
     s32 min_prio = sched_get_priority_min(scheduling_type);
@@ -145,7 +146,11 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
         params.sched_priority = min_prio - ((min_prio - max_prio) * level) / 4;
     }
 
-    pthread_setschedparam(this_thread, scheduling_type, &params);
+    pthread_setschedparam(reinterpret_cast<pthread_t>(thread), scheduling_type, &params);
+}
+
+void SetCurrentThreadPriority(ThreadPriority new_priority) {
+    SetThreadPriority(reinterpret_cast<void*>(pthread_self()), new_priority);
 }
 
 bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
