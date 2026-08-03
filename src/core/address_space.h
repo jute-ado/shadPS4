@@ -84,6 +84,9 @@ public:
     /// Protects requested region.
     void Protect(VAddr virtual_addr, u64 size, MemoryPermission perms);
 
+    /// Applies internal page-tracking protection without serializing independent tracked ranges.
+    void ProtectForTracking(VAddr virtual_addr, u64 size, MemoryPermission perms);
+
     // Returns an interval set containing all usable regions.
     boost::icl::interval_set<VAddr> GetUsableRegions();
 
