@@ -1,6 +1,6 @@
 # Uncharted 1 cave hair investigation
 
-Status: candidate fix proven at the cave checkpoint; merge gates pending.
+Status: fixed; focused, cross-game, and longitudinal gates are green.
 
 ## Target
 
@@ -48,8 +48,11 @@ not a title, shader, draw, or asset special case.
 - [x] Verify the 139-second cave checkpoint and separate RenderDoc diagnostic.
   The bright lattice is gone. Shader `cc2d0c16` no longer binds the erroneous
   64-byte shader-code buffer and instead uses the physical dynamic-read path.
-- [ ] Run focused PS4 suites, performance, and cross-game regression gates
-  before merge or push.
+- [x] Pass `local-ps4-uncharted-focus` (3/3) and `local-ps4-regression`
+  (12/12). RenderDoc measures the exact 9,804-index draw at 8.2-9.2 us versus
+  7.2-8.2 us before the fix, a roughly 2 us absolute cost.
+- [x] Record and sync clean PS4 fork observation
+  `679bd79f-7b87-4fb7-8018-f85bc346d09e` at emulator commit `59bbd421`.
 
 ## Working rules
 
