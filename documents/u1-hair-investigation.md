@@ -1,8 +1,8 @@
 # Uncharted 1 cave hair investigation
 
-Status: the original orange hair-card lattice is fixed. A follow-on intermittent
-white hair/web flash has a focused TDD candidate, but that candidate is not yet
-promoted because the full PS4 regression gate is 11/12.
+Status: the original orange hair-card lattice and the follow-on intermittent
+white hair/web flash are fixed on a reviewable TDD branch. Focused Uncharted,
+GPU, cross-game performance, and the complete PS4 regression gates are green.
 
 ## Target
 
@@ -83,17 +83,26 @@ maximum adjacent-frame difference of `0.06362248369404`.
   The GPU capture completed without a finding.
 - [x] Preserve the cross-game performance result: five valid PT trials report
   `29.9989` mean FPS, `34.09054 ms` p95 frame time, and zero measured stutter.
-- [ ] Pass the complete PS4 regression gate. The current run is 11/12: one PT
-  late-boot trial exited with `0x80000003` at `image.cpp:258 GetBarriers` before
-  its 105-second checkpoint and produced zero frames. A bounded rerun of the
-  candidate and a matching accepted-branch control both reached the checkpoint
-  cleanly, so the assertion is currently intermittent and is not attributed to
-  this fix without repeatable evidence. Do not suppress or clamp the assertion.
+- [x] Pass the complete PS4 regression gate. Two earlier 11/12 runs exited with
+  `0x80000003` at `image.cpp:258 GetBarriers` after 76.682 and 79.967 seconds.
+  The underlying texture-cache selection used lexicographic comparison for a
+  two-dimensional mip/layer extent, allowing an image with too few mip levels
+  to be reused when it happened to have more layers. Synthetic tests now require
+  component-wise containment, and `FindImage` rejects an image unless both
+  dimensions contain the requested extent. The final 12/12 run is
+  `f16aef8f-47ec-48f4-9674-cbb49a7db9b4`; late PT completed in 115.887 seconds,
+  Uncharted audio passed, and five performance trials retained 29.9993 mean FPS,
+  34.0785 ms p95 frame time, and zero measured stutter.
 
-Candidate commits are `845f6391` (RED) and `7b182423` (GREEN). The source branch
-must remain separate from the Uncharted integration branch until the applicable
-regression gate is green or the independent `GetBarriers` invariant is proved
-and fixed.
+Five focused late-PT trials produced four passes and one preserved visual-only
+`changed` result (`530ee00e-10a4-4a8d-9fe4-767a3b7b2c8e`). That fifth run had
+no crash or forbidden marker and passed all temporal invariants, but its 105-second
+checkpoint caught a different phase of the animated options highlight. The
+accepted visual reference was not changed and the result is not counted as a
+clean pass.
+
+White-flash candidate commits are `845f6391` (RED) and `7b182423` (GREEN).
+Texture-containment commits are `e7fff725` (RED) and `eaa8c93b` (GREEN).
 
 ## Working rules
 
