@@ -1,6 +1,8 @@
 # Uncharted 1 cave hair investigation
 
-Status: fixed; focused, cross-game, and longitudinal gates are green.
+Status: the original orange hair-card lattice is fixed. A follow-on intermittent
+white hair/web flash has a focused TDD candidate, but that candidate is not yet
+promoted because the full PS4 regression gate is 11/12.
 
 ## Target
 
@@ -53,6 +55,45 @@ not a title, shader, draw, or asset special case.
   7.2-8.2 us before the fix, a roughly 2 us absolute cost.
 - [x] Record and sync clean PS4 fork observation
   `679bd79f-7b87-4fb7-8018-f85bc346d09e` at emulator commit `59bbd421`.
+
+## Intermittent white material flash follow-up
+
+The corrected cave rendering later exposed a separate, intermittent material
+residency defect: hair and nearby spider-web geometry could briefly turn white.
+The repeatable temporal signature is a dark frame, one or two bright-white
+frames, then an immediate return to dark. The accepted integration branch
+produced two strict abrupt-return violations in a 300-frame capture, with a
+maximum adjacent-frame difference of `0.06362248369404`.
+
+- [x] Reduce the defect to a synthetic RED. An ADDR64 MUBUF load retained its
+  64-bit guest address for the shader, but resource tracking exposed only one
+  guest buffer instead of the required address-source buffer plus destination.
+- [x] Add an explicit `ReadConstBufferAddr64` IR operation carrying the source
+  descriptor, 64-bit address, and dword offset. Resource tracking now registers
+  the source guest buffer before the draw; the backend continues to perform the
+  direct buffer-device-address read.
+- [x] Pass all 48 focused GCN tests, including
+  `mubuf_addr64_tracks_source_buffer_residency`.
+- [x] Pass five consecutive strict cave trials: 200/200 frames were distinct,
+  every trial reported zero abrupt returns and zero invisible flashes, and the
+  worst adjacent-frame difference was `0.0317647030455701`.
+- [x] Pass a supplemental 300-frame/30-second capture with zero abrupt returns
+  and maximum adjacent-frame difference `0.027548541609931`.
+- [x] Pass `local-ps4-uncharted-focus` (3/3) and the separate GPU diagnostic.
+  The GPU capture completed without a finding.
+- [x] Preserve the cross-game performance result: five valid PT trials report
+  `29.9989` mean FPS, `34.09054 ms` p95 frame time, and zero measured stutter.
+- [ ] Pass the complete PS4 regression gate. The current run is 11/12: one PT
+  late-boot trial exited with `0x80000003` at `image.cpp:258 GetBarriers` before
+  its 105-second checkpoint and produced zero frames. A bounded rerun of the
+  candidate and a matching accepted-branch control both reached the checkpoint
+  cleanly, so the assertion is currently intermittent and is not attributed to
+  this fix without repeatable evidence. Do not suppress or clamp the assertion.
+
+Candidate commits are `845f6391` (RED) and `7b182423` (GREEN). The source branch
+must remain separate from the Uncharted integration branch until the applicable
+regression gate is green or the independent `GetBarriers` invariant is proved
+and fixed.
 
 ## Working rules
 
