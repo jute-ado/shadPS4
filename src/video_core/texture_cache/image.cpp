@@ -8,6 +8,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
+#include "video_core/texture_cache/subresource_range_diagnostic.h"
 
 #include <vk_mem_alloc.h>
 
@@ -228,6 +229,40 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
         subres_range &&
         (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
     const bool partially_transited = !subresource_states.empty();
+
+    const SubresourceDimensions resource_dimensions{
+        .levels = info.resources.levels,
+        .layers = info.resources.layers,
+    };
+    const SubresourceRangeBounds requested_range = subres_range
+                                                        ? SubresourceRangeBounds{
+                                                              .base_level = subres_range->base.level,
+                                                              .base_layer = subres_range->base.layer,
+                                                              .levels = subres_range->extent.levels,
+                                                              .layers = subres_range->extent.layers,
+                                                          }
+                                                        : SubresourceRangeBounds{
+                                                              .base_level = 0,
+                                                              .base_layer = 0,
+                                                              .levels = info.resources.levels,
+                                                              .layers = info.resources.layers,
+                                                          };
+    const bool range_in_bounds =
+        IsSubresourceRangeInBounds(resource_dimensions, requested_range);
+    const size_t expected_state_count =
+        static_cast<size_t>(info.resources.levels) * info.resources.layers;
+    const bool state_count_mismatch =
+        partially_transited && subresource_states.size() != expected_state_count;
+    if (!range_in_bounds || state_count_mismatch) {
+        LOG_CRITICAL(Render_Vulkan,
+                     "GetBarriers invariant failure: imageUid={} resourceLevels={} "
+                     "resourceLayers={} baseLevel={} baseLayer={} requestedLevels={} "
+                     "requestedLayers={} stateCount={} expectedStateCount={} rangeInBounds={}",
+                     image_uid, info.resources.levels, info.resources.layers,
+                     requested_range.base_level, requested_range.base_layer, requested_range.levels,
+                     requested_range.layers, subresource_states.size(), expected_state_count,
+                     range_in_bounds);
+    }
 
     Barriers barriers;
     if (needs_partial_transition || partially_transited) {
