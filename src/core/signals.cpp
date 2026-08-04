@@ -68,7 +68,35 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (WindowsException::ShouldShutdownForUnclaimedException(code)) {
-        LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        const auto* record = pExp != nullptr ? pExp->ExceptionRecord : nullptr;
+        const auto* context = pExp != nullptr ? pExp->ContextRecord : nullptr;
+        if (code == EXCEPTION_ACCESS_VIOLATION && record != nullptr &&
+            record->NumberParameters >= 2) {
+            const auto operation =
+                WindowsException::AccessViolationOperationName(record->ExceptionInformation[0]);
+            const auto* fault_address =
+                reinterpret_cast<void*>(record->ExceptionInformation[1]);
+#ifdef ARCH_X86_64
+            if (context != nullptr) {
+                LOG_CRITICAL(
+                    Debug,
+                    "Unhandled Exception code {:#x}: {} fault at {} from {}; rax={:#x} "
+                    "rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} rbp={:#x} "
+                    "rsp={:#x} r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} "
+                    "r13={:#x} r14={:#x} r15={:#x}",
+                    code, operation, fault_address, address, context->Rax, context->Rbx,
+                    context->Rcx, context->Rdx, context->Rsi, context->Rdi, context->Rbp,
+                    context->Rsp, context->R8, context->R9, context->R10, context->R11,
+                    context->R12, context->R13, context->R14, context->R15);
+            } else
+#endif
+            {
+                LOG_CRITICAL(Debug, "Unhandled Exception code {:#x}: {} fault at {} from {}",
+                             code, operation, fault_address, address);
+            }
+        } else {
+            LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        }
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 
