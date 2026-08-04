@@ -203,7 +203,7 @@ s32 PS4_SYSV_ABI sceVideodec2GetPictureInfo(const OrbisVideodec2OutputInfo* outp
         LOG_ERROR(Lib_Vdec2, "No picture info available");
         return ORBIS_OK;
     }
-    const auto picture_info = gPictureInfo.Get();
+    const auto picture_info = gPictureInfo.Get(outputInfo->frameBuffer);
     if (!picture_info) {
         LOG_ERROR(Lib_Vdec2, "No picture info available");
         return ORBIS_OK;
