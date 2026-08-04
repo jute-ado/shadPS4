@@ -1,6 +1,8 @@
 # Uncharted 1 cave hair investigation
 
-Status: fixed; focused, cross-game, and longitudinal gates are green.
+Status: the original orange hair-card lattice and the follow-on intermittent
+white hair/web flash are fixed on a reviewable TDD branch. Focused Uncharted,
+GPU, cross-game performance, and the complete PS4 regression gates are green.
 
 ## Target
 
@@ -53,6 +55,54 @@ not a title, shader, draw, or asset special case.
   7.2-8.2 us before the fix, a roughly 2 us absolute cost.
 - [x] Record and sync clean PS4 fork observation
   `679bd79f-7b87-4fb7-8018-f85bc346d09e` at emulator commit `59bbd421`.
+
+## Intermittent white material flash follow-up
+
+The corrected cave rendering later exposed a separate, intermittent material
+residency defect: hair and nearby spider-web geometry could briefly turn white.
+The repeatable temporal signature is a dark frame, one or two bright-white
+frames, then an immediate return to dark. The accepted integration branch
+produced two strict abrupt-return violations in a 300-frame capture, with a
+maximum adjacent-frame difference of `0.06362248369404`.
+
+- [x] Reduce the defect to a synthetic RED. An ADDR64 MUBUF load retained its
+  64-bit guest address for the shader, but resource tracking exposed only one
+  guest buffer instead of the required address-source buffer plus destination.
+- [x] Add an explicit `ReadConstBufferAddr64` IR operation carrying the source
+  descriptor, 64-bit address, and dword offset. Resource tracking now registers
+  the source guest buffer before the draw; the backend continues to perform the
+  direct buffer-device-address read.
+- [x] Pass all 48 focused GCN tests, including
+  `mubuf_addr64_tracks_source_buffer_residency`.
+- [x] Pass five consecutive strict cave trials: 200/200 frames were distinct,
+  every trial reported zero abrupt returns and zero invisible flashes, and the
+  worst adjacent-frame difference was `0.0317647030455701`.
+- [x] Pass a supplemental 300-frame/30-second capture with zero abrupt returns
+  and maximum adjacent-frame difference `0.027548541609931`.
+- [x] Pass `local-ps4-uncharted-focus` (3/3) and the separate GPU diagnostic.
+  The GPU capture completed without a finding.
+- [x] Preserve the cross-game performance result: five valid PT trials report
+  `29.9989` mean FPS, `34.09054 ms` p95 frame time, and zero measured stutter.
+- [x] Pass the complete PS4 regression gate. Two earlier 11/12 runs exited with
+  `0x80000003` at `image.cpp:258 GetBarriers` after 76.682 and 79.967 seconds.
+  The underlying texture-cache selection used lexicographic comparison for a
+  two-dimensional mip/layer extent, allowing an image with too few mip levels
+  to be reused when it happened to have more layers. Synthetic tests now require
+  component-wise containment, and `FindImage` rejects an image unless both
+  dimensions contain the requested extent. The final 12/12 run is
+  `f16aef8f-47ec-48f4-9674-cbb49a7db9b4`; late PT completed in 115.887 seconds,
+  Uncharted audio passed, and five performance trials retained 29.9993 mean FPS,
+  34.0785 ms p95 frame time, and zero measured stutter.
+
+Five focused late-PT trials produced four passes and one preserved visual-only
+`changed` result (`530ee00e-10a4-4a8d-9fe4-767a3b7b2c8e`). That fifth run had
+no crash or forbidden marker and passed all temporal invariants, but its 105-second
+checkpoint caught a different phase of the animated options highlight. The
+accepted visual reference was not changed and the result is not counted as a
+clean pass.
+
+White-flash candidate commits are `845f6391` (RED) and `7b182423` (GREEN).
+Texture-containment commits are `e7fff725` (RED) and `eaa8c93b` (GREEN).
 
 ## Working rules
 
