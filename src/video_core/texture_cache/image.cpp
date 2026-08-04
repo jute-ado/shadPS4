@@ -255,7 +255,17 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
                 // NOTE: these loops may produce a lot of small barriers.
                 // If this becomes a problem, we can optimize it by merging adjacent barriers.
                 const auto subres_idx = mip * info.resources.layers + layer;
-                ASSERT(subres_idx < subresource_states.size());
+                ASSERT_MSG(
+                    subres_idx < subresource_states.size(),
+                    "Image subresource transition is out of bounds: imageUid={} mip={} layer={} "
+                    "resourceLevels={} resourceLayers={} baseLevel={} baseLayer={} "
+                    "requestedLevels={} requestedLayers={} stateCount={}",
+                    image_uid, mip, layer, info.resources.levels, info.resources.layers,
+                    subres_range ? subres_range->base.level : 0,
+                    subres_range ? subres_range->base.layer : 0,
+                    subres_range ? subres_range->extent.levels : info.resources.levels,
+                    subres_range ? subres_range->extent.layers : info.resources.layers,
+                    subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 
                 constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
