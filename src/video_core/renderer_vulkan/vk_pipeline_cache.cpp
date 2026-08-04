@@ -348,11 +348,14 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
             runtime_infos, fetch_shader, modules, sdata, false);
         if (timing_enabled) {
             const auto compile_end_ns = MonotonicNanoseconds();
-            LOG_INFO(Render_Vulkan,
-                     "PipelineCompileTiming kind=graphics hash={:#x} start_ns={} end_ns={} "
-                     "duration_us={}",
-                     pipeline_hash, compile_start_ns, compile_end_ns,
-                     (compile_end_ns - compile_start_ns) / 1'000);
+            const auto compile_duration_ns = compile_end_ns - compile_start_ns;
+            if (PipelineCompileTimingShouldReport(compile_duration_ns)) {
+                LOG_INFO(Render_Vulkan,
+                         "PipelineCompileTiming kind=graphics hash={:#x} start_ns={} end_ns={} "
+                         "duration_us={}",
+                         pipeline_hash, compile_start_ns, compile_end_ns,
+                         compile_duration_ns / 1'000);
+            }
         }
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
@@ -388,11 +391,14 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
                                                        modules[0], sdata, false);
         if (timing_enabled) {
             const auto compile_end_ns = MonotonicNanoseconds();
-            LOG_INFO(Render_Vulkan,
-                     "PipelineCompileTiming kind=compute hash={:#x} start_ns={} end_ns={} "
-                     "duration_us={}",
-                     pipeline_hash, compile_start_ns, compile_end_ns,
-                     (compile_end_ns - compile_start_ns) / 1'000);
+            const auto compile_duration_ns = compile_end_ns - compile_start_ns;
+            if (PipelineCompileTimingShouldReport(compile_duration_ns)) {
+                LOG_INFO(Render_Vulkan,
+                         "PipelineCompileTiming kind=compute hash={:#x} start_ns={} end_ns={} "
+                         "duration_us={}",
+                         pipeline_hash, compile_start_ns, compile_end_ns,
+                         compile_duration_ns / 1'000);
+            }
         }
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
