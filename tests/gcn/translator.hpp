@@ -16,4 +16,5 @@ struct TranslationResult {
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst);
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts);
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst);
+TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access);
 TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts);

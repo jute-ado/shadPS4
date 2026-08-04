@@ -17,6 +17,7 @@ struct AccessLayout {
 std::optional<AccessLayout> GetAccessLayout(IR::Opcode opcode) {
     switch (opcode) {
     case IR::Opcode::ReadConstBuffer:
+    case IR::Opcode::ReadConstBufferAddr64:
         return AccessLayout{.address_shift = 2, .byte_size = 4};
     case IR::Opcode::LoadBufferU8:
     case IR::Opcode::StoreBufferU8:

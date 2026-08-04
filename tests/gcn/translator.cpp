@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "common/io_file.h"
+#include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/translate/translate.h"
@@ -33,6 +34,14 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst) {
     return TranslateToSpirvWithInfo(std::span<const u64>{&raw_gcn_inst, 1});
+}
+
+TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access) {
+    const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    EmulatorSettings.SetDirectMemoryAccessEnabled(direct_memory_access);
+    const auto result = TranslateToSpirvWithInfo(raw_gcn_inst);
+    EmulatorSettings.SetDirectMemoryAccessEnabled(previous);
+    return result;
 }
 
 TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {

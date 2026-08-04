@@ -210,6 +210,11 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     const IR::ScalarReg sharp{inst.src[2].code * 4};
 
     if (mubuf.addr64 && !is_inst_typed && !is_buffer_typed) {
+        IR::BufferInstInfo buffer_info{};
+        buffer_info.pc.Assign(pc);
+        const IR::Value handle =
+            ir.CompositeConstruct(ir.GetScalarReg(sharp), ir.GetScalarReg(sharp + 1),
+                                  ir.GetScalarReg(sharp + 2), ir.GetScalarReg(sharp + 3));
         const IR::U64 byte_address = BufferAddress64(inst);
         const IR::VectorReg dst_reg{inst.src[1].code};
         if (scalar_width == 8 || scalar_width == 16) {
@@ -220,7 +225,8 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
                 ir.BitwiseAnd(address_lo, ir.Imm32(scalar_width == 8 ? 3U : 2U));
             const IR::U64 aligned_address =
                 ir.BitwiseAnd(byte_address, ir.Imm64(~u64{3}));
-            const IR::U32 word = ir.ReadConst(ir.UnpackUint2x32(aligned_address), ir.Imm32(0));
+            const IR::U32 word = ir.ReadConstBufferAddr64(
+                handle, ir.UnpackUint2x32(aligned_address), ir.Imm32(0), buffer_info);
             const IR::U32 bit_offset = ir.IMul(byte_index, ir.Imm32(8));
             const IR::U32 value =
                 ir.BitFieldExtract(word, bit_offset, ir.Imm32(scalar_width), is_signed);
@@ -232,11 +238,13 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
         const IR::U64 aligned_address = ir.BitwiseAnd(byte_address, ir.Imm64(~u64{3}));
         const IR::Value base = ir.UnpackUint2x32(aligned_address);
         if (num_dwords == 1) {
-            ir.SetVectorReg(dst_reg, ir.ReadConst(base, ir.Imm32(0)));
+            ir.SetVectorReg(dst_reg,
+                            ir.ReadConstBufferAddr64(handle, base, ir.Imm32(0), buffer_info));
             return;
         }
         for (u32 i = 0; i < num_dwords; i++) {
-            ir.SetVectorReg(dst_reg + i, ir.ReadConst(base, ir.Imm32(i)));
+            ir.SetVectorReg(dst_reg + i,
+                            ir.ReadConstBufferAddr64(handle, base, ir.Imm32(i), buffer_info));
         }
         return;
     }

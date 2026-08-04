@@ -44,7 +44,7 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     // assertion proves that ADDR64 itself keeps s[4:7] live for pre-draw residency.
     constexpr u64 addr64_load = 0x80010000e030800cULL;
 
-    const auto result = TranslateToSpirvWithInfo(addr64_load);
+    const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
 }
