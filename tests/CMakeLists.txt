@@ -115,6 +115,16 @@ target_compile_features(shadps4_pipeline_bind_tracker_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_pipeline_bind_tracker_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pipeline_bind_tracker_test)
 
+add_executable(shadps4_pipeline_compile_timing_test
+    test_pipeline_compile_timing.cpp
+)
+target_include_directories(shadps4_pipeline_compile_timing_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pipeline_compile_timing_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pipeline_compile_timing_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pipeline_compile_timing_test)
+
 add_executable(shadps4_fault_range_test
     test_fault_range.cpp
 )
