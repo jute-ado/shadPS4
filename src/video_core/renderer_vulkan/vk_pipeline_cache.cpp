@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
 #include <ranges>
 
 #include "common/hash.h"
@@ -15,6 +17,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/pipeline_compile_timing.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -27,6 +30,18 @@ using Shader::Output;
 using Shader::Stage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
+
+static bool IsPipelineCompileTimingEnabled() {
+    static const bool enabled =
+        PipelineCompileTimingRequested(std::getenv("SHADPS4_PIPELINE_COMPILE_TIMING"));
+    return enabled;
+}
+
+static s64 MonotonicNanoseconds() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
@@ -324,11 +339,21 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+        const bool timing_enabled = IsPipelineCompileTimingEnabled();
+        const auto compile_start_ns = timing_enabled ? MonotonicNanoseconds() : 0;
 
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
             runtime_infos, fetch_shader, modules, sdata, false);
+        if (timing_enabled) {
+            const auto compile_end_ns = MonotonicNanoseconds();
+            LOG_INFO(Render_Vulkan,
+                     "PipelineCompileTiming kind=graphics hash={:#x} start_ns={} end_ns={} "
+                     "duration_us={}",
+                     pipeline_hash, compile_start_ns, compile_end_ns,
+                     (compile_end_ns - compile_start_ns) / 1'000);
+        }
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -354,11 +379,21 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
+        const bool timing_enabled = IsPipelineCompileTimingEnabled();
+        const auto compile_start_ns = timing_enabled ? MonotonicNanoseconds() : 0;
 
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
                                                        modules[0], sdata, false);
+        if (timing_enabled) {
+            const auto compile_end_ns = MonotonicNanoseconds();
+            LOG_INFO(Render_Vulkan,
+                     "PipelineCompileTiming kind=compute hash={:#x} start_ns={} end_ns={} "
+                     "duration_us={}",
+                     pipeline_hash, compile_start_ns, compile_end_ns,
+                     (compile_end_ns - compile_start_ns) / 1'000);
+        }
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
