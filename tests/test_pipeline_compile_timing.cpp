@@ -13,3 +13,9 @@ TEST(PipelineCompileTiming, RequiresExactOptInValue) {
     EXPECT_FALSE(Vulkan::PipelineCompileTimingRequested("true"));
     EXPECT_FALSE(Vulkan::PipelineCompileTimingRequested("10"));
 }
+
+TEST(PipelineCompileTiming, ReportsOnlyIndividuallySlowCompiles) {
+    EXPECT_FALSE(Vulkan::PipelineCompileTimingShouldReport(0));
+    EXPECT_FALSE(Vulkan::PipelineCompileTimingShouldReport(4'999'999));
+    EXPECT_TRUE(Vulkan::PipelineCompileTimingShouldReport(5'000'000));
+}
