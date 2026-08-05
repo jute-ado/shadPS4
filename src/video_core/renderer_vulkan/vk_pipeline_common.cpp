@@ -25,15 +25,21 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const BufferBarriers&
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
 
-    if (!buffer_barriers.empty()) {
-        const auto dependencies = vk::DependencyInfo{
-            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-            .bufferMemoryBarrierCount = u32(buffer_barriers.size()),
-            .pBufferMemoryBarriers = buffer_barriers.data(),
-        };
-        scheduler.EndRendering();
-        cmdbuf.pipelineBarrier2(dependencies);
-    }
+    const vk::MemoryBarrier2 memory_barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    const auto dependencies = vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &memory_barrier,
+        .bufferMemoryBarrierCount = u32(buffer_barriers.size()),
+        .pBufferMemoryBarriers = buffer_barriers.data(),
+    };
+    scheduler.EndRendering();
+    cmdbuf.pipelineBarrier2(dependencies);
 
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
     cmdbuf.pushConstants(*pipeline_layout, stage_flags, 0u, sizeof(push_data), &push_data);
