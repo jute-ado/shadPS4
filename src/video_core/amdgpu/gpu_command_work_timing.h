@@ -24,6 +24,11 @@ enum class GpuCommandWorkCategory : std::size_t {
     DispatchPipeline,
     DispatchHle,
     DispatchResourceBinding,
+    DispatchResourceClassify,
+    DispatchResourceUserData,
+    DispatchResourceBuffers,
+    DispatchResourceTextures,
+    DispatchResourceDma,
     DispatchDescriptorBind,
     DispatchEmit,
     Transfer,
@@ -69,6 +74,16 @@ struct GpuCommandWorkSnapshot {
                                 At(GpuCommandWorkCategory::DispatchEmit).nanoseconds;
         const auto dispatch = At(GpuCommandWorkCategory::Dispatch).nanoseconds;
         return dispatch > classified ? dispatch - classified : 0;
+    }
+
+    std::uint64_t UnclassifiedDispatchResourceNanoseconds() const {
+        const auto classified = At(GpuCommandWorkCategory::DispatchResourceClassify).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchResourceUserData).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchResourceBuffers).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchResourceTextures).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchResourceDma).nanoseconds;
+        const auto resources = At(GpuCommandWorkCategory::DispatchResourceBinding).nanoseconds;
+        return resources > classified ? resources - classified : 0;
     }
 };
 
@@ -119,6 +134,8 @@ private:
 };
 
 inline thread_local GpuCommandWorkTiming* active_gpu_command_work_timing{};
+inline thread_local GpuCommandWorkCategory active_gpu_command_work_category{
+    GpuCommandWorkCategory::Count};
 
 inline std::uint64_t GpuCommandWorkMonotonicNanoseconds() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -132,17 +149,29 @@ inline GpuCommandWorkTiming* ActiveGpuCommandWorkTiming() {
 
 inline void SetActiveGpuCommandWorkTiming(GpuCommandWorkTiming* timing) {
     active_gpu_command_work_timing = timing;
+    active_gpu_command_work_category = GpuCommandWorkCategory::Count;
+}
+
+inline bool GpuCommandWorkTimingInCategory(const GpuCommandWorkCategory category) {
+    return ActiveGpuCommandWorkTiming() && active_gpu_command_work_category == category;
 }
 
 class ScopedGpuCommandWorkTiming {
 public:
-    explicit ScopedGpuCommandWorkTiming(const GpuCommandWorkCategory category)
-        : timing{ActiveGpuCommandWorkTiming()}, category{category},
-          start_nanoseconds{timing ? GpuCommandWorkMonotonicNanoseconds() : 0} {}
+    explicit ScopedGpuCommandWorkTiming(const GpuCommandWorkCategory category,
+                                        const bool enabled = true)
+        : timing{enabled ? ActiveGpuCommandWorkTiming() : nullptr}, category{category},
+          previous_category{active_gpu_command_work_category},
+          start_nanoseconds{timing ? GpuCommandWorkMonotonicNanoseconds() : 0} {
+        if (timing) {
+            active_gpu_command_work_category = category;
+        }
+    }
 
     ~ScopedGpuCommandWorkTiming() {
         if (timing) {
             timing->Record(category, GpuCommandWorkMonotonicNanoseconds() - start_nanoseconds);
+            active_gpu_command_work_category = previous_category;
         }
     }
 
@@ -152,6 +181,7 @@ public:
 private:
     GpuCommandWorkTiming* timing;
     GpuCommandWorkCategory category;
+    GpuCommandWorkCategory previous_category;
     std::uint64_t start_nanoseconds;
 };
 

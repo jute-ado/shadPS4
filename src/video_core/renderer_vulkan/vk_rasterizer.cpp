@@ -439,35 +439,65 @@ void Rasterizer::OnSubmit() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
-        IsComputeImageClear(pipeline)) {
+    const bool profile_dispatch_resources = AmdGpu::GpuCommandWorkTimingInCategory(
+        AmdGpu::GpuCommandWorkCategory::DispatchResourceBinding);
+    bool handled_by_compute_specialization{};
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchResourceClassify, profile_dispatch_resources};
+        handled_by_compute_specialization = IsComputeImageCopy(pipeline) ||
+                                            IsComputeMetaClear(pipeline) ||
+                                            IsComputeImageClear(pipeline);
+    }
+    if (handled_by_compute_specialization) {
         return false;
     }
 
-    set_write_index = 0;
-    set_writes.clear();
-    buffer_barriers.clear();
-    buffer_infos.clear();
-    image_infos.clear();
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchResourceUserData, profile_dispatch_resources};
+        set_write_index = 0;
+        set_writes.clear();
+        buffer_barriers.clear();
+        buffer_infos.clear();
+        image_infos.clear();
+        push_data = MakeUserData(liverpool->regs);
+    }
 
     bool uses_dma = false;
 
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
-    push_data = MakeUserData(liverpool->regs);
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
         }
-        set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
-                          stage->samplers.size());
-        stage->PushUd(binding, push_data);
-        BindBuffers(*stage, binding, push_data);
-        BindTextures(*stage, binding);
+        {
+            AmdGpu::ScopedGpuCommandWorkTiming timing{
+                AmdGpu::GpuCommandWorkCategory::DispatchResourceUserData,
+                profile_dispatch_resources};
+            set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
+                              stage->samplers.size());
+            stage->PushUd(binding, push_data);
+        }
+        {
+            AmdGpu::ScopedGpuCommandWorkTiming timing{
+                AmdGpu::GpuCommandWorkCategory::DispatchResourceBuffers,
+                profile_dispatch_resources};
+            BindBuffers(*stage, binding, push_data);
+        }
+        {
+            AmdGpu::ScopedGpuCommandWorkTiming timing{
+                AmdGpu::GpuCommandWorkCategory::DispatchResourceTextures,
+                profile_dispatch_resources};
+            BindTextures(*stage, binding);
+        }
         uses_dma |= stage->uses_dma;
     }
 
     if (uses_dma) {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchResourceDma, profile_dispatch_resources};
         // We only use fault buffer for DMA right now.
         buffer_cache.SynchronizeDmaBuffers();
         fault_process_pending = true;

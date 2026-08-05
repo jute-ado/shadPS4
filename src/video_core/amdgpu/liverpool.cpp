@@ -55,6 +55,11 @@ static void MaybeReportGpuCommandWorkTiming() {
     const auto& dispatch_pipeline = snapshot.At(GpuCommandWorkCategory::DispatchPipeline);
     const auto& dispatch_hle = snapshot.At(GpuCommandWorkCategory::DispatchHle);
     const auto& dispatch_resources = snapshot.At(GpuCommandWorkCategory::DispatchResourceBinding);
+    const auto& resource_classify = snapshot.At(GpuCommandWorkCategory::DispatchResourceClassify);
+    const auto& resource_user_data = snapshot.At(GpuCommandWorkCategory::DispatchResourceUserData);
+    const auto& resource_buffers = snapshot.At(GpuCommandWorkCategory::DispatchResourceBuffers);
+    const auto& resource_textures = snapshot.At(GpuCommandWorkCategory::DispatchResourceTextures);
+    const auto& resource_dma = snapshot.At(GpuCommandWorkCategory::DispatchResourceDma);
     const auto& dispatch_descriptors = snapshot.At(GpuCommandWorkCategory::DispatchDescriptorBind);
     const auto& dispatch_emit = snapshot.At(GpuCommandWorkCategory::DispatchEmit);
     const auto& transfer = snapshot.At(GpuCommandWorkCategory::Transfer);
@@ -63,28 +68,37 @@ static void MaybeReportGpuCommandWorkTiming() {
     const auto& submit = snapshot.At(GpuCommandWorkCategory::Submit);
     const auto& wait = snapshot.At(GpuCommandWorkCategory::Wait);
 
-    LOG_INFO(Render,
-             "GpuCommandWorkTiming interval_us={} packets={} packet_dwords={} callback_calls={} "
-             "callback_us={} resume_calls={} resume_us={} unclassified_resume_us={} draw_calls={} "
-             "draw_us={} dispatch_calls={} dispatch_us={} transfer_calls={} transfer_us={} "
-             "dispatch_pipeline_calls={} dispatch_pipeline_us={} dispatch_hle_calls={} "
-             "dispatch_hle_us={} dispatch_resource_calls={} dispatch_resource_us={} "
-             "dispatch_descriptor_calls={} dispatch_descriptor_us={} dispatch_emit_calls={} "
-             "dispatch_emit_us={} unclassified_dispatch_us={} "
-             "download_calls={} download_us={} sync_calls={} sync_us={} submit_calls={} "
-             "submit_us={} wait_calls={} wait_us={}",
-             snapshot.interval_nanoseconds / 1'000, snapshot.packet_count, snapshot.packet_dwords,
-             callback.calls, callback.nanoseconds / 1'000, resume.calls, resume.nanoseconds / 1'000,
-             snapshot.UnclassifiedResumeNanoseconds() / 1'000, draw.calls, draw.nanoseconds / 1'000,
-             dispatch.calls, dispatch.nanoseconds / 1'000, transfer.calls,
-             transfer.nanoseconds / 1'000, dispatch_pipeline.calls,
-             dispatch_pipeline.nanoseconds / 1'000, dispatch_hle.calls,
-             dispatch_hle.nanoseconds / 1'000, dispatch_resources.calls,
-             dispatch_resources.nanoseconds / 1'000, dispatch_descriptors.calls,
-             dispatch_descriptors.nanoseconds / 1'000, dispatch_emit.calls,
-             dispatch_emit.nanoseconds / 1'000, snapshot.UnclassifiedDispatchNanoseconds() / 1'000,
-             download.calls, download.nanoseconds / 1'000, sync.calls, sync.nanoseconds / 1'000,
-             submit.calls, submit.nanoseconds / 1'000, wait.calls, wait.nanoseconds / 1'000);
+    LOG_INFO(
+        Render,
+        "GpuCommandWorkTiming interval_us={} packets={} packet_dwords={} callback_calls={} "
+        "callback_us={} resume_calls={} resume_us={} unclassified_resume_us={} draw_calls={} "
+        "draw_us={} dispatch_calls={} dispatch_us={} transfer_calls={} transfer_us={} "
+        "dispatch_pipeline_calls={} dispatch_pipeline_us={} dispatch_hle_calls={} "
+        "dispatch_hle_us={} dispatch_resource_calls={} dispatch_resource_us={} "
+        "resource_classify_calls={} resource_classify_us={} resource_user_data_calls={} "
+        "resource_user_data_us={} resource_buffer_calls={} resource_buffer_us={} "
+        "resource_texture_calls={} resource_texture_us={} resource_dma_calls={} "
+        "resource_dma_us={} unclassified_resource_us={} "
+        "dispatch_descriptor_calls={} dispatch_descriptor_us={} dispatch_emit_calls={} "
+        "dispatch_emit_us={} unclassified_dispatch_us={} "
+        "download_calls={} download_us={} sync_calls={} sync_us={} submit_calls={} "
+        "submit_us={} wait_calls={} wait_us={}",
+        snapshot.interval_nanoseconds / 1'000, snapshot.packet_count, snapshot.packet_dwords,
+        callback.calls, callback.nanoseconds / 1'000, resume.calls, resume.nanoseconds / 1'000,
+        snapshot.UnclassifiedResumeNanoseconds() / 1'000, draw.calls, draw.nanoseconds / 1'000,
+        dispatch.calls, dispatch.nanoseconds / 1'000, transfer.calls, transfer.nanoseconds / 1'000,
+        dispatch_pipeline.calls, dispatch_pipeline.nanoseconds / 1'000, dispatch_hle.calls,
+        dispatch_hle.nanoseconds / 1'000, dispatch_resources.calls,
+        dispatch_resources.nanoseconds / 1'000, resource_classify.calls,
+        resource_classify.nanoseconds / 1'000, resource_user_data.calls,
+        resource_user_data.nanoseconds / 1'000, resource_buffers.calls,
+        resource_buffers.nanoseconds / 1'000, resource_textures.calls,
+        resource_textures.nanoseconds / 1'000, resource_dma.calls, resource_dma.nanoseconds / 1'000,
+        snapshot.UnclassifiedDispatchResourceNanoseconds() / 1'000, dispatch_descriptors.calls,
+        dispatch_descriptors.nanoseconds / 1'000, dispatch_emit.calls,
+        dispatch_emit.nanoseconds / 1'000, snapshot.UnclassifiedDispatchNanoseconds() / 1'000,
+        download.calls, download.nanoseconds / 1'000, sync.calls, sync.nanoseconds / 1'000,
+        submit.calls, submit.nanoseconds / 1'000, wait.calls, wait.nanoseconds / 1'000);
 }
 
 static const char* dcb_task_name{"DCB_TASK"};
