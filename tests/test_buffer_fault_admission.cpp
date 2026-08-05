@@ -6,8 +6,8 @@
 #include "video_core/buffer_cache/buffer_fault_admission.h"
 
 TEST(BufferFaultAdmission, TracksCpuFaultWhileReplacementIsUnpublished) {
-    u32 invalidation_count = 0;
-    u32 dma_mark_count = 0;
+    int invalidation_count = 0;
+    int dma_mark_count = 0;
 
     const bool tracked = VideoCore::ProcessTrackedBufferFault(
         [&] {
@@ -22,8 +22,8 @@ TEST(BufferFaultAdmission, TracksCpuFaultWhileReplacementIsUnpublished) {
 }
 
 TEST(BufferFaultAdmission, LeavesUnknownUntrackedPageUnchanged) {
-    u32 invalidation_count = 0;
-    u32 dma_mark_count = 0;
+    int invalidation_count = 0;
+    int dma_mark_count = 0;
 
     const bool tracked = VideoCore::ProcessTrackedBufferFault(
         [&] {
