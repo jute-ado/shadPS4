@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -20,6 +21,11 @@ enum class GpuCommandWorkCategory : std::size_t {
     Resume,
     Draw,
     Dispatch,
+    DispatchPipeline,
+    DispatchHle,
+    DispatchResourceBinding,
+    DispatchDescriptorBind,
+    DispatchEmit,
     Transfer,
     Download,
     Sync,
@@ -53,6 +59,16 @@ struct GpuCommandWorkSnapshot {
                                 At(GpuCommandWorkCategory::Wait).nanoseconds;
         const auto resume = At(GpuCommandWorkCategory::Resume).nanoseconds;
         return resume > classified ? resume - classified : 0;
+    }
+
+    std::uint64_t UnclassifiedDispatchNanoseconds() const {
+        const auto classified = At(GpuCommandWorkCategory::DispatchPipeline).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchHle).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchResourceBinding).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchDescriptorBind).nanoseconds +
+                                At(GpuCommandWorkCategory::DispatchEmit).nanoseconds;
+        const auto dispatch = At(GpuCommandWorkCategory::Dispatch).nanoseconds;
+        return dispatch > classified ? dispatch - classified : 0;
     }
 };
 
@@ -100,6 +116,43 @@ private:
     std::uint64_t packet_dwords{};
     std::array<GpuCommandWorkCategoryStats, static_cast<std::size_t>(GpuCommandWorkCategory::Count)>
         categories{};
+};
+
+inline thread_local GpuCommandWorkTiming* active_gpu_command_work_timing{};
+
+inline std::uint64_t GpuCommandWorkMonotonicNanoseconds() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+inline GpuCommandWorkTiming* ActiveGpuCommandWorkTiming() {
+    return active_gpu_command_work_timing;
+}
+
+inline void SetActiveGpuCommandWorkTiming(GpuCommandWorkTiming* timing) {
+    active_gpu_command_work_timing = timing;
+}
+
+class ScopedGpuCommandWorkTiming {
+public:
+    explicit ScopedGpuCommandWorkTiming(const GpuCommandWorkCategory category)
+        : timing{ActiveGpuCommandWorkTiming()}, category{category},
+          start_nanoseconds{timing ? GpuCommandWorkMonotonicNanoseconds() : 0} {}
+
+    ~ScopedGpuCommandWorkTiming() {
+        if (timing) {
+            timing->Record(category, GpuCommandWorkMonotonicNanoseconds() - start_nanoseconds);
+        }
+    }
+
+    ScopedGpuCommandWorkTiming(const ScopedGpuCommandWorkTiming&) = delete;
+    ScopedGpuCommandWorkTiming& operator=(const ScopedGpuCommandWorkTiming&) = delete;
+
+private:
+    GpuCommandWorkTiming* timing;
+    GpuCommandWorkCategory category;
+    std::uint64_t start_nanoseconds;
 };
 
 } // namespace AmdGpu

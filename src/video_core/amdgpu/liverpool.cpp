@@ -3,7 +3,6 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
-#include <chrono>
 #include <cstdlib>
 
 #include "common/assert.h"
@@ -25,62 +24,39 @@
 
 namespace AmdGpu {
 
-static thread_local GpuCommandWorkTiming* active_command_work_timing{};
-
-static u64 MonotonicNanoseconds() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
-
-class ScopedGpuCommandWorkTiming {
-public:
-    explicit ScopedGpuCommandWorkTiming(const GpuCommandWorkCategory category)
-        : timing{active_command_work_timing}, category{category},
-          start_nanoseconds{timing ? MonotonicNanoseconds() : 0} {}
-
-    ~ScopedGpuCommandWorkTiming() {
-        if (timing) {
-            timing->Record(category, MonotonicNanoseconds() - start_nanoseconds);
-        }
-    }
-
-    ScopedGpuCommandWorkTiming(const ScopedGpuCommandWorkTiming&) = delete;
-    ScopedGpuCommandWorkTiming& operator=(const ScopedGpuCommandWorkTiming&) = delete;
-
-private:
-    GpuCommandWorkTiming* timing;
-    GpuCommandWorkCategory category;
-    u64 start_nanoseconds;
-};
-
 static void RecordGpuCommandPacket(const u64 dwords) {
-    if (active_command_work_timing) {
-        active_command_work_timing->RecordPacket(dwords);
+    if (auto* timing = ActiveGpuCommandWorkTiming()) {
+        timing->RecordPacket(dwords);
     }
 }
 
 static void RecordGpuCommandWaitYield() {
-    if (active_command_work_timing) {
-        active_command_work_timing->Record(GpuCommandWorkCategory::Wait, 0);
+    if (auto* timing = ActiveGpuCommandWorkTiming()) {
+        timing->Record(GpuCommandWorkCategory::Wait, 0);
     }
 }
 
 static void MaybeReportGpuCommandWorkTiming() {
-    if (!active_command_work_timing) {
+    auto* timing = ActiveGpuCommandWorkTiming();
+    if (!timing) {
         return;
     }
 
-    const u64 now_nanoseconds = MonotonicNanoseconds();
-    if (!active_command_work_timing->ShouldReport(now_nanoseconds)) {
+    const u64 now_nanoseconds = GpuCommandWorkMonotonicNanoseconds();
+    if (!timing->ShouldReport(now_nanoseconds)) {
         return;
     }
 
-    const auto snapshot = active_command_work_timing->TakeSnapshot(now_nanoseconds);
+    const auto snapshot = timing->TakeSnapshot(now_nanoseconds);
     const auto& callback = snapshot.At(GpuCommandWorkCategory::CommandCallback);
     const auto& resume = snapshot.At(GpuCommandWorkCategory::Resume);
     const auto& draw = snapshot.At(GpuCommandWorkCategory::Draw);
     const auto& dispatch = snapshot.At(GpuCommandWorkCategory::Dispatch);
+    const auto& dispatch_pipeline = snapshot.At(GpuCommandWorkCategory::DispatchPipeline);
+    const auto& dispatch_hle = snapshot.At(GpuCommandWorkCategory::DispatchHle);
+    const auto& dispatch_resources = snapshot.At(GpuCommandWorkCategory::DispatchResourceBinding);
+    const auto& dispatch_descriptors = snapshot.At(GpuCommandWorkCategory::DispatchDescriptorBind);
+    const auto& dispatch_emit = snapshot.At(GpuCommandWorkCategory::DispatchEmit);
     const auto& transfer = snapshot.At(GpuCommandWorkCategory::Transfer);
     const auto& download = snapshot.At(GpuCommandWorkCategory::Download);
     const auto& sync = snapshot.At(GpuCommandWorkCategory::Sync);
@@ -91,15 +67,24 @@ static void MaybeReportGpuCommandWorkTiming() {
              "GpuCommandWorkTiming interval_us={} packets={} packet_dwords={} callback_calls={} "
              "callback_us={} resume_calls={} resume_us={} unclassified_resume_us={} draw_calls={} "
              "draw_us={} dispatch_calls={} dispatch_us={} transfer_calls={} transfer_us={} "
+             "dispatch_pipeline_calls={} dispatch_pipeline_us={} dispatch_hle_calls={} "
+             "dispatch_hle_us={} dispatch_resource_calls={} dispatch_resource_us={} "
+             "dispatch_descriptor_calls={} dispatch_descriptor_us={} dispatch_emit_calls={} "
+             "dispatch_emit_us={} unclassified_dispatch_us={} "
              "download_calls={} download_us={} sync_calls={} sync_us={} submit_calls={} "
              "submit_us={} wait_calls={} wait_us={}",
              snapshot.interval_nanoseconds / 1'000, snapshot.packet_count, snapshot.packet_dwords,
              callback.calls, callback.nanoseconds / 1'000, resume.calls, resume.nanoseconds / 1'000,
              snapshot.UnclassifiedResumeNanoseconds() / 1'000, draw.calls, draw.nanoseconds / 1'000,
              dispatch.calls, dispatch.nanoseconds / 1'000, transfer.calls,
-             transfer.nanoseconds / 1'000, download.calls, download.nanoseconds / 1'000, sync.calls,
-             sync.nanoseconds / 1'000, submit.calls, submit.nanoseconds / 1'000, wait.calls,
-             wait.nanoseconds / 1'000);
+             transfer.nanoseconds / 1'000, dispatch_pipeline.calls,
+             dispatch_pipeline.nanoseconds / 1'000, dispatch_hle.calls,
+             dispatch_hle.nanoseconds / 1'000, dispatch_resources.calls,
+             dispatch_resources.nanoseconds / 1'000, dispatch_descriptors.calls,
+             dispatch_descriptors.nanoseconds / 1'000, dispatch_emit.calls,
+             dispatch_emit.nanoseconds / 1'000, snapshot.UnclassifiedDispatchNanoseconds() / 1'000,
+             download.calls, download.nanoseconds / 1'000, sync.calls, sync.nanoseconds / 1'000,
+             submit.calls, submit.nanoseconds / 1'000, wait.calls, wait.nanoseconds / 1'000);
 }
 
 static const char* dcb_task_name{"DCB_TASK"};
@@ -176,9 +161,9 @@ void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
 
-    GpuCommandWorkTiming command_work_timing{MonotonicNanoseconds()};
+    GpuCommandWorkTiming command_work_timing{GpuCommandWorkMonotonicNanoseconds()};
     if (GpuCommandWorkTimingRequested(std::getenv("SHADPS4_GPU_COMMAND_WORK_TIMING"))) {
-        active_command_work_timing = &command_work_timing;
+        SetActiveGpuCommandWorkTiming(&command_work_timing);
         LOG_INFO(Render, "GpuCommandWorkTiming enabled report_interval_ms=10000");
     }
 
@@ -252,7 +237,7 @@ void Liverpool::Process(std::stop_token stoken) {
         MaybeReportGpuCommandWorkTiming();
     }
 
-    active_command_work_timing = nullptr;
+    SetActiveGpuCommandWorkTiming(nullptr);
 }
 
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {

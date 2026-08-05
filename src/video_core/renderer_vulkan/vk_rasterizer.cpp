@@ -5,6 +5,7 @@
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
+#include "video_core/amdgpu/gpu_command_work_timing.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -319,28 +320,50 @@ void Rasterizer::DispatchDirect() {
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline{};
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{AmdGpu::GpuCommandWorkCategory::DispatchPipeline};
+        pipeline = pipeline_cache.GetComputePipeline();
+    }
     if (!pipeline) {
         return;
     }
 
     const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
-    if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
+    bool handled_by_hle{};
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{AmdGpu::GpuCommandWorkCategory::DispatchHle};
+        handled_by_hle = ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this);
+    }
+    if (handled_by_hle) {
         return;
     }
 
-    if (!BindResources(pipeline)) {
+    bool resources_bound{};
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchResourceBinding};
+        resources_bound = BindResources(pipeline);
+    }
+    if (!resources_bound) {
         return;
     }
 
-    scheduler.EndRendering();
-    pipeline->BindResources(set_writes, buffer_barriers, push_data);
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchDescriptorBind};
+        scheduler.EndRendering();
+        pipeline->BindResources(set_writes, buffer_barriers, push_data);
+    }
 
-    const auto cmdbuf = scheduler.CommandBuffer();
-    scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
-    cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{AmdGpu::GpuCommandWorkCategory::DispatchEmit};
+        const auto cmdbuf = scheduler.CommandBuffer();
+        scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+        cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
-    ResetBindings();
+        ResetBindings();
+    }
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -349,30 +372,49 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline{};
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{AmdGpu::GpuCommandWorkCategory::DispatchPipeline};
+        pipeline = pipeline_cache.GetComputePipeline();
+    }
     if (!pipeline) {
         return;
     }
 
-    if (!BindResources(pipeline)) {
+    VideoCore::Buffer* buffer{};
+    u32 base{};
+    bool resources_bound{};
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchResourceBinding};
+        resources_bound = BindResources(pipeline);
+        if (resources_bound) {
+            std::tie(buffer, base) = buffer_cache.ObtainBuffer(address + offset, size, false);
+            if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
+                                                  vk::PipelineStageFlagBits2::eDrawIndirect)) {
+                buffer_barriers.emplace_back(*barrier);
+            }
+        }
+    }
+    if (!resources_bound) {
         return;
     }
 
-    const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
-
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect)) {
-        buffer_barriers.emplace_back(*barrier);
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{
+            AmdGpu::GpuCommandWorkCategory::DispatchDescriptorBind};
+        scheduler.EndRendering();
+        pipeline->BindResources(set_writes, buffer_barriers, push_data);
     }
 
-    scheduler.EndRendering();
-    pipeline->BindResources(set_writes, buffer_barriers, push_data);
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming timing{AmdGpu::GpuCommandWorkCategory::DispatchEmit};
+        const auto cmdbuf = scheduler.CommandBuffer();
+        scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+        cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
-    scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
-    cmdbuf.dispatchIndirect(buffer->Handle(), base);
-
-    ResetBindings();
+        ResetBindings();
+    }
 }
 
 u64 Rasterizer::Flush() {
