@@ -95,6 +95,25 @@ TEST(GpuCommandWorkTiming, TracksNestedResourceBreakdown) {
     EXPECT_EQ(snapshot.UnclassifiedDispatchResourceNanoseconds(), 10);
 }
 
+TEST(GpuCommandWorkTiming, CountsEmptyAndDirtyDmaSynchronizationCalls) {
+    GpuCommandWorkTiming timing{0};
+    timing.RecordDmaSynchronization(0);
+    timing.RecordDmaSynchronization(0);
+    timing.RecordDmaSynchronization(3);
+    timing.RecordDmaSynchronization(2);
+
+    const auto snapshot = timing.TakeSnapshot(AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    EXPECT_EQ(snapshot.dma_synchronization_calls, 4);
+    EXPECT_EQ(snapshot.dma_dirty_synchronization_calls, 2);
+    EXPECT_EQ(snapshot.dma_dirty_ranges, 5);
+
+    const auto reset =
+        timing.TakeSnapshot(2 * AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    EXPECT_EQ(reset.dma_synchronization_calls, 0);
+    EXPECT_EQ(reset.dma_dirty_synchronization_calls, 0);
+    EXPECT_EQ(reset.dma_dirty_ranges, 0);
+}
+
 TEST(GpuCommandWorkTiming, PreservesScopedCategoryNesting) {
     GpuCommandWorkTiming timing{0};
     AmdGpu::SetActiveGpuCommandWorkTiming(&timing);
