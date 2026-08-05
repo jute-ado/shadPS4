@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/buffer_access_batch.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -125,26 +126,26 @@ public:
         return buffer.bda_addr;
     }
 
-    std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
-                                                       vk::PipelineStageFlagBits2 dst_stage,
+    std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_access_mask,
+                                                       vk::PipelineStageFlags2 dst_stages,
                                                        u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
+        if (!NeedsBufferBarrier(access_mask, stages, dst_access_mask, dst_stages)) {
             return {};
         }
 
         DEBUG_ASSERT(offset < size_bytes);
 
         const auto barrier = vk::BufferMemoryBarrier2{
-            .srcStageMask = stage,
+            .srcStageMask = stages,
             .srcAccessMask = access_mask,
-            .dstStageMask = dst_stage,
-            .dstAccessMask = dst_acess_mask,
+            .dstStageMask = dst_stages,
+            .dstAccessMask = dst_access_mask,
             .buffer = buffer.buffer,
             .offset = offset,
             .size = size_bytes - offset,
         };
-        access_mask = dst_acess_mask;
-        stage = dst_stage;
+        access_mask = dst_access_mask;
+        stages = dst_stages;
         return barrier;
     }
 
@@ -166,7 +167,7 @@ public:
     vk::Flags<vk::AccessFlagBits2> access_mask{
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
         vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
-    vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    vk::PipelineStageFlags2 stages{vk::PipelineStageFlagBits2::eAllCommands};
 };
 
 class StreamBuffer : public Buffer {
