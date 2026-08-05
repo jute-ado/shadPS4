@@ -16,10 +16,16 @@ enum class UploadSnapshotClassification {
 
 constexpr UploadSnapshotClassification ClassifyUploadSnapshot(u64 before, u64 copied,
                                                                u64 after) noexcept {
-    static_cast<void>(before);
-    static_cast<void>(copied);
-    static_cast<void>(after);
-    return UploadSnapshotClassification::Stable;
+    if (before == copied && copied == after) {
+        return UploadSnapshotClassification::Stable;
+    }
+    if (before == copied) {
+        return UploadSnapshotClassification::CopiedOldState;
+    }
+    if (copied == after) {
+        return UploadSnapshotClassification::CopiedNewState;
+    }
+    return UploadSnapshotClassification::CopyMismatch;
 }
 
 } // namespace VideoCore
