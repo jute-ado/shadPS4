@@ -3,6 +3,9 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <chrono>
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -14,12 +17,90 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/eop_completion.h"
+#include "video_core/amdgpu/gpu_command_work_timing.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace AmdGpu {
+
+static thread_local GpuCommandWorkTiming* active_command_work_timing{};
+
+static u64 MonotonicNanoseconds() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+class ScopedGpuCommandWorkTiming {
+public:
+    explicit ScopedGpuCommandWorkTiming(const GpuCommandWorkCategory category)
+        : timing{active_command_work_timing}, category{category},
+          start_nanoseconds{timing ? MonotonicNanoseconds() : 0} {}
+
+    ~ScopedGpuCommandWorkTiming() {
+        if (timing) {
+            timing->Record(category, MonotonicNanoseconds() - start_nanoseconds);
+        }
+    }
+
+    ScopedGpuCommandWorkTiming(const ScopedGpuCommandWorkTiming&) = delete;
+    ScopedGpuCommandWorkTiming& operator=(const ScopedGpuCommandWorkTiming&) = delete;
+
+private:
+    GpuCommandWorkTiming* timing;
+    GpuCommandWorkCategory category;
+    u64 start_nanoseconds;
+};
+
+static void RecordGpuCommandPacket(const u64 dwords) {
+    if (active_command_work_timing) {
+        active_command_work_timing->RecordPacket(dwords);
+    }
+}
+
+static void RecordGpuCommandWaitYield() {
+    if (active_command_work_timing) {
+        active_command_work_timing->Record(GpuCommandWorkCategory::Wait, 0);
+    }
+}
+
+static void MaybeReportGpuCommandWorkTiming() {
+    if (!active_command_work_timing) {
+        return;
+    }
+
+    const u64 now_nanoseconds = MonotonicNanoseconds();
+    if (!active_command_work_timing->ShouldReport(now_nanoseconds)) {
+        return;
+    }
+
+    const auto snapshot = active_command_work_timing->TakeSnapshot(now_nanoseconds);
+    const auto& callback = snapshot.At(GpuCommandWorkCategory::CommandCallback);
+    const auto& resume = snapshot.At(GpuCommandWorkCategory::Resume);
+    const auto& draw = snapshot.At(GpuCommandWorkCategory::Draw);
+    const auto& dispatch = snapshot.At(GpuCommandWorkCategory::Dispatch);
+    const auto& transfer = snapshot.At(GpuCommandWorkCategory::Transfer);
+    const auto& download = snapshot.At(GpuCommandWorkCategory::Download);
+    const auto& sync = snapshot.At(GpuCommandWorkCategory::Sync);
+    const auto& submit = snapshot.At(GpuCommandWorkCategory::Submit);
+    const auto& wait = snapshot.At(GpuCommandWorkCategory::Wait);
+
+    LOG_INFO(Render,
+             "GpuCommandWorkTiming interval_us={} packets={} packet_dwords={} callback_calls={} "
+             "callback_us={} resume_calls={} resume_us={} unclassified_resume_us={} draw_calls={} "
+             "draw_us={} dispatch_calls={} dispatch_us={} transfer_calls={} transfer_us={} "
+             "download_calls={} download_us={} sync_calls={} sync_us={} submit_calls={} "
+             "submit_us={} wait_calls={} wait_us={}",
+             snapshot.interval_nanoseconds / 1'000, snapshot.packet_count, snapshot.packet_dwords,
+             callback.calls, callback.nanoseconds / 1'000, resume.calls, resume.nanoseconds / 1'000,
+             snapshot.UnclassifiedResumeNanoseconds() / 1'000, draw.calls, draw.nanoseconds / 1'000,
+             dispatch.calls, dispatch.nanoseconds / 1'000, transfer.calls,
+             transfer.nanoseconds / 1'000, download.calls, download.nanoseconds / 1'000, sync.calls,
+             sync.nanoseconds / 1'000, submit.calls, submit.nanoseconds / 1'000, wait.calls,
+             wait.nanoseconds / 1'000);
+}
 
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
@@ -86,6 +167,7 @@ void Liverpool::ProcessCommands() {
             command_queue.pop();
             --num_commands;
         }
+        ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::CommandCallback};
         callback();
     }
 }
@@ -93,6 +175,12 @@ void Liverpool::ProcessCommands() {
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
+
+    GpuCommandWorkTiming command_work_timing{MonotonicNanoseconds()};
+    if (GpuCommandWorkTimingRequested(std::getenv("SHADPS4_GPU_COMMAND_WORK_TIMING"))) {
+        active_command_work_timing = &command_work_timing;
+        LOG_INFO(Render, "GpuCommandWorkTiming enabled report_interval_ms=10000");
+    }
 
     while (!stoken.stop_requested()) {
         {
@@ -121,7 +209,11 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
                 task = queue.submits.front();
             }
-            task.resume();
+            {
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Resume};
+                task.resume();
+            }
+            MaybeReportGpuCommandWorkTiming();
 
             if (task.done()) {
                 task.destroy();
@@ -147,6 +239,7 @@ void Liverpool::Process(std::stop_token stoken) {
         }
         if (has_submit_done) {
             if (rasterizer) {
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Submit};
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
@@ -156,7 +249,10 @@ void Liverpool::Process(std::stop_token stoken) {
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        MaybeReportGpuCommandWorkTiming();
     }
+
+    active_command_work_timing = nullptr;
 }
 
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
@@ -171,6 +267,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             // No other types of packets were spotted so far
             UNREACHABLE_MSG("Invalid PM4 type {}", type);
         }
+        RecordGpuCommandPacket(header->type3.NumWords() + 1);
 
         const PM4ItOpcode opcode = header->type3.opcode;
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
@@ -198,6 +295,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
             while ((cblock.de_count - cblock.ce_count) >= diff) {
+                RecordGpuCommandWaitYield();
                 YIELD_CE();
             }
             break;
@@ -209,6 +307,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             RESUME_CE(task);
 
             while (!task.handle.done()) {
+                RecordGpuCommandWaitYield();
                 YIELD_CE();
                 RESUME_CE(task);
             }
@@ -248,6 +347,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
+        RecordGpuCommandPacket(type == 3 ? header->type3.NumWords() + 1 : 1);
 
         switch (type) {
         default:
@@ -445,6 +545,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(fmt::format("gfx:{}:DrawIndex2", cmd_address));
@@ -466,6 +567,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -486,6 +588,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -506,6 +609,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -526,6 +630,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -549,6 +654,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -569,6 +675,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -593,6 +700,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Draw};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -627,6 +735,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                    cs_program);
                 }
                 if (rasterizer && (cs_program.dispatch_initiator & 1)) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Dispatch};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -650,6 +759,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                    cs_program);
                 }
                 if (rasterizer && (cs_program.dispatch_initiator & 1)) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Dispatch};
                     const auto cmd_address = reinterpret_cast<const void*>(header);
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
@@ -709,6 +819,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Download};
                     rasterizer->ProcessDownloadImages();
                 }
                 event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
@@ -720,6 +831,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
                     if (rasterizer) {
+                        ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Sync};
                         rasterizer->Finish();
                         const u32 value = rasterizer->ReadDataFromGds(event_eos->gds_index);
                         *event_eos->Address() = value;
@@ -730,6 +842,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Download};
                     rasterizer->ProcessDownloadImages();
                 }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
@@ -752,6 +865,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
                     break;
                 }
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Transfer};
                 if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                     rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
                                            dma_data->data, true);
@@ -811,6 +925,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
+                        RecordGpuCommandWaitYield();
                         YIELD_GFX();
                     }
                     mem_semaphore->Decrement();
@@ -827,6 +942,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 while (!rewind->Valid()) {
+                    RecordGpuCommandWaitYield();
                     YIELD_GFX();
                 }
                 break;
@@ -841,10 +957,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Wait};
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    RecordGpuCommandWaitYield();
                     YIELD_GFX();
                 }
                 break;
@@ -856,6 +974,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
+                    RecordGpuCommandWaitYield();
                     YIELD_GFX();
                     RESUME_GFX(task);
                 }
@@ -873,6 +992,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::PfpSyncMe: {
                 if (rasterizer) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Sync};
                     rasterizer->CpSync();
                 }
                 break;
@@ -915,6 +1035,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     if (ce_task.handle) {
         while (!ce_task.handle.done()) {
+            RecordGpuCommandWaitYield();
             RESUME_GFX(ce_task);
         }
         ce_task.handle.destroy();
@@ -963,6 +1084,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
 
+        RecordGpuCommandPacket(header->type == 3 ? header->type3.NumWords() + 1 : 1);
+
         if (header->type == 2) {
             // Type-2 packet are used for padding purposes
             next_dw_off = 1;
@@ -994,6 +1117,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             RESUME_ASC(task, vqid);
 
             while (!task.handle.done()) {
+                RecordGpuCommandWaitYield();
                 YIELD_ASC(vqid);
                 RESUME_ASC(task, vqid);
             }
@@ -1004,6 +1128,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
                 break;
             }
+            ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Transfer};
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
                                        true);
@@ -1053,6 +1178,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             }
             const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
+                RecordGpuCommandWaitYield();
                 YIELD_ASC(vqid);
             }
             break;
@@ -1083,6 +1209,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* dispatch_direct = reinterpret_cast<const PM4CmdDispatchDirect*>(header);
             if (auto it = std::ranges::find(indirect_patches, header, &IndirectPatch::header);
                 it != indirect_patches.end()) {
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Dispatch};
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
                 rasterizer->DispatchIndirect(it->indirect_addr, 0, size);
                 break;
@@ -1097,6 +1224,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                                                cs_program);
             }
             if (rasterizer && (cs_program.dispatch_initiator & 1)) {
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Dispatch};
                 const auto cmd_address = reinterpret_cast<const void*>(header);
                 if (host_markers_enabled) {
                     rasterizer->ScopeMarkerBegin(
@@ -1120,6 +1248,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                                                cs_program);
             }
             if (rasterizer && (cs_program.dispatch_initiator & 1)) {
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Dispatch};
                 const auto cmd_address = reinterpret_cast<const void*>(header);
                 if (host_markers_enabled) {
                     rasterizer->ScopeMarkerBegin(
@@ -1149,6 +1278,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 mem_semaphore->Signal();
             } else {
                 while (!mem_semaphore->Signaled()) {
+                    RecordGpuCommandWaitYield();
                     YIELD_ASC(vqid);
                 }
                 mem_semaphore->Decrement();
@@ -1159,6 +1289,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                RecordGpuCommandWaitYield();
                 YIELD_ASC(vqid);
             }
             break;
@@ -1166,6 +1297,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
+                ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Download};
                 rasterizer->ProcessDownloadImages();
             }
             release_mem->SignalFence(
@@ -1173,6 +1305,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
                 },
                 [this](VAddr dst, u16 gds_index, u16 num_dwords) {
+                    ScopedGpuCommandWorkTiming timing{GpuCommandWorkCategory::Transfer};
                     rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
                 });
             break;

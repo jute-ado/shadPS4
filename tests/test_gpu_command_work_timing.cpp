@@ -33,11 +33,11 @@ TEST(GpuCommandWorkTiming, ReportsAndResetsBoundedCategoryTotals) {
 
     EXPECT_FALSE(timing.ShouldReport(StartNanoseconds +
                                      AmdGpu::GpuCommandWorkReportIntervalNanoseconds - 1));
-    EXPECT_TRUE(timing.ShouldReport(StartNanoseconds +
-                                    AmdGpu::GpuCommandWorkReportIntervalNanoseconds));
+    EXPECT_TRUE(
+        timing.ShouldReport(StartNanoseconds + AmdGpu::GpuCommandWorkReportIntervalNanoseconds));
 
-    const auto snapshot = timing.TakeSnapshot(
-        StartNanoseconds + AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    const auto snapshot =
+        timing.TakeSnapshot(StartNanoseconds + AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
     EXPECT_EQ(snapshot.packet_count, 2);
     EXPECT_EQ(snapshot.packet_dwords, 20);
     EXPECT_EQ(snapshot.At(GpuCommandWorkCategory::Resume).calls, 1);
@@ -48,8 +48,8 @@ TEST(GpuCommandWorkTiming, ReportsAndResetsBoundedCategoryTotals) {
     EXPECT_EQ(snapshot.At(GpuCommandWorkCategory::Sync).nanoseconds, 7);
     EXPECT_EQ(snapshot.UnclassifiedResumeNanoseconds(), 38);
 
-    const auto reset = timing.TakeSnapshot(
-        StartNanoseconds + 2 * AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    const auto reset =
+        timing.TakeSnapshot(StartNanoseconds + 2 * AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
     EXPECT_EQ(reset.packet_count, 0);
     EXPECT_EQ(reset.packet_dwords, 0);
     EXPECT_EQ(reset.At(GpuCommandWorkCategory::Resume).calls, 0);
@@ -63,8 +63,7 @@ TEST(GpuCommandWorkTiming, UnclassifiedResumeTimeCannotUnderflow) {
     timing.Record(GpuCommandWorkCategory::Draw, 7);
     timing.Record(GpuCommandWorkCategory::Dispatch, 11);
 
-    const auto snapshot =
-        timing.TakeSnapshot(AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    const auto snapshot = timing.TakeSnapshot(AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
     EXPECT_EQ(snapshot.UnclassifiedResumeNanoseconds(), 0);
 }
 
