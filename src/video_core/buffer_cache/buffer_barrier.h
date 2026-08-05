@@ -7,9 +7,7 @@ namespace VideoCore {
 
 constexpr bool NeedsBufferBarrier(bool same_access_and_stage, bool source_writes,
                                   bool destination_writes) noexcept {
-    static_cast<void>(source_writes);
-    static_cast<void>(destination_writes);
-    return !same_access_and_stage;
+    return !same_access_and_stage || source_writes || destination_writes;
 }
 
 } // namespace VideoCore

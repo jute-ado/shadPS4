@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/buffer_barrier.h"
 #include "video_core/buffer_cache/stream_buffer_watch.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -129,7 +130,13 @@ public:
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
                                                        vk::PipelineStageFlagBits2 dst_stage,
                                                        u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
+        constexpr vk::AccessFlags2 WriteAccesses = vk::AccessFlagBits2::eShaderWrite |
+                                                   vk::AccessFlagBits2::eTransferWrite |
+                                                   vk::AccessFlagBits2::eMemoryWrite;
+        const bool same_access_and_stage = dst_acess_mask == access_mask && stage == dst_stage;
+        const bool source_writes = bool(access_mask & WriteAccesses);
+        const bool destination_writes = bool(dst_acess_mask & WriteAccesses);
+        if (!NeedsBufferBarrier(same_access_and_stage, source_writes, destination_writes)) {
             return {};
         }
 
