@@ -764,7 +764,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
         for (auto& copy : copies) {
             u8* const src_pointer = staging + copy.srcOffset;
             const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
-            memory->CopySparseMemory(device_addr, src_pointer, copy.size);
+            CopyGuestMemoryWithUploadProvenance(device_addr, src_pointer, copy.size,
+                                                UploadSnapshotPath::CachedStaging,
+                                                scheduler.CurrentTick());
             // Apply the staging offset
             copy.srcOffset += offset;
         }
@@ -780,7 +782,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
         for (const auto& copy : copies) {
             u8* const src_pointer = staging + copy.srcOffset;
             const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
-            memory->CopySparseMemory(device_addr, src_pointer, copy.size);
+            CopyGuestMemoryWithUploadProvenance(device_addr, src_pointer, copy.size,
+                                                UploadSnapshotPath::CachedStaging,
+                                                scheduler.CurrentTick());
         }
         scheduler.DeferOperation([buffer = std::move(temp_buffer)]() mutable { buffer.reset(); });
         return src_buffer;

@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/upload_snapshot_provenance.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -186,7 +187,9 @@ public:
         auto* memory = Core::Memory::Instance();
         const VAddr src_vaddr = reinterpret_cast<const VAddr>(src);
         if (memory->IsValidMapping(src_vaddr)) {
-            memory->CopySparseMemory(src_vaddr, data, size);
+            CopyGuestMemoryWithUploadProvenance(src_vaddr, data, size,
+                                                UploadSnapshotPath::DirectStream,
+                                                CurrentTick());
         } else {
             std::memcpy(data, reinterpret_cast<const void*>(src), size);
         }
@@ -195,6 +198,8 @@ public:
     }
 
 private:
+    u64 CurrentTick() const noexcept;
+
     struct Watch {
         u64 tick{};
         u64 upper_bound{};
