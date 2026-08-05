@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/stream_buffer_watch.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -195,13 +196,8 @@ public:
     }
 
 private:
-    struct Watch {
-        u64 tick{};
-        u64 upper_bound{};
-    };
-
     /// Increases the amount of watches available.
-    void ReserveWatches(std::vector<Watch>& watches, std::size_t grow_size);
+    void ReserveWatches(std::vector<StreamBufferWatch>& watches, std::size_t grow_size);
 
     /// Waits pending watches until requested upper bound.
     bool WaitPendingOperations(u64 requested_upper_bound, bool allow_wait);
@@ -209,10 +205,10 @@ private:
 private:
     u64 offset{};
     u64 mapped_size{};
-    std::vector<Watch> current_watches;
+    std::vector<StreamBufferWatch> current_watches;
     std::size_t current_watch_cursor{};
     std::optional<size_t> invalidation_mark;
-    std::vector<Watch> previous_watches;
+    std::vector<StreamBufferWatch> previous_watches;
     std::size_t wait_cursor{};
     u64 wait_bound{};
 };
