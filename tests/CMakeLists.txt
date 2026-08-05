@@ -237,6 +237,16 @@ target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
 
+add_executable(shadps4_stream_buffer_upload_test
+    test_stream_buffer_upload.cpp
+)
+target_include_directories(shadps4_stream_buffer_upload_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_stream_buffer_upload_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_stream_buffer_upload_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_stream_buffer_upload_test)
+
 add_executable(shadps4_buffer_access_range_test
     test_buffer_access_range.cpp
 )
