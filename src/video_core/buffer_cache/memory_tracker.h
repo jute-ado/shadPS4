@@ -13,6 +13,7 @@
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_manager.h"
+#include "video_core/buffer_cache/upload_snapshot_lock_policy.h"
 
 namespace VideoCore {
 
@@ -120,12 +121,12 @@ public:
                                manager->lock.lock();
                                manager->template ForEachModifiedRange<Type::CPU, true>(
                                    manager->GetCpuAddr() + offset, size, func);
-                               if (!is_written) {
+                               if (!KeepUploadSnapshotLockedDuringCopy(is_written)) {
                                    manager->lock.unlock();
                                }
                            });
         on_upload();
-        if (!is_written) {
+        if (!KeepUploadSnapshotLockedDuringCopy(is_written)) {
             return;
         }
         IteratePages<false>(query_cpu_range, query_size,
