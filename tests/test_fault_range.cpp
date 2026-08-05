@@ -114,6 +114,18 @@ TEST(DmaDirtyRanges, MergesOverlappingCpuWritesAndDrainsThemOnce) {
     EXPECT_TRUE(tracker.Take().empty());
 }
 
+TEST(DmaDirtyRanges, CoalescesDisjointWritesWithinOneTrackedPage) {
+    VideoCore::DmaDirtyRangeTracker tracker;
+    tracker.Mark(0x10'0008, 8);
+    tracker.Mark(0x10'0ff0, 8);
+
+    const auto ranges = tracker.Take();
+
+    ASSERT_EQ(ranges.size(), 1);
+    EXPECT_EQ(ranges[0].address, 0x10'0000);
+    EXPECT_EQ(ranges[0].size, 0x1000);
+}
+
 TEST(DmaDirtyRanges, RetainsWritesMarkedAfterAPreviousDrain) {
     VideoCore::DmaDirtyRangeTracker tracker;
     tracker.Mark(0x20'0000, 0x4000);
