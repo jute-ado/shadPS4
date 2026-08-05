@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <boost/container/small_vector.hpp>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
@@ -190,8 +192,7 @@ private:
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer, bool is_registered = true);
 
-    vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
-                            size_t total_size_bytes);
+    vk::Buffer UploadCopies(std::span<vk::BufferCopy> copies, std::span<const u8> snapshot);
 
     bool SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size);
 
@@ -216,6 +217,7 @@ private:
     Buffer bda_pagetable_buffer;
     CpuPageWriteTracker cpu_page_write_tracker;
     DmaDirtyRangeTracker dma_dirty_ranges;
+    std::vector<u8> guest_upload_snapshot;
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
     u64 trigger_gc_memory = 0;

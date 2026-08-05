@@ -46,12 +46,12 @@ TEST(GuestUploadTransaction, ReleasesGuestRangeBeforePublishingSnapshot) {
     bool published_while_locked{};
     std::array<int, 4> published{};
 
-    VideoCore::WithGuestUploadTransaction(
-        [&] { memory.Lock(); }, [&] { memory.Snapshot(); }, [&] { memory.Unlock(); },
-        [&] {
-            published_while_locked = memory.locked;
-            published = memory.snapshot;
-        });
+    VideoCore::WithGuestUploadTransaction([&] { memory.Lock(); }, [&] { memory.Snapshot(); },
+                                          [&] { memory.Unlock(); },
+                                          [&] {
+                                              published_while_locked = memory.locked;
+                                              published = memory.snapshot;
+                                          });
 
     EXPECT_FALSE(published_while_locked);
     EXPECT_EQ(published, (std::array<int, 4>{1, 1, 1, 1}));
@@ -62,11 +62,10 @@ TEST(GuestUploadTransaction, ReleasesGuestRangeAndSkipsPublishWhenSnapshotThrows
     MutatingGuestMemory memory;
     bool published{};
 
-    EXPECT_THROW(
-        VideoCore::WithGuestUploadTransaction(
-            [&] { memory.Lock(); }, [] { throw std::runtime_error{"copy failed"}; },
-            [&] { memory.Unlock(); }, [&] { published = true; }),
-        std::runtime_error);
+    EXPECT_THROW(VideoCore::WithGuestUploadTransaction(
+                     [&] { memory.Lock(); }, [] { throw std::runtime_error{"copy failed"}; },
+                     [&] { memory.Unlock(); }, [&] { published = true; }),
+                 std::runtime_error);
     EXPECT_FALSE(memory.locked);
     EXPECT_FALSE(published);
 }
