@@ -192,7 +192,7 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
     }
 
     if (offset + size > this->size_bytes) {
-        if (diagnostic_wrap_count < 128) {
+        if (diagnostic_wrap_count < 512) {
             const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::system_clock::now().time_since_epoch())
                                      .count();
