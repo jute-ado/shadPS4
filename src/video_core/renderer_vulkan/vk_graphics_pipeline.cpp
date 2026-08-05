@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_graphics_dynamic_state.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -154,6 +155,8 @@ GraphicsPipeline::GraphicsPipeline(
     if (instance.IsDynamicColorWriteMaskSupported()) {
         dynamic_states.push_back(vk::DynamicState::eColorWriteMaskEXT);
     }
+    AppendAttachmentFeedbackLoopDynamicState(
+        dynamic_states, instance.IsAttachmentFeedbackLoopLayoutSupported());
     if (instance.IsVertexInputDynamicState()) {
         dynamic_states.push_back(vk::DynamicState::eVertexInputEXT);
     } else if (!sdata.vertex_bindings.empty()) {
