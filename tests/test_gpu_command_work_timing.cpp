@@ -67,4 +67,19 @@ TEST(GpuCommandWorkTiming, UnclassifiedResumeTimeCannotUnderflow) {
     EXPECT_EQ(snapshot.UnclassifiedResumeNanoseconds(), 0);
 }
 
+TEST(GpuCommandWorkTiming, TracksNestedDispatchBreakdownWithoutDoubleSubtractingResume) {
+    GpuCommandWorkTiming timing{0};
+    timing.Record(GpuCommandWorkCategory::Resume, 100);
+    timing.Record(GpuCommandWorkCategory::Dispatch, 70);
+    timing.Record(GpuCommandWorkCategory::DispatchPipeline, 10);
+    timing.Record(GpuCommandWorkCategory::DispatchHle, 3);
+    timing.Record(GpuCommandWorkCategory::DispatchResourceBinding, 20);
+    timing.Record(GpuCommandWorkCategory::DispatchDescriptorBind, 15);
+    timing.Record(GpuCommandWorkCategory::DispatchEmit, 12);
+
+    const auto snapshot = timing.TakeSnapshot(AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    EXPECT_EQ(snapshot.UnclassifiedResumeNanoseconds(), 30);
+    EXPECT_EQ(snapshot.UnclassifiedDispatchNanoseconds(), 10);
+}
+
 } // namespace
