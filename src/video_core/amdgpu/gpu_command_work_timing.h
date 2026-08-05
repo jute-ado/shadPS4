@@ -48,6 +48,9 @@ struct GpuCommandWorkSnapshot {
     std::uint64_t interval_nanoseconds{};
     std::uint64_t packet_count{};
     std::uint64_t packet_dwords{};
+    std::uint64_t dma_synchronization_calls{};
+    std::uint64_t dma_dirty_synchronization_calls{};
+    std::uint64_t dma_dirty_ranges{};
     std::array<GpuCommandWorkCategoryStats, static_cast<std::size_t>(GpuCommandWorkCategory::Count)>
         categories{};
 
@@ -103,6 +106,14 @@ public:
         packet_dwords += dwords;
     }
 
+    void RecordDmaSynchronization(const std::uint64_t dirty_range_count) {
+        ++dma_synchronization_calls;
+        if (dirty_range_count != 0) {
+            ++dma_dirty_synchronization_calls;
+            dma_dirty_ranges += dirty_range_count;
+        }
+    }
+
     bool ShouldReport(const std::uint64_t now_nanoseconds) const {
         return now_nanoseconds >= interval_start_nanoseconds &&
                now_nanoseconds - interval_start_nanoseconds >=
@@ -116,11 +127,17 @@ public:
                                         : 0,
             .packet_count = packet_count,
             .packet_dwords = packet_dwords,
+            .dma_synchronization_calls = dma_synchronization_calls,
+            .dma_dirty_synchronization_calls = dma_dirty_synchronization_calls,
+            .dma_dirty_ranges = dma_dirty_ranges,
             .categories = categories,
         };
         interval_start_nanoseconds = now_nanoseconds;
         packet_count = 0;
         packet_dwords = 0;
+        dma_synchronization_calls = 0;
+        dma_dirty_synchronization_calls = 0;
+        dma_dirty_ranges = 0;
         categories = {};
         return snapshot;
     }
@@ -129,6 +146,9 @@ private:
     std::uint64_t interval_start_nanoseconds{};
     std::uint64_t packet_count{};
     std::uint64_t packet_dwords{};
+    std::uint64_t dma_synchronization_calls{};
+    std::uint64_t dma_dirty_synchronization_calls{};
+    std::uint64_t dma_dirty_ranges{};
     std::array<GpuCommandWorkCategoryStats, static_cast<std::size_t>(GpuCommandWorkCategory::Count)>
         categories{};
 };

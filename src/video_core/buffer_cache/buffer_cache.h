@@ -151,8 +151,8 @@ public:
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 
-    /// Synchronizes all buffers neede for DMA.
-    void SynchronizeDmaBuffers();
+    /// Synchronizes all buffers needed for DMA and returns the dirty range count.
+    [[nodiscard]] u64 SynchronizeDmaBuffers();
 
     /// Runs the garbage collector.
     void RunGarbageCollector();

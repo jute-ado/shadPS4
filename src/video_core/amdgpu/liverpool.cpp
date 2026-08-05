@@ -78,7 +78,8 @@ static void MaybeReportGpuCommandWorkTiming() {
         "resource_classify_calls={} resource_classify_us={} resource_user_data_calls={} "
         "resource_user_data_us={} resource_buffer_calls={} resource_buffer_us={} "
         "resource_texture_calls={} resource_texture_us={} resource_dma_calls={} "
-        "resource_dma_us={} unclassified_resource_us={} "
+        "resource_dma_us={} dma_sync_calls={} dma_dirty_sync_calls={} dma_dirty_ranges={} "
+        "unclassified_resource_us={} "
         "dispatch_descriptor_calls={} dispatch_descriptor_us={} dispatch_emit_calls={} "
         "dispatch_emit_us={} unclassified_dispatch_us={} "
         "download_calls={} download_us={} sync_calls={} sync_us={} submit_calls={} "
@@ -94,7 +95,9 @@ static void MaybeReportGpuCommandWorkTiming() {
         resource_user_data.nanoseconds / 1'000, resource_buffers.calls,
         resource_buffers.nanoseconds / 1'000, resource_textures.calls,
         resource_textures.nanoseconds / 1'000, resource_dma.calls, resource_dma.nanoseconds / 1'000,
-        snapshot.UnclassifiedDispatchResourceNanoseconds() / 1'000, dispatch_descriptors.calls,
+        snapshot.dma_synchronization_calls, snapshot.dma_dirty_synchronization_calls,
+        snapshot.dma_dirty_ranges, snapshot.UnclassifiedDispatchResourceNanoseconds() / 1'000,
+        dispatch_descriptors.calls,
         dispatch_descriptors.nanoseconds / 1'000, dispatch_emit.calls,
         dispatch_emit.nanoseconds / 1'000, snapshot.UnclassifiedDispatchNanoseconds() / 1'000,
         download.calls, download.nanoseconds / 1'000, sync.calls, sync.nanoseconds / 1'000,

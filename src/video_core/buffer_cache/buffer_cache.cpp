@@ -841,10 +841,12 @@ void BufferCache::SynchronizeBuffersInRange(VAddr device_addr, u64 size) {
     });
 }
 
-void BufferCache::SynchronizeDmaBuffers() {
-    for (const auto& range : dma_dirty_ranges.Take()) {
+u64 BufferCache::SynchronizeDmaBuffers() {
+    const auto dirty_ranges = dma_dirty_ranges.Take();
+    for (const auto& range : dirty_ranges) {
         SynchronizeBuffersInRange(range.address, range.size);
     }
+    return dirty_ranges.size();
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {
