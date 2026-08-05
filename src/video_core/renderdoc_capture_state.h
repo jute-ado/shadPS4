@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 
 namespace VideoCore {
 
@@ -15,6 +16,9 @@ class RenderDocCaptureState {
     };
 
 public:
+    explicit RenderDocCaptureState(const std::uint32_t presented_frame_count = 1)
+        : presented_frame_count{presented_frame_count} {}
+
     [[nodiscard]] bool Trigger() {
         auto expected = State::Idle;
         return state.compare_exchange_strong(expected, State::Triggered);
@@ -31,6 +35,7 @@ public:
     }
 
 private:
+    [[maybe_unused]] const std::uint32_t presented_frame_count;
     std::atomic<State> state{State::Idle};
 };
 

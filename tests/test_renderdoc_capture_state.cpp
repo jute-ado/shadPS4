@@ -11,10 +11,13 @@ TEST(RenderDocCaptureState, TriggerSchedulesExactlyOnePresentedFrame) {
     VideoCore::RenderDocCaptureState state;
 
     EXPECT_TRUE(state.Trigger());
+    EXPECT_FALSE(state.IsCapturing());
     EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
+    EXPECT_TRUE(state.IsCapturing());
     EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
     EXPECT_FALSE(state.Trigger());
     EXPECT_TRUE(state.FinishPresentedFrameCapture());
+    EXPECT_FALSE(state.IsCapturing());
     EXPECT_FALSE(state.FinishPresentedFrameCapture());
     EXPECT_TRUE(state.Trigger());
 }
@@ -38,4 +41,17 @@ TEST(RenderDocCaptureState, RepeatedTriggerDoesNotQueueOrOverlapAnotherCapture) 
     EXPECT_FALSE(state.Trigger());
     EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
     EXPECT_TRUE(state.FinishPresentedFrameCapture());
+}
+
+TEST(RenderDocCaptureState, CaptureCanSpanABoundedSequenceOfPresentedFrames) {
+    VideoCore::RenderDocCaptureState state{3};
+
+    ASSERT_TRUE(state.Trigger());
+    ASSERT_TRUE(state.ConsumePresentedFrameTrigger());
+
+    EXPECT_FALSE(state.FinishPresentedFrameCapture());
+    EXPECT_FALSE(state.Trigger());
+    EXPECT_FALSE(state.FinishPresentedFrameCapture());
+    EXPECT_TRUE(state.FinishPresentedFrameCapture());
+    EXPECT_TRUE(state.Trigger());
 }
