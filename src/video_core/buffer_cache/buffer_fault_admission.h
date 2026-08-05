@@ -9,8 +9,7 @@
 namespace VideoCore {
 
 template <typename Invalidate, typename MarkDirty>
-[[nodiscard]] bool ProcessTrackedBufferFault(Invalidate&& invalidate,
-                                             MarkDirty&& mark_dirty) {
+[[nodiscard]] bool ProcessTrackedBufferFault(Invalidate&& invalidate, MarkDirty&& mark_dirty) {
     if (!std::invoke(std::forward<Invalidate>(invalidate))) {
         return false;
     }
