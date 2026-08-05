@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/gpu_command_work_timing.h"
+#include "video_core/buffer_cache/dma_dirty_ranges.h"
 
 namespace {
 
@@ -97,21 +98,34 @@ TEST(GpuCommandWorkTiming, TracksNestedResourceBreakdown) {
 
 TEST(GpuCommandWorkTiming, CountsEmptyAndDirtyDmaSynchronizationCalls) {
     GpuCommandWorkTiming timing{0};
-    timing.RecordDmaSynchronization(0);
-    timing.RecordDmaSynchronization(0);
-    timing.RecordDmaSynchronization(3);
-    timing.RecordDmaSynchronization(2);
+    timing.RecordDmaSynchronization(0, 0);
+    timing.RecordDmaSynchronization(0, 0);
+    timing.RecordDmaSynchronization(3, 2);
+    timing.RecordDmaSynchronization(2, 1);
 
     const auto snapshot = timing.TakeSnapshot(AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
     EXPECT_EQ(snapshot.dma_synchronization_calls, 4);
     EXPECT_EQ(snapshot.dma_dirty_synchronization_calls, 2);
     EXPECT_EQ(snapshot.dma_dirty_ranges, 5);
+    EXPECT_EQ(snapshot.dma_page_aligned_ranges, 3);
 
     const auto reset =
         timing.TakeSnapshot(2 * AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
     EXPECT_EQ(reset.dma_synchronization_calls, 0);
     EXPECT_EQ(reset.dma_dirty_synchronization_calls, 0);
     EXPECT_EQ(reset.dma_dirty_ranges, 0);
+    EXPECT_EQ(reset.dma_page_aligned_ranges, 0);
+}
+
+TEST(GpuCommandWorkTiming, ProjectsDirtyRangesAtTrackerPageGranularity) {
+    const std::array ranges{
+        VideoCore::DmaDirtyRange{.address = 0x1008, .size = 8},
+        VideoCore::DmaDirtyRange{.address = 0x1ff0, .size = 8},
+        VideoCore::DmaDirtyRange{.address = 0x2008, .size = 8},
+        VideoCore::DmaDirtyRange{.address = 0x4000, .size = 8},
+    };
+
+    EXPECT_EQ(VideoCore::CountPageAlignedDmaDirtyRanges(ranges), 2);
 }
 
 TEST(GpuCommandWorkTiming, PreservesScopedCategoryNesting) {
