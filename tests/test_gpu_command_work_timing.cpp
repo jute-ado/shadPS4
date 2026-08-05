@@ -82,4 +82,34 @@ TEST(GpuCommandWorkTiming, TracksNestedDispatchBreakdownWithoutDoubleSubtracting
     EXPECT_EQ(snapshot.UnclassifiedDispatchNanoseconds(), 10);
 }
 
+TEST(GpuCommandWorkTiming, TracksNestedResourceBreakdown) {
+    GpuCommandWorkTiming timing{0};
+    timing.Record(GpuCommandWorkCategory::DispatchResourceBinding, 70);
+    timing.Record(GpuCommandWorkCategory::DispatchResourceClassify, 5);
+    timing.Record(GpuCommandWorkCategory::DispatchResourceUserData, 3);
+    timing.Record(GpuCommandWorkCategory::DispatchResourceBuffers, 40);
+    timing.Record(GpuCommandWorkCategory::DispatchResourceTextures, 10);
+    timing.Record(GpuCommandWorkCategory::DispatchResourceDma, 2);
+
+    const auto snapshot = timing.TakeSnapshot(AmdGpu::GpuCommandWorkReportIntervalNanoseconds);
+    EXPECT_EQ(snapshot.UnclassifiedDispatchResourceNanoseconds(), 10);
+}
+
+TEST(GpuCommandWorkTiming, PreservesScopedCategoryNesting) {
+    GpuCommandWorkTiming timing{0};
+    AmdGpu::SetActiveGpuCommandWorkTiming(&timing);
+    EXPECT_TRUE(AmdGpu::GpuCommandWorkTimingInCategory(GpuCommandWorkCategory::Count));
+    {
+        AmdGpu::ScopedGpuCommandWorkTiming resume{GpuCommandWorkCategory::Resume};
+        EXPECT_TRUE(AmdGpu::GpuCommandWorkTimingInCategory(GpuCommandWorkCategory::Resume));
+        {
+            AmdGpu::ScopedGpuCommandWorkTiming dispatch{GpuCommandWorkCategory::Dispatch};
+            EXPECT_TRUE(AmdGpu::GpuCommandWorkTimingInCategory(GpuCommandWorkCategory::Dispatch));
+        }
+        EXPECT_TRUE(AmdGpu::GpuCommandWorkTimingInCategory(GpuCommandWorkCategory::Resume));
+    }
+    EXPECT_TRUE(AmdGpu::GpuCommandWorkTimingInCategory(GpuCommandWorkCategory::Count));
+    AmdGpu::SetActiveGpuCommandWorkTiming(nullptr);
+}
+
 } // namespace
