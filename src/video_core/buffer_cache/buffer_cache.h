@@ -34,6 +34,11 @@ class TextureCache;
 class MemoryTracker;
 class PageManager;
 
+struct DmaSynchronizationResult {
+    u64 dirty_range_count;
+    u64 page_aligned_range_count;
+};
+
 class BufferCache {
 public:
     static constexpr u32 CACHING_PAGEBITS = 14;
@@ -151,8 +156,8 @@ public:
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 
-    /// Synchronizes all buffers needed for DMA and returns the dirty range count.
-    [[nodiscard]] u64 SynchronizeDmaBuffers();
+    /// Synchronizes all buffers needed for DMA and returns diagnostic range counts.
+    [[nodiscard]] DmaSynchronizationResult SynchronizeDmaBuffers();
 
     /// Runs the garbage collector.
     void RunGarbageCollector();

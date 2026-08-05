@@ -841,12 +841,16 @@ void BufferCache::SynchronizeBuffersInRange(VAddr device_addr, u64 size) {
     });
 }
 
-u64 BufferCache::SynchronizeDmaBuffers() {
+DmaSynchronizationResult BufferCache::SynchronizeDmaBuffers() {
     const auto dirty_ranges = dma_dirty_ranges.Take();
+    const u64 page_aligned_range_count = CountPageAlignedDmaDirtyRanges(dirty_ranges);
     for (const auto& range : dirty_ranges) {
         SynchronizeBuffersInRange(range.address, range.size);
     }
-    return dirty_ranges.size();
+    return {
+        .dirty_range_count = dirty_ranges.size(),
+        .page_aligned_range_count = page_aligned_range_count,
+    };
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {

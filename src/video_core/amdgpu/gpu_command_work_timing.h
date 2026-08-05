@@ -51,6 +51,7 @@ struct GpuCommandWorkSnapshot {
     std::uint64_t dma_synchronization_calls{};
     std::uint64_t dma_dirty_synchronization_calls{};
     std::uint64_t dma_dirty_ranges{};
+    std::uint64_t dma_page_aligned_ranges{};
     std::array<GpuCommandWorkCategoryStats, static_cast<std::size_t>(GpuCommandWorkCategory::Count)>
         categories{};
 
@@ -106,11 +107,13 @@ public:
         packet_dwords += dwords;
     }
 
-    void RecordDmaSynchronization(const std::uint64_t dirty_range_count) {
+    void RecordDmaSynchronization(const std::uint64_t dirty_range_count,
+                                  const std::uint64_t page_aligned_range_count) {
         ++dma_synchronization_calls;
         if (dirty_range_count != 0) {
             ++dma_dirty_synchronization_calls;
             dma_dirty_ranges += dirty_range_count;
+            dma_page_aligned_ranges += page_aligned_range_count;
         }
     }
 
@@ -130,6 +133,7 @@ public:
             .dma_synchronization_calls = dma_synchronization_calls,
             .dma_dirty_synchronization_calls = dma_dirty_synchronization_calls,
             .dma_dirty_ranges = dma_dirty_ranges,
+            .dma_page_aligned_ranges = dma_page_aligned_ranges,
             .categories = categories,
         };
         interval_start_nanoseconds = now_nanoseconds;
@@ -138,6 +142,7 @@ public:
         dma_synchronization_calls = 0;
         dma_dirty_synchronization_calls = 0;
         dma_dirty_ranges = 0;
+        dma_page_aligned_ranges = 0;
         categories = {};
         return snapshot;
     }
@@ -149,6 +154,7 @@ private:
     std::uint64_t dma_synchronization_calls{};
     std::uint64_t dma_dirty_synchronization_calls{};
     std::uint64_t dma_dirty_ranges{};
+    std::uint64_t dma_page_aligned_ranges{};
     std::array<GpuCommandWorkCategoryStats, static_cast<std::size_t>(GpuCommandWorkCategory::Count)>
         categories{};
 };

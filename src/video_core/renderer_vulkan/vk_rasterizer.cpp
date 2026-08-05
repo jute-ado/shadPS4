@@ -499,9 +499,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         AmdGpu::ScopedGpuCommandWorkTiming timing{
             AmdGpu::GpuCommandWorkCategory::DispatchResourceDma, profile_dispatch_resources};
         // We only use fault buffer for DMA right now.
-        const u64 dirty_range_count = buffer_cache.SynchronizeDmaBuffers();
+        const auto result = buffer_cache.SynchronizeDmaBuffers();
         if (profile_dispatch_resources) {
-            AmdGpu::ActiveGpuCommandWorkTiming()->RecordDmaSynchronization(dirty_range_count);
+            AmdGpu::ActiveGpuCommandWorkTiming()->RecordDmaSynchronization(
+                result.dirty_range_count, result.page_aligned_range_count);
         }
         fault_process_pending = true;
     }

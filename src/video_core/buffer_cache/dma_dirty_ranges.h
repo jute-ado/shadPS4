@@ -4,10 +4,13 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
+#include <span>
 #include <vector>
 
 #include "common/types.h"
+#include "video_core/buffer_cache/region_definitions.h"
 
 namespace VideoCore {
 
@@ -15,6 +18,33 @@ struct DmaDirtyRange {
     VAddr address;
     u64 size;
 };
+
+/// Counts the ranges that would remain if sorted dirty ranges were widened to the granularity
+/// used by MemoryTracker. This is a diagnostic projection and does not alter synchronization.
+inline u64 CountPageAlignedDmaDirtyRanges(std::span<const DmaDirtyRange> ranges) {
+    constexpr VAddr PageMask = TRACKER_BYTES_PER_PAGE - 1;
+    u64 count = 0;
+    VAddr current_end = 0;
+    for (const auto& range : ranges) {
+        if (range.size == 0) {
+            continue;
+        }
+        const VAddr start = range.address & ~PageMask;
+        const VAddr last = range.address +
+                           std::min<u64>(range.size - 1,
+                                         std::numeric_limits<VAddr>::max() - range.address);
+        const VAddr end = last > std::numeric_limits<VAddr>::max() - TRACKER_BYTES_PER_PAGE
+                              ? std::numeric_limits<VAddr>::max()
+                              : (last + TRACKER_BYTES_PER_PAGE) & ~PageMask;
+        if (count == 0 || start > current_end) {
+            ++count;
+            current_end = end;
+        } else {
+            current_end = std::max(current_end, end);
+        }
+    }
+    return count;
+}
 
 class DmaDirtyRangeTracker {
 public:
