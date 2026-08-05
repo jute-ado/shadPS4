@@ -32,8 +32,15 @@ using Shader::Stage;
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
 static bool IsPipelineCompileTimingEnabled() {
-    static const bool enabled =
-        PipelineCompileTimingRequested(std::getenv("SHADPS4_PIPELINE_COMPILE_TIMING"));
+    static const bool enabled = [] {
+        const bool requested =
+            PipelineCompileTimingRequested(std::getenv("SHADPS4_PIPELINE_COMPILE_TIMING"));
+        if (requested) {
+            LOG_INFO(Render_Vulkan,
+                     "PipelineCompileTiming enabled slow_compile_threshold_us=5000");
+        }
+        return requested;
+    }();
     return enabled;
 }
 
