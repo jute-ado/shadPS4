@@ -147,6 +147,7 @@ void Liverpool::Process(std::stop_token stoken) {
         }
         if (has_submit_done) {
             if (rasterizer) {
+                rasterizer->Finish();
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
