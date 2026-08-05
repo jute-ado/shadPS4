@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -189,6 +192,18 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
     }
 
     if (offset + size > this->size_bytes) {
+        if (diagnostic_wrap_count < 128) {
+            const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+            LOG_INFO(Render_Vulkan,
+                     "StreamBufferWrap wall_ms={} usage={} capacity={} requested={} watches={} "
+                     "tick={}",
+                     wall_ms, BufferTypeName(usage), this->size_bytes, size,
+                     current_watch_cursor, scheduler->CurrentTick());
+        }
+        ++diagnostic_wrap_count;
+
         // The buffer would overflow, save the amount of used watches and reset the state.
         invalidation_mark = current_watch_cursor;
         current_watch_cursor = 0;

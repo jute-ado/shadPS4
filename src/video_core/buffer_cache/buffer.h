@@ -222,6 +222,7 @@ private:
     std::vector<Watch> previous_watches;
     std::size_t wait_cursor{};
     u64 wait_bound{};
+    u32 diagnostic_wrap_count{};
 };
 
 } // namespace VideoCore
