@@ -219,9 +219,9 @@ void StreamBuffer::Commit() {
     }
 
     offset += mapped_size;
-    if (current_watch_cursor != 0 &&
-        current_watches[current_watch_cursor].tick == scheduler->CurrentTick()) {
-        current_watches[current_watch_cursor].upper_bound = offset;
+    if (auto* watch = FindLastCommittedStreamBufferWatch(current_watches, current_watch_cursor,
+                                                         scheduler->CurrentTick())) {
+        watch->upper_bound = offset;
         return;
     }
 
@@ -235,7 +235,7 @@ void StreamBuffer::Commit() {
     watch.tick = scheduler->CurrentTick();
 }
 
-void StreamBuffer::ReserveWatches(std::vector<Watch>& watches, std::size_t grow_size) {
+void StreamBuffer::ReserveWatches(std::vector<StreamBufferWatch>& watches, std::size_t grow_size) {
     watches.resize(watches.size() + grow_size);
 }
 
