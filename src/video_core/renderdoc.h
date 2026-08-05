@@ -18,7 +18,10 @@ void TriggerCapture();
 /// Begins a scheduled capture immediately before submitting a guest frame.
 [[nodiscard]] bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle);
 
-/// Ends a capture begun by BeginNextPresentedFrameCapture after its frame is presented.
+/// Returns true while a scheduled presented-frame capture is active.
+[[nodiscard]] bool IsPresentedFrameCaptureActive();
+
+/// Advances a capture after one of its included frames is presented and ends the final frame.
 void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle);
 
 /// Sets output directory for captures

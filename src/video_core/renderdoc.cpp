@@ -8,7 +8,10 @@
 #include "video_core/renderdoc_capture_state.h"
 #include "video_core/renderdoc_path.h"
 
+#include <algorithm>
+#include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <renderdoc_app.h>
 
 #ifdef _WIN32
@@ -21,7 +24,28 @@
 
 namespace VideoCore {
 
-static RenderDocCaptureState capture_state;
+namespace {
+
+constexpr u32 MaximumDiagnosticCaptureFrames = 8;
+
+u32 ConfiguredCaptureFrameCount() {
+    const char* const value = std::getenv("SHADPS4_RENDERDOC_CAPTURE_FRAMES");
+    if (!value) {
+        return 1;
+    }
+
+    u32 count{};
+    const auto* const end = value + std::strlen(value);
+    const auto [parsed_end, error] = std::from_chars(value, end, count);
+    if (error != std::errc{} || parsed_end != end || count == 0) {
+        return 1;
+    }
+    return std::min(count, MaximumDiagnosticCaptureFrames);
+}
+
+} // namespace
+
+static RenderDocCaptureState capture_state{ConfiguredCaptureFrameCount()};
 static ScreenshotRequestQueue screenshot_requests;
 
 RENDERDOC_API_1_6_0* rdoc_api{};
@@ -136,11 +160,16 @@ bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) 
     return true;
 }
 
+bool IsPresentedFrameCaptureActive() {
+    return capture_state.IsCapturing();
+}
+
 void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    ASSERT(rdoc_api);
+    if (!rdoc_api || !capture_state.FinishPresentedFrameCapture()) {
+        return;
+    }
     const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
     const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
-    ASSERT(capture_state.FinishPresentedFrameCapture());
     LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
 }
 

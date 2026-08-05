@@ -772,8 +772,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     void* const vulkan_instance =
         reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
     void* const window_handle = window.GetWindowInfo().render_surface;
-    frame->renderdoc_capture =
+    const bool renderdoc_capture_started =
         VideoCore::BeginNextPresentedFrameCapture(vulkan_instance, window_handle);
+    frame->renderdoc_capture =
+        renderdoc_capture_started || VideoCore::IsPresentedFrameCaptureActive();
     draw_scheduler.Flush(info);
     return frame;
 }
@@ -853,7 +855,7 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     const auto end_renderdoc_capture = [&] {
-        if (!frame->renderdoc_capture) {
+        if (!frame->renderdoc_capture || is_reusing_frame) {
             return;
         }
         void* const vulkan_instance =
