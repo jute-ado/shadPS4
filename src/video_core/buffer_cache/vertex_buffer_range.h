@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <ranges>
 #include <vector>
 
@@ -22,8 +23,15 @@ template <std::ranges::input_range Buffers, typename ClampSize>
                                                                      ClampSize&& clamp_size) {
     std::vector<VertexBufferRange> ranges;
     for (const auto& buffer : buffers) {
-        if (buffer.base_address != 0 && buffer.GetSize() > 0) {
-            ranges.emplace_back(buffer.base_address, buffer.base_address + buffer.GetSize());
+        const u64 requested_size = buffer.GetSize();
+        if (buffer.base_address == 0 || requested_size == 0) {
+            continue;
+        }
+        const u64 clamped_size = std::invoke(clamp_size, buffer.base_address, requested_size);
+        const u64 address_space_left = std::numeric_limits<VAddr>::max() - buffer.base_address;
+        const u64 safe_size = std::min(clamped_size, address_space_left);
+        if (safe_size != 0) {
+            ranges.emplace_back(buffer.base_address, buffer.base_address + safe_size);
         }
     }
 
@@ -37,11 +45,6 @@ template <std::ranges::input_range Buffers, typename ClampSize>
         }
     }
 
-    for (auto& range : merged) {
-        const u64 size =
-            std::invoke(clamp_size, range.base_address, range.end_address - range.base_address);
-        range.end_address = range.base_address + size;
-    }
     return merged;
 }
 
