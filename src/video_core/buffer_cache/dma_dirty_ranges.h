@@ -7,7 +7,9 @@
 #include <mutex>
 #include <vector>
 
+#include "common/alignment.h"
 #include "common/types.h"
+#include "video_core/buffer_cache/region_definitions.h"
 
 namespace VideoCore {
 
@@ -23,8 +25,14 @@ public:
             return;
         }
 
+        // MemoryTracker records CPU dirtiness per page, so byte-disjoint writes on the same page
+        // require the same synchronization work. Widen them before batching so Take can coalesce
+        // redundant page walks.
+        const VAddr aligned_address = Common::AlignDown(address, TRACKER_BYTES_PER_PAGE);
+        const VAddr aligned_end = Common::AlignUp(address + size, TRACKER_BYTES_PER_PAGE);
+
         const std::scoped_lock lock{mutex};
-        ranges.push_back({address, size});
+        ranges.push_back({aligned_address, aligned_end - aligned_address});
     }
 
     [[nodiscard]] std::vector<DmaDirtyRange> Take() {
