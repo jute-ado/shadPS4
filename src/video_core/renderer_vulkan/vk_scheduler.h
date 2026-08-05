@@ -447,7 +447,7 @@ private:
 
     void SubmitExecution(SubmitInfo& info);
 
-    [[nodiscard]] u64 SubmitExecutionWithSubmitLockHeld(SubmitInfo& info);
+    u64 SubmitExecutionWithSubmitLockHeld(SubmitInfo& info);
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
