@@ -18,10 +18,10 @@ struct StreamBufferWatch {
 inline StreamBufferWatch* FindLastCommittedStreamBufferWatch(std::span<StreamBufferWatch> watches,
                                                              std::size_t next_watch_index,
                                                              u64 tick) {
-    if (next_watch_index == 0 || watches[next_watch_index].tick != tick) {
+    if (next_watch_index == 0 || watches[next_watch_index - 1].tick != tick) {
         return nullptr;
     }
-    return &watches[next_watch_index];
+    return &watches[next_watch_index - 1];
 }
 
 } // namespace VideoCore
