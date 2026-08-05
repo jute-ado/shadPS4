@@ -132,7 +132,7 @@ TEST(GpuCompletionSubmission, SharesExactTickAssociationWithOrdinarySubmissions)
     std::latch release_exact_submit{1};
 
     std::jthread exact_submission{[&] {
-        sequencer.Submit(
+        static_cast<void>(sequencer.Submit(
             [] {},
             [&] {
                 const u64 tick = next_tick.fetch_add(1);
@@ -140,7 +140,7 @@ TEST(GpuCompletionSubmission, SharesExactTickAssociationWithOrdinarySubmissions)
                 release_exact_submit.wait();
                 return tick;
             },
-            [&](auto&&, u64 tick) { deferred_tick = tick; });
+            [&](auto&&, u64 tick) { deferred_tick = tick; }));
     }};
     exact_submit_entered.wait();
 

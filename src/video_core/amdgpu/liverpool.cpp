@@ -733,18 +733,31 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     rasterizer->ProcessDownloadImages();
                 }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
-                PublishEop(
-                    *event_eop,
-                    [](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                            memcpy(address, &data, num_bytes);
-                        }
-                    },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                    [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
-                        complete_eop_flip();
-                    });
+                auto write_memory = [](void* address, u64 data, u32 num_bytes) {
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+                        memcpy(address, &data, num_bytes);
+                    }
+                };
+                auto signal_interrupt = [] {
+                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                };
+                auto notify_completion = [complete_eop_flip =
+                                              std::move(complete_eop_flip)]() mutable {
+                    complete_eop_flip();
+                };
+                if (rasterizer) {
+                    SubmitEopAtGpuCompletion(
+                        *event_eop,
+                        [this](Common::UniqueFunction<void>&& completion) {
+                            rasterizer->FlushWithGpuCompletion(std::move(completion));
+                        },
+                        std::move(write_memory), std::move(signal_interrupt),
+                        std::move(notify_completion));
+                } else {
+                    PublishEop(*event_eop, std::move(write_memory), std::move(signal_interrupt),
+                               std::move(notify_completion));
+                }
                 break;
             }
             case PM4ItOpcode::DmaData: {
