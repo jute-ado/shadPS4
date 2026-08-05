@@ -113,11 +113,10 @@ public:
 
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
-                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+                           BufferAccessBatch& buffer_accesses);
 
     /// Bind host index buffer for the current draw.
-    void BindIndexBuffer(u32 index_offset,
-                         boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+    void BindIndexBuffer(u32 index_offset, BufferAccessBatch& buffer_accesses);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);

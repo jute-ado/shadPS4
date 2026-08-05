@@ -103,6 +103,7 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void FinalizeBufferAccesses();
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {
@@ -139,6 +140,7 @@ private:
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
     Pipeline::BufferBarriers buffer_barriers;
+    VideoCore::BufferAccessBatch buffer_accesses;
     Shader::PushData push_data;
 
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
