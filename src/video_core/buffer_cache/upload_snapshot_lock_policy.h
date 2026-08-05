@@ -5,8 +5,8 @@
 
 namespace VideoCore {
 
-[[nodiscard]] constexpr bool KeepUploadSnapshotLockedDuringCopy(bool is_gpu_written) noexcept {
-    return is_gpu_written;
+[[nodiscard]] constexpr bool KeepUploadSnapshotLockedDuringCopy(bool) noexcept {
+    return true;
 }
 
 } // namespace VideoCore

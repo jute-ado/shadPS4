@@ -130,9 +130,11 @@ public:
             return;
         }
         IteratePages<false>(query_cpu_range, query_size,
-                            [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
-                                manager->template ChangeRegionState<Type::GPU, true>(
-                                    manager->GetCpuAddr() + offset, size);
+                            [is_written](RegionManager* manager, u64 offset, size_t size) {
+                                if (is_written) {
+                                    manager->template ChangeRegionState<Type::GPU, true>(
+                                        manager->GetCpuAddr() + offset, size);
+                                }
                                 manager->lock.unlock();
                             });
     }
