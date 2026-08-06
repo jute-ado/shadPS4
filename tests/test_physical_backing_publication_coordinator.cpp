@@ -741,6 +741,41 @@ TEST(PhysicalBackingPublicationCoordinator, AtomicallyMigratesDirtyOwnersIntoRep
               (std::vector<VideoCore::PhysicalBackingDirtySlice>{{256, 512}}));
 }
 
+TEST(PhysicalBackingPublicationCoordinator,
+     ReplacementMigrationKeepsActiveTextureOverlapSuppressed) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 64, 128));
+    const auto texture = coordinator.BeginTextureOverlap(GuestB, PageSize);
+    ASSERT_TRUE(texture.has_value());
+    constexpr u64 replacement_address = OverrideBase + 2 * PageSize;
+    constexpr std::array requests{VideoCore::PhysicalBackingCachePageRequest{
+        GuestA, PhysicalBackingDeviceAddress{replacement_address}}};
+
+    const auto migrated = coordinator.MigrateCachePagesForGuests(requests);
+
+    ASSERT_TRUE(migrated.has_value());
+    ASSERT_EQ(migrated->migrations.size(), 1);
+    EXPECT_EQ(migrated->migrations[0].previous_token, owner->token);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
+    const auto restored = coordinator.EndTextureOverlap(texture->token);
+    ASSERT_TRUE(restored.has_value());
+    ASSERT_EQ(restored->size(), 2);
+    EXPECT_EQ((*restored)[0].device_address.value, replacement_address);
+    EXPECT_EQ((*restored)[1].device_address.value, replacement_address);
+    EXPECT_EQ(coordinator.ResolveCachePageDirtySlices(migrated->migrations[0].token),
+              (std::vector<VideoCore::PhysicalBackingDirtySlice>{{64, 128}}));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, BatchReturnsOneOwnerForPhysicalAliases) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
