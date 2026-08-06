@@ -133,4 +133,17 @@ template <typename Wait>
     return tracker.CompleteThrough(*required_tick);
 }
 
+template <typename ResolvePages, typename SynchronizePages>
+[[nodiscard]] bool SynchronizePhysicalBackingHostAccessIfPending(
+    PhysicalBackingWritebackTracker& tracker, ResolvePages&& resolve_pages,
+    SynchronizePages&& synchronize_pages) {
+    if (tracker.PendingPageCount() == 0) {
+        return true;
+    }
+    const auto physical_pages = std::invoke(std::forward<ResolvePages>(resolve_pages));
+    return physical_pages &&
+           std::invoke(std::forward<SynchronizePages>(synchronize_pages),
+                       std::span<const u64>{*physical_pages});
+}
+
 } // namespace VideoCore

@@ -431,8 +431,12 @@ bool BufferCache::SynchronizePhysicalBackingPages(std::span<const u64> physical_
 }
 
 bool BufferCache::SynchronizePhysicalBackingHostAccess(VAddr device_addr, u64 size) {
-    const auto physical_pages = ResolvePhysicalBackingPages(device_addr, size);
-    return physical_pages && SynchronizePhysicalBackingPages(*physical_pages);
+    return SynchronizePhysicalBackingHostAccessIfPending(
+        physical_backing_writeback_tracker,
+        [this, device_addr, size] { return ResolvePhysicalBackingPages(device_addr, size); },
+        [this](std::span<const u64> physical_pages) {
+            return SynchronizePhysicalBackingPages(physical_pages);
+        });
 }
 
 bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
