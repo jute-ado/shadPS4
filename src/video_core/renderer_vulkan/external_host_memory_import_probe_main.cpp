@@ -806,7 +806,10 @@ static_assert(ERROR_COMMITMENT_LIMIT == 1455);
 constexpr std::size_t ExactVisibilityWordCount = 64;
 constexpr vk::DeviceSize ExactVisibilityByteCount =
     ExactVisibilityWordCount * sizeof(std::uint32_t);
-constexpr vk::DeviceSize ExactVisibilityOutputByteCount = ExactVisibilityByteCount * 2;
+constexpr vk::DeviceSize ExactVisibilityOutputByteCount = ExactVisibilityByteCount * 3;
+constexpr std::size_t ExactVisibilityPageTableEntryCount = 8;
+constexpr std::uint64_t ExactVisibilityGuestPage = 3;
+constexpr std::uint64_t ExactVisibilityInPageOffset = 0x100;
 
 class ExactHostVisibilityShader final : public Sirit::Module {
 public:
@@ -822,7 +825,9 @@ public:
         const auto u64_type = TypeUInt(64);
         const auto u32x3_type = TypeVector(u32_type, 3);
         const auto zero = Constant(u32_type, 0u);
+        const auto one = Constant(u32_type, 1u);
         const auto bda_output_base = Constant(u32_type, ExactVisibilityWordCount);
+        const auto page_table_output_base = Constant(u32_type, ExactVisibilityWordCount * 2);
 
         const auto storage_array_type = TypeRuntimeArray(u32_type);
         Decorate(storage_array_type, spv::Decoration::ArrayStride, sizeof(std::uint32_t));
@@ -842,9 +847,23 @@ public:
         Decorate(output, spv::Decoration::DescriptorSet, 0u);
         Decorate(output, spv::Decoration::Binding, 1u);
 
-        const auto push_block_type = TypeStruct(u64_type);
+        const auto page_table_array_type = TypeRuntimeArray(u64_type);
+        Decorate(page_table_array_type, spv::Decoration::ArrayStride, sizeof(std::uint64_t));
+        const auto page_table_block_type = TypeStruct(page_table_array_type);
+        Decorate(page_table_block_type, spv::Decoration::Block);
+        MemberDecorate(page_table_block_type, 0u, spv::Decoration::Offset, 0u);
+        const auto page_table_block_pointer =
+            TypePointer(spv::StorageClass::StorageBuffer, page_table_block_type);
+        const auto storage_u64_pointer = TypePointer(spv::StorageClass::StorageBuffer, u64_type);
+        const auto page_table =
+            AddGlobalVariable(page_table_block_pointer, spv::StorageClass::StorageBuffer);
+        Decorate(page_table, spv::Decoration::DescriptorSet, 0u);
+        Decorate(page_table, spv::Decoration::Binding, 2u);
+
+        const auto push_block_type = TypeStruct(u64_type, u64_type);
         Decorate(push_block_type, spv::Decoration::Block);
         MemberDecorate(push_block_type, 0u, spv::Decoration::Offset, 0u);
+        MemberDecorate(push_block_type, 1u, spv::Decoration::Offset, sizeof(std::uint64_t));
         const auto push_block_pointer =
             TypePointer(spv::StorageClass::PushConstant, push_block_type);
         const auto push_u64_pointer = TypePointer(spv::StorageClass::PushConstant, u64_type);
@@ -883,13 +902,34 @@ public:
         const auto physical_output_pointer =
             OpAccessChain(storage_u32_pointer, output, zero, physical_output_index);
         OpStore(physical_output_pointer, physical_value);
+
+        const auto guest_address_pointer = OpAccessChain(push_u64_pointer, push, one);
+        const auto guest_address = OpLoad(u64_type, guest_address_pointer);
+        const auto guest_page =
+            OpShiftRightLogical(u64_type, guest_address, Constant(u64_type, 14ull));
+        const auto guest_page32 = OpUConvert(u32_type, guest_page);
+        const auto page_table_pointer =
+            OpAccessChain(storage_u64_pointer, page_table, zero, guest_page32);
+        const auto page_base = OpLoad(u64_type, page_table_pointer);
+        const auto guest_page_offset =
+            OpBitwiseAnd(u64_type, guest_address, Constant(u64_type, 0x3fffull));
+        const auto resolved_address = OpIAdd(u64_type, page_base, guest_page_offset);
+        const auto resolved_block = OpConvertUToPtr(physical_block_pointer, resolved_address);
+        const auto resolved_pointer =
+            OpAccessChain(physical_u32_pointer, resolved_block, zero, invocation);
+        const auto resolved_value =
+            OpLoad(u32_type, resolved_pointer, spv::MemoryAccessMask::Aligned, 4u);
+        const auto resolved_output_index = OpIAdd(u32_type, page_table_output_base, invocation);
+        const auto resolved_output_pointer =
+            OpAccessChain(storage_u32_pointer, output, zero, resolved_output_index);
+        OpStore(resolved_output_pointer, resolved_value);
         OpReturn();
         OpFunctionEnd();
 
         AddExecutionMode(main_function, spv::ExecutionMode::LocalSize,
                          static_cast<std::uint32_t>(ExactVisibilityWordCount), 1u, 1u);
         AddEntryPoint(spv::ExecutionModel::GLCompute, main_function, "main", global_invocation_id,
-                      descriptor_input, output, push);
+                      descriptor_input, output, page_table, push);
     }
 };
 
@@ -1038,6 +1078,44 @@ struct ExactGuestAliasView {
     }
     ExactMappedMemoryGuard mapped_guard{device, *output_memory, mapped};
 
+    constexpr vk::DeviceSize page_table_bytes =
+        ExactVisibilityPageTableEntryCount * sizeof(vk::DeviceAddress);
+    auto [page_table_buffer_result, created_page_table_buffer] = device.createBufferUnique({
+        .size = page_table_bytes,
+        .usage = vk::BufferUsageFlagBits::eStorageBuffer,
+        .sharingMode = vk::SharingMode::eExclusive,
+    });
+    if (page_table_buffer_result != vk::Result::eSuccess) {
+        return fail("page_table_buffer_creation_failed");
+    }
+    vk::UniqueDeviceMemory page_table_memory;
+    vk::UniqueBuffer page_table_buffer = std::move(created_page_table_buffer);
+    const auto page_table_requirements = device.getBufferMemoryRequirements(*page_table_buffer);
+    const auto page_table_memory_type = FindExactVisibilityMemoryType(
+        physical_device, page_table_requirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    if (!page_table_memory_type) {
+        return fail("coherent_page_table_memory_unavailable");
+    }
+    auto [page_table_memory_result, allocated_page_table_memory] = device.allocateMemoryUnique({
+        .allocationSize = page_table_requirements.size,
+        .memoryTypeIndex = *page_table_memory_type,
+    });
+    if (page_table_memory_result != vk::Result::eSuccess) {
+        return fail("page_table_memory_allocation_failed");
+    }
+    page_table_memory = std::move(allocated_page_table_memory);
+    if (device.bindBufferMemory(*page_table_buffer, *page_table_memory, 0) !=
+        vk::Result::eSuccess) {
+        return fail("page_table_memory_binding_failed");
+    }
+    auto [page_table_map_result, page_table_mapped] =
+        device.mapMemory(*page_table_memory, 0, page_table_bytes);
+    if (page_table_map_result != vk::Result::eSuccess || page_table_mapped == nullptr) {
+        return fail("page_table_memory_mapping_failed");
+    }
+    ExactMappedMemoryGuard page_table_mapped_guard{device, *page_table_memory, page_table_mapped};
+
     ExactHostVisibilityShader shader;
     const auto shader_code = shader.Assemble();
     auto [shader_result, shader_module] = device.createShaderModuleUnique({
@@ -1061,6 +1139,12 @@ struct ExactGuestAliasView {
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         },
+        vk::DescriptorSetLayoutBinding{
+            .binding = 2,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        },
     };
     auto [layout_result, descriptor_layout] = device.createDescriptorSetLayoutUnique({
         .bindingCount = static_cast<std::uint32_t>(layout_bindings.size()),
@@ -1073,7 +1157,7 @@ struct ExactGuestAliasView {
     const vk::PushConstantRange push_range{
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .offset = 0,
-        .size = sizeof(vk::DeviceAddress),
+        .size = sizeof(vk::DeviceAddress) * 2,
     };
     auto [pipeline_layout_result, pipeline_layout] = device.createPipelineLayoutUnique({
         .setLayoutCount = 1,
@@ -1097,7 +1181,7 @@ struct ExactGuestAliasView {
 
     const vk::DescriptorPoolSize pool_size{
         .type = vk::DescriptorType::eStorageBuffer,
-        .descriptorCount = 2,
+        .descriptorCount = 3,
     };
     auto [pool_result, descriptor_pool] = device.createDescriptorPoolUnique({
         .maxSets = 1,
@@ -1144,9 +1228,13 @@ struct ExactGuestAliasView {
     };
     bool canonical_view_verified{};
     bool guest_alias_verified{};
+    bool guest_page_table_verified{};
     for (const bool use_guest_alias : {false, true}) {
         for (std::size_t offset_index = 0; offset_index < offsets.size(); ++offset_index) {
-            const auto offset = offsets[offset_index];
+            const auto page_offset = offsets[offset_index];
+            const auto source_offset = page_offset + ExactVisibilityInPageOffset;
+            constexpr std::uint64_t guest_address =
+                (ExactVisibilityGuestPage << 14) + ExactVisibilityInPageOffset;
             const auto trial_index = offset_index + (use_guest_alias ? offsets.size() : 0);
             std::array<std::uint32_t, ExactVisibilityWordCount> expected{};
             for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -1155,10 +1243,10 @@ struct ExactGuestAliasView {
                                   (static_cast<std::uint32_t>(index) * 0x9e3779b9u);
             }
             std::optional<ExactGuestAliasView> guest_alias;
-            std::byte* write_pointer = static_cast<std::byte*>(host_pointer) + offset;
+            std::byte* write_pointer = static_cast<std::byte*>(host_pointer) + source_offset;
             if (use_guest_alias) {
                 auto mapped_alias =
-                    MapExactGuestAlias(backing_mapping, offset, ExactVisibilityByteCount);
+                    MapExactGuestAlias(backing_mapping, source_offset, ExactVisibilityByteCount);
                 if (!mapped_alias) {
                     return fail("guest_alias_mapping_failed");
                 }
@@ -1167,16 +1255,24 @@ struct ExactGuestAliasView {
             }
             std::memcpy(write_pointer, expected.data(), ExactVisibilityByteCount);
             std::memset(mapped, 0, ExactVisibilityOutputByteCount);
+            std::memset(page_table_mapped, 0, page_table_bytes);
+            static_cast<vk::DeviceAddress*>(page_table_mapped)[ExactVisibilityGuestPage] =
+                imported_address + page_offset;
 
             const vk::DescriptorBufferInfo input_info{
                 .buffer = imported_buffer,
-                .offset = offset,
+                .offset = source_offset,
                 .range = ExactVisibilityByteCount,
             };
             const vk::DescriptorBufferInfo output_info{
                 .buffer = *output_buffer,
                 .offset = 0,
                 .range = ExactVisibilityOutputByteCount,
+            };
+            const vk::DescriptorBufferInfo page_table_info{
+                .buffer = *page_table_buffer,
+                .offset = 0,
+                .range = page_table_bytes,
             };
             const std::array writes{
                 vk::WriteDescriptorSet{
@@ -1192,6 +1288,13 @@ struct ExactGuestAliasView {
                     .descriptorCount = 1,
                     .descriptorType = vk::DescriptorType::eStorageBuffer,
                     .pBufferInfo = &output_info,
+                },
+                vk::WriteDescriptorSet{
+                    .dstSet = *descriptor_sets.front(),
+                    .dstBinding = 2,
+                    .descriptorCount = 1,
+                    .descriptorType = vk::DescriptorType::eStorageBuffer,
+                    .pBufferInfo = &page_table_info,
                 },
             };
             device.updateDescriptorSets(writes, {});
@@ -1212,9 +1315,12 @@ struct ExactGuestAliasView {
             command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
             command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0,
                                                *descriptor_sets.front(), {});
-            const vk::DeviceAddress trial_address = imported_address + offset;
+            const std::array<vk::DeviceAddress, 2> push_data{
+                imported_address + source_offset,
+                guest_address,
+            };
             command_buffer->pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
-                                          sizeof(trial_address), &trial_address);
+                                          sizeof(push_data), push_data.data());
             command_buffer->dispatch(1, 1, 1);
             const vk::MemoryBarrier shader_to_host{
                 .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
@@ -1240,11 +1346,13 @@ struct ExactGuestAliasView {
             }
 
             const auto actual =
-                std::span{static_cast<const std::uint32_t*>(mapped), ExactVisibilityWordCount * 2};
+                std::span{static_cast<const std::uint32_t*>(mapped), ExactVisibilityWordCount * 3};
             std::size_t descriptor_mismatches{};
             std::size_t bda_mismatches{};
+            std::size_t page_table_mismatches{};
             std::optional<std::size_t> descriptor_first_mismatch;
             std::optional<std::size_t> bda_first_mismatch;
+            std::optional<std::size_t> page_table_first_mismatch;
             for (std::size_t index = 0; index < expected.size(); ++index) {
                 if (actual[index] != expected[index]) {
                     descriptor_first_mismatch = descriptor_first_mismatch.value_or(index);
@@ -1254,20 +1362,32 @@ struct ExactGuestAliasView {
                     bda_first_mismatch = bda_first_mismatch.value_or(index);
                     ++bda_mismatches;
                 }
+                if (actual[ExactVisibilityWordCount * 2 + index] != expected[index]) {
+                    page_table_first_mismatch = page_table_first_mismatch.value_or(index);
+                    ++page_table_mismatches;
+                }
             }
             result.trials.push_back({
-                {"offset", offset},
+                {"physicalPageOffset", page_offset},
+                {"sourceOffset", source_offset},
+                {"guestAddress", guest_address},
                 {"writeSource", use_guest_alias ? "guest_alias_view" : "canonical_view"},
                 {"expectedHash", ExactVisibilityHash(expected)},
                 {"descriptorHash", ExactVisibilityHash(actual.first(ExactVisibilityWordCount))},
-                {"bdaHash", ExactVisibilityHash(actual.subspan(ExactVisibilityWordCount))},
+                {"bdaHash", ExactVisibilityHash(actual.subspan(ExactVisibilityWordCount,
+                                                               ExactVisibilityWordCount))},
+                {"pageTableHash", ExactVisibilityHash(actual.subspan(ExactVisibilityWordCount * 2,
+                                                                     ExactVisibilityWordCount))},
                 {"descriptorMismatchCount", descriptor_mismatches},
                 {"bdaMismatchCount", bda_mismatches},
+                {"pageTableMismatchCount", page_table_mismatches},
                 {"descriptorFirstMismatch", descriptor_first_mismatch},
                 {"bdaFirstMismatch", bda_first_mismatch},
+                {"pageTableFirstMismatch", page_table_first_mismatch},
             });
-            if (descriptor_mismatches != 0 || bda_mismatches != 0) {
-                result.failure = descriptor_mismatches != 0 && bda_mismatches != 0
+            if (descriptor_mismatches != 0 || bda_mismatches != 0 || page_table_mismatches != 0) {
+                result.failure = page_table_mismatches != 0 ? "guest_page_table_data_mismatch"
+                                 : descriptor_mismatches != 0 && bda_mismatches != 0
                                      ? "descriptor_and_bda_data_mismatch"
                                  : descriptor_mismatches != 0 ? "descriptor_data_mismatch"
                                                               : "bda_data_mismatch";
@@ -1275,10 +1395,11 @@ struct ExactGuestAliasView {
             }
             canonical_view_verified |= !use_guest_alias;
             guest_alias_verified |= use_guest_alias;
+            guest_page_table_verified = true;
         }
     }
-    result.succeeded = Vulkan::HasRequiredExactHostVisibilityEvidence(canonical_view_verified,
-                                                                      guest_alias_verified);
+    result.succeeded = Vulkan::HasRequiredExactGuestPublicationEvidence(
+        canonical_view_verified, guest_alias_verified, guest_page_table_verified);
     if (!result.succeeded) {
         return fail("required_visibility_evidence_incomplete");
     }
