@@ -68,3 +68,24 @@ TEST(BufferFaultAdmission, RequiresRegistrationOrExactPageTrackerOwnership) {
     EXPECT_EQ(process_fault(TransientProtectedPage, false), std::tuple(true, 1, 1));
     EXPECT_EQ(process_fault(UnrelatedDirtyPage, false), std::tuple(false, 1, 0));
 }
+
+TEST(BufferFaultAdmission, RetainsExactOwnershipSampleWhileWaitingForTransactionLock) {
+    static constexpr VAddr ManagerBase = 8_MB;
+    static constexpr VAddr SnapshotPage = ManagerBase + VideoCore::TRACKER_BYTES_PER_PAGE;
+
+    VideoCore::RegionManager manager;
+    manager.SetCpuAddress(ManagerBase);
+    manager.GetRegionBits<VideoCore::Type::CPU>().Fill();
+    manager.GetRegionBits<VideoCore::Type::CPU>().Unset(1);
+
+    const bool owned_before_wait =
+        manager.IsRegionCpuTracked(SnapshotPage - manager.GetCpuAddr(), 1);
+    manager.GetRegionBits<VideoCore::Type::CPU>().Set(1);
+    const bool owned_after_wait =
+        manager.IsRegionCpuTracked(SnapshotPage - manager.GetCpuAddr(), 1);
+
+    EXPECT_TRUE(owned_before_wait);
+    EXPECT_FALSE(owned_after_wait);
+    EXPECT_TRUE(VideoCore::IsBufferFaultOwned(false, owned_before_wait, owned_after_wait));
+    EXPECT_FALSE(VideoCore::IsBufferFaultOwned(false, false, false));
+}
