@@ -52,5 +52,20 @@ TEST(FaultDownload, ClassifiesCleanFaultedInvalidAndOverflowEpochs) {
     EXPECT_EQ(overflow.GetStatus(), DmaFaultEpoch::Status::Overflow);
 }
 
+TEST(FaultDownload, MissingOrResetCompletionFailsClosed) {
+    DmaFaultEpochCompletion completion;
+
+    EXPECT_FALSE(completion.IsComplete());
+    EXPECT_EQ(completion.ValueOrInvalid().GetStatus(), DmaFaultEpoch::Status::Invalid);
+
+    completion.Complete(DmaFaultEpoch::Clean());
+    EXPECT_TRUE(completion.IsComplete());
+    EXPECT_EQ(completion.ValueOrInvalid().GetStatus(), DmaFaultEpoch::Status::Clean);
+
+    completion.Reset();
+    EXPECT_FALSE(completion.IsComplete());
+    EXPECT_EQ(completion.ValueOrInvalid().GetStatus(), DmaFaultEpoch::Status::Invalid);
+}
+
 } // namespace
 } // namespace VideoCore
