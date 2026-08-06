@@ -393,6 +393,22 @@ PlanPhysicalBackingCachePageRetirements(
     return retirements;
 }
 
+struct PhysicalBackingRetirementBatch {
+    size_t begin{};
+    size_t count{};
+
+    auto operator<=>(const PhysicalBackingRetirementBatch&) const = default;
+};
+
+[[nodiscard]] inline std::optional<std::vector<PhysicalBackingRetirementBatch>>
+PlanPhysicalBackingRetirementBatches(size_t owner_count, u64 staging_budget,
+                                     u64 maximum_bytes_per_owner) {
+    if (owner_count == 0) {
+        return std::vector<PhysicalBackingRetirementBatch>{};
+    }
+    return std::vector<PhysicalBackingRetirementBatch>{{0, owner_count}};
+}
+
 [[nodiscard]] inline std::optional<PhysicalBackingCommandAliasPlan>
 PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAccess> accesses) {
     constexpr u64 PageMask = 16_KB - 1;

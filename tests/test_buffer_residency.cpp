@@ -381,3 +381,15 @@ TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
     ASSERT_TRUE(retirements.has_value());
     EXPECT_EQ(*retirements, (std::vector<Owner>{owners.front()}));
 }
+
+TEST(BufferResidency, BatchesLargeOwnerRetirementsInsideStagingBudget) {
+    using Batch = VideoCore::PhysicalBackingRetirementBatch;
+    constexpr size_t owner_count = 4096;
+    constexpr u64 staging_budget = 32_MB;
+
+    const auto batches = VideoCore::PlanPhysicalBackingRetirementBatches(
+        owner_count, staging_budget, 16_KB);
+
+    ASSERT_TRUE(batches.has_value());
+    EXPECT_EQ(*batches, (std::vector<Batch>{{0, 2048}, {2048, 2048}}));
+}
