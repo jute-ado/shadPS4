@@ -424,8 +424,7 @@ bool Rasterizer::DepthStencilAttachmentWillWrite() const {
     }
     const auto& regs = liverpool->regs;
     const bool depth_write = regs.depth_control.depth_enable &&
-                             regs.depth_control.depth_write_enable &&
-                             !regs.depth_view.z_read_only;
+                             regs.depth_control.depth_write_enable && !regs.depth_view.z_read_only;
     const auto& stencil = regs.stencil_control;
     const bool stencil_op_writes = stencil.stencil_fail_front != AmdGpu::StencilFunc::Keep ||
                                    stencil.stencil_zpass_front != AmdGpu::StencilFunc::Keep ||
@@ -459,39 +458,24 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
 
     std::vector<ResourceRange> resources;
     std::vector<Access> accesses;
-    u32 next_buffer_resource{};
     const auto add_access = [&](Kind kind, VAddr address, u64 size, bool is_written,
-                                std::optional<u32> texture_index = std::nullopt) {
-        if (address == 0 || size == 0 || size > std::numeric_limits<u32>::max()) {
+                                std::optional<u32> resource_index) {
+        if (address == 0 || size == 0 || size > std::numeric_limits<u32>::max() ||
+            !resource_index) {
             return false;
         }
-        Resource resource;
-        if (kind == Kind::Texture) {
-            if (!texture_index) {
-                return false;
-            }
-            resource = {kind, *texture_index};
-        } else {
-            const auto matching_buffer =
-                std::ranges::find_if(resources, [&](const ResourceRange& range) {
-                    return range.resource.kind == Kind::Buffer && range.address == address &&
-                           range.size == size;
-                });
-            resource = matching_buffer == resources.end()
-                           ? Resource{kind, next_buffer_resource++}
-                           : matching_buffer->resource;
-        }
-        auto resource_it = std::ranges::find(resources, resource, &ResourceRange::resource);
-        if (resource_it == resources.end()) {
-            resource_it = resources.emplace(resources.end(),
-                                            ResourceRange{resource, address,
-                                                          static_cast<u32>(size)});
+        const Resource resource{kind, *resource_index};
+        const bool range_registered = std::ranges::any_of(resources, [&](const auto& range) {
+            return range.resource == resource && range.address == address && range.size == size;
+        });
+        if (!range_registered) {
+            resources.push_back({resource, address, static_cast<u32>(size)});
         }
         const auto physical_pages = buffer_cache.ResolvePhysicalBackingPages(address, size);
         if (!physical_pages) {
             return false;
         }
-        accesses.push_back({resource_it->resource, is_written, *physical_pages});
+        accesses.push_back({resource, is_written, *physical_pages});
         return true;
     };
 
@@ -506,7 +490,9 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
             }
             const u64 binding_size = desc.GetBindingSize(vsharp);
             const u64 size = memory->ClampRangeSize(vsharp.base_address, binding_size);
-            if (!add_access(Kind::Buffer, vsharp.base_address, size, desc.is_written)) {
+            const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
+            if (!add_access(Kind::Buffer, vsharp.base_address, size, desc.is_written,
+                            buffer_id.index)) {
                 return false;
             }
         }
@@ -564,16 +550,21 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
 
     const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
     if (!plan) {
-        LOG_ERROR(Render_Vulkan,
-                  "Rejected GPU command with competing physical-backing writers");
+        LOG_ERROR(Render_Vulkan, "Rejected GPU command with competing physical-backing writers");
         return false;
     }
     for (const Resource resource : plan->read_snapshot_order) {
-        const auto range = std::ranges::find(resources, resource, &ResourceRange::resource);
-        ASSERT(range != resources.end());
-        if (!buffer_cache.TransitionAuthoritativeTextureForDmaRead(range->address, range->size)) {
-            return false;
+        bool found = false;
+        for (const auto& range : resources) {
+            if (range.resource != resource) {
+                continue;
+            }
+            found = true;
+            if (!buffer_cache.TransitionAuthoritativeTextureForDmaRead(range.address, range.size)) {
+                return false;
+            }
         }
+        ASSERT(found);
     }
     return true;
 }
@@ -1404,14 +1395,12 @@ void Rasterizer::RetirePhysicalBacking(
     if (!physical_backing_coordinator || physical_retirements.empty()) {
         return;
     }
-    liverpool->SendCommand<true>(
-        [this, physical_retirements = std::move(physical_retirements)] {
-            if (!physical_backing_coordinator->RetirePhysicalAllocations(
-                    physical_retirements)) {
-                LOG_ERROR(Render_Vulkan,
-                          "Failed to retire physical allocation publication before reuse");
-            }
-        });
+    liverpool->SendCommand<true>([this, physical_retirements = std::move(physical_retirements)] {
+        if (!physical_backing_coordinator->RetirePhysicalAllocations(physical_retirements)) {
+            LOG_ERROR(Render_Vulkan,
+                      "Failed to retire physical allocation publication before reuse");
+        }
+    });
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
