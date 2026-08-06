@@ -1382,7 +1382,12 @@ struct ExactGuestAliasView {
                 queue.submit(submit, *fence) != vk::Result::eSuccess) {
                 return fail("queue_submission_failed");
             }
-            if (device.waitForFences(*fence, true, 10'000'000'000ull) != vk::Result::eSuccess) {
+            const auto wait_result = device.waitForFences(*fence, true, 10'000'000'000ull);
+            if (wait_result != vk::Result::eSuccess) {
+                if (Vulkan::RequiresExactProbeIdleBeforeResourceCleanup(
+                        false, wait_result == vk::Result::eErrorDeviceLost)) {
+                    static_cast<void>(device.waitIdle());
+                }
                 return fail("queue_fence_wait_failed");
             }
 
@@ -1571,7 +1576,12 @@ struct ExactGuestAliasView {
             queue.submit(submit, *fence) != vk::Result::eSuccess) {
             return fail("publication_switch_queue_submission_failed");
         }
-        if (device.waitForFences(*fence, true, 10'000'000'000ull) != vk::Result::eSuccess) {
+        const auto wait_result = device.waitForFences(*fence, true, 10'000'000'000ull);
+        if (wait_result != vk::Result::eSuccess) {
+            if (Vulkan::RequiresExactProbeIdleBeforeResourceCleanup(
+                    false, wait_result == vk::Result::eErrorDeviceLost)) {
+                static_cast<void>(device.waitIdle());
+            }
             return fail("publication_switch_queue_fence_wait_failed");
         }
 
