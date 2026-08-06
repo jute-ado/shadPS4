@@ -603,10 +603,19 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
 
 bool BufferCache::MigratePhysicalBackingOwnersForBufferReplacement(BufferId target_buffer_id,
                                                                    BufferId source_buffer_id) {
+    static u64 diagnostic_messages = 0;
+    const auto report = [&](std::string_view outcome, size_t owner_count) {
+        if (diagnostic_messages++ < 32) {
+            LOG_ERROR(Render_Vulkan,
+                      "Physical replacement migration {} source={} target={} owners={}", outcome,
+                      source_buffer_id.index, target_buffer_id.index, owner_count);
+        }
+    };
     if (!physical_backing_coordinator) {
         return true;
     }
     if (target_buffer_id == source_buffer_id) {
+        report("same_buffer", 0);
         return false;
     }
     const auto source_it = physical_backing_cache_pages.find(source_buffer_id);
@@ -636,6 +645,7 @@ bool BufferCache::MigratePhysicalBackingOwnersForBufferReplacement(BufferId targ
         source_buffer.CpuAddr(), source_buffer.SizeBytes(), target_buffer.CpuAddr(),
         target_buffer.SizeBytes(), owner_guest_pages);
     if (!plan || plan->size() != source_owners.size()) {
+        report("plan_rejected", source_owners.size());
         return false;
     }
 
@@ -644,6 +654,7 @@ bool BufferCache::MigratePhysicalBackingOwnersForBufferReplacement(BufferId targ
     for (const auto& migration : *plan) {
         if (target_buffer.BufferDeviceAddress() >
             std::numeric_limits<u64>::max() - migration.destination_offset) {
+            report("address_overflow", source_owners.size());
             return false;
         }
         requests.push_back({
@@ -659,6 +670,7 @@ bool BufferCache::MigratePhysicalBackingOwnersForBufferReplacement(BufferId targ
     target_owners.reserve(target_owners.size() + source_owners.size());
     const auto migrated = physical_backing_coordinator->MigrateCachePagesForGuests(requests);
     if (!migrated || migrated->migrations.size() != plan->size()) {
+        report("coordinator_rejected", source_owners.size());
         if (target_inserted) {
             physical_backing_cache_pages.erase(target_buffer_id);
         }
@@ -686,6 +698,7 @@ bool BufferCache::MigratePhysicalBackingOwnersForBufferReplacement(BufferId targ
     physical_backing_cache_pages.erase(source_buffer_id);
     ProtectPhysicalBackingAliases(migrated->deltas);
     ApplyPhysicalBackingBdaDeltas(migrated->deltas);
+    report("success", plan->size());
     return true;
 }
 
