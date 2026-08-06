@@ -33,6 +33,10 @@ public:
         return backing_base;
     }
 
+    [[nodiscard]] u64 BackingSize() const noexcept {
+        return backing_size;
+    }
+
     [[nodiscard]] VAddr SystemManagedVirtualBase() noexcept {
         return reinterpret_cast<VAddr>(system_managed_base);
     }
@@ -92,6 +96,7 @@ public:
 
 private:
     struct Impl;
+    const u64 backing_size;
     std::unique_ptr<Impl> impl;
     u8* backing_base{};
     u8* system_managed_base{};
