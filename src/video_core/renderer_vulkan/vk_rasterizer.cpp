@@ -554,24 +554,6 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         return false;
     }
     for (const Resource resource : plan->read_snapshot_order) {
-        bool has_complete_exclusive_texture_ownership = false;
-        if (resource.kind == Kind::Texture) {
-            std::vector<u64> resource_pages;
-            for (const auto& page : plan->pages) {
-                if (std::ranges::contains(page.readers, resource)) {
-                    resource_pages.push_back(page.physical_page);
-                }
-            }
-            const auto component =
-                texture_cache.PlanPhysicalBackingTextureOwnershipComponent(resource_pages);
-            has_complete_exclusive_texture_ownership =
-                component && VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
-                                 resource.index, resource_pages, *component);
-        }
-        if (!VideoCore::ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
-                resource, *plan, has_complete_exclusive_texture_ownership)) {
-            continue;
-        }
         bool found = false;
         for (const auto& range : resources) {
             if (range.resource != resource) {

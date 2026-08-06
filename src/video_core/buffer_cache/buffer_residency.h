@@ -105,18 +105,6 @@ struct PhysicalBackingTextureOwnershipComponent {
     std::vector<u64> physical_pages;
 };
 
-[[nodiscard]] inline bool HasCompleteExclusivePhysicalBackingTextureOwnership(
-    u32 image_index, std::span<const u64> required_physical_pages,
-    const PhysicalBackingTextureOwnershipComponent& component) {
-    if (required_physical_pages.empty() || component.oldest_to_newest_images.size() != 1 ||
-        component.oldest_to_newest_images.front().image_index != image_index) {
-        return false;
-    }
-    return std::ranges::all_of(required_physical_pages, [&](u64 physical_page) {
-        return std::ranges::contains(component.physical_pages, physical_page);
-    });
-}
-
 struct PhysicalBackingTexturePageSource {
     u64 physical_page{};
     VAddr guest_page{};
@@ -360,27 +348,6 @@ struct PhysicalBackingCommandAliasPlan {
     std::vector<PhysicalBackingCommandResource> writer_finalize_order;
     std::vector<PhysicalBackingCommandPagePlan> pages;
 };
-
-[[nodiscard]] inline bool ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
-    PhysicalBackingCommandResource resource, const PhysicalBackingCommandAliasPlan& plan,
-    bool has_complete_exclusive_texture_ownership) {
-    if (resource.kind != PhysicalBackingCommandResourceKind::Texture ||
-        !has_complete_exclusive_texture_ownership) {
-        return true;
-    }
-
-    bool touches_command_page = false;
-    for (const auto& page : plan.pages) {
-        if (!std::ranges::contains(page.readers, resource)) {
-            continue;
-        }
-        touches_command_page = true;
-        if (page.writers.size() != 1 || page.writers.front() != resource) {
-            return true;
-        }
-    }
-    return !touches_command_page;
-}
 
 struct PhysicalBackingCachePageOwnerLocation {
     u32 buffer_index{};
