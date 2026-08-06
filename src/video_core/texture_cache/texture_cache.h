@@ -17,6 +17,7 @@
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "shader_recompiler/resource.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/multi_level_page_table.h"
 #include "video_core/texture_cache/blit_helper.h"
@@ -97,22 +98,40 @@ public:
     [[nodiscard]] std::vector<ImageId> FindPhysicalBackingImagesForPages(
         std::span<const u64> physical_pages);
 
+    [[nodiscard]] std::optional<PhysicalBackingTextureOwnershipComponent>
+    PlanPhysicalBackingTextureOwnershipComponent(std::span<const u64> physical_pages);
+
     [[nodiscard]] bool ReleasePhysicalBackingTextureOwnershipForBufferWrite(
         ImageId image_id, std::span<const u64> physical_pages);
 
     template <typename Transition>
-    [[nodiscard]] bool TransitionAllPhysicalBackingTextureOwnershipForBufferAccess(
-        ImageId image_id, Transition&& transition) {
+    [[nodiscard]] bool TransitionPhysicalBackingTextureOwnershipComponentForBufferAccess(
+        std::span<const u32> ordered_image_indices, Transition&& transition) {
         std::scoped_lock lock{mutex};
-        const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
-        if (physical_tokens == physical_backing_texture_tokens.end() ||
-            physical_tokens->second.empty() ||
-            !std::forward<Transition>(transition)(
-                std::span<const PhysicalBackingTextureToken>{physical_tokens->second})) {
+        if (ordered_image_indices.empty()) {
             return false;
         }
-        slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
-        physical_backing_texture_tokens.erase(physical_tokens);
+        std::vector<PhysicalBackingTextureToken> component_tokens;
+        for (const u32 image_index : ordered_image_indices) {
+            const ImageId image_id{image_index};
+            const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
+            if (physical_tokens == physical_backing_texture_tokens.end() ||
+                physical_tokens->second.empty()) {
+                return false;
+            }
+            component_tokens.insert(component_tokens.end(), physical_tokens->second.begin(),
+                                    physical_tokens->second.end());
+        }
+        if (!std::forward<Transition>(transition)(
+                std::span<const PhysicalBackingTextureToken>{component_tokens})) {
+            return false;
+        }
+        for (const u32 image_index : ordered_image_indices) {
+            const ImageId image_id{image_index};
+            slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
+            physical_backing_texture_tokens.erase(image_id);
+            physical_backing_texture_write_orders.erase(image_id);
+        }
         return true;
     }
 
@@ -366,6 +385,8 @@ private:
     PageTable page_table;
     std::unordered_map<ImageId, std::vector<PhysicalBackingTextureToken>>
         physical_backing_texture_tokens;
+    std::unordered_map<ImageId, u64> physical_backing_texture_write_orders;
+    u64 last_physical_backing_texture_write_order{};
     std::mutex mutex;
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;

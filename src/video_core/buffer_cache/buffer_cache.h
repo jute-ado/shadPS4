@@ -19,6 +19,7 @@
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
+#include "video_core/texture_cache/types.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -224,6 +225,7 @@ private:
                             size_t total_size_bytes);
 
     bool SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size);
+    bool SynchronizeBufferFromImage(Buffer& buffer, ImageId image_id);
 
     void WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes);
 
