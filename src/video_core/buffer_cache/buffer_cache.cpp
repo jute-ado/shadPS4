@@ -850,8 +850,9 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         return false;
     }
     auto& tile_manager = texture_cache.GetTileManager();
-    tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, work.buffer_span,
-                           work.dispatch_size);
+    tile_manager.TileImage(image, buffer_copies,
+                           std::span{work.packed_offsets}.first(work.num_mips), buffer.Handle(),
+                           buf_offset, work.buffer_span, work.dispatch_size);
     if (image.info.props.is_tiled) {
         buffer.RecordAccess(vk::AccessFlagBits2::eShaderWrite,
                             vk::PipelineStageFlagBits2::eComputeShader, buf_offset,

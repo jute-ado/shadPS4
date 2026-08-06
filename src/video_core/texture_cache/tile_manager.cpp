@@ -242,8 +242,8 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                            vk::Buffer out_buffer, u32 out_offset, u64 buffer_span,
-                            u64 dispatch_size) {
+                            std::span<const u64> packed_offsets, vk::Buffer out_buffer,
+                            u32 out_offset, u64 buffer_span, u64 dispatch_size) {
     const auto& info = in_image.info;
     if (!info.props.is_tiled) {
         for (auto& copy : buffer_copies) {
@@ -254,6 +254,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     }
 
     TilingInfo params{};
+    ASSERT(buffer_copies.size() == packed_offsets.size());
     params.bank_swizzle = info.bank_swizzle;
     params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
     params.num_mips = static_cast<u32>(buffer_copies.size());
@@ -278,7 +279,14 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     });
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    in_image.Download(buffer_copies, temp_buffer, 0, buffer_span);
+    std::array<vk::BufferImageCopy, 16> packed_copies{};
+    ASSERT(buffer_copies.size() <= packed_copies.size());
+    std::ranges::copy(buffer_copies, packed_copies.begin());
+    for (u32 mip = 0; mip < packed_offsets.size(); ++mip) {
+        packed_copies[mip].bufferOffset = packed_offsets[mip];
+    }
+    in_image.Download(std::span{packed_copies}.first(buffer_copies.size()), temp_buffer, 0,
+                      dispatch_size);
 
     scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, GetTilingPipeline(info, true));
 

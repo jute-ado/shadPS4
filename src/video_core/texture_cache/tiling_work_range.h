@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <ranges>
@@ -19,6 +20,7 @@ struct TilingWorkRange {
     std::uint32_t num_mips{};
     std::uint64_t buffer_span{};
     std::uint64_t dispatch_size{};
+    std::array<std::uint64_t, 16> packed_offsets{};
 };
 
 template <std::ranges::input_range MipRanges>
@@ -26,10 +28,12 @@ template <std::ranges::input_range MipRanges>
                                                      std::uint64_t buffer_capacity) {
     TilingWorkRange result{};
     for (const auto& mip : mips) {
-        if (mip.offset > buffer_capacity || mip.size > buffer_capacity - mip.offset ||
+        if (result.num_mips == result.packed_offsets.size() || mip.size == 0 ||
+            mip.offset > buffer_capacity || mip.size > buffer_capacity - mip.offset ||
             mip.size > std::numeric_limits<std::uint64_t>::max() - result.dispatch_size) {
             break;
         }
+        result.packed_offsets[result.num_mips] = result.dispatch_size;
         ++result.num_mips;
         result.buffer_span = std::max(result.buffer_span, mip.offset + mip.size);
         result.dispatch_size += mip.size;

@@ -193,6 +193,23 @@ TEST(TilingWorkRange, DistinguishesSparseBufferSpanFromDispatchBytes) {
     EXPECT_EQ(work.num_mips, 2);
     EXPECT_EQ(work.buffer_span, 160);
     EXPECT_EQ(work.dispatch_size, 96);
+    EXPECT_EQ(work.packed_offsets[0], 0);
+    EXPECT_EQ(work.packed_offsets[1], 64);
+}
+
+TEST(TilingWorkRange, StopsBeforeAZeroSizedMip) {
+    const std::array mips = {
+        VideoCore::BasicTilingMipRange{.offset = 0, .size = 64},
+        VideoCore::BasicTilingMipRange{.offset = 64, .size = 0},
+        VideoCore::BasicTilingMipRange{.offset = 64, .size = 32},
+    };
+
+    const auto work = VideoCore::ComputeTilingWorkRange(mips, 96);
+
+    EXPECT_EQ(work.num_mips, 1);
+    EXPECT_EQ(work.buffer_span, 64);
+    EXPECT_EQ(work.dispatch_size, 64);
+    EXPECT_EQ(work.packed_offsets[0], 0);
 }
 
 } // namespace
