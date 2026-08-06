@@ -65,8 +65,12 @@ TEST(PhysicalBackingPublicationCoordinator,
     EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
     EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestC)->value,
               ImportedBase + OtherPhysicalPage);
-    EXPECT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize));
-    EXPECT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestC + PageSize, 32));
+    const auto repeated = coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize);
+    ASSERT_TRUE(repeated.has_value());
+    EXPECT_TRUE(repeated->empty());
+    const auto unmapped = coordinator.SuppressGuestRangeForGpuWrite(GuestC + PageSize, 32);
+    ASSERT_TRUE(unmapped.has_value());
+    EXPECT_TRUE(unmapped->empty());
 
     ASSERT_TRUE(coordinator.UnmapRange(GuestA, PageSize));
     ASSERT_TRUE(coordinator.UnmapRange(GuestB, PageSize));
@@ -78,6 +82,31 @@ TEST(PhysicalBackingPublicationCoordinator,
     ASSERT_EQ(remapped_deltas->size(), 1);
     EXPECT_EQ(remapped_deltas->front().guest_page, GuestA);
     EXPECT_EQ(remapped_deltas->front().device_address.value, 0);
+}
+
+TEST(PhysicalBackingPublicationCoordinator,
+     RetiresSuppressedAllocationBeforePhysicalPageReuse) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array first_span{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(first_span));
+    ASSERT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize));
+    ASSERT_TRUE(coordinator.UnmapRange(GuestA, PageSize));
+    constexpr std::array retirements{
+        Core::PhysicalBackingRetirement{PhysicalPage, PageSize, 7},
+    };
+
+    ASSERT_TRUE(coordinator.RetirePhysicalAllocations(retirements));
+
+    constexpr std::array reused_span{
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 8},
+    };
+    const auto reused = coordinator.MapSpans(reused_span);
+    ASSERT_TRUE(reused.has_value());
+    ASSERT_EQ(reused->size(), 1);
+    EXPECT_EQ(reused->front().device_address.value, ImportedBase + PhysicalPage);
 }
 
 TEST(PhysicalBackingPublicationCoordinator, RollsBackWholeBatchWhenOnePageIsRejected) {
