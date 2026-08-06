@@ -1116,6 +1116,47 @@ struct ExactGuestAliasView {
     }
     ExactMappedMemoryGuard page_table_mapped_guard{device, *page_table_memory, page_table_mapped};
 
+    constexpr vk::DeviceSize cache_page_bytes = 0x4000;
+    auto [cache_buffer_result, created_cache_buffer] = device.createBufferUnique({
+        .size = cache_page_bytes,
+        .usage = vk::BufferUsageFlagBits::eStorageBuffer |
+                 vk::BufferUsageFlagBits::eShaderDeviceAddress |
+                 vk::BufferUsageFlagBits::eTransferDst,
+        .sharingMode = vk::SharingMode::eExclusive,
+    });
+    if (cache_buffer_result != vk::Result::eSuccess) {
+        return fail("cache_buffer_creation_failed");
+    }
+    vk::UniqueDeviceMemory cache_memory;
+    vk::UniqueBuffer cache_buffer = std::move(created_cache_buffer);
+    const auto cache_requirements = device.getBufferMemoryRequirements(*cache_buffer);
+    const auto cache_memory_type =
+        FindExactVisibilityMemoryType(physical_device, cache_requirements.memoryTypeBits,
+                                      vk::MemoryPropertyFlagBits::eDeviceLocal);
+    if (!cache_memory_type) {
+        return fail("device_local_cache_memory_unavailable");
+    }
+    const vk::MemoryAllocateFlagsInfo cache_allocation_flags{
+        .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
+    };
+    auto [cache_memory_result, allocated_cache_memory] = device.allocateMemoryUnique({
+        .pNext = &cache_allocation_flags,
+        .allocationSize = cache_requirements.size,
+        .memoryTypeIndex = *cache_memory_type,
+    });
+    if (cache_memory_result != vk::Result::eSuccess) {
+        return fail("cache_memory_allocation_failed");
+    }
+    cache_memory = std::move(allocated_cache_memory);
+    if (device.bindBufferMemory(*cache_buffer, *cache_memory, 0) != vk::Result::eSuccess) {
+        return fail("cache_memory_binding_failed");
+    }
+    const auto cache_address =
+        device.getBufferAddress(vk::BufferDeviceAddressInfo{.buffer = *cache_buffer});
+    if (cache_address == 0) {
+        return fail("cache_device_address_zero");
+    }
+
     ExactHostVisibilityShader shader;
     const auto shader_code = shader.Assemble();
     auto [shader_result, shader_module] = device.createShaderModuleUnique({
@@ -1398,8 +1439,186 @@ struct ExactGuestAliasView {
             guest_page_table_verified = true;
         }
     }
+
+    const auto switch_page_offset = offsets.front();
+    const auto switch_source_offset = switch_page_offset + ExactVisibilityInPageOffset;
+    constexpr std::uint64_t switch_guest_address =
+        (ExactVisibilityGuestPage << 14) + ExactVisibilityInPageOffset;
+    std::array<std::uint32_t, ExactVisibilityWordCount> imported_expected{};
+    std::array<std::uint32_t, ExactVisibilityWordCount> cache_expected{};
+    for (std::size_t index = 0; index < imported_expected.size(); ++index) {
+        imported_expected[index] =
+            0x1a2b0000u ^ (static_cast<std::uint32_t>(index) * 0x9e3779b9u);
+        cache_expected[index] =
+            0xc4d50000u ^ (static_cast<std::uint32_t>(index) * 0x7f4a7c15u);
+    }
+    if (ExactVisibilityHash(imported_expected) == ExactVisibilityHash(cache_expected)) {
+        return fail("publication_switch_patterns_not_distinct");
+    }
+    std::memcpy(static_cast<std::byte*>(host_pointer) + switch_source_offset,
+                imported_expected.data(), ExactVisibilityByteCount);
+
+    const vk::DescriptorBufferInfo switch_input_info{
+        .buffer = imported_buffer,
+        .offset = switch_source_offset,
+        .range = ExactVisibilityByteCount,
+    };
+    const vk::DescriptorBufferInfo switch_output_info{
+        .buffer = *output_buffer,
+        .offset = 0,
+        .range = ExactVisibilityOutputByteCount,
+    };
+    const vk::DescriptorBufferInfo switch_page_table_info{
+        .buffer = *page_table_buffer,
+        .offset = 0,
+        .range = page_table_bytes,
+    };
+    const std::array switch_writes{
+        vk::WriteDescriptorSet{
+            .dstSet = *descriptor_sets.front(),
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .pBufferInfo = &switch_input_info,
+        },
+        vk::WriteDescriptorSet{
+            .dstSet = *descriptor_sets.front(),
+            .dstBinding = 1,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .pBufferInfo = &switch_output_info,
+        },
+        vk::WriteDescriptorSet{
+            .dstSet = *descriptor_sets.front(),
+            .dstBinding = 2,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .pBufferInfo = &switch_page_table_info,
+        },
+    };
+    device.updateDescriptorSets(switch_writes, {});
+
+    constexpr std::array<std::string_view, 3> phase_names{
+        "imported_before", "cache_override", "imported_restored"};
+    bool imported_before_verified{};
+    bool cache_override_verified{};
+    bool imported_after_restore_verified{};
+    bool direct_import_control_verified{true};
+    for (std::size_t phase = 0; phase < phase_names.size(); ++phase) {
+        const bool use_cache = phase == 1;
+        const auto expected_page = use_cache ? std::span{cache_expected}
+                                             : std::span{imported_expected};
+        std::memset(mapped, 0, ExactVisibilityOutputByteCount);
+        std::memset(page_table_mapped, 0, page_table_bytes);
+        static_cast<vk::DeviceAddress*>(page_table_mapped)[ExactVisibilityGuestPage] =
+            use_cache ? cache_address : imported_address + switch_page_offset;
+
+        auto& command_buffer = command_buffers.front();
+        if (command_buffer->reset({}) != vk::Result::eSuccess ||
+            command_buffer->begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}) !=
+                vk::Result::eSuccess) {
+            return fail("publication_switch_command_buffer_begin_failed");
+        }
+        if (use_cache) {
+            command_buffer->updateBuffer(*cache_buffer, ExactVisibilityInPageOffset,
+                                         ExactVisibilityByteCount, cache_expected.data());
+            const vk::BufferMemoryBarrier cache_to_shader{
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = *cache_buffer,
+                .offset = ExactVisibilityInPageOffset,
+                .size = ExactVisibilityByteCount,
+            };
+            command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                            vk::PipelineStageFlagBits::eComputeShader, {}, {},
+                                            cache_to_shader, {});
+        }
+        const vk::MemoryBarrier host_to_shader{
+            .srcAccessMask = vk::AccessFlagBits::eHostWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+        };
+        command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eHost,
+                                        vk::PipelineStageFlagBits::eComputeShader, {},
+                                        host_to_shader, {}, {});
+        command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
+        command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0,
+                                           *descriptor_sets.front(), {});
+        const std::array<vk::DeviceAddress, 2> switch_push_data{
+            imported_address + switch_source_offset,
+            switch_guest_address,
+        };
+        command_buffer->pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                      sizeof(switch_push_data), switch_push_data.data());
+        command_buffer->dispatch(1, 1, 1);
+        const vk::MemoryBarrier shader_to_host{
+            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        };
+        command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                        vk::PipelineStageFlagBits::eHost, {}, shader_to_host, {},
+                                        {});
+        if (command_buffer->end() != vk::Result::eSuccess) {
+            return fail("publication_switch_command_buffer_end_failed");
+        }
+        const vk::CommandBuffer submitted = *command_buffer;
+        const vk::SubmitInfo submit{
+            .commandBufferCount = 1,
+            .pCommandBuffers = &submitted,
+        };
+        if (device.resetFences(*fence) != vk::Result::eSuccess ||
+            queue.submit(submit, *fence) != vk::Result::eSuccess) {
+            return fail("publication_switch_queue_submission_failed");
+        }
+        if (device.waitForFences(*fence, true, 10'000'000'000ull) != vk::Result::eSuccess) {
+            return fail("publication_switch_queue_fence_wait_failed");
+        }
+
+        const auto actual =
+            std::span{static_cast<const std::uint32_t*>(mapped), ExactVisibilityWordCount * 3};
+        const auto descriptor_actual = actual.first(ExactVisibilityWordCount);
+        const auto direct_actual =
+            actual.subspan(ExactVisibilityWordCount, ExactVisibilityWordCount);
+        const auto page_table_actual =
+            actual.subspan(ExactVisibilityWordCount * 2, ExactVisibilityWordCount);
+        std::size_t descriptor_mismatch_count{};
+        std::size_t direct_mismatch_count{};
+        std::size_t page_table_mismatch_count{};
+        for (std::size_t index = 0; index < imported_expected.size(); ++index) {
+            descriptor_mismatch_count += descriptor_actual[index] != imported_expected[index];
+            direct_mismatch_count += direct_actual[index] != imported_expected[index];
+            page_table_mismatch_count += page_table_actual[index] != expected_page[index];
+        }
+        result.trials.push_back({
+            {"trialKind", "guest_page_table_publication_switch"},
+            {"phase", phase_names[phase]},
+            {"pageTableSource", use_cache ? "device_local_cache" : "imported_backing"},
+            {"expectedImportedHash", ExactVisibilityHash(imported_expected)},
+            {"expectedPageTableHash", ExactVisibilityHash(expected_page)},
+            {"descriptorHash", ExactVisibilityHash(descriptor_actual)},
+            {"bdaHash", ExactVisibilityHash(direct_actual)},
+            {"pageTableHash", ExactVisibilityHash(page_table_actual)},
+            {"descriptorMismatchCount", descriptor_mismatch_count},
+            {"bdaMismatchCount", direct_mismatch_count},
+            {"pageTableMismatchCount", page_table_mismatch_count},
+        });
+        direct_import_control_verified &=
+            descriptor_mismatch_count == 0 && direct_mismatch_count == 0;
+        const bool phase_verified = descriptor_mismatch_count == 0 &&
+                                    direct_mismatch_count == 0 &&
+                                    page_table_mismatch_count == 0;
+        imported_before_verified |= phase == 0 && phase_verified;
+        cache_override_verified |= phase == 1 && phase_verified;
+        imported_after_restore_verified |= phase == 2 && phase_verified;
+        if (!phase_verified) {
+            return fail("guest_page_table_publication_switch_data_mismatch");
+        }
+    }
     result.succeeded = Vulkan::HasRequiredExactGuestPublicationEvidence(
-        canonical_view_verified, guest_alias_verified, guest_page_table_verified);
+        canonical_view_verified, guest_alias_verified, guest_page_table_verified,
+        imported_before_verified, cache_override_verified, imported_after_restore_verified,
+        direct_import_control_verified);
     if (!result.succeeded) {
         return fail("required_visibility_evidence_incomplete");
     }

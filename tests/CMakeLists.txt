@@ -303,7 +303,7 @@ if (WIN32)
     )
 
     # Exact production AddressSpace-backing feasibility probe. The executable is never part of the
-    # emulator app and publishes no guest pages.
+    # emulator app and never publishes production emulator guest pages.
     add_executable(shadps4_exact_address_space_host_import_probe
         ${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/external_host_memory_import_probe_main.cpp
     )

@@ -311,9 +311,12 @@ struct ExactSelectedMemoryTypeEvidence {
 
 [[nodiscard]] constexpr bool HasRequiredExactGuestPublicationEvidence(
     bool canonical_view_verified, bool guest_alias_verified,
-    bool guest_page_table_verified) noexcept {
+    bool guest_page_table_verified, bool imported_before_verified,
+    bool cache_override_verified, bool imported_after_restore_verified,
+    bool direct_import_control_verified) noexcept {
     return HasRequiredExactHostVisibilityEvidence(canonical_view_verified, guest_alias_verified) &&
-           guest_page_table_verified;
+           guest_page_table_verified && imported_before_verified && cache_override_verified &&
+           imported_after_restore_verified && direct_import_control_verified;
 }
 
 [[nodiscard]] constexpr ExactSelectedMemoryTypeEvidence MakeExactSelectedMemoryTypeEvidence(
