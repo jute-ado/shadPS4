@@ -228,5 +228,16 @@ TEST(ExternalAddressSpaceBackingImport, FailsClosedOnZeroDeviceAddressAndNeverPu
     EXPECT_EQ(ownership.GuestPagePublicationCount(), 0u);
 }
 
+TEST(ExternalAddressSpaceBackingImport, BoundsPhysicalWritebackInsideExactLease) {
+    EXPECT_TRUE(IsExternalAddressSpacePhysicalWriteRangeValid(0x8000, 0, 1));
+    EXPECT_TRUE(IsExternalAddressSpacePhysicalWriteRangeValid(0x8000, 0x7000, 0x1000));
+    EXPECT_FALSE(IsExternalAddressSpacePhysicalWriteRangeValid(0x8000, 0, 0));
+    EXPECT_FALSE(IsExternalAddressSpacePhysicalWriteRangeValid(0x8000, 0x8000, 1));
+    EXPECT_FALSE(IsExternalAddressSpacePhysicalWriteRangeValid(0x8000, 0x7000, 0x1001));
+    EXPECT_FALSE(IsExternalAddressSpacePhysicalWriteRangeValid(
+        std::numeric_limits<std::uint64_t>::max(),
+        std::numeric_limits<std::uint64_t>::max() - 1, 3));
+}
+
 } // namespace
 } // namespace Vulkan
