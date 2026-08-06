@@ -81,6 +81,11 @@ public:
             mapping_generation <= last_mapping_generation) {
             return std::nullopt;
         }
+        const auto retired_it = retired_allocation_generations.find(physical_offset);
+        if (retired_it != retired_allocation_generations.end() &&
+            allocation_generation <= retired_it->second) {
+            return std::nullopt;
+        }
 
         auto [physical_it, inserted] = physical_pages.try_emplace(physical_offset);
         PhysicalPageState& physical = physical_it->second;
@@ -115,6 +120,7 @@ public:
         }
         physical.mapping_epoch = *next_epoch;
         ++physical.alias_count;
+        retired_allocation_generations.erase(physical_offset);
         last_mapping_generation = mapping_generation;
         return guest_it->second;
     }
@@ -273,6 +279,25 @@ public:
         return true;
     }
 
+    /// Forgets every publication token for a physical allocation before its
+    /// backing can be reused. Pending writebacks are deliberately invalidated;
+    /// a writeback already inside its synchronous commit cannot be retired.
+    [[nodiscard]] bool RetirePhysicalPage(u64 physical_offset, u64 allocation_generation) {
+        const auto physical_it = physical_pages.find(physical_offset);
+        if (physical_it == physical_pages.end()) {
+            return false;
+        }
+        const PhysicalPageState& physical = physical_it->second;
+        if (physical.publication == Publication::CommittingWriteback || physical.alias_count != 0 ||
+            physical.allocation_generation != allocation_generation) {
+            return false;
+        }
+
+        retired_allocation_generations.insert_or_assign(physical_offset, allocation_generation);
+        physical_pages.erase(physical_it);
+        return true;
+    }
+
     /// Marks a freed physical page as a new allocation generation. This is the
     /// explicit recovery path when an old allocation was retired while a dirty
     /// writeback was still pending. No guest alias may remain at this boundary.
@@ -426,6 +451,7 @@ private:
     u64 last_mapping_generation{};
     std::unordered_map<VAddr, PhysicalBackingMapping> guest_mappings;
     PhysicalPages physical_pages;
+    std::unordered_map<u64, u64> retired_allocation_generations;
 };
 
 } // namespace VideoCore
