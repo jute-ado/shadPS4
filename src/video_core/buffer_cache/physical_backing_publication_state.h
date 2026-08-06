@@ -216,25 +216,30 @@ public:
 
     /// Transfers one live cache override directly to a newer cache owner. The
     /// imported backing is never exposed between the two owners.
-    [[nodiscard]] std::optional<PhysicalBackingOverride> MigrateOverride(
+    [[nodiscard]] bool CanMigrateOverride(
         const PhysicalBackingOverride& current,
         PhysicalBackingDeviceAddress override_page_address, u64 owner_generation) {
         if (!eligible || owner_generation == 0 || owner_generation <= current.owner_generation ||
             override_page_address.value == 0 || !HasCompletePage(override_page_address.value)) {
+            return false;
+        }
+        const auto physical_it = FindActiveOverride(current);
+        return physical_it != physical_pages.end() &&
+               NextGeneration(physical_it->second.state_generation).has_value();
+    }
+
+    [[nodiscard]] std::optional<PhysicalBackingOverride> MigrateOverride(
+        const PhysicalBackingOverride& current,
+        PhysicalBackingDeviceAddress override_page_address, u64 owner_generation) {
+        if (!CanMigrateOverride(current, override_page_address, owner_generation)) {
             return std::nullopt;
         }
         const auto physical_it = FindActiveOverride(current);
-        if (physical_it == physical_pages.end()) {
-            return std::nullopt;
-        }
-        const auto next_state = NextGeneration(physical_it->second.state_generation);
-        if (!next_state) {
-            return std::nullopt;
-        }
+        const auto next_state = *NextGeneration(physical_it->second.state_generation);
 
         PhysicalPageState& physical = physical_it->second;
         physical.owner_generation = owner_generation;
-        physical.state_generation = *next_state;
+        physical.state_generation = next_state;
         physical.override_address = override_page_address;
         return PhysicalBackingOverride{
             .physical_offset = current.physical_offset,

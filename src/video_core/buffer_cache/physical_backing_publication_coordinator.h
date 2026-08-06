@@ -446,6 +446,7 @@ public:
             u64 physical_offset{};
             PhysicalBackingDeviceAddress override_page_address{};
             std::optional<PhysicalBackingCachePageToken> existing_token;
+            bool requires_migration{};
         };
         std::vector<PendingOwner> pending;
         pending.reserve(requests.size());
@@ -472,24 +473,42 @@ public:
                 return std::nullopt;
             }
             std::optional<PhysicalBackingCachePageToken> existing_token;
+            bool requires_migration = false;
             if (owner_it != active_cache_owners.end()) {
-                if (state.Resolve(request.guest_page) != request.override_page_address) {
-                    return std::nullopt;
-                }
                 existing_token = owner_it->second.token;
+                requires_migration =
+                    state.Resolve(request.guest_page) != request.override_page_address;
             }
             if (aliases_it->second.size() > std::numeric_limits<size_t>::max() - alias_count) {
                 return std::nullopt;
             }
             alias_count += aliases_it->second.size();
             pending.push_back({request.guest_page, physical_offset, request.override_page_address,
-                               existing_token});
+                               existing_token, requires_migration});
         }
         const auto new_owner_count = static_cast<u64>(std::ranges::count_if(
-            pending, [](const PendingOwner& owner) { return !owner.existing_token.has_value(); }));
+            pending, [](const PendingOwner& owner) {
+                return !owner.existing_token.has_value() || owner.requires_migration;
+            }));
         if (requested_physical_pages != texture_pages ||
             new_owner_count > std::numeric_limits<u64>::max() - last_owner_generation) {
             return std::nullopt;
+        }
+
+        std::vector<u64> staged_owner_generations(pending.size());
+        u64 next_owner_index = 0;
+        for (size_t index = 0; index < pending.size(); ++index) {
+            const auto& owner = pending[index];
+            if (owner.existing_token && !owner.requires_migration) {
+                continue;
+            }
+            const u64 owner_generation = last_owner_generation + ++next_owner_index;
+            staged_owner_generations[index] = owner_generation;
+            if (owner.requires_migration &&
+                !state.CanMigrateOverride(owner.existing_token->publication,
+                                          owner.override_page_address, owner_generation)) {
+                return std::nullopt;
+            }
         }
 
         PhysicalBackingCachePublicationBatch result;
@@ -499,16 +518,18 @@ public:
         std::vector<std::optional<PhysicalBackingCachePageToken>> staged_tokens(pending.size());
         std::vector<PhysicalBackingCachePageToken> newly_staged_tokens;
         newly_staged_tokens.reserve(static_cast<size_t>(new_owner_count));
-        u64 new_owner_index = 0;
         for (size_t index = 0; index < pending.size(); ++index) {
             const auto& owner = pending[index];
-            if (owner.existing_token) {
+            if (owner.existing_token && !owner.requires_migration) {
                 staged_tokens[index] = owner.existing_token;
                 continue;
             }
-            const u64 owner_generation = last_owner_generation + ++new_owner_index;
+            if (owner.requires_migration) {
+                continue;
+            }
             const auto publication = state.ActivateOverride(
-                owner.physical_offset, owner.override_page_address, owner_generation);
+                owner.physical_offset, owner.override_page_address,
+                staged_owner_generations[index]);
             if (!publication) {
                 for (auto token_it = newly_staged_tokens.rbegin();
                      token_it != newly_staged_tokens.rend();
@@ -520,6 +541,16 @@ public:
             staged_tokens[index] = PhysicalBackingCachePageToken{*publication};
             newly_staged_tokens.push_back(*staged_tokens[index]);
         }
+        for (size_t index = 0; index < pending.size(); ++index) {
+            const auto& owner = pending[index];
+            if (!owner.requires_migration) {
+                continue;
+            }
+            const auto publication = state.MigrateOverride(
+                owner.existing_token->publication, owner.override_page_address,
+                staged_owner_generations[index]);
+            staged_tokens[index] = PhysicalBackingCachePageToken{publication.value()};
+        }
 
         for (const u64 physical_offset : texture_pages) {
             texture_block_generations.erase(physical_offset);
@@ -529,8 +560,9 @@ public:
             const auto& owner = pending[index];
             const auto& token = *staged_tokens[index];
             if (owner.existing_token) {
-                active_cache_owners.find(owner.physical_offset)->second.dirty_slices = {
-                    {0, static_cast<u32>(PageSize)}};
+                auto& active_owner = active_cache_owners.find(owner.physical_offset)->second;
+                active_owner.token = token;
+                active_owner.dirty_slices = {{0, static_cast<u32>(PageSize)}};
             } else {
                 active_cache_owners.emplace(
                     owner.physical_offset,
