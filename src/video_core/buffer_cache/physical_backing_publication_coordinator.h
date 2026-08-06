@@ -202,6 +202,20 @@ public:
         return result;
     }
 
+    [[nodiscard]] std::optional<PhysicalBackingCachePagePublication> ActivateCachePageForGuest(
+        VAddr guest_page, PhysicalBackingDeviceAddress override_page_address,
+        bool has_texture_overlap) {
+        if (!IsPageAligned(guest_page)) {
+            return std::nullopt;
+        }
+        const auto mapping_it = mapping_tokens.find(guest_page);
+        if (mapping_it == mapping_tokens.end()) {
+            return std::nullopt;
+        }
+        return ActivateCachePage(mapping_it->second.physical_offset, override_page_address,
+                                 has_texture_overlap);
+    }
+
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(
         const PhysicalBackingCachePageToken& token) {
         const auto owner_it = FindActiveCacheOwner(token);
