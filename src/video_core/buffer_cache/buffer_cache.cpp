@@ -11,8 +11,8 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
-#include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
+#include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -69,8 +69,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
 BufferCache::~BufferCache() = default;
 
-void BufferCache::ApplyPhysicalBackingBdaDeltas(
-    std::span<const PhysicalBackingBdaDelta> deltas) {
+void BufferCache::ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas) {
     if (deltas.empty()) {
         return;
     }
@@ -88,8 +87,7 @@ void BufferCache::ApplyPhysicalBackingBdaDeltas(
     while (run_begin < ordered.size()) {
         size_t run_end = run_begin + 1;
         while (run_end < ordered.size() &&
-               ordered[run_end].guest_page ==
-                   ordered[run_end - 1].guest_page + CACHING_PAGESIZE) {
+               ordered[run_end].guest_page == ordered[run_end - 1].guest_page + CACHING_PAGESIZE) {
             ++run_end;
         }
         std::vector<vk::DeviceAddress> addresses;
@@ -117,6 +115,116 @@ void BufferCache::MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size) {
             page, static_cast<u32>(device_addr - page), static_cast<u32>(slice_end - device_addr)));
         device_addr = slice_end;
     }
+}
+
+bool BufferCache::MigratePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
+                                                          Buffer& target_buffer, VAddr device_addr,
+                                                          u64 size) {
+    if (!physical_backing_coordinator || size == 0) {
+        return true;
+    }
+    if (device_addr > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+    const VAddr end = device_addr + size;
+    for (VAddr target_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); target_page < end;
+         target_page += CACHING_PAGESIZE) {
+        const auto active =
+            physical_backing_coordinator->ResolveActiveCachePageForGuest(target_page);
+        if (!active) {
+            continue;
+        }
+        const u64 physical_offset = active->publication.physical_offset;
+        const auto source_id_it = physical_backing_owner_buffers.find(physical_offset);
+        if (source_id_it == physical_backing_owner_buffers.end()) {
+            return false;
+        }
+        const BufferId source_buffer_id = source_id_it->second;
+        const PhysicalBackingDeviceAddress target_address{target_buffer.BufferDeviceAddress() +
+                                                          target_buffer.Offset(target_page)};
+        const auto current_address =
+            physical_backing_coordinator->ResolveGuestPagePublication(target_page);
+        if (source_buffer_id == target_buffer_id && current_address == target_address) {
+            continue;
+        }
+        if (IsBufferInvalid(source_buffer_id)) {
+            return false;
+        }
+        auto source_owners_it = physical_backing_cache_pages.find(source_buffer_id);
+        if (source_owners_it == physical_backing_cache_pages.end()) {
+            return false;
+        }
+        auto& source_owners = source_owners_it->second;
+        const auto source_owner_it =
+            std::ranges::find(source_owners, *active, &PhysicalBackingCachePageOwner::token);
+        if (source_owner_it == source_owners.end()) {
+            return false;
+        }
+
+        Buffer& source_buffer = slot_buffers[source_buffer_id];
+        const auto copy = PlanPhysicalBackingAliasMigrationCopy(
+            source_buffer.CpuAddr(), source_buffer.SizeBytes(), source_owner_it->guest_page,
+            target_buffer.CpuAddr(), target_buffer.SizeBytes(), target_page);
+        if (!copy) {
+            return false;
+        }
+
+        scheduler.EndRendering();
+        const auto cmdbuf = scheduler.CommandBuffer();
+        boost::container::static_vector<vk::BufferMemoryBarrier2, 2> pre_barriers{};
+        if (auto barrier = source_buffer.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                                                    vk::PipelineStageFlagBits2::eTransfer,
+                                                    copy->source_offset)) {
+            pre_barriers.push_back(*barrier);
+        }
+        if (auto barrier = target_buffer.GetBarrier(vk::AccessFlagBits2::eTransferWrite,
+                                                    vk::PipelineStageFlagBits2::eTransfer,
+                                                    copy->destination_offset)) {
+            pre_barriers.push_back(*barrier);
+        }
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+            .pBufferMemoryBarriers = pre_barriers.data(),
+        });
+        cmdbuf.copyBuffer(source_buffer.Handle(), target_buffer.Handle(),
+                          vk::BufferCopy{
+                              .srcOffset = copy->source_offset,
+                              .dstOffset = copy->destination_offset,
+                              .size = copy->size,
+                          });
+        boost::container::static_vector<vk::BufferMemoryBarrier2, 2> post_barriers{};
+        if (auto barrier = source_buffer.GetBarrier(
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                vk::PipelineStageFlagBits2::eAllCommands, copy->source_offset)) {
+            post_barriers.push_back(*barrier);
+        }
+        if (auto barrier = target_buffer.GetBarrier(
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                vk::PipelineStageFlagBits2::eAllCommands, copy->destination_offset)) {
+            post_barriers.push_back(*barrier);
+        }
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = static_cast<u32>(post_barriers.size()),
+            .pBufferMemoryBarriers = post_barriers.data(),
+        });
+
+        const auto migration =
+            physical_backing_coordinator->MigrateCachePageForGuest(target_page, target_address);
+        if (!migration || migration->previous_token != *active) {
+            return false;
+        }
+        source_owners.erase(source_owner_it);
+        if (source_owners.empty()) {
+            physical_backing_cache_pages.erase(source_owners_it);
+        }
+        physical_backing_cache_pages[target_buffer_id].push_back(
+            {.guest_page = target_page, .token = migration->token});
+        source_id_it->second = target_buffer_id;
+        ApplyPhysicalBackingBdaDeltas(migration->deltas);
+    }
+    return true;
 }
 
 std::optional<std::vector<PhysicalBackingTextureToken>>
@@ -204,19 +312,19 @@ bool BufferCache::RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 
         if (!owner) {
             continue;
         }
-        bool found = false;
-        for (const auto& [buffer_id, cache_pages] : physical_backing_cache_pages) {
-            if (std::ranges::any_of(cache_pages, [&](const auto& cache_page) {
-                    return cache_page.token == *owner;
-                })) {
-                buffers.push_back(buffer_id);
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
+        const auto owner_buffer =
+            physical_backing_owner_buffers.find(owner->publication.physical_offset);
+        if (owner_buffer == physical_backing_owner_buffers.end()) {
             return false;
         }
+        const auto cache_pages = physical_backing_cache_pages.find(owner_buffer->second);
+        if (cache_pages == physical_backing_cache_pages.end() ||
+            !std::ranges::any_of(cache_pages->second, [&](const auto& cache_page) {
+                return cache_page.token == *owner;
+            })) {
+            return false;
+        }
+        buffers.push_back(owner_buffer->second);
     }
     std::ranges::sort(buffers);
     buffers.erase(std::unique(buffers.begin(), buffers.end()), buffers.end());
@@ -548,6 +656,8 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     Buffer& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
     if (is_written) {
+        ASSERT_MSG(MigratePhysicalBackingOwnersForGpuWrite(buffer_id, buffer, device_addr, size),
+                   "Failed to migrate physical backing ownership before GPU write");
         gpu_modified_ranges.Add(device_addr, size);
         MarkPhysicalBackingGpuDirty(device_addr, size);
     }
@@ -728,7 +838,8 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
         .pBufferMemoryBarriers = post_barriers.data(),
     });
     if (!DeleteBuffer(overlap_id)) {
-        LOG_ERROR(Render_Vulkan, "Deferred overlapping buffer deletion after physical writeback failure");
+        LOG_ERROR(Render_Vulkan,
+                  "Deferred overlapping buffer deletion after physical writeback failure");
     }
 }
 
@@ -791,8 +902,8 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
         physical_requests.reserve(size_pages);
         for (u64 i = 0; i < size_pages; ++i) {
             const VAddr guest_page = (page_begin + i) << CACHING_PAGEBITS;
-            const PhysicalBackingDeviceAddress buffer_page{
-                buffer.BufferDeviceAddress() + (i << CACHING_PAGEBITS)};
+            const PhysicalBackingDeviceAddress buffer_page{buffer.BufferDeviceAddress() +
+                                                           (i << CACHING_PAGEBITS)};
             if (physical_backing_coordinator &&
                 physical_backing_coordinator->ResolveGuestPagePublication(guest_page)) {
                 physical_requests.push_back({guest_page, buffer_page});
@@ -809,6 +920,10 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
                 owners.reserve(publication->owners.size());
                 for (const auto& owner : publication->owners) {
                     owners.push_back({.guest_page = owner.guest_page, .token = owner.token});
+                    const auto [owner_it, inserted] = physical_backing_owner_buffers.emplace(
+                        owner.token.publication.physical_offset, buffer_id);
+                    ASSERT_MSG(inserted || owner_it->second == buffer_id,
+                               "Physical backing cache page already belongs to another buffer");
                 }
                 ApplyPhysicalBackingBdaDeltas(publication->deltas);
             }
@@ -838,6 +953,7 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
                 if (!retirement) {
                     return false;
                 }
+                physical_backing_owner_buffers.erase(owner.token.publication.physical_offset);
                 ApplyPhysicalBackingBdaDeltas(retirement->deltas);
                 if (retirement->writeback) {
                     owner.pending_writeback = retirement->writeback;
@@ -864,8 +980,8 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
                         .dstOffset = total_size_bytes,
                         .size = slice.size,
                     });
-                    pending_copies.push_back({owner_index, static_cast<size_t>(total_size_bytes),
-                                              slice.size});
+                    pending_copies.push_back(
+                        {owner_index, static_cast<size_t>(total_size_bytes), slice.size});
                     total_size_bytes = Common::AlignUp(total_size_bytes + slice.size, 64ULL);
                 }
             }
@@ -927,8 +1043,7 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
                 wrote_back = true;
                 for (const auto& delta : *restored) {
                     gpu_modified_ranges.Subtract(delta.guest_page, CACHING_PAGESIZE);
-                    memory_tracker->UnmarkRegionAsGpuModified(delta.guest_page,
-                                                              CACHING_PAGESIZE);
+                    memory_tracker->UnmarkRegionAsGpuModified(delta.guest_page, CACHING_PAGESIZE);
                     cpu_page_write_tracker.Discard(delta.guest_page, CACHING_PAGESIZE);
                 }
                 restored_deltas.insert(restored_deltas.end(), restored->begin(), restored->end());
@@ -943,8 +1058,8 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
                     .srcStageMask = vk::PipelineStageFlagBits2::eHost,
                     .srcAccessMask = vk::AccessFlagBits2::eHostWrite,
                     .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                    .dstAccessMask = vk::AccessFlagBits2::eMemoryRead |
-                                     vk::AccessFlagBits2::eMemoryWrite,
+                    .dstAccessMask =
+                        vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
                 };
                 scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
                     .memoryBarrierCount = 1,
@@ -960,10 +1075,10 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
         bda_addrs.reserve(size_pages);
         for (u64 page = page_begin; page != page_end; ++page) {
             const VAddr guest_page = page << CACHING_PAGEBITS;
-            const auto resolved = physical_backing_coordinator
-                                      ? physical_backing_coordinator->ResolveGuestPagePublication(
-                                            guest_page)
-                                      : std::nullopt;
+            const auto resolved =
+                physical_backing_coordinator
+                    ? physical_backing_coordinator->ResolveGuestPagePublication(guest_page)
+                    : std::nullopt;
             bda_addrs.push_back(resolved ? resolved->value : 0);
         }
         WriteDataBuffer(bda_pagetable_buffer, page_begin * sizeof(vk::DeviceAddress),
@@ -1244,8 +1359,9 @@ void BufferCache::RunGarbageCollector() {
             DownloadBufferMemory<true>(buffer, buffer.CpuAddr(), buffer.SizeBytes(), true);
         }
         if (!DeleteBuffer(buffer_id)) {
-            LOG_ERROR(Render_Vulkan,
-                      "Deferred garbage-collected buffer deletion after physical writeback failure");
+            LOG_ERROR(
+                Render_Vulkan,
+                "Deferred garbage-collected buffer deletion after physical writeback failure");
         }
     };
 }

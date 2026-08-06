@@ -3,11 +3,45 @@
 
 #pragma once
 
+#include <limits>
+#include <optional>
 #include <span>
 
 #include "common/types.h"
 
 namespace VideoCore {
+
+struct PhysicalBackingAliasMigrationCopy {
+    u64 source_offset{};
+    u64 destination_offset{};
+    u64 size{};
+};
+
+[[nodiscard]] constexpr std::optional<PhysicalBackingAliasMigrationCopy>
+PlanPhysicalBackingAliasMigrationCopy(VAddr source_base, u64 source_size, VAddr source_page,
+                                      VAddr destination_base, u64 destination_size,
+                                      VAddr destination_page) noexcept {
+    constexpr u64 PageSize = 16_KB;
+    constexpr u64 PageMask = PageSize - 1;
+    constexpr u64 Max = std::numeric_limits<u64>::max();
+    if ((source_page & PageMask) != 0 || (destination_page & PageMask) != 0 ||
+        source_size < PageSize || destination_size < PageSize || source_page < source_base ||
+        destination_page < destination_base || source_base > Max - (source_size - 1) ||
+        destination_base > Max - (destination_size - 1)) {
+        return std::nullopt;
+    }
+    const u64 source_offset = source_page - source_base;
+    const u64 destination_offset = destination_page - destination_base;
+    if (source_offset > source_size - PageSize ||
+        destination_offset > destination_size - PageSize) {
+        return std::nullopt;
+    }
+    return PhysicalBackingAliasMigrationCopy{
+        .source_offset = source_offset,
+        .destination_offset = destination_offset,
+        .size = PageSize,
+    };
+}
 
 template <typename Buffer, typename Synchronize, typename Publish>
 void PublishDmaBufferAfterSynchronization(Buffer& buffer, Synchronize&& synchronize,

@@ -31,7 +31,7 @@ class MemoryManager;
 namespace Vulkan {
 class ExternalAddressSpaceBacking;
 class GraphicsPipeline;
-}
+} // namespace Vulkan
 
 namespace VideoCore {
 
@@ -209,6 +209,9 @@ private:
     [[nodiscard]] bool ChangeRegister(BufferId buffer_id);
 
     void MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size);
+    [[nodiscard]] bool MigratePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
+                                                               Buffer& target_buffer,
+                                                               VAddr device_addr, u64 size);
     [[nodiscard]] bool RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size);
 
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
@@ -260,6 +263,7 @@ private:
     Vulkan::ExternalAddressSpaceBacking* external_address_space_backing{};
     std::unordered_map<BufferId, std::vector<PhysicalBackingCachePageOwner>>
         physical_backing_cache_pages;
+    std::unordered_map<u64, BufferId> physical_backing_owner_buffers;
 };
 
 } // namespace VideoCore
