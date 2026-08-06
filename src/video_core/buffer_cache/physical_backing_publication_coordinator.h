@@ -40,6 +40,12 @@ struct PhysicalBackingCachePagePublication {
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
+struct PhysicalBackingCachePageMigration {
+    PhysicalBackingCachePageToken previous_token{};
+    PhysicalBackingCachePageToken token{};
+    std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
 struct PhysicalBackingCachePageRequest {
     VAddr guest_page{};
     PhysicalBackingDeviceAddress override_page_address{};
@@ -423,6 +429,39 @@ public:
             return std::nullopt;
         }
         return owner_it->second.token;
+    }
+
+    [[nodiscard]] std::optional<PhysicalBackingCachePageMigration> MigrateCachePageForGuest(
+        VAddr guest_page, PhysicalBackingDeviceAddress override_page_address) {
+        if (!IsPageAligned(guest_page) || override_page_address.value == 0) {
+            return std::nullopt;
+        }
+        const auto mapping_it = mapping_tokens.find(guest_page);
+        if (mapping_it == mapping_tokens.end()) {
+            return std::nullopt;
+        }
+        const u64 physical_offset = mapping_it->second.physical_offset;
+        const auto owner_it = active_cache_owners.find(physical_offset);
+        if (owner_it == active_cache_owners.end() || pending_writebacks.contains(physical_offset) ||
+            texture_block_generations.contains(physical_offset)) {
+            return std::nullopt;
+        }
+        const auto owner_generation = AcquireOwnerGeneration();
+        if (!owner_generation) {
+            return std::nullopt;
+        }
+        const PhysicalBackingCachePageToken previous_token = owner_it->second.token;
+        const auto migrated = state.MigrateOverride(previous_token.publication,
+                                                    override_page_address, *owner_generation);
+        if (!migrated) {
+            return std::nullopt;
+        }
+        owner_it->second.token = {*migrated};
+        return PhysicalBackingCachePageMigration{
+            .previous_token = previous_token,
+            .token = owner_it->second.token,
+            .deltas = MakeAliasDeltas(physical_offset),
+        };
     }
 
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(
