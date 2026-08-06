@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -86,6 +87,29 @@ TEST(DmaPublicationGate, EligibilityExcludesWorkWithUnreplayableSideEffects) {
     traits = eligible;
     traits.storage_image_writes = true;
     EXPECT_FALSE(VideoCore::IsDmaDiscoveryEligible(traits));
+    traits = eligible;
+    traits.unsupported_stage_dma_reads = true;
+    EXPECT_FALSE(VideoCore::IsDmaDiscoveryEligible(traits));
+}
+
+TEST(DmaPublicationGate, RebuildsEveryDiscoveryAttemptBeforePublishingOnce) {
+    DmaPublicationGate gate{
+        DmaPublicationGate::Config{.maximum_attempts = 3, .binding_generation = 23}};
+    const std::array epochs{DmaFaultEpoch::FaultCount(1), DmaFaultEpoch::Clean()};
+    std::vector<char> operations;
+
+    const auto result = VideoCore::ExecuteDmaPublicationGate(
+        gate, 23,
+        [&](std::uint32_t attempt) {
+            operations.push_back('D');
+            return epochs.at(attempt - 1);
+        },
+        [&] { operations.push_back('P'); });
+
+    EXPECT_EQ(result, VideoCore::DmaExecutionResult::Published);
+    EXPECT_EQ(operations, (std::vector<char>{'D', 'D', 'P'}));
+    EXPECT_EQ(gate.AttemptCount(), 2);
+    EXPECT_EQ(gate.PublicationCount(), 1);
 }
 
 TEST(DmaDiscoveryPolicy, DiscoveryNeverClearsOrConsumesAttachmentMetadata) {
