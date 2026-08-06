@@ -488,6 +488,25 @@ PlanPhysicalBackingGpuWritebackCopies(VAddr buffer_base, u64 buffer_size, u64 ba
     return coalesced;
 }
 
+[[nodiscard]] inline bool PhysicalBackingGpuWritebacksOverlapGuestRange(
+    std::span<const VAddr> pending_guest_pages, VAddr guest_address, u64 size) {
+    constexpr u64 PageSize = 16_KB;
+    constexpr u64 PageMask = PageSize - 1;
+    if (size == 0 || guest_address > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+    const VAddr end = guest_address + size;
+    for (const VAddr page : pending_guest_pages) {
+        if ((page & PageMask) != 0 || page > std::numeric_limits<VAddr>::max() - PageSize) {
+            return false;
+        }
+        if (page < end && guest_address < page + PageSize) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] inline std::optional<PhysicalBackingCommandAliasPlan>
 PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAccess> accesses) {
     constexpr u64 PageMask = 16_KB - 1;
