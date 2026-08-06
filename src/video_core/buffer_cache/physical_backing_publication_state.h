@@ -58,6 +58,10 @@ struct PhysicalBackingWriteback {
 /// bounded hash lookups and an override changes every alias without rewriting any
 /// guest entry. Mutations are generation checked so delayed cache retirement or
 /// writeback work cannot publish a newer mapping accidentally.
+///
+/// This policy is not internally synchronized. Every access to one instance,
+/// including Resolve and policy calls re-entered by a writeback callback, must be
+/// externally serialized.
 class PhysicalBackingPublicationState {
 public:
     static constexpr u64 PageSize = 16_KB;
