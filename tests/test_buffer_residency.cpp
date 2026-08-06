@@ -306,7 +306,7 @@ TEST(BufferResidency, PlansOneAliasHandoffForTheWholeGpuCommand) {
     const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
 
     ASSERT_TRUE(plan.has_value());
-    EXPECT_EQ(plan->read_snapshot_order, (std::vector<Resource>{texture}));
+    EXPECT_EQ(plan->read_snapshot_order, (std::vector<Resource>{texture, buffer}));
     EXPECT_EQ(plan->writer_prepare_order, (std::vector<Resource>{buffer}));
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{buffer}));
     ASSERT_EQ(plan->pages.size(), 1);
@@ -326,4 +326,20 @@ TEST(BufferResidency, RejectsCompetingBufferAndTextureWritersInOneGpuCommand) {
     };
 
     EXPECT_FALSE(VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses));
+}
+
+TEST(BufferResidency, SnapshotsWritableResourceBeforePreparingPartialWrite) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    constexpr u64 page = 0xab8d'0000;
+    const Resource texture{Kind::Texture, 16};
+    const std::array accesses{Access{texture, true, {page}}};
+
+    const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
+
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->read_snapshot_order, (std::vector<Resource>{texture}));
+    EXPECT_EQ(plan->writer_prepare_order, (std::vector<Resource>{texture}));
+    EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{texture}));
 }
