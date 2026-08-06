@@ -14,6 +14,31 @@
 
 namespace Vulkan {
 
+enum class ExternalHostBackingProvenance : std::uint8_t {
+    Unknown,
+    PageFileMapping,
+    ForeignMapped,
+};
+
+enum class ExternalHostHandleClass : std::uint8_t {
+    None,
+    HostAllocation,
+    HostMappedForeignMemory,
+};
+
+[[nodiscard]] constexpr ExternalHostHandleClass AllowedExternalHostHandleTypes(
+    ExternalHostBackingProvenance provenance) noexcept {
+    switch (provenance) {
+    case ExternalHostBackingProvenance::PageFileMapping:
+        return ExternalHostHandleClass::HostAllocation;
+    case ExternalHostBackingProvenance::ForeignMapped:
+        return ExternalHostHandleClass::HostMappedForeignMemory;
+    case ExternalHostBackingProvenance::Unknown:
+        return ExternalHostHandleClass::None;
+    }
+    return ExternalHostHandleClass::None;
+}
+
 enum class ExternalHostMemoryProbeStage : std::uint8_t {
     NotStarted,
     Capability,
@@ -46,6 +71,63 @@ enum class ExternalHostMemoryProbeFailure : std::uint8_t {
     MemoryAllocationFailed,
     MemoryBindingFailed,
     ZeroDeviceAddress,
+};
+
+enum class ExternalHostProbeVkResultClass : std::uint8_t {
+    NotCalled,
+    Success,
+    ErrorInvalidExternalHandle,
+    ErrorOutOfMemory,
+    ErrorUnknown,
+};
+
+enum class ExternalHostProbeDisposition : std::uint8_t {
+    Pass,
+    Unsupported,
+    Error,
+};
+
+[[nodiscard]] constexpr ExternalHostProbeDisposition ClassifyExternalHostProbeAttempt(
+    bool succeeded, ExternalHostMemoryProbeFailure failure,
+    ExternalHostProbeVkResultClass vk_result) noexcept {
+    if (succeeded) {
+        return ExternalHostProbeDisposition::Pass;
+    }
+    if (failure == ExternalHostMemoryProbeFailure::ExtensionUnavailable ||
+        failure == ExternalHostMemoryProbeFailure::HandleTypeNotImportable ||
+        failure == ExternalHostMemoryProbeFailure::NoCompatibleMemoryType ||
+        failure == ExternalHostMemoryProbeFailure::NoCoherentMemoryType ||
+        vk_result == ExternalHostProbeVkResultClass::ErrorInvalidExternalHandle) {
+        return ExternalHostProbeDisposition::Unsupported;
+    }
+    return ExternalHostProbeDisposition::Error;
+}
+
+[[nodiscard]] constexpr ExternalHostProbeDisposition ClassifyExternalHostProbeResult(
+    std::span<const ExternalHostProbeDisposition> attempts) noexcept {
+    if (attempts.empty()) {
+        return ExternalHostProbeDisposition::Error;
+    }
+    bool all_unsupported = true;
+    for (const auto attempt : attempts) {
+        if (attempt == ExternalHostProbeDisposition::Pass) {
+            return ExternalHostProbeDisposition::Pass;
+        }
+        all_unsupported &= attempt == ExternalHostProbeDisposition::Unsupported;
+    }
+    return all_unsupported ? ExternalHostProbeDisposition::Unsupported
+                           : ExternalHostProbeDisposition::Error;
+}
+
+struct ExternalHostProbeCleanupResult {
+    bool unmap_attempted{};
+    bool unmap_succeeded{};
+    bool close_attempted{};
+    bool close_succeeded{};
+
+    [[nodiscard]] constexpr bool Complete() const noexcept {
+        return (!unmap_attempted || unmap_succeeded) && (!close_attempted || close_succeeded);
+    }
 };
 
 struct ExternalHostMemoryProbeResult {
