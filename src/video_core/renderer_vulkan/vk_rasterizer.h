@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -23,6 +25,7 @@ namespace Vulkan {
 class Scheduler;
 class RenderState;
 class GraphicsPipeline;
+class ExternalAddressSpaceBacking;
 
 class Rasterizer {
 public:
@@ -147,6 +150,7 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+    std::unique_ptr<ExternalAddressSpaceBacking> external_address_space_backing;
 };
 
 } // namespace Vulkan

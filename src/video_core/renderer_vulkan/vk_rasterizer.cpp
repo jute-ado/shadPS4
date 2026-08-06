@@ -7,6 +7,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -40,6 +41,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
     if (!EmulatorSettings.IsNullGPU()) {
+        if (auto lease = memory->GetAddressSpace().AcquireBackingLease()) {
+            external_address_space_backing =
+                std::make_unique<ExternalAddressSpaceBacking>(instance, std::move(*lease));
+        }
         liverpool->BindRasterizer(this);
     }
     memory->SetRasterizer(this);
