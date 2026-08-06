@@ -267,6 +267,16 @@ target_compile_features(shadps4_external_host_memory_probe_test PRIVATE cxx_std_
 target_link_libraries(shadps4_external_host_memory_probe_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_external_host_memory_probe_test)
 
+add_executable(shadps4_exact_address_space_host_import_probe_test
+    test_exact_address_space_host_import_probe.cpp
+)
+target_include_directories(shadps4_exact_address_space_host_import_probe_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_exact_address_space_host_import_probe_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_exact_address_space_host_import_probe_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_exact_address_space_host_import_probe_test)
+
 # One-shot hardware mechanism probe. This is intentionally separate from the emulator app: it
 # imports only a bounded synthetic page-file mapping and never publishes guest BDA pages.
 if (WIN32)
