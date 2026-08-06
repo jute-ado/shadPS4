@@ -311,6 +311,27 @@ TEST(PhysicalBackingPublicationCoordinator, IncompleteTextureTransitionLeavesOwn
     EXPECT_TRUE(coordinator.EndTextureOverlap(second->token));
 }
 
+TEST(PhysicalBackingPublicationCoordinator,
+     RejectsSecondTextureOwnerUntilPriorAuthorityIsMaterialized) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto first = coordinator.BeginTextureOverlap(GuestA, PageSize);
+    ASSERT_TRUE(first.has_value());
+
+    const auto second = coordinator.BeginTextureOverlap(GuestB, PageSize);
+
+    EXPECT_FALSE(second.has_value());
+    if (second) {
+        EXPECT_TRUE(coordinator.EndTextureOverlap(second->token));
+    }
+    EXPECT_TRUE(coordinator.EndTextureOverlap(first->token));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, GuestPageRegistrationUsesMonotonicOwnerTokens) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
