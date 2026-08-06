@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/buffer_cache/dma_gpu_publication_predicate.h"
 #include "video_core/buffer_cache/dma_publication_gate.h"
 #include "video_core/renderer_vulkan/dma_discovery_policy.h"
 
@@ -14,6 +15,9 @@ using VideoCore::DmaAttemptResult;
 using VideoCore::DmaFaultEpoch;
 using VideoCore::DmaPublicationGate;
 using VideoCore::DmaWorkTraits;
+using VideoCore::GpuDmaPredicateCommand;
+using VideoCore::GpuDmaPredicateSlotPool;
+using VideoCore::GpuDmaPredicateSupport;
 
 TEST(DmaPublicationGate, FaultedDiscoveryRetriesAndPublishesExactlyOnceWhenClean) {
     DmaPublicationGate gate{
@@ -110,6 +114,94 @@ TEST(DmaDiscoveryPolicy, PublicationPreservesClearAndConsumesMetadata) {
         false, VideoCore::DmaAttachmentMode::Publication);
     EXPECT_FALSE(loaded.load_clear);
     EXPECT_TRUE(loaded.consume_metadata);
+}
+
+TEST(GpuDmaPublicationPredicate, FailsClosedWithoutSupportOrOwnedSlot) {
+    constexpr GpuDmaPredicateSupport supported{
+        .extension_available = true,
+        .conditional_rendering_feature = true,
+    };
+    constexpr GpuDmaPredicateSupport no_extension{
+        .extension_available = false,
+        .conditional_rendering_feature = true,
+    };
+    constexpr GpuDmaPredicateSupport no_feature{
+        .extension_available = true,
+        .conditional_rendering_feature = false,
+    };
+    GpuDmaPredicateSlotPool<1> slots;
+    const auto owned = slots.Acquire(0);
+    ASSERT_TRUE(owned.has_value());
+
+    EXPECT_FALSE(VideoCore::BuildGpuDmaPublicationPlan(no_extension, owned, slots).has_value());
+    EXPECT_FALSE(VideoCore::BuildGpuDmaPublicationPlan(no_feature, owned, slots).has_value());
+    EXPECT_FALSE(
+        VideoCore::BuildGpuDmaPublicationPlan(supported, std::nullopt, slots).has_value());
+
+    const auto stale = *owned;
+    ASSERT_TRUE(slots.ReleaseUnsubmitted(*owned));
+    EXPECT_FALSE(VideoCore::BuildGpuDmaPublicationPlan(supported, stale, slots).has_value());
+}
+
+TEST(GpuDmaPublicationPredicate, CleanAttemptUsesGpuOrderedConditionalPublication) {
+    constexpr GpuDmaPredicateSupport supported{
+        .extension_available = true,
+        .conditional_rendering_feature = true,
+    };
+    GpuDmaPredicateSlotPool<1> slots;
+    const auto owned = slots.Acquire(0);
+    ASSERT_TRUE(owned.has_value());
+
+    const auto plan = VideoCore::BuildGpuDmaPublicationPlan(supported, owned, slots);
+    ASSERT_TRUE(plan.has_value());
+    constexpr std::array expected{
+        GpuDmaPredicateCommand::ResetClean,
+        GpuDmaPredicateCommand::TransferWriteToShaderReadWriteBarrier,
+        GpuDmaPredicateCommand::RasterDiscardDiscovery,
+        GpuDmaPredicateCommand::ShaderWriteToConditionalReadBarrier,
+        GpuDmaPredicateCommand::BeginConditionalPublication,
+        GpuDmaPredicateCommand::PublicationDraw,
+        GpuDmaPredicateCommand::EndConditionalPublication,
+    };
+    EXPECT_EQ(plan->commands, expected);
+    EXPECT_EQ(plan->predicate_value_for_clean, 1U);
+    EXPECT_EQ(plan->predicate_value_for_fault, 0U);
+    EXPECT_FALSE(plan->conditional_inverted);
+    EXPECT_FALSE(plan->requires_cpu_wait);
+}
+
+TEST(GpuDmaPublicationPredicate, SlotsRemainUniqueUntilTheirGpuTickCompletes) {
+    GpuDmaPredicateSlotPool<2> slots;
+    const auto first = slots.Acquire(0);
+    const auto second = slots.Acquire(0);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_NE(first->index, second->index);
+    EXPECT_FALSE(slots.Acquire(0).has_value());
+
+    ASSERT_TRUE(slots.Retire(*first, 7));
+    EXPECT_FALSE(slots.Acquire(6).has_value());
+    const auto reused = slots.Acquire(7);
+    ASSERT_TRUE(reused.has_value());
+    EXPECT_EQ(reused->index, first->index);
+    EXPECT_NE(reused->generation, first->generation);
+
+    EXPECT_FALSE(slots.Retire(*first, 8));
+    EXPECT_TRUE(slots.Owns(*reused));
+}
+
+TEST(GpuDmaPublicationPredicate, UnsubmittedReleaseRejectsStaleOwnership) {
+    GpuDmaPredicateSlotPool<1> slots;
+    const auto first = slots.Acquire(0);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(slots.ReleaseUnsubmitted(*first));
+
+    const auto second = slots.Acquire(0);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second->index, first->index);
+    EXPECT_NE(second->generation, first->generation);
+    EXPECT_FALSE(slots.ReleaseUnsubmitted(*first));
+    EXPECT_TRUE(slots.Owns(*second));
 }
 
 } // namespace
