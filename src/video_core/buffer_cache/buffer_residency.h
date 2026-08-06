@@ -27,6 +27,26 @@ struct PhysicalBackingAliasMigrationCopy {
     u64 size{};
 };
 
+struct PhysicalBackingTextureBufferTransition {
+    VAddr base{};
+    u32 size{};
+};
+
+[[nodiscard]] constexpr std::optional<PhysicalBackingTextureBufferTransition>
+PlanPhysicalBackingTextureBufferTransition(VAddr image_base, u64 image_size, VAddr write_address,
+                                           u64 write_size) noexcept {
+    constexpr u64 Max = std::numeric_limits<u64>::max();
+    if (image_size == 0 || image_size > std::numeric_limits<u32>::max() || write_size == 0 ||
+        image_base > Max - image_size || write_address < image_base ||
+        write_address > Max - write_size || write_address + write_size > image_base + image_size) {
+        return std::nullopt;
+    }
+    return PhysicalBackingTextureBufferTransition{
+        .base = image_base,
+        .size = static_cast<u32>(image_size),
+    };
+}
+
 [[nodiscard]] constexpr std::optional<PhysicalBackingAliasMigrationCopy>
 PlanPhysicalBackingAliasMigrationCopy(VAddr source_base, u64 source_size, VAddr source_page,
                                       VAddr destination_base, u64 destination_size,

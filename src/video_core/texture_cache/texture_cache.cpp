@@ -167,6 +167,41 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     });
 }
 
+std::vector<ImageId> TextureCache::FindPhysicalBackingImagesForPages(
+    std::span<const u64> physical_pages) {
+    std::scoped_lock lock{mutex};
+    std::vector<ImageId> images;
+    for (const auto& [image_id, tokens] : physical_backing_texture_tokens) {
+        bool found = false;
+        for (const auto& token : tokens) {
+            if (std::ranges::any_of(token.physical_pages, [&](u64 physical_page) {
+                    return std::ranges::contains(physical_pages, physical_page);
+                })) {
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            images.push_back(image_id);
+        }
+    }
+    return images;
+}
+
+bool TextureCache::ReleasePhysicalBackingTextureOwnershipForBufferWrite(ImageId image_id) {
+    std::scoped_lock lock{mutex};
+    const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
+    if (physical_tokens == physical_backing_texture_tokens.end()) {
+        return false;
+    }
+    if (!buffer_cache.EndPhysicalBackingTextureOverlap(physical_tokens->second)) {
+        return false;
+    }
+    slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
+    physical_backing_texture_tokens.erase(physical_tokens);
+    return true;
+}
+
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
     std::scoped_lock lk{mutex};
 

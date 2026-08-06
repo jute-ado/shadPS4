@@ -117,6 +117,67 @@ void BufferCache::MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size) {
     }
 }
 
+bool BufferCache::TransitionPhysicalBackingTexturesForGpuWrite(VAddr device_addr, u64 size) {
+    if (!physical_backing_coordinator || size == 0) {
+        return true;
+    }
+    if (device_addr > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+    const VAddr end = device_addr + size;
+    std::vector<u64> physical_pages;
+    for (VAddr guest_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); guest_page < end;
+         guest_page += CACHING_PAGESIZE) {
+        if (const auto physical =
+                physical_backing_coordinator->ResolvePhysicalPageForGuest(guest_page)) {
+            physical_pages.push_back(*physical);
+        }
+    }
+    std::ranges::sort(physical_pages);
+    physical_pages.erase(std::ranges::unique(physical_pages).begin(), physical_pages.end());
+    if (physical_pages.empty()) {
+        return true;
+    }
+
+    const auto images = texture_cache.FindPhysicalBackingImagesForPages(physical_pages);
+    for (const ImageId image_id : images) {
+        Image& image = texture_cache.GetImage(image_id);
+        const auto transition = PlanPhysicalBackingTextureBufferTransition(
+            image.info.guest_address, image.info.guest_size, image.info.guest_address, 1);
+        if (!transition) {
+            return false;
+        }
+        const BufferId image_buffer_id = FindBuffer(transition->base, transition->size);
+        Buffer& image_buffer = slot_buffers[image_buffer_id];
+        if (!SynchronizeBufferFromImage(image_buffer, transition->base, transition->size)) {
+            return false;
+        }
+        const vk::BufferMemoryBarrier2 image_copy_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask =
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .buffer = image_buffer.Handle(),
+            .offset = 0,
+            .size = image_buffer.SizeBytes(),
+        };
+        scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &image_copy_barrier,
+        });
+        if (!texture_cache.ReleasePhysicalBackingTextureOwnershipForBufferWrite(image_id) ||
+            !AcquirePhysicalBackingOwnersForGpuWrite(image_buffer_id, image_buffer,
+                                                     transition->base, transition->size)) {
+            return false;
+        }
+        gpu_modified_ranges.Add(transition->base, transition->size);
+        MarkPhysicalBackingGpuDirty(transition->base, transition->size);
+    }
+    return true;
+}
+
 bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                           Buffer& target_buffer, VAddr device_addr,
                                                           u64 size) {
@@ -612,6 +673,8 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         if (dst_gds) {
             return gds_buffer;
         }
+        ASSERT_MSG(TransitionPhysicalBackingTexturesForGpuWrite(dst, num_bytes),
+                   "Failed to preserve physical texture ownership before GPU copy");
         dst_buffer_id = FindBuffer(dst, num_bytes);
         auto& buffer = slot_buffers[dst_buffer_id];
         SynchronizeBuffer(buffer, dst, num_bytes, true, true);
@@ -687,6 +750,10 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
         return {&stream_buffer, offset};
+    }
+    if (is_written) {
+        ASSERT_MSG(TransitionPhysicalBackingTexturesForGpuWrite(device_addr, size),
+                   "Failed to preserve physical texture ownership before GPU write");
     }
     if (IsBufferInvalid(buffer_id)) {
         buffer_id = FindBuffer(device_addr, size);
