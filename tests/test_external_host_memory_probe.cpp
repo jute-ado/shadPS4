@@ -12,6 +12,17 @@
 namespace Vulkan {
 namespace {
 
+TEST(ExternalHostMemoryProbe, RequiresExtensionAndValidImportedPointerAlignment) {
+    EXPECT_EQ(ValidateExternalHostMemoryProbeCapability(false, 0x1000),
+              ExternalHostMemoryProbeCapability::ExtensionUnavailable);
+    EXPECT_EQ(ValidateExternalHostMemoryProbeCapability(true, 0),
+              ExternalHostMemoryProbeCapability::InvalidPointerAlignment);
+    EXPECT_EQ(ValidateExternalHostMemoryProbeCapability(true, 24),
+              ExternalHostMemoryProbeCapability::InvalidPointerAlignment);
+    EXPECT_EQ(ValidateExternalHostMemoryProbeCapability(true, 0x1000),
+              ExternalHostMemoryProbeCapability::Available);
+}
+
 TEST(ExternalHostMemoryProbe, ValidatesImportedHostAllocationBoundsAndAlignment) {
     constexpr std::uintptr_t aligned_address = 0x10000;
     constexpr std::size_t alignment = 0x1000;
