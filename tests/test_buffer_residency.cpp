@@ -190,7 +190,7 @@ TEST(BufferResidency, PlansTransitiveTextureOwnershipComponentInGpuWriteOrder) {
             .physical_pages = {0xbeef'0000},
         },
     };
-    constexpr std::array seed_pages{0xab8d'0000ULL};
+    constexpr std::array seed_pages{0xab8d'0000ULL, 0xdead'0000ULL};
 
     const auto plan =
         VideoCore::PlanPhysicalBackingTextureOwnershipComponent(records, seed_pages);
