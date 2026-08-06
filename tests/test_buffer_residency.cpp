@@ -84,3 +84,19 @@ TEST(BufferResidency, FailedPhysicalOwnershipBatchPreservesCurrentPagePublicatio
     EXPECT_EQ(addresses[1], ImportedAddress);
     EXPECT_EQ(addresses[2], 0);
 }
+
+TEST(BufferResidency, PlansFullPageCopyBeforeWritableAliasMigration) {
+    constexpr VAddr PageSize = 16_KB;
+    const auto copy = VideoCore::PlanPhysicalBackingAliasMigrationCopy(
+        0x1000'0000, 4 * PageSize, 0x1000'4000, 0x2000'0000, 4 * PageSize, 0x2000'8000);
+
+    ASSERT_TRUE(copy.has_value());
+    EXPECT_EQ(copy->source_offset, PageSize);
+    EXPECT_EQ(copy->destination_offset, 2 * PageSize);
+    EXPECT_EQ(copy->size, PageSize);
+
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingAliasMigrationCopy(
+        0x1000'0000, PageSize, 0x1000'0001, 0x2000'0000, PageSize, 0x2000'0000));
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingAliasMigrationCopy(
+        0x1000'0000, PageSize, 0x1000'4000, 0x2000'0000, PageSize, 0x2000'0000));
+}
