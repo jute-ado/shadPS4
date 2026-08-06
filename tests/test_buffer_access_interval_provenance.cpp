@@ -112,9 +112,17 @@ TEST(BufferAccessProvenanceTrace, WritesExactIntervalsForMultiRoleCommandsWithin
     const auto lines = ReadJsonLines(path);
     ASSERT_EQ(lines.size(), 3);
     EXPECT_EQ(lines[0].at("source"), "buffer_access_interval_provenance");
+    EXPECT_EQ(lines[0].at("timestampClock"), "unix_nanoseconds");
+    EXPECT_EQ(lines[0].at("elapsedClock"), "trace_elapsed_nanoseconds");
 
     EXPECT_EQ(lines[1].at("commandId"), 12);
     EXPECT_EQ(lines[1].at("tick"), 51);
+    EXPECT_TRUE(lines[1].at("timestampUnixNanoseconds").is_number_unsigned());
+    EXPECT_TRUE(lines[1].at("traceElapsedNanoseconds").is_number_unsigned());
+    EXPECT_LE(lines[1].at("timestampUnixNanoseconds").get<std::uint64_t>(),
+              lines[2].at("timestampUnixNanoseconds").get<std::uint64_t>());
+    EXPECT_LE(lines[1].at("traceElapsedNanoseconds").get<std::uint64_t>(),
+              lines[2].at("traceElapsedNanoseconds").get<std::uint64_t>());
     EXPECT_EQ(lines[1].at("bufferId"), 1);
     EXPECT_EQ(lines[1].at("offset"), 0);
     EXPECT_EQ(lines[1].at("size"), 64);
