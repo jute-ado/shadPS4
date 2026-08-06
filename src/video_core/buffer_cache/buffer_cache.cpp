@@ -11,6 +11,7 @@
 #include "video_core/buffer_cache/buffer_fault_admission.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
+#include "video_core/buffer_cache/readonly_stream_snapshot.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -397,8 +398,17 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
-        const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
-        return {&stream_buffer, offset};
+        const auto reservation = StageReadonlyStreamSnapshot(
+            [&] { return stream_buffer.Map(size, instance.UniformMinAlignment()); },
+            [&](auto&& snapshot) {
+                memory_tracker->WithReadonlyStreamSnapshot(
+                    device_addr, size, std::forward<decltype(snapshot)>(snapshot));
+            },
+            [&](const auto& reservation) {
+                memory->CopySparseMemory(device_addr, reservation.first, size);
+            },
+            [&] { stream_buffer.Commit(); });
+        return {&stream_buffer, reservation.second};
     }
     if (IsBufferInvalid(buffer_id)) {
         buffer_id = FindBuffer(device_addr, size);

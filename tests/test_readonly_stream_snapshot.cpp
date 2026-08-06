@@ -104,9 +104,7 @@ TEST(ReadonlyStreamSnapshot, OwnsACoherentSnapshotWhileGuestMutationIsAttempted)
             memory.Reserve();
             return std::span<int>{memory.staging};
         },
-        [&](auto&& snapshot) {
-            memory.Transaction(std::forward<decltype(snapshot)>(snapshot));
-        },
+        [&](auto&& snapshot) { memory.Transaction(std::forward<decltype(snapshot)>(snapshot)); },
         [&](std::span<int> destination) { memory.CopySnapshot(destination); },
         [&] { memory.Commit(); });
     writer.join();

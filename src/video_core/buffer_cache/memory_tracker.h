@@ -5,11 +5,15 @@
 
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <type_traits>
 #include <vector>
 
+#include <boost/container/static_vector.hpp>
+
 #include "common/debug.h"
+#include "common/scope_exit.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_manager.h"
@@ -138,6 +142,47 @@ public:
                                     manager->GetCpuAddr() + offset, size);
                                 manager->lock.unlock();
                             });
+    }
+
+    /// Own a coherent CPU snapshot for a small read-only stream upload. Pages that were dirty on
+    /// entry are restored to the same dirty/writeable state before this transaction returns.
+    void WithReadonlyStreamSnapshot(VAddr query_cpu_range, u64 query_size, auto&& snapshot) {
+        static constexpr u64 MaxSnapshotSize = 64_KB;
+        static constexpr size_t MaxManagers = 2;
+        static constexpr size_t MaxDirtyRanges = MaxSnapshotSize / TRACKER_BYTES_PER_PAGE + 1;
+        ASSERT(query_size <= MaxSnapshotSize);
+
+        struct DirtyRange {
+            RegionManager* manager;
+            VAddr address;
+            u64 size;
+        };
+        boost::container::static_vector<RegionManager*, MaxManagers> locked_managers;
+        boost::container::static_vector<DirtyRange, MaxDirtyRanges> dirty_ranges;
+
+        SCOPE_EXIT {
+            for (const auto& range : dirty_ranges) {
+                range.manager->template ChangeRegionState<Type::CPU, true>(range.address,
+                                                                           range.size);
+            }
+            for (auto manager = locked_managers.rbegin(); manager != locked_managers.rend();
+                 ++manager) {
+                (*manager)->lock.unlock();
+            }
+        };
+
+        IteratePages<true>(
+            query_cpu_range, query_size,
+            [&locked_managers, &dirty_ranges](RegionManager* manager, u64 offset, size_t size) {
+                locked_managers.push_back(manager);
+                manager->lock.lock();
+                manager->template ForEachModifiedRange<Type::CPU, true>(
+                    manager->GetCpuAddr() + offset, size,
+                    [&dirty_ranges, manager](VAddr address, u64 dirty_size) {
+                        dirty_ranges.push_back({manager, address, dirty_size});
+                    });
+            });
+        std::invoke(std::forward<decltype(snapshot)>(snapshot));
     }
 
     /// Call 'func' for each GPU modified range and unmark those pages as GPU modified
