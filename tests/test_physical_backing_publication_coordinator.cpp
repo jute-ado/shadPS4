@@ -141,4 +141,30 @@ TEST(PhysicalBackingPublicationCoordinator, DirtyCacheOwnerZerosAliasesUntilPhys
     EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, CpuWriteThroughAliasRetiresPhysicalGpuOwner) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePage(
+        PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 256, 512));
+
+    const auto retirement = coordinator.RetireOwnerForCpuWrite(GuestB);
+
+    ASSERT_TRUE(retirement.has_value());
+    ASSERT_TRUE(retirement->writeback.has_value());
+    EXPECT_EQ(retirement->writeback->physical_offset, PhysicalPage);
+    ASSERT_EQ(retirement->dirty_slices.size(), 1);
+    EXPECT_EQ(retirement->dirty_slices[0].offset, 256);
+    EXPECT_EQ(retirement->dirty_slices[0].size, 512);
+    ASSERT_EQ(retirement->deltas.size(), 2);
+    EXPECT_EQ(retirement->deltas[0].device_address.value, 0);
+    EXPECT_EQ(retirement->deltas[1].device_address.value, 0);
+}
+
 } // namespace
