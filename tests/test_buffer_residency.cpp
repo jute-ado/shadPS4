@@ -151,3 +151,54 @@ TEST(BufferResidency, AlignsTheCompleteTextureOwnershipSpan) {
     EXPECT_FALSE(VideoCore::PlanPhysicalBackingTextureOwnershipSpan(
         std::numeric_limits<VAddr>::max() - 0x1000, 0x2000));
 }
+
+TEST(BufferResidency, PlansTransitiveTextureOwnershipComponentInGpuWriteOrder) {
+    const std::array records{
+        VideoCore::PhysicalBackingTextureOwnershipRecord{
+            .image_index = 16,
+            .guest_base = 0x114b'6d00'00,
+            .guest_size = 0x24'0000,
+            .write_order = 20,
+            .physical_pages = {0xab8d'0000, 0xab8d'4000},
+        },
+        VideoCore::PhysicalBackingTextureOwnershipRecord{
+            .image_index = 41,
+            .guest_base = 0x114b'7100'00,
+            .guest_size = 0x14'0000,
+            .write_order = 30,
+            .physical_pages = {0xab8d'0000},
+        },
+        VideoCore::PhysicalBackingTextureOwnershipRecord{
+            .image_index = 44,
+            .guest_base = 0x114b'8500'00,
+            .guest_size = 0x2a'9600,
+            .write_order = 40,
+            .physical_pages = {0xab8d'4000, 0xab8d'8000},
+        },
+        VideoCore::PhysicalBackingTextureOwnershipRecord{
+            .image_index = 51,
+            .guest_base = 0x114b'4c00'00,
+            .guest_size = 0x24'0000,
+            .write_order = 10,
+            .physical_pages = {0xab8c'c000, 0xab8d'0000},
+        },
+        VideoCore::PhysicalBackingTextureOwnershipRecord{
+            .image_index = 77,
+            .guest_base = 0x1200'0000'00,
+            .guest_size = 0x4000,
+            .write_order = 50,
+            .physical_pages = {0xbeef'0000},
+        },
+    };
+    constexpr std::array seed_pages{0xab8d'0000ULL};
+
+    const auto plan =
+        VideoCore::PlanPhysicalBackingTextureOwnershipComponent(records, seed_pages);
+
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->ordered_image_indices, (std::vector<u32>{51, 16, 41, 44}));
+    EXPECT_EQ(plan->ownership_span.base, 0x114b'4c00'00);
+    EXPECT_EQ(plan->ownership_span.size, 0x63'c000);
+    EXPECT_EQ(plan->physical_pages,
+              (std::vector<u64>{0xab8c'c000, 0xab8d'0000, 0xab8d'4000, 0xab8d'8000}));
+}
