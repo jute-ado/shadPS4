@@ -71,7 +71,8 @@ TEST(BufferResidency, FailedPhysicalOwnershipBatchPreservesCurrentPagePublicatio
     constexpr std::array physical_pages{FirstPage + PageSize, FirstPage + 2 * PageSize};
 
     VideoCore::RefreshPhysicalBackingRegistrationAddresses(
-        physical_pages, FirstPage, addresses,
+        std::span<const VAddr>{physical_pages}, FirstPage, std::span<u64>{addresses},
+        [](VAddr page) { return page; },
         [](VAddr page) -> std::optional<u64> {
             if (page == FirstPage + PageSize) {
                 return 0x2'0000'0000ULL;

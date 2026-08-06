@@ -811,15 +811,16 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
                     owners.push_back({.guest_page = owner.guest_page, .token = owner.token});
                 }
                 ApplyPhysicalBackingBdaDeltas(publication->deltas);
-                for (const auto& request : physical_requests) {
-                    const auto resolved = physical_backing_coordinator->ResolveGuestPagePublication(
-                        request.guest_page);
-                    if (resolved) {
-                        bda_addrs[(request.guest_page >> CACHING_PAGEBITS) - page_begin] =
-                            resolved->value;
-                    }
-                }
             }
+            RefreshPhysicalBackingRegistrationAddresses(
+                std::span<const PhysicalBackingCachePageRequest>{physical_requests},
+                page_begin << CACHING_PAGEBITS, std::span<vk::DeviceAddress>{bda_addrs},
+                [](const PhysicalBackingCachePageRequest& request) { return request.guest_page; },
+                [this](VAddr guest_page) -> std::optional<vk::DeviceAddress> {
+                    const auto resolved =
+                        physical_backing_coordinator->ResolveGuestPagePublication(guest_page);
+                    return resolved ? std::optional{resolved->value} : std::nullopt;
+                });
         }
         WriteDataBuffer(bda_pagetable_buffer, page_begin * sizeof(vk::DeviceAddress),
                         bda_addrs.data(), bda_addrs.size() * sizeof(vk::DeviceAddress));
