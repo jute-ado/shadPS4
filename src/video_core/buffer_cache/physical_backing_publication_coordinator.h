@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <span>
@@ -37,6 +38,19 @@ struct PhysicalBackingCachePagePublication {
 struct PhysicalBackingDirtyCachePagePublication {
     PhysicalBackingWriteback writeback{};
     std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
+struct PhysicalBackingDirtySlice {
+    u32 offset{};
+    u32 size{};
+
+    auto operator<=>(const PhysicalBackingDirtySlice&) const = default;
+};
+
+struct PhysicalBackingOwnerRetirement {
+    std::vector<PhysicalBackingBdaDelta> deltas;
+    std::optional<PhysicalBackingWriteback> writeback;
+    std::vector<PhysicalBackingDirtySlice> dirty_slices;
 };
 
 /// GPU-thread-owned coordinator for physical mapping provenance and BDA publications.
@@ -125,6 +139,8 @@ public:
         for (u64 offset = 0; offset < size; offset += PageSize) {
             const auto mapping_it = mapping_tokens.find(guest_base + offset);
             if (mapping_it == mapping_tokens.end() ||
+                active_cache_owners.contains(mapping_it->second.physical_offset) ||
+                pending_writebacks.contains(mapping_it->second.physical_offset) ||
                 !state.CanUnmapGuestPage(mapping_it->second)) {
                 return std::nullopt;
             }
@@ -151,7 +167,8 @@ public:
         bool has_texture_overlap) {
         const auto aliases_it = physical_aliases.find(physical_offset);
         if (has_texture_overlap || aliases_it == physical_aliases.end() ||
-            aliases_it->second.empty()) {
+            aliases_it->second.empty() || active_cache_owners.contains(physical_offset) ||
+            pending_writebacks.contains(physical_offset)) {
             return std::nullopt;
         }
         const auto owner_generation = AcquireOwnerGeneration();
@@ -163,47 +180,111 @@ public:
         if (!publication) {
             return std::nullopt;
         }
-        return PhysicalBackingCachePagePublication{
+        PhysicalBackingCachePagePublication result{
             .token = {*publication},
             .deltas = MakeAliasDeltas(physical_offset),
         };
+        active_cache_owners.emplace(physical_offset, ActiveCacheOwner{.token = result.token});
+        return result;
     }
 
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(
         const PhysicalBackingCachePageToken& token) {
-        if (!physical_aliases.contains(token.publication.physical_offset) ||
+        const auto owner_it = FindActiveCacheOwner(token);
+        if (owner_it == active_cache_owners.end() ||
+            !physical_aliases.contains(token.publication.physical_offset) ||
             !state.RetireClean(token.publication)) {
             return std::nullopt;
         }
+        active_cache_owners.erase(owner_it);
         return MakeAliasDeltas(token.publication.physical_offset);
     }
 
     [[nodiscard]] std::optional<PhysicalBackingDirtyCachePagePublication>
     RetireCachePageGpuDirty(const PhysicalBackingCachePageToken& token) {
-        if (!physical_aliases.contains(token.publication.physical_offset)) {
+        const auto owner_it = FindActiveCacheOwner(token);
+        if (owner_it == active_cache_owners.end() ||
+            !physical_aliases.contains(token.publication.physical_offset)) {
             return std::nullopt;
         }
         const auto writeback = state.RetireGpuDirty(token.publication);
         if (!writeback) {
             return std::nullopt;
         }
+        pending_writebacks.emplace(writeback->physical_offset, *writeback);
+        active_cache_owners.erase(owner_it);
         return PhysicalBackingDirtyCachePagePublication{
             .writeback = *writeback,
             .deltas = MakeAliasDeltas(token.publication.physical_offset),
         };
     }
 
+    [[nodiscard]] bool MarkCachePageGpuDirty(const PhysicalBackingCachePageToken& token,
+                                             u32 offset, u32 size) {
+        const auto owner_it = FindActiveCacheOwner(token);
+        if (owner_it == active_cache_owners.end() || size == 0 || offset >= PageSize ||
+            size > PageSize - offset) {
+            return false;
+        }
+        auto& slices = owner_it->second.dirty_slices;
+        slices.push_back({offset, size});
+        NormalizeDirtySlices(slices);
+        return true;
+    }
+
+    [[nodiscard]] std::optional<PhysicalBackingOwnerRetirement> RetireOwnerForCpuWrite(
+        VAddr guest_page) {
+        const auto mapping_it = mapping_tokens.find(guest_page);
+        if (mapping_it == mapping_tokens.end()) {
+            return std::nullopt;
+        }
+        const u64 physical_offset = mapping_it->second.physical_offset;
+        const auto owner_it = active_cache_owners.find(physical_offset);
+        if (owner_it == active_cache_owners.end()) {
+            return std::nullopt;
+        }
+
+        PhysicalBackingOwnerRetirement retirement{
+            .dirty_slices = owner_it->second.dirty_slices,
+        };
+        if (retirement.dirty_slices.empty()) {
+            if (!state.RetireClean(owner_it->second.token.publication)) {
+                return std::nullopt;
+            }
+        } else {
+            const auto writeback = state.RetireGpuDirty(owner_it->second.token.publication);
+            if (!writeback) {
+                return std::nullopt;
+            }
+            retirement.writeback = *writeback;
+            pending_writebacks.emplace(physical_offset, *writeback);
+        }
+        active_cache_owners.erase(owner_it);
+        retirement.deltas = MakeAliasDeltas(physical_offset);
+        return retirement;
+    }
+
     template <typename Commit>
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
     CommitCachePageWriteback(const PhysicalBackingWriteback& writeback, Commit&& commit) {
-        if (!physical_aliases.contains(writeback.physical_offset) ||
+        const auto pending_it = pending_writebacks.find(writeback.physical_offset);
+        if (pending_it == pending_writebacks.end() || pending_it->second != writeback ||
+            !physical_aliases.contains(writeback.physical_offset) ||
             !state.CommitOrderedWriteback(writeback, std::forward<Commit>(commit))) {
             return std::nullopt;
         }
+        pending_writebacks.erase(pending_it);
         return MakeAliasDeltas(writeback.physical_offset);
     }
 
 private:
+    struct ActiveCacheOwner {
+        PhysicalBackingCachePageToken token{};
+        std::vector<PhysicalBackingDirtySlice> dirty_slices;
+    };
+
+    using ActiveCacheOwners = std::unordered_map<u64, ActiveCacheOwner>;
+
     [[nodiscard]] static constexpr bool IsPageAligned(u64 value) noexcept {
         return (value & (PageSize - 1)) == 0;
     }
@@ -245,6 +326,33 @@ private:
         return deltas;
     }
 
+    [[nodiscard]] ActiveCacheOwners::iterator FindActiveCacheOwner(
+        const PhysicalBackingCachePageToken& token) {
+        const auto owner_it = active_cache_owners.find(token.publication.physical_offset);
+        if (owner_it == active_cache_owners.end() || owner_it->second.token != token) {
+            return active_cache_owners.end();
+        }
+        return owner_it;
+    }
+
+    static void NormalizeDirtySlices(std::vector<PhysicalBackingDirtySlice>& slices) {
+        std::ranges::sort(slices, {}, &PhysicalBackingDirtySlice::offset);
+        size_t output = 0;
+        for (const PhysicalBackingDirtySlice slice : slices) {
+            if (output != 0) {
+                auto& previous = slices[output - 1];
+                const u32 previous_end = previous.offset + previous.size;
+                if (slice.offset <= previous_end) {
+                    previous.size = std::max(previous_end, slice.offset + slice.size) -
+                                    previous.offset;
+                    continue;
+                }
+            }
+            slices[output++] = slice;
+        }
+        slices.resize(output);
+    }
+
     void ErasePhysicalAlias(u64 physical_offset, VAddr guest_page) {
         const auto aliases_it = physical_aliases.find(physical_offset);
         if (aliases_it == physical_aliases.end()) {
@@ -269,6 +377,8 @@ private:
     u64 last_owner_generation{};
     std::unordered_map<VAddr, PhysicalBackingMapping> mapping_tokens;
     std::unordered_map<u64, std::unordered_set<VAddr>> physical_aliases;
+    ActiveCacheOwners active_cache_owners;
+    std::unordered_map<u64, PhysicalBackingWriteback> pending_writebacks;
 };
 
 } // namespace VideoCore
