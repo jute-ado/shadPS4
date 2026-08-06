@@ -19,6 +19,7 @@ constexpr u64 ImportedBase = 0x2'0000'0000ULL;
 constexpr u64 OverrideBase = 0x4'0000'0000ULL;
 constexpr VAddr GuestA = 0x1000'0000ULL;
 constexpr VAddr GuestB = 0x2000'0000ULL;
+constexpr VAddr GuestC = 0x3000'0000ULL;
 constexpr u64 PhysicalPage = 3 * PageSize;
 constexpr u64 OtherPhysicalPage = 5 * PageSize;
 
@@ -38,6 +39,45 @@ TEST(PhysicalBackingPublicationCoordinator, MapsPhysicalAliasesToExactImportedAd
     EXPECT_EQ((*deltas)[0].device_address.value, ImportedBase + PhysicalPage);
     EXPECT_EQ((*deltas)[1].guest_page, GuestB);
     EXPECT_EQ((*deltas)[1].device_address.value, ImportedBase + PhysicalPage);
+}
+
+TEST(PhysicalBackingPublicationCoordinator,
+     GpuWriteSuppressesImportedPublicationForEveryPhysicalAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestC, OtherPhysicalPage, PageSize, 8},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+
+    const auto deltas =
+        coordinator.SuppressGuestRangeForGpuWrite(GuestB + PageSize - 32, 64);
+
+    ASSERT_TRUE(deltas.has_value());
+    ASSERT_EQ(deltas->size(), 2);
+    EXPECT_EQ((*deltas)[0].guest_page, GuestA);
+    EXPECT_EQ((*deltas)[0].device_address.value, 0);
+    EXPECT_EQ((*deltas)[1].guest_page, GuestB);
+    EXPECT_EQ((*deltas)[1].device_address.value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestC)->value,
+              ImportedBase + OtherPhysicalPage);
+    EXPECT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize));
+    EXPECT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestC + PageSize, 32));
+
+    ASSERT_TRUE(coordinator.UnmapRange(GuestA, PageSize));
+    ASSERT_TRUE(coordinator.UnmapRange(GuestB, PageSize));
+    constexpr std::array remapped_span{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+    };
+    const auto remapped_deltas = coordinator.MapSpans(remapped_span);
+    ASSERT_TRUE(remapped_deltas.has_value());
+    ASSERT_EQ(remapped_deltas->size(), 1);
+    EXPECT_EQ(remapped_deltas->front().guest_page, GuestA);
+    EXPECT_EQ(remapped_deltas->front().device_address.value, 0);
 }
 
 TEST(PhysicalBackingPublicationCoordinator, RollsBackWholeBatchWhenOnePageIsRejected) {

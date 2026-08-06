@@ -53,6 +53,34 @@ TEST(PhysicalBackingPublicationState, ResolvesPhysicalAliasesThroughOneSharedSta
     EXPECT_EQ(state.Resolve(GuestB).value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationState,
+     GpuWriteSuppressesImportedBackingUntilPhysicalAllocationRetires) {
+    auto state = MakeState();
+    const auto first = state.MapGuestPage(GuestA, PhysicalPage, 1, 7);
+    const auto alias = state.MapGuestPage(GuestB, PhysicalPage, 2, 7);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(alias.has_value());
+    ASSERT_NE(state.Resolve(GuestA).value, 0);
+    ASSERT_NE(state.Resolve(GuestB).value, 0);
+
+    EXPECT_TRUE(state.SuppressImportedBackingForGpuWrite(PhysicalPage));
+    EXPECT_EQ(state.Resolve(GuestA).value, 0);
+    EXPECT_EQ(state.Resolve(GuestB).value, 0);
+    EXPECT_TRUE(state.SuppressImportedBackingForGpuWrite(PhysicalPage));
+
+    ASSERT_TRUE(state.UnmapGuestPage(*first));
+    ASSERT_TRUE(state.UnmapGuestPage(*alias));
+    const auto remapped = state.MapGuestPage(GuestA, PhysicalPage, 3, 7);
+    ASSERT_TRUE(remapped.has_value());
+    EXPECT_EQ(state.Resolve(GuestA).value, 0);
+    ASSERT_TRUE(state.UnmapGuestPage(*remapped));
+    ASSERT_TRUE(state.RetirePhysicalPage(PhysicalPage, 7));
+
+    const auto reallocated = state.MapGuestPage(GuestA, PhysicalPage, 4, 8);
+    ASSERT_TRUE(reallocated.has_value());
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
+
 TEST(PhysicalBackingPublicationState, DirtyRetirementSuppressesAliasesUntilOrderedWriteback) {
     auto state = MakeState();
     ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 1, 1));
