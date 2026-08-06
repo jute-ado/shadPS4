@@ -159,6 +159,38 @@ TEST(ExactAddressSpaceHostImportProbe, RequiresImmutableChecksAndRequirementsBef
     EXPECT_FALSE(skipped.CanAllocateLargeBacking());
 }
 
+TEST(ExactAddressSpaceHostImportProbe, CannotClaimRetentionBeforeGpuDataVerification) {
+    ExactHostImportProtocol protocol;
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::Capability));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::DeviceLimits));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::ExternalBufferProperties));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::BufferCreation));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::MemoryRequirements));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::Backing));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::HostPointerProperties));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::MemoryTypeSelection));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::MemoryAllocation));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::MemoryBinding));
+    EXPECT_TRUE(protocol.Complete(ExactHostImportStage::DeviceAddress));
+
+    EXPECT_FALSE(protocol.Complete(ExactHostImportStage::Retained));
+
+    ExactHostImportProtocol verified;
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::Capability));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::DeviceLimits));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::ExternalBufferProperties));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::BufferCreation));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::MemoryRequirements));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::Backing));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::HostPointerProperties));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::MemoryTypeSelection));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::MemoryAllocation));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::MemoryBinding));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::DeviceAddress));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::DataVerification));
+    EXPECT_TRUE(verified.Complete(ExactHostImportStage::Retained));
+}
+
 TEST(ExactAddressSpaceHostImportProbe, ClassifiesOnlyImmutableIncompatibilityAsUnsupported) {
     EXPECT_EQ(ClassifyExactHostImportFailure(ExactHostImportFailure::ExtensionUnavailable),
               ExactHostImportDisposition::Unsupported);
