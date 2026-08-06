@@ -172,6 +172,26 @@ TEST(PhysicalBackingPublicationCoordinator, CpuWriteThroughAliasRetiresPhysicalG
     EXPECT_EQ(retirement->deltas[1].device_address.value, 0);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, MarksGpuDirtyThroughAnyPhysicalAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirtyForGuest(GuestB, 384, 128));
+    const auto retirement = coordinator.RetireCachePageGpuDirty(owner->token);
+    ASSERT_TRUE(retirement.has_value());
+    ASSERT_EQ(retirement->dirty_slices.size(), 1);
+    EXPECT_EQ(retirement->dirty_slices[0].offset, 384);
+    EXPECT_EQ(retirement->dirty_slices[0].size, 128);
+}
+
 TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysicalAlias) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
