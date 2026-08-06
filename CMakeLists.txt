@@ -844,6 +844,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/aerolib/aerolib.h
          src/core/address_space.cpp
          src/core/address_space.h
+         src/core/address_space_backing_lease.h
+         src/core/windows_address_space_backing.h
          src/core/windows_protection_snapshot.cpp
          src/core/windows_protection_snapshot.h
          src/core/file_sys/devices/base_device.cpp
