@@ -105,3 +105,9 @@ TEST(BufferResidency, DefersPhysicalBackingOwnershipUntilGpuWrite) {
     EXPECT_FALSE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(false));
     EXPECT_TRUE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(true));
 }
+
+TEST(BufferResidency, InvalidatesTextureOwnershipBeforeGpuBufferFill) {
+    EXPECT_FALSE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(true, true));
+    EXPECT_FALSE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(false, false));
+    EXPECT_TRUE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(false, true));
+}
