@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <span>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp11>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +30,82 @@ struct F32x2 {
     float a;
     float b;
 };
+
+namespace {
+
+template <typename Visitor>
+bool VisitSpirv(std::span<const u32> spirv, Visitor&& visitor) {
+    constexpr size_t SpirvHeaderWords = 5;
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const size_t word_count = instruction >> 16;
+        if (word_count == 0 || word_count > spirv.size() - offset) {
+            return false;
+        }
+        const auto opcode = static_cast<spv::Op>(instruction & 0xffffU);
+        visitor(opcode, spirv.subspan(offset + 1, word_count - 1));
+        offset += word_count;
+    }
+    return true;
+}
+
+std::string ReadSpirvString(std::span<const u32> words) {
+    const char* const bytes = reinterpret_cast<const char*>(words.data());
+    const size_t capacity = words.size_bytes();
+    size_t length = 0;
+    while (length < capacity && bytes[length] != '\0') {
+        ++length;
+    }
+    return std::string{bytes, length};
+}
+
+bool FunctionSelectsConstantValue(std::span<const u32> spirv, std::string_view function_name) {
+    std::unordered_map<u32, std::string> names;
+    std::unordered_set<u32> constants;
+    if (!VisitSpirv(spirv, [&](spv::Op opcode, std::span<const u32> operands) {
+            if (opcode == spv::Op::OpName && operands.size() >= 2) {
+                names.emplace(operands[0], ReadSpirvString(operands.subspan(1)));
+            } else if ((opcode == spv::Op::OpConstant || opcode == spv::Op::OpConstantNull ||
+                        opcode == spv::Op::OpConstantTrue ||
+                        opcode == spv::Op::OpConstantFalse) &&
+                       operands.size() >= 2) {
+                constants.emplace(operands[1]);
+            }
+        })) {
+        return false;
+    }
+
+    bool in_target_function = false;
+    bool selects_constant = false;
+    VisitSpirv(spirv, [&](spv::Op opcode, std::span<const u32> operands) {
+        if (opcode == spv::Op::OpFunction && operands.size() >= 2) {
+            const auto name = names.find(operands[1]);
+            in_target_function = name != names.end() && name->second == function_name;
+        } else if (opcode == spv::Op::OpFunctionEnd) {
+            in_target_function = false;
+        } else if (in_target_function && opcode == spv::Op::OpPhi && operands.size() >= 4) {
+            for (size_t value_index = 2; value_index < operands.size(); value_index += 2) {
+                selects_constant |= constants.contains(operands[value_index]);
+            }
+        }
+    });
+    return selects_constant;
+}
+
+} // Anonymous namespace
+
+TEST_F(GcnTest, dma_page_fault_does_not_publish_a_fabricated_load_value) {
+    // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto result = TranslateToSpirvWithInfo(addr64_load, true);
+
+    // A missing BDA page currently records the fault and selects a constant fallback. The
+    // command then continues, allowing that fabricated value to reach guest-visible output
+    // before the page is made resident. Correct demand paging must defer publication and replay
+    // the faulting work after residency instead of returning any constant substitute.
+    EXPECT_FALSE(FunctionSelectsConstantValue(result.spirv, "read_const_dynamic"));
+}
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
