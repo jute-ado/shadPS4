@@ -69,19 +69,25 @@ public:
     }
 
     /// Removes all protection from a page while preserving GPU-owned bytes before CPU mutation.
-    [[nodiscard]] bool InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush,
-                                        auto&& on_preserve) noexcept {
-        bool tracked = false;
+    [[nodiscard]] bool InvalidateRegion(VAddr cpu_addr, u64 size, bool is_registered,
+                                        auto&& on_flush, auto&& on_preserve) noexcept {
+        bool tracked = is_registered;
         IteratePages<false>(
             cpu_addr, size,
-            [&tracked, &on_flush, &on_preserve](RegionManager* manager, u64 offset, size_t size) {
-                tracked = true;
+            [is_registered, &tracked, &on_flush, &on_preserve](RegionManager* manager, u64 offset,
+                                                               size_t size) {
+                bool admitted = false;
                 const bool should_flush = [&] {
                     // Perform both the GPU modification check and CPU state change with the lock
                     // in case we are racing with GPU thread trying to mark the page as GPU
                     // modified. If we need to flush the flush function is going to perform CPU
                     // state change.
                     std::scoped_lock lk{manager->lock};
+                    if (!is_registered && !manager->IsRegionCpuTracked(offset, size)) {
+                        return false;
+                    }
+                    admitted = true;
+                    tracked = true;
                     if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
                         if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
                             return true;
@@ -113,7 +119,7 @@ public:
                         manager->GetCpuAddr() + offset, size);
                     return false;
                 }();
-                if (should_flush) {
+                if (admitted && should_flush) {
                     on_flush();
                 }
             });

@@ -70,10 +70,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
+    const bool is_registered = IsRegionRegistered(device_addr, size);
     (void)ProcessTrackedBufferFault(
-        [this, device_addr, size] {
+        [this, device_addr, size, is_registered] {
             return memory_tracker->InvalidateRegion(
-                device_addr, size,
+                device_addr, size, is_registered,
                 [this, device_addr, size] {
                     cpu_page_write_tracker.Discard(device_addr, size);
                     ReadMemory(device_addr, size, true);

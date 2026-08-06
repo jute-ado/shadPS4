@@ -157,6 +157,22 @@ public:
         return test.Any();
     }
 
+    /// Returns true if any page in the range is currently owned by the CPU write tracker.
+    [[nodiscard]] bool IsRegionCpuTracked(u64 offset, u64 size) const noexcept {
+        const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page =
+            Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE);
+        if (start_page >= NUM_PAGES_PER_REGION || end_page <= start_page) {
+            return false;
+        }
+        for (size_t page = start_page; page < end_page; ++page) {
+            if (!cpu.Get(page)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     LockType lock;
 
 private:
