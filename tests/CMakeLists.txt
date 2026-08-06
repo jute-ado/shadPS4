@@ -161,6 +161,16 @@ target_link_libraries(shadps4_address_space_backing_size_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_address_space_backing_size_test)
 
+add_executable(shadps4_external_address_space_backing_import_test
+    test_external_address_space_backing_import.cpp
+)
+target_include_directories(shadps4_external_address_space_backing_import_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_external_address_space_backing_import_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_external_address_space_backing_import_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_external_address_space_backing_import_test)
+
 if (WIN32)
     add_executable(shadps4_windows_address_space_backing_test
         test_windows_address_space_backing.cpp
