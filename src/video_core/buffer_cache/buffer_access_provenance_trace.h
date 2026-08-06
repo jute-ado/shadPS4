@@ -5,6 +5,7 @@
 
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -62,7 +63,12 @@ template <typename Key>
 class BasicBufferAccessProvenanceTrace {
 public:
     explicit BasicBufferAccessProvenanceTrace(const BufferAccessProvenanceTraceRequest& request)
-        : record_limit{request.record_limit}, observation_limit{request.observation_limit} {
+        : trace_start{std::chrono::steady_clock::now()},
+          trace_start_timestamp_ns{static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count())},
+          record_limit{request.record_limit}, observation_limit{request.observation_limit} {
         output.open(request.path, std::ios::out | std::ios::app | std::ios::binary);
         if (!output) {
             throw std::runtime_error{"Cannot create buffer access provenance trace"};
@@ -71,6 +77,8 @@ public:
                       {"kind", "header"},
                       {"protocolVersion", 1},
                       {"source", "buffer_access_interval_provenance"},
+                      {"timestampClock", "unix_nanoseconds"},
+                      {"elapsedClock", "trace_elapsed_nanoseconds"},
                       {"recordLimit", record_limit},
                       {"observationLimit", observation_limit},
                   }
@@ -89,6 +97,11 @@ public:
         tracker.BeginCommand(command_id, tick);
         current_command_id = command_id;
         current_tick = tick;
+        current_trace_elapsed_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                  trace_start)
+                .count());
+        current_timestamp_ns = trace_start_timestamp_ns + current_trace_elapsed_ns;
         command_active = true;
     }
 
@@ -241,6 +254,8 @@ private:
                       {"protocolVersion", 1},
                       {"commandId", current_command_id},
                       {"tick", current_tick},
+                      {"timestampUnixNanoseconds", current_timestamp_ns},
+                      {"traceElapsedNanoseconds", current_trace_elapsed_ns},
                       {"bufferId", BufferId(transition.key)},
                       {"offset", transition.offset},
                       {"size", transition.size},
@@ -263,12 +278,16 @@ private:
     Tracker tracker;
     std::ofstream output;
     std::vector<std::pair<Key, std::uint64_t>> buffer_ids;
+    std::chrono::steady_clock::time_point trace_start;
+    std::uint64_t trace_start_timestamp_ns{};
     std::uint64_t record_limit{};
     std::uint64_t observation_limit{};
     std::uint64_t record_count{};
     std::uint64_t observation_count{};
     std::uint64_t current_command_id{};
     std::uint64_t current_tick{};
+    std::uint64_t current_timestamp_ns{};
+    std::uint64_t current_trace_elapsed_ns{};
     bool command_active{};
     bool complete{};
 };
