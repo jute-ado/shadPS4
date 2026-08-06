@@ -202,3 +202,20 @@ TEST(BufferResidency, PlansTransitiveTextureOwnershipComponentInGpuWriteOrder) {
     EXPECT_EQ(plan->physical_pages,
               (std::vector<u64>{0xab8c'c000, 0xab8d'0000, 0xab8d'4000, 0xab8d'8000}));
 }
+
+TEST(BufferResidency, SelectsNewestTextureAliasForEachPhysicalPage) {
+    constexpr std::array candidates{
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'4000, 0x114b'6d40'00},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00},
+    };
+
+    const auto sources = VideoCore::PlanPhysicalBackingTexturePageSources(candidates);
+
+    ASSERT_TRUE(sources.has_value());
+    EXPECT_EQ(*sources,
+              (std::vector<VideoCore::PhysicalBackingTexturePageSource>{
+                  {0xab8d'0000, 0x214b'7100'00},
+                  {0xab8d'4000, 0x114b'6d40'00},
+              }));
+}
