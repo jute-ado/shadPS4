@@ -120,6 +120,17 @@ void BufferCache::MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size) {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
+    if (physical_backing_coordinator && size != 0) {
+        bool retired = false;
+        liverpool->SendCommand<true>([this, device_addr, size, &retired] {
+            retired = RetirePhysicalBackingOwnersForCpuWrite(device_addr, size);
+        });
+        if (!retired) {
+            LOG_ERROR(Render_Vulkan,
+                      "Physical backing owner retirement failed before CPU invalidation");
+            return;
+        }
+    }
     if (!IsRegionRegistered(device_addr, size)) {
         return;
     }
@@ -135,6 +146,39 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
             return cpu_page_write_tracker.Capture(page_addr, page, write_offset, write_size);
         });
     dma_dirty_ranges.Mark(device_addr, size);
+}
+
+bool BufferCache::RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size) {
+    const VAddr end = device_addr + size;
+    std::vector<BufferId> buffers;
+    for (VAddr page = Common::AlignDown(device_addr, CACHING_PAGESIZE); page < end;
+         page += CACHING_PAGESIZE) {
+        const auto owner = physical_backing_coordinator->ResolveActiveCachePageForGuest(page);
+        if (!owner) {
+            continue;
+        }
+        bool found = false;
+        for (const auto& [buffer_id, cache_pages] : physical_backing_cache_pages) {
+            if (std::ranges::any_of(cache_pages, [&](const auto& cache_page) {
+                    return cache_page.token == *owner;
+                })) {
+                buffers.push_back(buffer_id);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    std::ranges::sort(buffers);
+    buffers.erase(std::unique(buffers.begin(), buffers.end()), buffers.end());
+    for (const BufferId buffer_id : buffers) {
+        if (!DeleteBuffer(buffer_id)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {

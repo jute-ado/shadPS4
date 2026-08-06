@@ -204,6 +204,7 @@ private:
     [[nodiscard]] bool ChangeRegister(BufferId buffer_id);
 
     void MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size);
+    [[nodiscard]] bool RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size);
 
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer, bool is_registered = true);
