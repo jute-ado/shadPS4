@@ -627,3 +627,45 @@ TEST(BufferResidency, PendingPhysicalWritebackResolvesAndSynchronizesGuestRange)
     EXPECT_TRUE(resolved);
     EXPECT_TRUE(synchronized);
 }
+
+TEST(BufferResidency, PhysicalHostWritePreparationRetiresOwnersBeforeSynchronization) {
+    std::vector<std::string> operations;
+
+    EXPECT_TRUE(VideoCore::PreparePhysicalBackingHostWrite(
+        [&] {
+            operations.emplace_back("texture-transition");
+            return true;
+        },
+        [&] {
+            operations.emplace_back("buffer-retirement");
+            return true;
+        },
+        [&] {
+            operations.emplace_back("writeback-sync");
+            return true;
+        }));
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"texture-transition", "buffer-retirement",
+                                                    "writeback-sync"}));
+}
+
+TEST(BufferResidency, FailedPhysicalHostWritePreparationStopsBeforePublication) {
+    std::vector<std::string> operations;
+
+    EXPECT_FALSE(VideoCore::PreparePhysicalBackingHostWrite(
+        [&] {
+            operations.emplace_back("texture-transition");
+            return true;
+        },
+        [&] {
+            operations.emplace_back("buffer-retirement");
+            return false;
+        },
+        [&] {
+            operations.emplace_back("writeback-sync");
+            return true;
+        }));
+
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"texture-transition", "buffer-retirement"}));
+}
