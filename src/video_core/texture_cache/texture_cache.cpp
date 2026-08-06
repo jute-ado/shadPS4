@@ -10,6 +10,7 @@
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -775,8 +776,14 @@ void TextureCache::RefreshImage(Image& image) {
 
     const auto [in_buffer, in_offset] =
         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
-    if (auto barrier = in_buffer->GetBarrier(vk::AccessFlagBits2::eTransferRead,
-                                             vk::PipelineStageFlagBits2::eTransfer)) {
+    const auto consumer = PhysicalBackingTextureUploadConsumer(image.info.props.is_tiled);
+    const auto consumer_access = consumer == PhysicalBackingTextureConsumer::ComputeShaderRead
+                                     ? vk::AccessFlagBits2::eShaderRead
+                                     : vk::AccessFlagBits2::eTransferRead;
+    const auto consumer_stage = consumer == PhysicalBackingTextureConsumer::ComputeShaderRead
+                                    ? vk::PipelineStageFlagBits2::eComputeShader
+                                    : vk::PipelineStageFlagBits2::eTransfer;
+    if (auto barrier = in_buffer->GetBarrier(consumer_access, consumer_stage)) {
         scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
             .dependencyFlags = vk::DependencyFlagBits::eByRegion,
             .bufferMemoryBarrierCount = 1,

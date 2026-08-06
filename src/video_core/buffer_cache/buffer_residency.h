@@ -7,6 +7,17 @@
 
 namespace VideoCore {
 
+enum class PhysicalBackingTextureConsumer {
+    ComputeShaderRead,
+    TransferRead,
+};
+
+[[nodiscard]] constexpr PhysicalBackingTextureConsumer PhysicalBackingTextureUploadConsumer(
+    bool is_tiled) {
+    return is_tiled ? PhysicalBackingTextureConsumer::ComputeShaderRead
+                    : PhysicalBackingTextureConsumer::TransferRead;
+}
+
 template <typename Buffer, typename Synchronize, typename Publish>
 void PublishDmaBufferAfterSynchronization(Buffer& buffer, Synchronize&& synchronize,
                                           Publish&& publish) {
