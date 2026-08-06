@@ -205,7 +205,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!BindResources(pipeline)) {
         return;
     }
-    const auto state = BeginRendering(pipeline);
+    const auto state = BeginRendering(pipeline, VideoCore::DmaAttachmentMode::Publication);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -253,7 +253,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!BindResources(pipeline)) {
         return;
     }
-    const auto state = BeginRendering(pipeline);
+    const auto state = BeginRendering(pipeline, VideoCore::DmaAttachmentMode::Publication);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -826,7 +826,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 }
 
-RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline,
+                                       VideoCore::DmaAttachmentMode attachment_mode) {
     attachment_feedback_loop = false;
     const auto& regs = liverpool->regs;
     const auto& key = pipeline->GetGraphicsKey();
@@ -854,7 +855,11 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 
         const auto& col_buf = regs.color_buffers[cb];
         const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
-        texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        const auto attachment_policy =
+            VideoCore::ResolveDmaAttachmentPolicy(is_clear, attachment_mode);
+        if (attachment_policy.consume_metadata) {
+            texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        }
 
         if (image->binding.is_bound) {
             ASSERT_MSG(!image->binding.force_general,
@@ -875,13 +880,14 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         state.height = std::min<u32>(state.height, std::max(image->info.size.height >> mip, 1u));
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
-        const auto clear_value =
-            is_clear ? LiverpoolToVK::ColorBufferClearValue(col_buf) : vk::ClearValue{};
+        const auto clear_value = attachment_policy.load_clear
+                                     ? LiverpoolToVK::ColorBufferClearValue(col_buf)
+                                     : vk::ClearValue{};
         auto& attachment = state.color_attachments[cb];
         attachment.image_view = *image_view.image_view;
         attachment.image_layout = image->backing->state.layout;
         attachment.clear_value = clear_value.color.uint32;
-        attachment.is_clear = is_clear;
+        attachment.is_clear = attachment_policy.load_clear;
 
         image->usage.render_target = 1u;
     }
@@ -899,7 +905,13 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const bool is_depth_clear = regs.depth_render_control.depth_clear_enable ||
                                     texture_cache.IsMetaCleared(htile_address, slice);
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
-        texture_cache.TouchMeta(htile_address, slice, false);
+        const auto depth_policy =
+            VideoCore::ResolveDmaAttachmentPolicy(is_depth_clear, attachment_mode);
+        const auto stencil_policy =
+            VideoCore::ResolveDmaAttachmentPolicy(is_stencil_clear, attachment_mode);
+        if (depth_policy.consume_metadata || stencil_policy.consume_metadata) {
+            texture_cache.TouchMeta(htile_address, slice, false);
+        }
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);
 
         const bool has_stencil = image.info.props.has_stencil;
@@ -928,14 +940,15 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         attachment.clear_value = {};
 
         if (regs.depth_buffer.DepthValid()) {
-            attachment.clear_value[0] = is_depth_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
+            attachment.clear_value[0] =
+                depth_policy.load_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
             attachment.has_depth = true;
-            attachment.depth_clear = is_depth_clear;
+            attachment.depth_clear = depth_policy.load_clear;
         }
         if (regs.depth_buffer.StencilValid()) {
-            attachment.clear_value[1] = is_stencil_clear ? regs.stencil_clear : 0u;
+            attachment.clear_value[1] = stencil_policy.load_clear ? regs.stencil_clear : 0u;
             attachment.has_stencil = true;
-            attachment.stencil_clear = is_stencil_clear;
+            attachment.stencil_clear = stencil_policy.load_clear;
         }
 
         image.usage.depth_target = true;
