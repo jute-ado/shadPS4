@@ -51,6 +51,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
                         VideoCore::PhysicalBackingDeviceAddress{
                             external_address_space_backing->DeviceAddress()},
                         external_address_space_backing->BackingSize());
+                buffer_cache.AttachPhysicalBackingPublicationCoordinator(
+                    physical_backing_coordinator.get(), external_address_space_backing.get());
             }
         }
         liverpool->BindRasterizer(this);

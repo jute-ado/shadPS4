@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <optional>
 #include <span>
+#include <unordered_map>
+#include <vector>
 
 #include <boost/container/small_vector.hpp>
 #include "common/lru_cache.h"
@@ -26,6 +29,7 @@ class MemoryManager;
 }
 
 namespace Vulkan {
+class ExternalAddressSpaceBacking;
 class GraphicsPipeline;
 }
 
@@ -86,8 +90,10 @@ public:
     }
 
     void AttachPhysicalBackingPublicationCoordinator(
-        PhysicalBackingPublicationCoordinator* coordinator) noexcept {
+        PhysicalBackingPublicationCoordinator* coordinator,
+        Vulkan::ExternalAddressSpaceBacking* backing) noexcept {
         physical_backing_coordinator = coordinator;
+        external_address_space_backing = backing;
     }
 
     void ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas);
@@ -192,10 +198,12 @@ private:
 
     void Register(BufferId buffer_id);
 
-    void Unregister(BufferId buffer_id);
+    [[nodiscard]] bool Unregister(BufferId buffer_id);
 
     template <bool insert>
-    void ChangeRegister(BufferId buffer_id);
+    [[nodiscard]] bool ChangeRegister(BufferId buffer_id);
+
+    void MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size);
 
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer, bool is_registered = true);
@@ -209,7 +217,14 @@ private:
 
     void TouchBuffer(const Buffer& buffer);
 
-    void DeleteBuffer(BufferId buffer_id);
+    [[nodiscard]] bool DeleteBuffer(BufferId buffer_id);
+
+    struct PhysicalBackingCachePageOwner {
+        VAddr guest_page{};
+        PhysicalBackingCachePageToken token{};
+        std::optional<PhysicalBackingWriteback> pending_writeback;
+        std::vector<PhysicalBackingDirtySlice> dirty_slices;
+    };
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
@@ -236,6 +251,9 @@ private:
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
     PhysicalBackingPublicationCoordinator* physical_backing_coordinator{};
+    Vulkan::ExternalAddressSpaceBacking* external_address_space_backing{};
+    std::unordered_map<BufferId, std::vector<PhysicalBackingCachePageOwner>>
+        physical_backing_cache_pages;
 };
 
 } // namespace VideoCore
