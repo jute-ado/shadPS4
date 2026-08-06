@@ -11,6 +11,11 @@
 
 namespace VideoCore {
 
+[[nodiscard]] constexpr bool ShouldAcquirePhysicalBackingBufferOwnership(
+    bool will_gpu_write) noexcept {
+    return will_gpu_write;
+}
+
 struct PhysicalBackingAliasMigrationCopy {
     u64 source_offset{};
     u64 destination_offset{};

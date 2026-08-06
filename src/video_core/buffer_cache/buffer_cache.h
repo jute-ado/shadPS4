@@ -209,7 +209,7 @@ private:
     [[nodiscard]] bool ChangeRegister(BufferId buffer_id);
 
     void MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size);
-    [[nodiscard]] bool MigratePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
+    [[nodiscard]] bool AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                                Buffer& target_buffer,
                                                                VAddr device_addr, u64 size);
     [[nodiscard]] bool RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size);

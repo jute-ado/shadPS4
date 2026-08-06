@@ -117,16 +117,48 @@ void BufferCache::MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size) {
     }
 }
 
-bool BufferCache::MigratePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
+bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                           Buffer& target_buffer, VAddr device_addr,
                                                           u64 size) {
-    if (!physical_backing_coordinator || size == 0) {
+    if (!physical_backing_coordinator ||
+        !ShouldAcquirePhysicalBackingBufferOwnership(size != 0)) {
         return true;
     }
     if (device_addr > std::numeric_limits<VAddr>::max() - size) {
         return false;
     }
     const VAddr end = device_addr + size;
+    std::vector<PhysicalBackingCachePageRequest> requests;
+    for (VAddr target_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); target_page < end;
+         target_page += CACHING_PAGESIZE) {
+        if (!physical_backing_coordinator->ResolveGuestPagePublication(target_page)) {
+            continue;
+        }
+        requests.push_back({
+            .guest_page = target_page,
+            .override_page_address = PhysicalBackingDeviceAddress{
+                target_buffer.BufferDeviceAddress() + target_buffer.Offset(target_page)},
+        });
+    }
+    if (requests.empty()) {
+        return true;
+    }
+    const auto publication = physical_backing_coordinator->AcquireCachePagesForGuests(requests);
+    if (!publication) {
+        return false;
+    }
+    auto& target_owners = physical_backing_cache_pages[target_buffer_id];
+    target_owners.reserve(target_owners.size() + publication->owners.size());
+    for (const auto& owner : publication->owners) {
+        target_owners.push_back({.guest_page = owner.guest_page, .token = owner.token});
+        const auto [owner_it, inserted] = physical_backing_owner_buffers.emplace(
+            owner.token.publication.physical_offset, target_buffer_id);
+        if (!inserted && owner_it->second != target_buffer_id) {
+            return false;
+        }
+    }
+    ApplyPhysicalBackingBdaDeltas(publication->deltas);
+
     for (VAddr target_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); target_page < end;
          target_page += CACHING_PAGESIZE) {
         const auto active =
@@ -572,13 +604,16 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         SynchronizeBuffer(buffer, src, num_bytes, false, true);
         return buffer;
     }();
-    auto& dst_buffer = [&] -> const Buffer& {
+    BufferId dst_buffer_id{};
+    auto& dst_buffer = [&] -> Buffer& {
         if (dst_gds) {
             return gds_buffer;
         }
-        const auto buffer_id = FindBuffer(dst, num_bytes);
-        auto& buffer = slot_buffers[buffer_id];
+        dst_buffer_id = FindBuffer(dst, num_bytes);
+        auto& buffer = slot_buffers[dst_buffer_id];
         SynchronizeBuffer(buffer, dst, num_bytes, true, true);
+        ASSERT_MSG(AcquirePhysicalBackingOwnersForGpuWrite(dst_buffer_id, buffer, dst, num_bytes),
+                   "Failed to acquire physical backing ownership before GPU copy");
         gpu_modified_ranges.Add(dst, num_bytes);
         MarkPhysicalBackingGpuDirty(dst, num_bytes);
         return buffer;
@@ -656,8 +691,8 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     Buffer& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
     if (is_written) {
-        ASSERT_MSG(MigratePhysicalBackingOwnersForGpuWrite(buffer_id, buffer, device_addr, size),
-                   "Failed to migrate physical backing ownership before GPU write");
+        ASSERT_MSG(AcquirePhysicalBackingOwnersForGpuWrite(buffer_id, buffer, device_addr, size),
+                   "Failed to acquire physical backing ownership before GPU write");
         gpu_modified_ranges.Add(device_addr, size);
         MarkPhysicalBackingGpuDirty(device_addr, size);
     }
@@ -898,44 +933,15 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
         buffer.SetLRUId(lru_cache.Insert(buffer_id, gc_tick));
         boost::container::small_vector<vk::DeviceAddress, 128> bda_addrs;
         bda_addrs.reserve(size_pages);
-        std::vector<PhysicalBackingCachePageRequest> physical_requests;
-        physical_requests.reserve(size_pages);
         for (u64 i = 0; i < size_pages; ++i) {
             const VAddr guest_page = (page_begin + i) << CACHING_PAGEBITS;
             const PhysicalBackingDeviceAddress buffer_page{buffer.BufferDeviceAddress() +
                                                            (i << CACHING_PAGEBITS)};
-            if (physical_backing_coordinator &&
-                physical_backing_coordinator->ResolveGuestPagePublication(guest_page)) {
-                physical_requests.push_back({guest_page, buffer_page});
-                bda_addrs.push_back(0);
-            } else {
-                bda_addrs.push_back(buffer_page.value);
-            }
-        }
-        if (!physical_requests.empty()) {
-            const auto publication =
-                physical_backing_coordinator->AcquireCachePagesForGuests(physical_requests);
-            if (publication) {
-                auto& owners = physical_backing_cache_pages[buffer_id];
-                owners.reserve(publication->owners.size());
-                for (const auto& owner : publication->owners) {
-                    owners.push_back({.guest_page = owner.guest_page, .token = owner.token});
-                    const auto [owner_it, inserted] = physical_backing_owner_buffers.emplace(
-                        owner.token.publication.physical_offset, buffer_id);
-                    ASSERT_MSG(inserted || owner_it->second == buffer_id,
-                               "Physical backing cache page already belongs to another buffer");
-                }
-                ApplyPhysicalBackingBdaDeltas(publication->deltas);
-            }
-            RefreshPhysicalBackingRegistrationAddresses(
-                std::span<const PhysicalBackingCachePageRequest>{physical_requests},
-                page_begin << CACHING_PAGEBITS, std::span<vk::DeviceAddress>{bda_addrs},
-                [](const PhysicalBackingCachePageRequest& request) { return request.guest_page; },
-                [this](VAddr guest_page) -> std::optional<vk::DeviceAddress> {
-                    const auto resolved =
-                        physical_backing_coordinator->ResolveGuestPagePublication(guest_page);
-                    return resolved ? std::optional{resolved->value} : std::nullopt;
-                });
+            const auto resolved =
+                physical_backing_coordinator
+                    ? physical_backing_coordinator->ResolveGuestPagePublication(guest_page)
+                    : std::nullopt;
+            bda_addrs.push_back(resolved ? resolved->value : buffer_page.value);
         }
         WriteDataBuffer(bda_pagetable_buffer, page_begin * sizeof(vk::DeviceAddress),
                         bda_addrs.data(), bda_addrs.size() * sizeof(vk::DeviceAddress));
