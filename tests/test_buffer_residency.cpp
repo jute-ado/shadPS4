@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -139,4 +140,14 @@ TEST(BufferResidency, TracksTheActualTextureMirrorProducer) {
               VideoCore::PhysicalBackingTextureProducer::ComputeShader);
     EXPECT_EQ(VideoCore::PhysicalBackingTextureMirrorProducer(false),
               VideoCore::PhysicalBackingTextureProducer::Copy);
+}
+
+TEST(BufferResidency, AlignsTheCompleteTextureOwnershipSpan) {
+    const auto span = VideoCore::PlanPhysicalBackingTextureOwnershipSpan(0x1000'0123, 0x5000);
+
+    ASSERT_TRUE(span.has_value());
+    EXPECT_EQ(span->base, 0x1000'0000);
+    EXPECT_EQ(span->size, 0x8000);
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingTextureOwnershipSpan(
+        std::numeric_limits<VAddr>::max() - 0x1000, 0x2000));
 }
