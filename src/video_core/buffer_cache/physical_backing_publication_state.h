@@ -7,8 +7,11 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "common/types.h"
 
@@ -38,6 +41,12 @@ struct PhysicalBackingOverride {
     u64 state_generation{};
 
     auto operator<=>(const PhysicalBackingOverride&) const = default;
+};
+
+struct PhysicalBackingOverrideMigrationRequest {
+    PhysicalBackingOverride current{};
+    PhysicalBackingDeviceAddress override_page_address{};
+    u64 owner_generation{};
 };
 
 /// One ordered writeback whose completion may restore imported backing publication.
@@ -246,6 +255,39 @@ public:
             .owner_generation = owner_generation,
             .state_generation = physical.state_generation,
         };
+    }
+
+    /// Atomically transfers distinct live overrides to replacement cache storage.
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingOverride>> MigrateOverrides(
+        std::span<const PhysicalBackingOverrideMigrationRequest> requests) {
+        if (requests.empty()) {
+            return std::nullopt;
+        }
+        std::unordered_set<u64> physical_pages_in_batch;
+        physical_pages_in_batch.reserve(requests.size());
+        for (const auto& request : requests) {
+            if (!physical_pages_in_batch.emplace(request.current.physical_offset).second ||
+                !CanMigrateOverride(request.current, request.override_page_address,
+                                    request.owner_generation)) {
+                return std::nullopt;
+            }
+        }
+
+        std::vector<PhysicalBackingOverride> migrated;
+        migrated.reserve(requests.size());
+        for (const auto& request : requests) {
+            auto physical_it = FindActiveOverride(request.current);
+            PhysicalPageState& physical = physical_it->second;
+            physical.owner_generation = request.owner_generation;
+            physical.state_generation = *NextGeneration(physical.state_generation);
+            physical.override_address = request.override_page_address;
+            migrated.push_back({
+                .physical_offset = request.current.physical_offset,
+                .owner_generation = request.owner_generation,
+                .state_generation = physical.state_generation,
+            });
+        }
+        return migrated;
     }
 
     [[nodiscard]] bool RetireClean(const PhysicalBackingOverride& override) {

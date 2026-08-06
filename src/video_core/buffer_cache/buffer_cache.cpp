@@ -601,6 +601,94 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
     return true;
 }
 
+bool BufferCache::MigratePhysicalBackingOwnersForBufferReplacement(BufferId target_buffer_id,
+                                                                   BufferId source_buffer_id) {
+    if (!physical_backing_coordinator) {
+        return true;
+    }
+    if (target_buffer_id == source_buffer_id) {
+        return false;
+    }
+    const auto source_it = physical_backing_cache_pages.find(source_buffer_id);
+    if (source_it == physical_backing_cache_pages.end()) {
+        return true;
+    }
+    auto& source_owners = source_it->second;
+    if (source_owners.empty()) {
+        physical_backing_cache_pages.erase(source_it);
+        return true;
+    }
+
+    Buffer& source_buffer = slot_buffers[source_buffer_id];
+    Buffer& target_buffer = slot_buffers[target_buffer_id];
+    std::vector<VAddr> owner_guest_pages;
+    owner_guest_pages.reserve(source_owners.size());
+    for (const auto& owner : source_owners) {
+        owner_guest_pages.push_back(owner.guest_page);
+        const auto owner_buffer =
+            physical_backing_owner_buffers.find(owner.token.publication.physical_offset);
+        if (owner_buffer == physical_backing_owner_buffers.end() ||
+            owner_buffer->second != source_buffer_id) {
+            UNREACHABLE_MSG("Replacement source lost its physical owner buffer mirror");
+        }
+    }
+    const auto plan = PlanPhysicalBackingOwnerReplacementMigrations(
+        source_buffer.CpuAddr(), source_buffer.SizeBytes(), target_buffer.CpuAddr(),
+        target_buffer.SizeBytes(), owner_guest_pages);
+    if (!plan || plan->size() != source_owners.size()) {
+        return false;
+    }
+
+    std::vector<PhysicalBackingCachePageRequest> requests;
+    requests.reserve(plan->size());
+    for (const auto& migration : *plan) {
+        if (target_buffer.BufferDeviceAddress() >
+            std::numeric_limits<u64>::max() - migration.destination_offset) {
+            return false;
+        }
+        requests.push_back({
+            .guest_page = migration.guest_page,
+            .override_page_address = PhysicalBackingDeviceAddress{
+                target_buffer.BufferDeviceAddress() + migration.destination_offset},
+        });
+    }
+
+    auto [target_it, target_inserted] =
+        physical_backing_cache_pages.try_emplace(target_buffer_id);
+    auto& target_owners = target_it->second;
+    target_owners.reserve(target_owners.size() + source_owners.size());
+    const auto migrated = physical_backing_coordinator->MigrateCachePagesForGuests(requests);
+    if (!migrated || migrated->migrations.size() != plan->size()) {
+        if (target_inserted) {
+            physical_backing_cache_pages.erase(target_buffer_id);
+        }
+        return false;
+    }
+    for (size_t index = 0; index < plan->size(); ++index) {
+        const auto& migration = (*plan)[index];
+        if (migration.owner_index >= source_owners.size() ||
+            migrated->migrations[index].previous_token !=
+                source_owners[migration.owner_index].token) {
+            UNREACHABLE_MSG("Replacement owner migration changed after prevalidation");
+        }
+    }
+
+    for (size_t index = 0; index < plan->size(); ++index) {
+        const auto& migration = (*plan)[index];
+        auto owner = std::move(source_owners[migration.owner_index]);
+        owner.token = migrated->migrations[index].token;
+        auto owner_buffer =
+            physical_backing_owner_buffers.find(owner.token.publication.physical_offset);
+        owner_buffer->second = target_buffer_id;
+        target_owners.push_back(std::move(owner));
+    }
+    source_owners.clear();
+    physical_backing_cache_pages.erase(source_buffer_id);
+    ProtectPhysicalBackingAliases(migrated->deltas);
+    ApplyPhysicalBackingBdaDeltas(migrated->deltas);
+    return true;
+}
+
 std::optional<std::vector<PhysicalBackingTextureToken>>
 BufferCache::BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size) {
     std::vector<PhysicalBackingTextureToken> tokens;
@@ -1467,6 +1555,10 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
         .bufferMemoryBarrierCount = static_cast<u32>(post_barriers.size()),
         .pBufferMemoryBarriers = post_barriers.data(),
     });
+    if (!MigratePhysicalBackingOwnersForBufferReplacement(new_buffer_id, overlap_id)) {
+        LOG_ERROR(Render_Vulkan,
+                  "Falling back to retirement after physical replacement migration failed");
+    }
     if (!DeleteBuffer(overlap_id)) {
         LOG_ERROR(Render_Vulkan,
                   "Deferred overlapping buffer deletion after physical writeback failure");
