@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <atomic>
+#include <cstring>
 #include <limits>
 
 #include "common/logging/log.h"
@@ -212,6 +214,18 @@ ExternalAddressSpaceBacking::ExternalAddressSpaceBacking(const Instance& instanc
         Render_Vulkan,
         "Retained external address-space backing import ({} bytes); guest page publications: 0",
         request.lease_size);
+}
+
+bool ExternalAddressSpaceBacking::TryWritePhysical(u64 physical_offset,
+                                                   std::span<const u8> bytes) noexcept {
+    if (!resources ||
+        !IsExternalAddressSpacePhysicalWriteRangeValid(resources->lease.Size(), physical_offset,
+                                                       bytes.size())) {
+        return false;
+    }
+    std::memcpy(resources->lease.Base() + physical_offset, bytes.data(), bytes.size());
+    std::atomic_thread_fence(std::memory_order_release);
+    return true;
 }
 
 } // namespace Vulkan

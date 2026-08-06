@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 
 #include "core/address_space_backing_lease.h"
 #include "video_core/renderer_vulkan/external_address_space_backing_import.h"
@@ -36,6 +37,9 @@ public:
     [[nodiscard]] u64 BackingSize() const noexcept {
         return resources ? resources->lease.Size() : 0;
     }
+
+    [[nodiscard]] bool TryWritePhysical(u64 physical_offset,
+                                        std::span<const u8> bytes) noexcept;
 
     [[nodiscard]] static constexpr u64 GuestPagePublicationCount() noexcept {
         return 0;
