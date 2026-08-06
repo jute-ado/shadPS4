@@ -768,6 +768,38 @@ public:
         return MakeAliasDeltas(writeback.physical_offset);
     }
 
+    /// Publishes a prevalidated batch whose GPU copies into canonical backing have already been
+    /// encoded in command order. Host visibility remains guarded by the writeback timeline tracker.
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
+    PublishSubmittedCachePageGpuWritebacks(
+        std::span<const PhysicalBackingWriteback> writebacks) {
+        if (writebacks.empty()) {
+            return std::nullopt;
+        }
+        std::vector<u64> physical_pages;
+        physical_pages.reserve(writebacks.size());
+        u64 previous_physical_offset = 0;
+        bool first = true;
+        for (const auto& writeback : writebacks) {
+            const auto pending = pending_writebacks.find(writeback.physical_offset);
+            if ((!first && writeback.physical_offset <= previous_physical_offset) ||
+                pending == pending_writebacks.end() || pending->second != writeback ||
+                !physical_aliases.contains(writeback.physical_offset)) {
+                return std::nullopt;
+            }
+            physical_pages.push_back(writeback.physical_offset);
+            previous_physical_offset = writeback.physical_offset;
+            first = false;
+        }
+        if (!state.PublishSubmittedWritebacks(writebacks)) {
+            return std::nullopt;
+        }
+        for (const u64 physical_page : physical_pages) {
+            pending_writebacks.erase(physical_page);
+        }
+        return MakePhysicalDeltas(physical_pages);
+    }
+
     /// Suppresses buffer BDA publication for every physical alias while a texture may own it.
     [[nodiscard]] std::optional<PhysicalBackingTexturePublication> BeginTextureOverlap(
         VAddr guest_base, u64 size) {

@@ -315,6 +315,30 @@ public:
         return true;
     }
 
+    /// Restores imported publication after the caller has encoded ordered GPU copies into the
+    /// canonical backing. The copies remain protected from host access by their timeline tick.
+    /// The complete batch is validated before any publication changes.
+    [[nodiscard]] bool PublishSubmittedWritebacks(
+        std::span<const PhysicalBackingWriteback> writebacks) {
+        if (writebacks.empty()) {
+            return false;
+        }
+        u64 previous_physical_offset = 0;
+        bool first = true;
+        for (const auto& writeback : writebacks) {
+            if ((!first && writeback.physical_offset <= previous_physical_offset) ||
+                !MatchesWriteback(writeback, Publication::AwaitingWriteback)) {
+                return false;
+            }
+            previous_physical_offset = writeback.physical_offset;
+            first = false;
+        }
+        for (const auto& writeback : writebacks) {
+            RestoreImportedBacking(physical_pages.find(writeback.physical_offset)->second);
+        }
+        return true;
+    }
+
     /// Forgets every publication token for a physical allocation before its
     /// backing can be reused. Pending writebacks are deliberately invalidated;
     /// a writeback already inside its synchronous commit cannot be retired.
