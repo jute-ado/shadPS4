@@ -349,6 +349,22 @@ struct PhysicalBackingCommandAliasPlan {
     std::vector<PhysicalBackingCommandPagePlan> pages;
 };
 
+struct PhysicalBackingCachePageOwnerLocation {
+    u32 buffer_index{};
+    u32 owner_index{};
+    u64 physical_page{};
+
+    auto operator<=>(const PhysicalBackingCachePageOwnerLocation&) const = default;
+};
+
+[[nodiscard]] inline std::optional<std::vector<PhysicalBackingCachePageOwnerLocation>>
+PlanPhysicalBackingCachePageRetirements(
+    std::span<const u64> requested_physical_pages,
+    std::span<const PhysicalBackingCachePageOwnerLocation> owners) {
+    std::vector<PhysicalBackingCachePageOwnerLocation> retirements(owners.begin(), owners.end());
+    return retirements;
+}
+
 [[nodiscard]] inline std::optional<PhysicalBackingCommandAliasPlan>
 PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAccess> accesses) {
     constexpr u64 PageMask = 16_KB - 1;

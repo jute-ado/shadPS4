@@ -364,3 +364,20 @@ TEST(BufferResidency, LeavesUncontendedReadOnlyPagesOutOfCommandSnapshots) {
     EXPECT_EQ(plan->writer_prepare_order, (std::vector<Resource>{writer}));
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{writer}));
 }
+
+TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
+    using Owner = VideoCore::PhysicalBackingCachePageOwnerLocation;
+    constexpr u64 requested_page = 0xab8d'0000;
+    constexpr u64 unrelated_page = requested_page + 16_KB;
+    constexpr std::array requested{requested_page};
+    constexpr std::array owners{
+        Owner{41, 0, requested_page},
+        Owner{41, 1, unrelated_page},
+    };
+
+    const auto retirements =
+        VideoCore::PlanPhysicalBackingCachePageRetirements(requested, owners);
+
+    ASSERT_TRUE(retirements.has_value());
+    EXPECT_EQ(*retirements, (std::vector<Owner>{owners.front()}));
+}
