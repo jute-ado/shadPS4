@@ -45,16 +45,17 @@ struct PhysicalBackingCachePublicationBatch {
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
-struct PhysicalBackingDirtyCachePagePublication {
-    PhysicalBackingWriteback writeback{};
-    std::vector<PhysicalBackingBdaDelta> deltas;
-};
-
 struct PhysicalBackingDirtySlice {
     u32 offset{};
     u32 size{};
 
     auto operator<=>(const PhysicalBackingDirtySlice&) const = default;
+};
+
+struct PhysicalBackingDirtyCachePagePublication {
+    PhysicalBackingWriteback writeback{};
+    std::vector<PhysicalBackingBdaDelta> deltas;
+    std::vector<PhysicalBackingDirtySlice> dirty_slices;
 };
 
 struct PhysicalBackingOwnerRetirement {
@@ -329,11 +330,13 @@ public:
         if (!writeback) {
             return std::nullopt;
         }
+        auto dirty_slices = std::move(owner_it->second.dirty_slices);
         pending_writebacks.emplace(writeback->physical_offset, *writeback);
         active_cache_owners.erase(owner_it);
         return PhysicalBackingDirtyCachePagePublication{
             .writeback = *writeback,
             .deltas = MakeAliasDeltas(token.publication.physical_offset),
+            .dirty_slices = std::move(dirty_slices),
         };
     }
 
