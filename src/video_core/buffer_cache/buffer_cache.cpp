@@ -405,6 +405,9 @@ BufferCache::BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size) {
     if (!physical_backing_coordinator || size == 0) {
         return tokens;
     }
+    if (!TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size)) {
+        return std::nullopt;
+    }
     if (!RetirePhysicalBackingOwnersForCpuWrite(device_addr, size)) {
         return std::nullopt;
     }

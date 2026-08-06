@@ -698,28 +698,26 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
-        AcquirePhysicalBackingTextureOwnership(image_id, image);
-        image.flags |= ImageFlagBits::GpuModified;
+        PreparePhysicalBackingTextureGpuWrite(image_id);
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
         }
+    } else {
+        UpdateImage(image_id);
     }
-    UpdateImage(image_id);
     return image.FindView(desc.view_info);
 }
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
-    AcquirePhysicalBackingTextureOwnership(image_id, image);
-    image.flags |= ImageFlagBits::GpuModified;
+    PreparePhysicalBackingTextureGpuWrite(image_id);
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
     image.usage.render_target = 1u;
-    UpdateImage(image_id);
 
     // Register meta data for this color buffer
     if (desc.info.meta_info.cmask_addr) {
@@ -739,10 +737,8 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
-    AcquirePhysicalBackingTextureOwnership(image_id, image);
-    image.flags |= ImageFlagBits::GpuModified;
+    PreparePhysicalBackingTextureGpuWrite(image_id);
     image.usage.depth_target = 1u;
-    UpdateImage(image_id);
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
@@ -899,10 +895,10 @@ void TextureCache::RegisterImage(ImageId image_id) {
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
 }
 
-void TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, const Image& image) {
+bool TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, const Image& image) {
     const bool already_owned = physical_backing_texture_tokens.contains(image_id);
     if (!ShouldAcquirePhysicalBackingTextureOwnership(already_owned, true)) {
-        return;
+        return false;
     }
     const auto physical_tokens = buffer_cache.BeginPhysicalBackingTextureOverlap(
         image.info.guest_address, image.info.guest_size);
@@ -911,12 +907,17 @@ void TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, cons
     physical_backing_texture_tokens.emplace(image_id, std::move(*physical_tokens));
     ASSERT_MSG(physical_backing_texture_write_orders.Acquire(image_id.index),
                "Physical backing texture write order already tracked");
+    return true;
 }
 
 void TextureCache::PreparePhysicalBackingTextureGpuWrite(ImageId image_id) {
     Image& image = slot_images[image_id];
-    AcquirePhysicalBackingTextureOwnership(image_id, image);
+    const bool acquired = AcquirePhysicalBackingTextureOwnership(image_id, image);
+    if (acquired) {
+        image.flags |= ImageFlagBits::GpuDirty;
+    }
     image.flags |= ImageFlagBits::GpuModified;
+    UpdateImage(image_id);
 }
 
 void TextureCache::RecordPhysicalBackingTextureGpuWrites(std::span<const ImageId> image_ids) {

@@ -332,7 +332,8 @@ private:
     void RegisterImage(ImageId image);
 
     /// Suppress imported buffer publication only when the image can receive GPU writes.
-    void AcquirePhysicalBackingTextureOwnership(ImageId image_id, const Image& image);
+    [[nodiscard]] bool AcquirePhysicalBackingTextureOwnership(ImageId image_id,
+                                                              const Image& image);
 
     /// Unregister image from the page table
     void UnregisterImage(ImageId image);

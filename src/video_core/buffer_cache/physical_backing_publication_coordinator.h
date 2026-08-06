@@ -721,6 +721,7 @@ public:
             }
             const u64 physical_offset = mapping_it->second.physical_offset;
             if (active_cache_owners.contains(physical_offset) ||
+                texture_block_generations.contains(physical_offset) ||
                 pending_writebacks.contains(physical_offset)) {
                 return std::nullopt;
             }

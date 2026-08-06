@@ -287,7 +287,7 @@ TEST(PhysicalBackingPublicationCoordinator, DmaResidencyAtomicallyPublishesDirty
               (VideoCore::PhysicalBackingDirtySlice{0, static_cast<u32>(PageSize)}));
 }
 
-TEST(PhysicalBackingPublicationCoordinator, IncompleteTextureTransitionLeavesOwnershipBlocked) {
+TEST(PhysicalBackingPublicationCoordinator, TextureAuthorityTransfersOnlyAfterPriorOwnerEnds) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
     constexpr std::array spans{
@@ -296,19 +296,20 @@ TEST(PhysicalBackingPublicationCoordinator, IncompleteTextureTransitionLeavesOwn
     };
     ASSERT_TRUE(coordinator.MapSpans(spans));
     const auto first = coordinator.BeginTextureOverlap(GuestA, PageSize);
-    const auto second = coordinator.BeginTextureOverlap(GuestB, PageSize);
     ASSERT_TRUE(first.has_value());
+    EXPECT_FALSE(coordinator.BeginTextureOverlap(GuestB, PageSize));
+    ASSERT_TRUE(coordinator.EndTextureOverlap(first->token));
+    const auto second = coordinator.BeginTextureOverlap(GuestB, PageSize);
     ASSERT_TRUE(second.has_value());
     const std::array requests{VideoCore::PhysicalBackingCachePageRequest{
         GuestA, PhysicalBackingDeviceAddress{OverrideBase}}};
 
-    EXPECT_FALSE(coordinator.TransitionTexturePagesToDirtyCachePages(
-        std::span{&first->token, 1}, requests));
+    const auto transition = coordinator.TransitionTexturePagesToDirtyCachePages(
+        std::span{&second->token, 1}, requests);
 
-    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
-    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
-    EXPECT_TRUE(coordinator.EndTextureOverlap(first->token));
-    EXPECT_TRUE(coordinator.EndTextureOverlap(second->token));
+    ASSERT_TRUE(transition.has_value());
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, OverrideBase);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, OverrideBase);
 }
 
 TEST(PhysicalBackingPublicationCoordinator,
