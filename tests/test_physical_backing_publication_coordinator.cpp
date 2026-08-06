@@ -240,7 +240,7 @@ TEST(PhysicalBackingPublicationCoordinator, ResolvesZeroPublishedAliasesDuringTe
     ASSERT_EQ(restored->size(), 1);
     EXPECT_EQ(restored->front().device_address.value, 0);
     EXPECT_EQ(coordinator.ResolvePhysicalPagesForDeltas(*restored),
-              (std::vector<u64>{PhysicalPage}));
+              (std::optional<std::vector<u64>>{std::vector<u64>{PhysicalPage}}));
 }
 
 TEST(PhysicalBackingPublicationCoordinator, CpuWriteThroughAliasRetiresPhysicalGpuOwner) {

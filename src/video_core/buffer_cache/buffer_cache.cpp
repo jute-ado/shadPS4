@@ -893,14 +893,14 @@ bool BufferCache::RetirePhysicalBackingCachePagesForCpuWrite(
         for (const u64 physical_page : submitted_physical_pages) {
             pending_physical_backing_host_aliases[physical_page].clear();
         }
-        for (const auto& delta : *restored) {
-            if (delta.device_address.value < external_address_space_backing->DeviceAddress()) {
-                UNREACHABLE_MSG(
-                    "Restored physical alias did not resolve into imported backing");
-            }
-            const u64 physical_page =
-                delta.device_address.value - external_address_space_backing->DeviceAddress();
-            pending_physical_backing_host_aliases[physical_page].push_back(delta.guest_page);
+        const auto restored_physical_pages =
+            physical_backing_coordinator->ResolvePhysicalPagesForDeltas(*restored);
+        if (!restored_physical_pages || restored_physical_pages->size() != restored->size()) {
+            UNREACHABLE_MSG("Restored physical aliases lost their mapping provenance");
+        }
+        for (size_t index = 0; index < restored->size(); ++index) {
+            pending_physical_backing_host_aliases[(*restored_physical_pages)[index]].push_back(
+                (*restored)[index].guest_page);
         }
         restored_deltas.insert(restored_deltas.end(), restored->begin(), restored->end());
     }

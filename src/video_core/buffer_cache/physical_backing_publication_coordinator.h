@@ -611,6 +611,20 @@ public:
         return mapping_it->second.physical_offset;
     }
 
+    [[nodiscard]] std::optional<std::vector<u64>> ResolvePhysicalPagesForDeltas(
+        std::span<const PhysicalBackingBdaDelta> deltas) const {
+        std::vector<u64> physical_pages;
+        physical_pages.reserve(deltas.size());
+        for (const auto& delta : deltas) {
+            const auto physical_page = ResolvePhysicalPageForGuest(delta.guest_page);
+            if (!physical_page) {
+                return std::nullopt;
+            }
+            physical_pages.push_back(*physical_page);
+        }
+        return physical_pages;
+    }
+
     [[nodiscard]] std::optional<PhysicalBackingDeviceAddress> ResolveGuestPagePublication(
         VAddr guest_page) const {
         if (!IsPageAligned(guest_page)) {
