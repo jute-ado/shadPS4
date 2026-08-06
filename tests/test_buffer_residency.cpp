@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <optional>
 #include <vector>
 
 #include "video_core/buffer_cache/buffer_residency.h"
@@ -59,4 +61,25 @@ TEST(BufferResidency, DoesNotTouchUnpublishedBufferAfterResidencyUpload) {
 
     VideoCore::TouchBufferAfterUploadIfRegistered(true, [&] { ++touch_count; });
     EXPECT_EQ(touch_count, 1);
+}
+
+TEST(BufferResidency, FailedPhysicalOwnershipBatchPreservesCurrentPagePublications) {
+    constexpr VAddr PageSize = 16_KB;
+    constexpr VAddr FirstPage = 0x1000'0000;
+    constexpr u64 ImportedAddress = 0x2'0000'0000;
+    std::array<u64, 3> addresses{0x4'0000'0000, 0, 0};
+    constexpr std::array physical_pages{FirstPage + PageSize, FirstPage + 2 * PageSize};
+
+    VideoCore::RefreshPhysicalBackingRegistrationAddresses(
+        physical_pages, FirstPage, addresses,
+        [](VAddr page) -> std::optional<u64> {
+            if (page == FirstPage + PageSize) {
+                return 0x2'0000'0000ULL;
+            }
+            return 0;
+        });
+
+    EXPECT_EQ(addresses[0], 0x4'0000'0000);
+    EXPECT_EQ(addresses[1], ImportedAddress);
+    EXPECT_EQ(addresses[2], 0);
 }
