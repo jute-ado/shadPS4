@@ -13,6 +13,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/memory.h"
+#include "core/windows_address_space_backing.h"
 #include "core/windows_protection_snapshot.h"
 #include "libraries/error_codes.h"
 
@@ -103,6 +104,54 @@ static constexpr u64 UserSize = USER_MAX - USER_MIN + 1;
         }
     }
 }
+
+class NativeWindowsAddressSpaceBackingApi final : public WindowsAddressSpaceBackingApi {
+public:
+    void* CreatePageFileMapping(void* file, u32 desired_access, u32 page_protection,
+                                u32 allocation_attributes, u64 maximum_size) override {
+        return CreateFileMapping2(static_cast<HANDLE>(file), nullptr, desired_access,
+                                  page_protection, allocation_attributes, maximum_size, nullptr,
+                                  nullptr, 0);
+    }
+
+    u8* ReservePlaceholder(void* process, u64 size, u32 allocation_type,
+                           u32 protection) override {
+        return static_cast<u8*>(VirtualAlloc2(static_cast<HANDLE>(process), nullptr, size,
+                                              allocation_type, protection, nullptr, 0));
+    }
+
+    u8* MapPlaceholder(void* mapping, void* process, u8* placeholder, u64 offset, u64 size,
+                       u32 allocation_type, u32 protection) override {
+        return static_cast<u8*>(MapViewOfFile3(static_cast<HANDLE>(mapping),
+                                               static_cast<HANDLE>(process), placeholder, offset,
+                                               size, allocation_type, protection, nullptr, 0));
+    }
+
+    bool UnmapView(void* process, u8* base, u32 flags) override {
+        const bool result =
+            UnmapViewOfFile2(static_cast<HANDLE>(process), base, static_cast<ULONG>(flags));
+        if (!result) {
+            LOG_CRITICAL(Core, "Failed to unmap backing memory placeholder");
+        }
+        return result;
+    }
+
+    bool ReleasePlaceholder(void* process, u8* base, u64 size, u32 flags) override {
+        const bool result = VirtualFreeEx(static_cast<HANDLE>(process), base, size, flags);
+        if (!result) {
+            LOG_CRITICAL(Core, "Failed to free backing memory");
+        }
+        return result;
+    }
+
+    bool CloseMapping(void* mapping) override {
+        const bool result = CloseHandle(static_cast<HANDLE>(mapping));
+        if (!result) {
+            LOG_CRITICAL(Core, "Failed to free backing memory file handle");
+        }
+        return result;
+    }
+};
 
 struct MemoryRegion {
     VAddr base;
@@ -199,23 +248,10 @@ struct AddressSpace::Impl {
         user_base = reinterpret_cast<u8*>(USER_MIN);
         user_size = supported_user_max - USER_MIN - 1;
 
-        // Allocate backing file that represents the total physical memory.
-        backing_handle = CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_ALL_ACCESS,
-                                            PAGE_EXECUTE_READWRITE, SEC_COMMIT, backing_size,
-                                            nullptr, nullptr, 0);
-
-        ASSERT_MSG(backing_handle, "{}", Common::GetLastErrorMsg());
-        // Allocate a virtual memory for the backing file map as placeholder
-        backing_base = static_cast<u8*>(VirtualAlloc2(process, nullptr, backing_size,
-                                                      MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
-                                                      PAGE_NOACCESS, nullptr, 0));
-        ASSERT_MSG(backing_base, "{}", Common::GetLastErrorMsg());
-
-        // Map backing placeholder. This will commit the pages
-        void* const ret =
-            MapViewOfFile3(backing_handle, process, backing_base, 0, backing_size,
-                           MEM_REPLACE_PLACEHOLDER, PAGE_EXECUTE_READWRITE, nullptr, 0);
-        ASSERT_MSG(ret == backing_base, "{}", Common::GetLastErrorMsg());
+        // Allocate the one canonical backing shared by Core and any opaque lifetime leases.
+        backing = WindowsAddressSpaceBacking::Create(
+            std::make_shared<NativeWindowsAddressSpaceBackingApi>(), process, backing_size);
+        ASSERT_MSG(backing, "{}", Common::GetLastErrorMsg());
     }
 
     ~Impl() {
@@ -223,17 +259,6 @@ struct AddressSpace::Impl {
             if (!VirtualFree(virtual_base, 0, MEM_RELEASE)) {
                 LOG_CRITICAL(Core, "Failed to free virtual memory");
             }
-        }
-        if (backing_base) {
-            if (!UnmapViewOfFile2(process, backing_base, MEM_PRESERVE_PLACEHOLDER)) {
-                LOG_CRITICAL(Core, "Failed to unmap backing memory placeholder");
-            }
-            if (!VirtualFreeEx(process, backing_base, 0, MEM_RELEASE)) {
-                LOG_CRITICAL(Core, "Failed to free backing memory");
-            }
-        }
-        if (!CloseHandle(backing_handle)) {
-            LOG_CRITICAL(Core, "Failed to free backing memory file handle");
         }
     }
 
@@ -246,7 +271,8 @@ struct AddressSpace::Impl {
 
         void* ptr = nullptr;
         if (phys_addr != -1) {
-            HANDLE backing = fd != -1 ? reinterpret_cast<HANDLE>(fd) : backing_handle;
+            HANDLE backing_handle =
+                fd != -1 ? reinterpret_cast<HANDLE>(fd) : static_cast<HANDLE>(backing->Mapping());
             if (fd != -1 && prot == PAGE_READONLY) {
                 // Allocate the memory for the mapping
                 DWORD resultvar;
@@ -260,14 +286,14 @@ struct AddressSpace::Impl {
                 // Offset is the least-significant 32 bits, OffsetHigh is the most-significant.
                 param.Offset = phys_addr & 0xffffffffull;
                 param.OffsetHigh = (phys_addr & 0xffffffff00000000ull) >> 32;
-                bool ret = ReadFile(backing, ptr, size, &resultvar, &param);
+                bool ret = ReadFile(backing_handle, ptr, size, &resultvar, &param);
                 ASSERT_MSG(ret, "ReadFile failed. {}", Common::GetLastErrorMsg());
 
                 // ReadFile moves the file pointer, restore it with SetFilePointer
                 s64 size_to_move = -size;
                 LONG size_low = size_to_move & 0xffffffffull;
                 LONG size_high = (size_to_move & 0xffffffff00000000ull) >> 32;
-                ret = SetFilePointer(backing, size_low, &size_high, FILE_CURRENT);
+                ret = SetFilePointer(backing_handle, size_low, &size_high, FILE_CURRENT);
 
                 // Protect the memory area appropriately
                 ret = VirtualProtect(ptr, size, prot, &resultvar);
@@ -275,7 +301,8 @@ struct AddressSpace::Impl {
             } else {
                 if (prot == PAGE_NOACCESS) {
                     DWORD resultvar;
-                    ptr = MapViewOfFile3(backing, process, reinterpret_cast<PVOID>(virtual_addr),
+                    ptr = MapViewOfFile3(backing_handle, process,
+                                         reinterpret_cast<PVOID>(virtual_addr),
                                          phys_addr, size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
                                          nullptr, 0);
                     ASSERT_MSG(ptr, "MapViewOfFile3 failed. {}", Common::GetLastErrorMsg());
@@ -283,7 +310,8 @@ struct AddressSpace::Impl {
                     ASSERT_MSG(ret, "VirtualProtect failed. {}", Common::GetLastErrorMsg());
                 } else {
                     ptr =
-                        MapViewOfFile3(backing, process, reinterpret_cast<PVOID>(virtual_addr),
+                        MapViewOfFile3(backing_handle, process,
+                                       reinterpret_cast<PVOID>(virtual_addr),
                                        phys_addr, size, MEM_REPLACE_PLACEHOLDER, prot, nullptr, 0);
                     ASSERT_MSG(ptr, "MapViewOfFile3 failed. {}", Common::GetLastErrorMsg());
                 }
@@ -603,9 +631,8 @@ struct AddressSpace::Impl {
 
     AddressSpaceOperationGate operation_gate;
     HANDLE process{};
-    HANDLE backing_handle{};
+    std::shared_ptr<WindowsAddressSpaceBacking> backing;
     const u64 backing_size;
-    u8* backing_base{};
     u8* virtual_base{};
     u8* system_managed_base{};
     u64 system_managed_size{};
@@ -841,7 +868,11 @@ struct AddressSpace::Impl {
 
 AddressSpace::AddressSpace()
     : backing_size{ConfiguredBackingSize()}, impl{std::make_unique<Impl>(backing_size)} {
+#ifdef _WIN32
+    backing_base = impl->backing->Base();
+#else
     backing_base = impl->backing_base;
+#endif
     system_managed_base = impl->system_managed_base;
     system_managed_size = impl->system_managed_size;
     system_reserved_base = impl->system_reserved_base;
@@ -851,6 +882,14 @@ AddressSpace::AddressSpace()
 }
 
 AddressSpace::~AddressSpace() = default;
+
+std::optional<AddressSpaceBackingLease> AddressSpace::AcquireBackingLease() const noexcept {
+#ifdef _WIN32
+    return impl->backing->AcquireLease();
+#else
+    return std::nullopt;
+#endif
+}
 
 void* AddressSpace::Map(VAddr virtual_addr, u64 size, PAddr phys_addr, bool is_exec) {
 #if ARCH_X86_64
