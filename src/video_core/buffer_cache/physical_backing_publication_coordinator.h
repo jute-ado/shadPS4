@@ -400,6 +400,34 @@ public:
         return PublishedAddress(guest_page, mapping_it->second.physical_offset);
     }
 
+    [[nodiscard]] std::optional<PhysicalBackingCachePageToken>
+    ResolveActiveCachePageForGuest(VAddr guest_page) const {
+        if (!IsPageAligned(guest_page)) {
+            return std::nullopt;
+        }
+        const auto mapping_it = mapping_tokens.find(guest_page);
+        if (mapping_it == mapping_tokens.end()) {
+            return std::nullopt;
+        }
+        const auto owner_it = active_cache_owners.find(mapping_it->second.physical_offset);
+        if (owner_it == active_cache_owners.end()) {
+            return std::nullopt;
+        }
+        return owner_it->second.token;
+    }
+
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
+    RetireCachePageToGpuWriteSuppressed(const PhysicalBackingCachePageToken& token) {
+        const auto owner_it = FindActiveCacheOwner(token);
+        if (owner_it == active_cache_owners.end() ||
+            !physical_aliases.contains(token.publication.physical_offset) ||
+            !state.RetireToGpuWriteSuppressed(token.publication)) {
+            return std::nullopt;
+        }
+        active_cache_owners.erase(owner_it);
+        return MakeAliasDeltas(token.publication.physical_offset);
+    }
+
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(
         const PhysicalBackingCachePageToken& token) {
         const auto owner_it = FindActiveCacheOwner(token);

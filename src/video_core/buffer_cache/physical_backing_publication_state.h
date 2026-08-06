@@ -266,6 +266,22 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool RetireToGpuWriteSuppressed(const PhysicalBackingOverride& override) {
+        const auto physical_it = FindActiveOverride(override);
+        if (physical_it == physical_pages.end()) {
+            return false;
+        }
+        const auto next_state = NextGeneration(physical_it->second.state_generation);
+        if (!next_state) {
+            return false;
+        }
+        PhysicalPageState& physical = physical_it->second;
+        physical.publication = Publication::GpuWriteSuppressed;
+        physical.override_address = {};
+        physical.state_generation = *next_state;
+        return true;
+    }
+
     [[nodiscard]] std::optional<PhysicalBackingWriteback> RetireGpuDirty(
         const PhysicalBackingOverride& override) {
         const auto physical_it = FindActiveOverride(override);
