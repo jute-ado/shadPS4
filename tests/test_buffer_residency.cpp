@@ -343,3 +343,24 @@ TEST(BufferResidency, SnapshotsWritableResourceBeforePreparingPartialWrite) {
     EXPECT_EQ(plan->writer_prepare_order, (std::vector<Resource>{texture}));
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{texture}));
 }
+
+TEST(BufferResidency, LeavesUncontendedReadOnlyPagesOutOfCommandSnapshots) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    constexpr u64 written_page = 0xab8d'0000;
+    constexpr u64 read_only_page = written_page + 16_KB;
+    const Resource writer{Kind::Buffer, 41};
+    const Resource read_only_texture{Kind::Texture, 16};
+    const std::array accesses{
+        Access{writer, true, {written_page}},
+        Access{read_only_texture, false, {read_only_page}},
+    };
+
+    const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
+
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->read_snapshot_order, (std::vector<Resource>{writer}));
+    EXPECT_EQ(plan->writer_prepare_order, (std::vector<Resource>{writer}));
+    EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{writer}));
+}
