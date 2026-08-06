@@ -1,0 +1,89 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#pragma once
+
+#include <algorithm>
+#include <limits>
+#include <optional>
+#include <span>
+#include <unordered_map>
+
+#include "common/types.h"
+
+namespace VideoCore {
+
+/// Retains the newest submitted GPU timeline tick for each canonical physical page.
+class PhysicalBackingWritebackTracker {
+public:
+    static constexpr u64 PageSize = 16_KB;
+
+    [[nodiscard]] bool Record(std::span<const u64> physical_pages, u64 tick) {
+        if (tick == 0 || physical_pages.empty()) {
+            return false;
+        }
+        u64 previous_page = 0;
+        bool first_page = true;
+        for (const u64 page : physical_pages) {
+            if ((page & (PageSize - 1)) != 0 || (!first_page && page <= previous_page)) {
+                return false;
+            }
+            previous_page = page;
+            first_page = false;
+        }
+        for (const u64 page : physical_pages) {
+            auto& latest_tick = pending_ticks[page];
+            latest_tick = std::max(latest_tick, tick);
+        }
+        return true;
+    }
+
+    [[nodiscard]] std::optional<u64> RequiredTick(
+        std::span<const u64> physical_pages) const {
+        if (!ValidateQuery(physical_pages) || pending_ticks.empty()) {
+            return std::nullopt;
+        }
+
+        // Conservative RED behavior: model the existing global wait. The focused test requires
+        // selecting only ticks attached to the queried canonical physical pages.
+        return RequiredTickForAll();
+    }
+
+    [[nodiscard]] std::optional<u64> RequiredTickForAll() const {
+        std::optional<u64> highest;
+        for (const auto& [page, tick] : pending_ticks) {
+            highest = highest ? std::max(*highest, tick) : tick;
+        }
+        return highest;
+    }
+
+    void CompleteThrough(u64 tick) {
+        std::erase_if(pending_ticks,
+                      [tick](const auto& pending) { return pending.second <= tick; });
+    }
+
+    [[nodiscard]] size_t PendingPageCount() const noexcept {
+        return pending_ticks.size();
+    }
+
+private:
+    [[nodiscard]] static bool ValidateQuery(std::span<const u64> physical_pages) {
+        if (physical_pages.empty()) {
+            return false;
+        }
+        u64 previous_page = 0;
+        bool first_page = true;
+        for (const u64 page : physical_pages) {
+            if ((page & (PageSize - 1)) != 0 || (!first_page && page <= previous_page)) {
+                return false;
+            }
+            previous_page = page;
+            first_page = false;
+        }
+        return true;
+    }
+
+    std::unordered_map<u64, u64> pending_ticks;
+};
+
+} // namespace VideoCore

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "video_core/buffer_cache/buffer_residency.h"
+#include "video_core/buffer_cache/physical_backing_writeback_tracker.h"
 
 namespace {
 
@@ -429,4 +430,37 @@ TEST(BufferResidency, WaitsOnlyForGpuWritebacksOverlappingHostAccess) {
         VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(pending_guest_pages, 0x13fff, 2));
     EXPECT_FALSE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
         pending_guest_pages, std::numeric_limits<VAddr>::max(), 2));
+}
+
+TEST(BufferResidency, PhysicalWritebackTrackerDoesNotRequireUnrelatedWait) {
+    VideoCore::PhysicalBackingWritebackTracker tracker;
+    constexpr std::array first_pages{u64{0x20000}};
+    constexpr std::array second_pages{u64{0x24000}};
+    constexpr std::array unrelated_pages{u64{0x28000}};
+
+    EXPECT_TRUE(tracker.Record(first_pages, 41));
+    EXPECT_TRUE(tracker.Record(second_pages, 47));
+
+    EXPECT_FALSE(tracker.RequiredTick(unrelated_pages).has_value());
+    EXPECT_EQ(tracker.RequiredTick(first_pages), 41);
+    EXPECT_EQ(tracker.RequiredTick(second_pages), 47);
+    EXPECT_EQ(tracker.PendingPageCount(), 2);
+}
+
+TEST(BufferResidency, PhysicalWritebackTrackerWaitsForLatestSamePageSubmission) {
+    VideoCore::PhysicalBackingWritebackTracker tracker;
+    constexpr std::array first_page{u64{0x20000}};
+    constexpr std::array second_page{u64{0x24000}};
+
+    EXPECT_TRUE(tracker.Record(first_page, 41));
+    EXPECT_TRUE(tracker.Record(second_page, 47));
+    EXPECT_TRUE(tracker.Record(first_page, 53));
+
+    EXPECT_EQ(tracker.RequiredTick(first_page), 53);
+    EXPECT_EQ(tracker.RequiredTickForAll(), 53);
+    tracker.CompleteThrough(47);
+    EXPECT_EQ(tracker.PendingPageCount(), 1);
+    EXPECT_EQ(tracker.RequiredTick(first_page), 53);
+    tracker.CompleteThrough(53);
+    EXPECT_EQ(tracker.PendingPageCount(), 0);
 }
