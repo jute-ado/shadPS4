@@ -449,6 +449,22 @@ TEST(BufferResidency, ExpandsPhysicalWritebackSlicesToVulkanCopyAlignment) {
               (std::vector<Copy>{{0x4000, 0x20000, 4}, {0x8000, 0x24000, 8}}));
 }
 
+TEST(BufferResidency, MergesPhysicalWritebackSlicesThatOverlapAfterAlignment) {
+    using Slice = VideoCore::PhysicalBackingGpuWritebackSlice;
+    using Copy = VideoCore::PhysicalBackingGpuWritebackCopy;
+    constexpr VAddr buffer_base = 0x100000;
+    constexpr std::array slices{
+        Slice{buffer_base + 0x4000, 0x20000, 1, 1},
+        Slice{buffer_base + 0x4000, 0x20000, 3, 1},
+    };
+
+    const auto copies = VideoCore::PlanPhysicalBackingGpuWritebackCopies(
+        buffer_base, 0x10000, 0x400000, slices);
+
+    ASSERT_TRUE(copies.has_value());
+    EXPECT_EQ(*copies, (std::vector<Copy>{{0x4000, 0x20000, 4}}));
+}
+
 TEST(BufferResidency, InitializesNewPhysicalOwnerFromTheWholeCanonicalPage) {
     using Copy = VideoCore::PhysicalBackingOwnerInitializationCopy;
     constexpr VAddr buffer_base = 0x100000;
@@ -463,6 +479,41 @@ TEST(BufferResidency, InitializesNewPhysicalOwnerFromTheWholeCanonicalPage) {
     EXPECT_FALSE(VideoCore::PlanPhysicalBackingOwnerInitializationCopy(
                      buffer_base, 0x4001, guest_page)
                      .has_value());
+}
+
+TEST(BufferResidency, WholePageOwnerRoundTripPreservesNeighboringCpuBytes) {
+    constexpr VAddr buffer_base = 0x100000;
+    constexpr VAddr guest_page = buffer_base + 0x4000;
+    constexpr u64 physical_page = 0x20000;
+    std::array<u8, 16_KB> canonical{};
+    canonical[0x100] = 0x5a;
+    std::array<u8, 16_KB> owner{};
+
+    const auto initialization = VideoCore::PlanPhysicalBackingOwnerInitializationCopy(
+        buffer_base, 0x10000, guest_page);
+    ASSERT_TRUE(initialization.has_value());
+    std::copy_n(canonical.begin(), initialization->size, owner.begin());
+    owner[1] = 0xa1;
+    constexpr std::array dirty{
+        VideoCore::PhysicalBackingGpuWritebackSlice{guest_page, physical_page, 1, 1},
+    };
+    const auto writeback = VideoCore::PlanPhysicalBackingGpuWritebackCopies(
+        buffer_base, 0x10000, 0x400000, dirty);
+    ASSERT_TRUE(writeback.has_value());
+    for (const auto& copy : *writeback) {
+        const u64 source_in_page = copy.source_offset - (guest_page - buffer_base);
+        const u64 destination_in_page = copy.destination_offset - physical_page;
+        std::copy_n(owner.begin() + source_in_page, copy.size,
+                    canonical.begin() + destination_in_page);
+    }
+
+    EXPECT_EQ(canonical[1], 0xa1);
+    EXPECT_EQ(canonical[0x100], 0x5a);
+}
+
+TEST(BufferResidency, HashesPhysicalHostMemoryOnlyWhenNoGpuBytesAreAuthoritative) {
+    EXPECT_TRUE(VideoCore::ShouldHashPhysicalBackingHostMemory(false));
+    EXPECT_FALSE(VideoCore::ShouldHashPhysicalBackingHostMemory(true));
 }
 
 TEST(BufferResidency, PhysicalWritebackTrackerDoesNotRequireUnrelatedWait) {
@@ -496,6 +547,18 @@ TEST(BufferResidency, PhysicalWritebackTrackerWaitsForLatestSamePageSubmission) 
     EXPECT_EQ(tracker.RequiredTick(first_page), 53);
     EXPECT_EQ(tracker.CompleteThrough(53), (std::vector<u64>{0x20000}));
     EXPECT_EQ(tracker.PendingPageCount(), 0);
+}
+
+TEST(BufferResidency, PhysicalWritebackCompletionPreviewDoesNotConsumeTracker) {
+    VideoCore::PhysicalBackingWritebackTracker tracker;
+    constexpr std::array first_page{u64{0x20000}};
+    constexpr std::array second_page{u64{0x24000}};
+    ASSERT_TRUE(tracker.Record(first_page, 41));
+    ASSERT_TRUE(tracker.Record(second_page, 47));
+
+    EXPECT_EQ(tracker.PagesCompletingThrough(41), (std::vector<u64>{0x20000}));
+    EXPECT_EQ(tracker.PendingPageCount(), 2);
+    EXPECT_EQ(tracker.RequiredTick(first_page), 41);
 }
 
 TEST(BufferResidency, PhysicalWritebackSynchronizationUsesExactTickWithoutGlobalFinish) {
