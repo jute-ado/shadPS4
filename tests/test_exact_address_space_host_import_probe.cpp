@@ -158,6 +158,8 @@ TEST(ExactAddressSpaceHostImportProbe, ClassifiesOnlyImmutableIncompatibilityAsU
               ExactHostImportDisposition::Unsupported);
     EXPECT_EQ(ClassifyExactHostImportFailure(ExactHostImportFailure::NoCoherentMemoryType),
               ExactHostImportDisposition::Unsupported);
+    EXPECT_EQ(ClassifyExactHostImportFailure(ExactHostImportFailure::DeviceLimitExceeded),
+              ExactHostImportDisposition::Unsupported);
     EXPECT_EQ(ClassifyExactHostImportFailure(ExactHostImportFailure::RequirementExceedsBacking),
               ExactHostImportDisposition::ExactDesignIncompatible);
     EXPECT_EQ(ClassifyExactHostImportFailure(ExactHostImportFailure::RequirementAlignmentMismatch),
@@ -168,6 +170,33 @@ TEST(ExactAddressSpaceHostImportProbe, ClassifiesOnlyImmutableIncompatibilityAsU
               ExactHostImportDisposition::ResourceLimited);
     EXPECT_EQ(ClassifyExactHostImportFailure(ExactHostImportFailure::CleanupFailed),
               ExactHostImportDisposition::Error);
+}
+
+TEST(ExactAddressSpaceHostImportProbe, RejectsTheActualImportedPointerWhenItIsMisaligned) {
+    EXPECT_TRUE(IsExactImportedPointerAligned(0x10000, 4096));
+    EXPECT_FALSE(IsExactImportedPointerAligned(0x10001, 4096));
+    EXPECT_FALSE(IsExactImportedPointerAligned(0x10000, 0));
+    EXPECT_FALSE(IsExactImportedPointerAligned(0x10000, 3072));
+}
+
+TEST(ExactAddressSpaceHostImportProbe, DistinguishesResourceLimitsFromWin32LifecycleErrors) {
+    EXPECT_EQ(ClassifyExactBackingAcquisitionFailure(ExactWindowsBackingErrorClass::ResourceLimited,
+                                                     true),
+              ExactHostImportFailure::BackingCommitFailed);
+    EXPECT_EQ(ClassifyExactBackingAcquisitionFailure(ExactWindowsBackingErrorClass::Other, true),
+              ExactHostImportFailure::Win32LifecycleFailed);
+    EXPECT_EQ(ClassifyExactBackingAcquisitionFailure(ExactWindowsBackingErrorClass::ResourceLimited,
+                                                     false),
+              ExactHostImportFailure::Win32LifecycleFailed);
+}
+
+TEST(ExactAddressSpaceHostImportProbe, TreatsInvalidExternalHandleAsImmutableIncompatibility) {
+    EXPECT_EQ(ClassifyExactVulkanFailure(ExactVulkanFailureClass::InvalidExternalHandle),
+              ExactHostImportFailure::HandleNotImportable);
+    EXPECT_EQ(ClassifyExactVulkanFailure(ExactVulkanFailureClass::OutOfMemory),
+              ExactHostImportFailure::VulkanOutOfMemory);
+    EXPECT_EQ(ClassifyExactVulkanFailure(ExactVulkanFailureClass::Other),
+              ExactHostImportFailure::VulkanCallFailed);
 }
 
 } // namespace
