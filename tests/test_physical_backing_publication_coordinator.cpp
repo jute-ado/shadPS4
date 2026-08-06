@@ -119,6 +119,8 @@ TEST(PhysicalBackingPublicationCoordinator, DirtyCacheOwnerZerosAliasesUntilPhys
     const auto owner = coordinator.ActivateCachePage(
         PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false);
     ASSERT_TRUE(owner.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 128, 256));
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 256, 512));
 
     const auto retirement = coordinator.RetireCachePageGpuDirty(owner->token);
 
@@ -127,6 +129,9 @@ TEST(PhysicalBackingPublicationCoordinator, DirtyCacheOwnerZerosAliasesUntilPhys
     EXPECT_EQ(retirement->deltas[0].device_address.value, 0);
     EXPECT_EQ(retirement->deltas[1].device_address.value, 0);
     EXPECT_EQ(retirement->writeback.physical_offset, PhysicalPage);
+    ASSERT_EQ(retirement->dirty_slices.size(), 1);
+    EXPECT_EQ(retirement->dirty_slices[0].offset, 128);
+    EXPECT_EQ(retirement->dirty_slices[0].size, 640);
 
     bool wrote_physical_backing = false;
     const auto restored_deltas = coordinator.CommitCachePageWriteback(
