@@ -81,6 +81,13 @@ void BufferCache::ApplyPhysicalBackingBdaDeltas(
             return;
         }
     }
+    for (const auto& delta : ordered) {
+        if (delta.device_address.value == 0) {
+            unpublished_physical_backing_ranges.Add(delta.guest_page, CACHING_PAGESIZE);
+        } else {
+            unpublished_physical_backing_ranges.Subtract(delta.guest_page, CACHING_PAGESIZE);
+        }
+    }
 
     size_t run_begin = 0;
     while (run_begin < ordered.size()) {
@@ -101,6 +108,27 @@ void BufferCache::ApplyPhysicalBackingBdaDeltas(
                         static_cast<u32>(addresses.size() * sizeof(vk::DeviceAddress)));
         run_begin = run_end;
     }
+}
+
+bool BufferCache::SuppressPhysicalBackingPublicationForGpuWrite(VAddr device_addr, u64 size) {
+    if (physical_backing_coordinator == nullptr) {
+        return true;
+    }
+    if (size != 0 && device_addr < (1ULL << 40) && size <= (1ULL << 40) - device_addr) {
+        const VAddr first_page = Common::AlignDown(device_addr, CACHING_PAGESIZE);
+        const VAddr last_page = Common::AlignDown(device_addr + size - 1, CACHING_PAGESIZE);
+        if (unpublished_physical_backing_ranges.Contains(
+                first_page, static_cast<size_t>(last_page - first_page + CACHING_PAGESIZE))) {
+            return true;
+        }
+    }
+    const auto deltas =
+        physical_backing_coordinator->SuppressGuestRangeForGpuWrite(device_addr, size);
+    if (!deltas) {
+        return false;
+    }
+    ApplyPhysicalBackingBdaDeltas(*deltas);
+    return true;
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
@@ -347,6 +375,11 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         // Without a readback there's nothing we can do with this
         // Fallback to creating dst buffer on GPU to at least have this data there
     }
+    if (!dst_gds && !SuppressPhysicalBackingPublicationForGpuWrite(dst, num_bytes)) {
+        LOG_ERROR(Render_Vulkan,
+                  "Failed to suppress imported physical backing for GPU buffer copy at {:#x}",
+                  dst);
+    }
     texture_cache.InvalidateMemoryFromGPU(dst, num_bytes);
     auto& src_buffer = [&] -> const Buffer& {
         if (src_gds) {
@@ -429,6 +462,12 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
                                                   bool is_texel_buffer, BufferId buffer_id) {
+    if (is_written &&
+        !SuppressPhysicalBackingPublicationForGpuWrite(device_addr, static_cast<u64>(size))) {
+        LOG_ERROR(Render_Vulkan,
+                  "Failed to suppress imported physical backing for GPU buffer write at {:#x}",
+                  device_addr);
+    }
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());

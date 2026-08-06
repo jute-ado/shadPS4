@@ -621,7 +621,7 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
-        image.flags |= ImageFlagBits::GpuModified;
+        MarkImageGpuModified(image);
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
@@ -634,7 +634,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
-    image.flags |= ImageFlagBits::GpuModified;
+    MarkImageGpuModified(image);
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
@@ -660,7 +660,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
-    image.flags |= ImageFlagBits::GpuModified;
+    MarkImageGpuModified(image);
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
 
@@ -691,11 +691,23 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             RegisterImage(stencil_id);
         }
         Image& stencil_image = slot_images[stencil_id];
+        MarkImageGpuModified(stencil_image);
         TouchImage(stencil_image);
         stencil_image.AssociateDepth(image_id, image.image_uid);
     }
 
     return image.FindView(desc.view_info, false);
+}
+
+void TextureCache::MarkImageGpuModified(Image& image) {
+    if (image.info.guest_address != 0 && image.info.guest_size != 0 &&
+        !buffer_cache.SuppressPhysicalBackingPublicationForGpuWrite(image.info.guest_address,
+                                                                    image.info.guest_size)) {
+        LOG_ERROR(Render_Vulkan,
+                  "Failed to suppress imported physical backing for GPU image write at {:#x}",
+                  image.info.guest_address);
+    }
+    image.flags |= ImageFlagBits::GpuModified;
 }
 
 void TextureCache::RefreshImage(Image& image) {

@@ -343,7 +343,7 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
     }
 
     // Acquire writer lock
-    std::scoped_lock lk2{mutex};
+    std::unique_lock lk2{mutex};
 
     for (const auto& [addr, size] : remove_list) {
         LOG_INFO(Kernel_Vmm, "Unmapping direct mapping {:#x} with size {:#x}", addr, size);
@@ -351,17 +351,25 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
     }
 
     // Unmap all dmem areas within this area.
+    std::vector<PhysicalBackingRetirement> physical_retirements;
     for (auto& [phys_addr, size] : free_list) {
         // Carve a free dmem area in place of this one.
         const auto dmem_handle = CarvePhysArea(dmem_map, phys_addr, size);
         auto& new_dmem_area = dmem_handle->second;
-        (void)RetirePhysicalBacking(new_dmem_area);
+        if (auto retirement = RetirePhysicalBacking(new_dmem_area)) {
+            physical_retirements.push_back(*retirement);
+        }
         new_dmem_area.dma_type = PhysicalMemoryType::Free;
         new_dmem_area.memory_type = 0;
 
         // Merge the new dmem_area with dmem_map
         MergeAdjacent(dmem_map, dmem_handle);
     }
+
+    // Keep unmap_mutex held so another allocation cannot reuse a generation before
+    // the GPU-thread publication coordinator has forgotten the retired one.
+    lk2.unlock();
+    rasterizer->RetirePhysicalBacking(std::move(physical_retirements));
 
     return ORBIS_OK;
 }

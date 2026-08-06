@@ -123,7 +123,8 @@ public:
                     return std::nullopt;
                 }
                 const auto address = PublishedAddress(mapping->guest_page, mapping->physical_offset);
-                if (address.value == 0) {
+                if (address.value == 0 &&
+                    !state.IsImportedBackingSuppressedForGpuWrite(mapping->physical_offset)) {
                     static_cast<void>(state.UnmapGuestPage(*mapping));
                     RollbackMappings(mapped);
                     return std::nullopt;
@@ -135,6 +136,51 @@ public:
             }
         }
         return deltas;
+    }
+
+    /// Hides imported backing for every mapped physical page touched by a GPU
+    /// write. Unmapped guest pages require no delta and are deliberately skipped.
+    /// The complete mapped range is preflighted before any publication changes.
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
+    SuppressGuestRangeForGpuWrite(VAddr guest_base, u64 size) {
+        if (size == 0 || guest_base >= AddressSpaceSize || size > AddressSpaceSize - guest_base) {
+            return std::nullopt;
+        }
+
+        const VAddr first_page = guest_base & ~(PageSize - 1);
+        const VAddr last_page = (guest_base + size - 1) & ~(PageSize - 1);
+        std::vector<u64> physical_pages;
+        physical_pages.reserve(static_cast<size_t>((last_page - first_page) / PageSize + 1));
+        for (VAddr guest_page = first_page;; guest_page += PageSize) {
+            const auto mapping_it = mapping_tokens.find(guest_page);
+            if (mapping_it != mapping_tokens.end()) {
+                physical_pages.push_back(mapping_it->second.physical_offset);
+            }
+            if (guest_page == last_page) {
+                break;
+            }
+        }
+        std::ranges::sort(physical_pages);
+        physical_pages.erase(std::unique(physical_pages.begin(), physical_pages.end()),
+                             physical_pages.end());
+
+        for (const u64 physical_offset : physical_pages) {
+            if (!state.CanSuppressImportedBackingForGpuWrite(physical_offset)) {
+                return std::nullopt;
+            }
+        }
+        std::vector<u64> newly_suppressed;
+        newly_suppressed.reserve(physical_pages.size());
+        for (const u64 physical_offset : physical_pages) {
+            if (state.IsImportedBackingSuppressedForGpuWrite(physical_offset)) {
+                continue;
+            }
+            if (!state.SuppressImportedBackingForGpuWrite(physical_offset)) {
+                return std::nullopt;
+            }
+            newly_suppressed.push_back(physical_offset);
+        }
+        return MakePhysicalDeltas(newly_suppressed);
     }
 
     /// Atomically removes a complete guest range and returns zero page-table deltas.
@@ -171,6 +217,46 @@ public:
             deltas.push_back({mapping.guest_page, {}});
         }
         return deltas;
+    }
+
+    /// Forgets publication state only after every guest alias has been unmapped,
+    /// before the physical allocation generation can be reused.
+    [[nodiscard]] bool RetirePhysicalAllocations(
+        std::span<const Core::PhysicalBackingRetirement> retirements) {
+        std::vector<std::pair<u64, u64>> tracked_pages;
+        std::unordered_set<u64> batch_pages;
+        for (const auto& retirement : retirements) {
+            if (retirement.size == 0 || retirement.allocation_generation == 0 ||
+                !IsPageAligned(retirement.physical_offset) || !IsPageAligned(retirement.size) ||
+                retirement.physical_offset >
+                    std::numeric_limits<u64>::max() - (retirement.size - 1)) {
+                return false;
+            }
+            for (u64 offset = 0; offset < retirement.size; offset += PageSize) {
+                const u64 physical_offset = retirement.physical_offset + offset;
+                if (!batch_pages.emplace(physical_offset).second) {
+                    return false;
+                }
+                if (!state.HasPhysicalPage(physical_offset)) {
+                    continue;
+                }
+                if (physical_aliases.contains(physical_offset) ||
+                    active_cache_owners.contains(physical_offset) ||
+                    texture_block_generations.contains(physical_offset) ||
+                    !state.CanRetirePhysicalPage(physical_offset,
+                                                 retirement.allocation_generation)) {
+                    return false;
+                }
+                tracked_pages.emplace_back(physical_offset, retirement.allocation_generation);
+            }
+        }
+        for (const auto& [physical_offset, allocation_generation] : tracked_pages) {
+            if (!state.RetirePhysicalPage(physical_offset, allocation_generation)) {
+                return false;
+            }
+            pending_writebacks.erase(physical_offset);
+        }
+        return true;
     }
 
     /// Publishes one buffer-cache page for every guest alias of its physical page.

@@ -74,6 +74,8 @@ public:
     void MapMemory(VAddr addr, u64 size,
                    std::vector<Core::PhysicalBackingSpan> physical_spans = {});
     void UnmapMemory(VAddr addr, u64 size);
+    void RetirePhysicalBacking(
+        std::vector<Core::PhysicalBackingRetirement> physical_retirements);
 
     void CpSync();
     u64 Flush();
