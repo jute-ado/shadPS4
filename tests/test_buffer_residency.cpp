@@ -107,6 +107,29 @@ TEST(BufferResidency, DefersPhysicalBackingOwnershipUntilGpuWrite) {
     EXPECT_TRUE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(true));
 }
 
+TEST(BufferResidency, AdvancesTextureAuthorityOnlyAfterAnEncodedGpuWrite) {
+    VideoCore::PhysicalBackingTextureWriteOrderTracker tracker;
+
+    EXPECT_TRUE(tracker.Acquire(16));
+    EXPECT_TRUE(tracker.Acquire(41));
+    EXPECT_EQ(tracker.Get(16), 0);
+    EXPECT_EQ(tracker.Get(41), 0);
+
+    EXPECT_TRUE(tracker.MarkGpuWrite(16));
+    const u64 image_16_write = tracker.Get(16);
+    EXPECT_GT(image_16_write, 0);
+
+    EXPECT_FALSE(tracker.Acquire(41));
+    EXPECT_EQ(tracker.Get(41), 0);
+    EXPECT_EQ(tracker.Get(16), image_16_write);
+
+    EXPECT_TRUE(tracker.MarkGpuWrite(41));
+    EXPECT_GT(tracker.Get(41), image_16_write);
+
+    EXPECT_TRUE(tracker.Release(16));
+    EXPECT_FALSE(tracker.MarkGpuWrite(16));
+}
+
 TEST(BufferResidency, InvalidatesTextureOwnershipBeforeGpuBufferFill) {
     EXPECT_FALSE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(true, true));
     EXPECT_FALSE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(false, false));
