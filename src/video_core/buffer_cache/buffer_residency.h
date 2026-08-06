@@ -318,6 +318,114 @@ enum class PhysicalBackingTextureConsumer {
                     : PhysicalBackingTextureConsumer::TransferRead;
 }
 
+enum class PhysicalBackingCommandResourceKind {
+    Buffer,
+    Texture,
+};
+
+struct PhysicalBackingCommandResource {
+    PhysicalBackingCommandResourceKind kind{};
+    u32 index{};
+
+    auto operator<=>(const PhysicalBackingCommandResource&) const = default;
+};
+
+struct PhysicalBackingCommandAccess {
+    PhysicalBackingCommandResource resource{};
+    bool is_written{};
+    std::vector<u64> physical_pages;
+};
+
+struct PhysicalBackingCommandPagePlan {
+    u64 physical_page{};
+    std::vector<PhysicalBackingCommandResource> readers;
+    std::optional<PhysicalBackingCommandResource> writer;
+};
+
+struct PhysicalBackingCommandAliasPlan {
+    std::vector<PhysicalBackingCommandResource> read_snapshot_order;
+    std::vector<PhysicalBackingCommandResource> writer_prepare_order;
+    std::vector<PhysicalBackingCommandResource> writer_finalize_order;
+    std::vector<PhysicalBackingCommandPagePlan> pages;
+};
+
+[[nodiscard]] inline std::optional<PhysicalBackingCommandAliasPlan>
+PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAccess> accesses) {
+    constexpr u64 PageMask = 16_KB - 1;
+    struct AggregatedAccess {
+        PhysicalBackingCommandResource resource{};
+        bool is_read{};
+        bool is_written{};
+        std::vector<u64> physical_pages;
+    };
+
+    std::vector<AggregatedAccess> aggregated;
+    aggregated.reserve(accesses.size());
+    for (const auto& access : accesses) {
+        if (access.resource.index == std::numeric_limits<u32>::max() ||
+            std::ranges::any_of(access.physical_pages,
+                                [](u64 page) { return (page & PageMask) != 0; })) {
+            return std::nullopt;
+        }
+        auto found = std::ranges::find(aggregated, access.resource, &AggregatedAccess::resource);
+        if (found == aggregated.end()) {
+            found = aggregated.emplace(aggregated.end(), AggregatedAccess{
+                                                             .resource = access.resource,
+                                                         });
+        }
+        found->is_read |= !access.is_written;
+        found->is_written |= access.is_written;
+        found->physical_pages.insert(found->physical_pages.end(), access.physical_pages.begin(),
+                                     access.physical_pages.end());
+    }
+
+    std::vector<u64> physical_pages;
+    for (auto& access : aggregated) {
+        std::ranges::sort(access.physical_pages);
+        access.physical_pages.erase(std::ranges::unique(access.physical_pages).begin(),
+                                    access.physical_pages.end());
+        physical_pages.insert(physical_pages.end(), access.physical_pages.begin(),
+                              access.physical_pages.end());
+    }
+    std::ranges::sort(physical_pages);
+    physical_pages.erase(std::ranges::unique(physical_pages).begin(), physical_pages.end());
+
+    PhysicalBackingCommandAliasPlan plan;
+    plan.pages.reserve(physical_pages.size());
+    for (const u64 physical_page : physical_pages) {
+        PhysicalBackingCommandPagePlan page_plan{.physical_page = physical_page};
+        for (const auto& access : aggregated) {
+            if (!std::ranges::contains(access.physical_pages, physical_page)) {
+                continue;
+            }
+            if (access.is_read) {
+                page_plan.readers.push_back(access.resource);
+            }
+            if (access.is_written) {
+                if (page_plan.writer && *page_plan.writer != access.resource) {
+                    return std::nullopt;
+                }
+                page_plan.writer = access.resource;
+            }
+        }
+        plan.pages.push_back(std::move(page_plan));
+    }
+
+    for (const auto& access : aggregated) {
+        if (access.physical_pages.empty()) {
+            continue;
+        }
+        if (access.is_read) {
+            plan.read_snapshot_order.push_back(access.resource);
+        }
+        if (access.is_written) {
+            plan.writer_prepare_order.push_back(access.resource);
+            plan.writer_finalize_order.push_back(access.resource);
+        }
+    }
+    return plan;
+}
+
 template <typename Buffer, typename Synchronize, typename Publish>
 void PublishDmaBufferAfterSynchronization(Buffer& buffer, Synchronize&& synchronize,
                                           Publish&& publish) {
