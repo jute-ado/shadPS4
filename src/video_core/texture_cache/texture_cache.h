@@ -111,6 +111,10 @@ public:
     /// Retrieves the depth target with specified properties
     [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc);
 
+    /// Records a guest-visible GPU image write and suppresses stale imported
+    /// physical backing before the write is submitted.
+    void MarkImageGpuModified(Image& image);
+
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
         std::scoped_lock lock{mutex};

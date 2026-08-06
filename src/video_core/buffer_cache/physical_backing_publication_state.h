@@ -169,6 +169,8 @@ public:
         switch (physical.publication) {
         case Publication::ImportedBacking:
             return {imported_base.value + guest_it->second.physical_offset};
+        case Publication::GpuWriteSuppressed:
+            return {};
         case Publication::CacheOverride:
             return physical.override_address;
         case Publication::AwaitingWriteback:
@@ -176,6 +178,39 @@ public:
             return {};
         }
         return {};
+    }
+
+    /// Permanently hides imported backing for the current physical allocation
+    /// after the GPU becomes authoritative for its contents. Every guest alias
+    /// observes the suppression, including aliases mapped after this call.
+    [[nodiscard]] bool CanSuppressImportedBackingForGpuWrite(u64 physical_offset) const {
+        const auto physical_it = physical_pages.find(physical_offset);
+        if (physical_it == physical_pages.end() || physical_it->second.alias_count == 0) {
+            return false;
+        }
+        const PhysicalPageState& physical = physical_it->second;
+        return physical.publication == Publication::GpuWriteSuppressed ||
+               (physical.publication == Publication::ImportedBacking &&
+                NextGeneration(physical.state_generation).has_value());
+    }
+
+    [[nodiscard]] bool SuppressImportedBackingForGpuWrite(u64 physical_offset) {
+        if (!CanSuppressImportedBackingForGpuWrite(physical_offset)) {
+            return false;
+        }
+        PhysicalPageState& physical = physical_pages.find(physical_offset)->second;
+        if (physical.publication == Publication::GpuWriteSuppressed) {
+            return true;
+        }
+        physical.publication = Publication::GpuWriteSuppressed;
+        physical.state_generation = *NextGeneration(physical.state_generation);
+        return true;
+    }
+
+    [[nodiscard]] bool IsImportedBackingSuppressedForGpuWrite(u64 physical_offset) const {
+        const auto physical_it = physical_pages.find(physical_offset);
+        return physical_it != physical_pages.end() &&
+               physical_it->second.publication == Publication::GpuWriteSuppressed;
     }
 
     [[nodiscard]] std::optional<PhysicalBackingOverride> ActivateOverride(
@@ -284,19 +319,29 @@ public:
     /// Forgets every publication token for a physical allocation before its
     /// backing can be reused. Pending writebacks are deliberately invalidated;
     /// a writeback already inside its synchronous commit cannot be retired.
-    [[nodiscard]] bool RetirePhysicalPage(u64 physical_offset, u64 allocation_generation) {
+    [[nodiscard]] bool HasPhysicalPage(u64 physical_offset) const noexcept {
+        return physical_pages.contains(physical_offset);
+    }
+
+    [[nodiscard]] bool CanRetirePhysicalPage(u64 physical_offset,
+                                             u64 allocation_generation) const noexcept {
         const auto physical_it = physical_pages.find(physical_offset);
         if (physical_it == physical_pages.end()) {
             return false;
         }
         const PhysicalPageState& physical = physical_it->second;
-        if (physical.publication == Publication::CommittingWriteback || physical.alias_count != 0 ||
-            physical.allocation_generation != allocation_generation) {
+        return physical.publication != Publication::CommittingWriteback &&
+               physical.alias_count == 0 &&
+               physical.allocation_generation == allocation_generation;
+    }
+
+    [[nodiscard]] bool RetirePhysicalPage(u64 physical_offset, u64 allocation_generation) {
+        if (!CanRetirePhysicalPage(physical_offset, allocation_generation)) {
             return false;
         }
 
         retired_allocation_generations.insert_or_assign(physical_offset, allocation_generation);
-        physical_pages.erase(physical_it);
+        physical_pages.erase(physical_offset);
         return true;
     }
 
@@ -335,6 +380,7 @@ public:
 private:
     enum class Publication {
         ImportedBacking,
+        GpuWriteSuppressed,
         CacheOverride,
         AwaitingWriteback,
         CommittingWriteback,

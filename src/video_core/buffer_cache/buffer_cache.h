@@ -92,6 +92,11 @@ public:
 
     void ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas);
 
+    /// Permanently hides imported physical backing for mapped pages touched by
+    /// a GPU write in the current physical-allocation generation.
+    [[nodiscard]] bool SuppressPhysicalBackingPublicationForGpuWrite(VAddr device_addr,
+                                                                     u64 size);
+
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
         return fault_manager.GetFaultBuffer();
@@ -233,6 +238,7 @@ private:
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<BufferId, u64> lru_cache;
     RangeSet gpu_modified_ranges;
+    RangeSet unpublished_physical_backing_ranges;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
     PhysicalBackingPublicationCoordinator* physical_backing_coordinator{};

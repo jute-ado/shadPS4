@@ -533,6 +533,7 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Perform image copy
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
+    texture_cache.MarkImageGpuModified(dst_image);
     if (instance.IsMaintenance8Supported() ||
         src_image.info.props.is_depth == dst_image.info.props.is_depth) {
         dst_image.CopyImage(src_image);
@@ -541,7 +542,6 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
             buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::DeviceLocal);
         dst_image.CopyImageWithBuffer(src_image, copy_buffer.Handle(), 0);
     }
-    dst_image.flags |= VideoCore::ImageFlagBits::GpuModified;
     dst_image.flags &= ~VideoCore::ImageFlagBits::Dirty;
     return true;
 }
@@ -600,8 +600,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
             },
         .extent = image1.info.resources,
     };
+    texture_cache.MarkImageGpuModified(image1);
     image1.Clear(clear, range);
-    image1.flags |= VideoCore::ImageFlagBits::GpuModified;
     image1.flags &= ~VideoCore::ImageFlagBits::Dirty;
     return true;
 }
@@ -1114,13 +1114,51 @@ void Rasterizer::MapMemory(VAddr addr, u64 size,
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
-    buffer_cache.InvalidateMemory(addr, size);
-    texture_cache.UnmapMemory(addr, size);
-    page_manager.OnGpuUnmap(addr, size);
-    {
-        std::scoped_lock lock{mapped_ranges_mutex};
-        mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+    auto unmap = [this, addr, size] {
+        buffer_cache.InvalidateMemory(addr, size);
+        texture_cache.UnmapMemory(addr, size);
+        if (physical_backing_coordinator) {
+            for (VAddr page = addr; page < addr + size;
+                 page += VideoCore::PhysicalBackingPublicationCoordinator::PageSize) {
+                if (!physical_backing_coordinator->ResolveGuestPagePublication(page)) {
+                    continue;
+                }
+                const auto deltas = physical_backing_coordinator->UnmapRange(
+                    page, VideoCore::PhysicalBackingPublicationCoordinator::PageSize);
+                if (!deltas) {
+                    LOG_ERROR(Render_Vulkan,
+                              "Failed to retire physical backing publication for GPU unmap");
+                    return;
+                }
+                buffer_cache.ApplyPhysicalBackingBdaDeltas(*deltas);
+            }
+        }
+        page_manager.OnGpuUnmap(addr, size);
+        {
+            std::scoped_lock lock{mapped_ranges_mutex};
+            mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        }
+    };
+    if (physical_backing_coordinator) {
+        liverpool->SendCommand<true>(unmap);
+    } else {
+        unmap();
     }
+}
+
+void Rasterizer::RetirePhysicalBacking(
+    std::vector<Core::PhysicalBackingRetirement> physical_retirements) {
+    if (!physical_backing_coordinator || physical_retirements.empty()) {
+        return;
+    }
+    liverpool->SendCommand<true>(
+        [this, physical_retirements = std::move(physical_retirements)] {
+            if (!physical_backing_coordinator->RetirePhysicalAllocations(
+                    physical_retirements)) {
+                LOG_ERROR(Render_Vulkan,
+                          "Failed to retire physical allocation publication before reuse");
+            }
+        });
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
