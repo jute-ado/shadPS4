@@ -103,7 +103,11 @@ void UniqueBuffer::Create(const vk::BufferCreateInfo& buffer_ci, MemoryUsage usa
 Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_, MemoryUsage usage_,
                VAddr cpu_addr_, vk::BufferUsageFlags flags, u64 size_bytes_)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, instance{&instance_}, scheduler{&scheduler_},
-      usage{usage_}, buffer{instance->GetDevice(), instance->GetAllocator()} {
+      usage{usage_}, buffer{instance->GetDevice(), instance->GetAllocator()},
+      access_state{size_bytes_,
+                   vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
+                       vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+                   vk::PipelineStageFlagBits2::eAllCommands} {
     // Create buffer object.
     const vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
@@ -158,6 +162,7 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &post_barrier,
     });
+    RecordAccess(post_barrier.dstAccessMask, post_barrier.dstStageMask, offset, num_bytes);
 }
 
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;

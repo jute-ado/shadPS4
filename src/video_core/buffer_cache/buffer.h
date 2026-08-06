@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/buffer_access_interval_provenance.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -125,27 +126,31 @@ public:
         return buffer.bda_addr;
     }
 
-    std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
-                                                       vk::PipelineStageFlagBits2 dst_stage,
-                                                       u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
+    std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_access_mask,
+                                                       vk::PipelineStageFlags2 dst_stages,
+                                                       u64 offset, u64 size) {
+        DEBUG_ASSERT(size != 0 && offset < size_bytes && size <= size_bytes - offset);
+        const auto transition = access_state.Transition(offset, size, dst_access_mask, dst_stages);
+        if (!transition.requires_barrier) {
             return {};
         }
 
-        DEBUG_ASSERT(offset < size_bytes);
-
         const auto barrier = vk::BufferMemoryBarrier2{
-            .srcStageMask = stage,
-            .srcAccessMask = access_mask,
-            .dstStageMask = dst_stage,
-            .dstAccessMask = dst_acess_mask,
+            .srcStageMask = transition.prior_stages,
+            .srcAccessMask = transition.prior_access,
+            .dstStageMask = dst_stages,
+            .dstAccessMask = dst_access_mask,
             .buffer = buffer.buffer,
             .offset = offset,
-            .size = size_bytes - offset,
+            .size = size,
         };
-        access_mask = dst_acess_mask;
-        stage = dst_stage;
         return barrier;
+    }
+
+    void RecordAccess(vk::AccessFlags2 access, vk::PipelineStageFlags2 stages, u64 offset,
+                      u64 size) {
+        DEBUG_ASSERT(size != 0 && offset < size_bytes && size <= size_bytes - offset);
+        (void)access_state.Transition(offset, size, access, stages);
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
@@ -163,10 +168,7 @@ public:
     Vulkan::Scheduler* scheduler;
     MemoryUsage usage;
     UniqueBuffer buffer;
-    vk::Flags<vk::AccessFlagBits2> access_mask{
-        vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
-        vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
-    vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    BasicBufferAccessRangeState<vk::AccessFlags2, vk::PipelineStageFlags2> access_state;
 };
 
 class StreamBuffer : public Buffer {

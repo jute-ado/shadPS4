@@ -214,9 +214,9 @@ void BufferCache::BindVertexBuffers(
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
         if (IsRegionGpuModified(range.base_address, size)) {
-            if (auto barrier =
-                    buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
-                                       vk::PipelineStageFlagBits2::eVertexAttributeInput)) {
+            if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
+                                                  vk::PipelineStageFlagBits2::eVertexAttributeInput,
+                                                  offset, size)) {
                 barriers.emplace_back(*barrier);
             }
         }
@@ -272,7 +272,8 @@ void BufferCache::BindIndexBuffer(
     const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
     if (IsRegionGpuModified(index_address, index_buffer_size)) {
         if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
-                                                 vk::PipelineStageFlagBits2::eIndexInput)) {
+                                                 vk::PipelineStageFlagBits2::eIndexInput, offset,
+                                                 index_buffer_size)) {
             barriers.emplace_back(*barrier);
         }
     }
@@ -312,7 +313,7 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         // Fallback to creating dst buffer on GPU to at least have this data there
     }
     texture_cache.InvalidateMemoryFromGPU(dst, num_bytes);
-    auto& src_buffer = [&] -> const Buffer& {
+    auto& src_buffer = [&] -> Buffer& {
         if (src_gds) {
             return gds_buffer;
         }
@@ -321,7 +322,7 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         SynchronizeBuffer(buffer, src, num_bytes, false, true);
         return buffer;
     }();
-    auto& dst_buffer = [&] -> const Buffer& {
+    auto& dst_buffer = [&] -> Buffer& {
         if (dst_gds) {
             return gds_buffer;
         }
@@ -389,6 +390,10 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         .bufferMemoryBarrierCount = 2,
         .pBufferMemoryBarriers = buf_barriers_after,
     });
+    dst_buffer.RecordAccess(buf_barriers_after[0].dstAccessMask, buf_barriers_after[0].dstStageMask,
+                            dst_buffer.Offset(dst), num_bytes);
+    src_buffer.RecordAccess(buf_barriers_after[1].dstAccessMask, buf_barriers_after[1].dstStageMask,
+                            src_buffer.Offset(src), num_bytes);
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
@@ -549,13 +554,14 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
     const auto cmdbuf = scheduler.CommandBuffer();
 
     boost::container::static_vector<vk::BufferMemoryBarrier2, 2> pre_barriers{};
-    if (auto src_barrier = overlap.GetBarrier(vk::AccessFlagBits2::eTransferRead,
-                                              vk::PipelineStageFlagBits2::eTransfer)) {
+    if (auto src_barrier =
+            overlap.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                               vk::PipelineStageFlagBits2::eTransfer, 0, overlap.SizeBytes())) {
         pre_barriers.push_back(*src_barrier);
     }
-    if (auto dst_barrier =
-            new_buffer.GetBarrier(vk::AccessFlagBits2::eTransferWrite,
-                                  vk::PipelineStageFlagBits2::eTransfer, dst_base_offset)) {
+    if (auto dst_barrier = new_buffer.GetBarrier(vk::AccessFlagBits2::eTransferWrite,
+                                                 vk::PipelineStageFlagBits2::eTransfer,
+                                                 dst_base_offset, overlap.SizeBytes())) {
         pre_barriers.push_back(*dst_barrier);
     }
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
@@ -569,12 +575,12 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
     boost::container::static_vector<vk::BufferMemoryBarrier2, 2> post_barriers{};
     if (auto src_barrier =
             overlap.GetBarrier(vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-                               vk::PipelineStageFlagBits2::eAllCommands)) {
+                               vk::PipelineStageFlagBits2::eAllCommands, 0, overlap.SizeBytes())) {
         post_barriers.push_back(*src_barrier);
     }
     if (auto dst_barrier = new_buffer.GetBarrier(
             vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-            vk::PipelineStageFlagBits2::eAllCommands, dst_base_offset)) {
+            vk::PipelineStageFlagBits2::eAllCommands, dst_base_offset, overlap.SizeBytes())) {
         post_barriers.push_back(*dst_barrier);
     }
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
@@ -746,6 +752,8 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .bufferMemoryBarrierCount = 1,
             .pBufferMemoryBarriers = &post_barrier,
         });
+        buffer.RecordAccess(post_barrier.dstAccessMask, post_barrier.dstStageMask, 0,
+                            buffer.SizeBytes());
         TouchBufferAfterUploadIfRegistered(is_registered, [&] { TouchBuffer(buffer); });
     }
     if (is_texel_buffer && !is_written) {
@@ -827,6 +835,13 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     }
     auto& tile_manager = texture_cache.GetTileManager();
     tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
+    if (image.info.props.is_tiled) {
+        buffer.RecordAccess(vk::AccessFlagBits2::eShaderWrite,
+                            vk::PipelineStageFlagBits2::eComputeShader, buf_offset, copy_size);
+    } else {
+        buffer.RecordAccess(vk::AccessFlagBits2::eMemoryRead,
+                            vk::PipelineStageFlagBits2::eAllCommands, buf_offset, copy_size);
+    }
     return true;
 }
 
@@ -901,6 +916,8 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* val
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &post_barrier,
     });
+    buffer.RecordAccess(post_barrier.dstAccessMask, post_barrier.dstStageMask,
+                        buffer.Offset(address), num_bytes);
 }
 
 void BufferCache::RunGarbageCollector() {

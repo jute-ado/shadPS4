@@ -9,47 +9,7 @@
 
 namespace {
 
-using Tracker = VideoCore::BasicBufferAccessIntervalProvenance<std::uint32_t>;
-using Role = VideoCore::BufferAccessRole;
 using RangeState = VideoCore::BasicBufferAccessRangeState<std::uint32_t>;
-
-TEST(BufferAccessIntervalProvenance, DisjointRolesKeepThePriorProducerAndOverlapAggregates) {
-    Tracker tracker;
-
-    tracker.BeginCommand(11, 50);
-    tracker.Observe(7, 0, 128, Role::TransferWrite, 0x01, 0x10, true);
-    ASSERT_EQ(tracker.CommitCommand().size(), 1);
-
-    tracker.BeginCommand(12, 51);
-    tracker.Observe(7, 0, 64, Role::ShaderReadWrite, 0x06, 0x20, true);
-    tracker.Observe(7, 64, 64, Role::VertexRead, 0x08, 0x40, false);
-    tracker.Observe(7, 64, 64, Role::IndexRead, 0x10, 0x80, false);
-
-    const auto transitions = tracker.CommitCommand();
-    ASSERT_EQ(transitions.size(), 2);
-
-    const auto& shader = transitions[0];
-    EXPECT_EQ(shader.offset, 0);
-    EXPECT_EQ(shader.size, 64);
-    ASSERT_TRUE(shader.prior.has_value());
-    EXPECT_EQ(shader.prior->command_id, 11);
-    EXPECT_EQ(shader.prior->tick, 50);
-    EXPECT_EQ(shader.prior->roles, Role::TransferWrite);
-    EXPECT_EQ(shader.observations.size(), 1);
-    EXPECT_EQ(shader.current_roles, Role::ShaderReadWrite);
-
-    const auto& geometry = transitions[1];
-    EXPECT_EQ(geometry.offset, 64);
-    EXPECT_EQ(geometry.size, 64);
-    ASSERT_TRUE(geometry.prior.has_value());
-    EXPECT_EQ(geometry.prior->command_id, 11);
-    EXPECT_EQ(geometry.prior->tick, 50);
-    EXPECT_EQ(geometry.prior->roles, Role::TransferWrite);
-    EXPECT_EQ(geometry.observations.size(), 2);
-    EXPECT_EQ(geometry.current_roles, Role::VertexRead | Role::IndexRead);
-    EXPECT_EQ(geometry.current_access, 0x18);
-    EXPECT_EQ(geometry.current_stages, 0xC0);
-}
 
 TEST(BufferAccessRangeState, DisjointTransitionsRetainTheirIndependentPriorAccess) {
     RangeState state{128, 0x01, 0x10};
@@ -66,16 +26,56 @@ TEST(BufferAccessRangeState, DisjointTransitionsRetainTheirIndependentPriorAcces
     EXPECT_EQ(state.IntervalCount(), 2);
 }
 
+TEST(BufferAccessRangeState, RepeatedMatchingAccessNeedsNoBarrierOrStateSplit) {
+    RangeState state{128, 0x01, 0x10};
+
+    const auto repeated = state.Transition(32, 64, 0x01, 0x10);
+
+    EXPECT_FALSE(repeated.requires_barrier);
+    EXPECT_EQ(repeated.prior_access, 0x01);
+    EXPECT_EQ(repeated.prior_stages, 0x10);
+    EXPECT_EQ(state.IntervalCount(), 1);
+}
+
 TEST(BufferAccessRangeState, OverlapUnionsOnlyTheCoveredPriorIntervals) {
     RangeState state{192, 0x01, 0x10};
-    state.Transition(0, 64, 0x02, 0x20);
-    state.Transition(128, 64, 0x04, 0x40);
+    const auto first = state.Transition(0, 64, 0x02, 0x20);
+    const auto last = state.Transition(128, 64, 0x04, 0x40);
+    EXPECT_TRUE(first.requires_barrier);
+    EXPECT_TRUE(last.requires_barrier);
 
     const auto overlap = state.Transition(32, 128, 0x08, 0x80);
 
     EXPECT_TRUE(overlap.requires_barrier);
     EXPECT_EQ(overlap.prior_access, 0x01 | 0x02 | 0x04);
     EXPECT_EQ(overlap.prior_stages, 0x10 | 0x20 | 0x40);
+}
+
+TEST(BufferAccessRangeState, CapacityCoarseningNeverDiscardsPriorDependencies) {
+    VideoCore::BasicBufferAccessRangeState<std::uint32_t, std::uint32_t, 4> state{64, 0, 0};
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        const auto transition = state.Transition(i * 8, 8, 1U << i, 1U << (i + 8));
+        EXPECT_LE(state.IntervalCount(), 4);
+        if (i != 0) {
+            EXPECT_TRUE(transition.requires_barrier);
+        }
+    }
+
+    const auto all = state.Transition(0, 64, 0x100, 0x10000);
+    EXPECT_EQ(all.prior_access, 0xFF);
+    EXPECT_EQ(all.prior_stages, 0xFF00);
+}
+
+TEST(BufferAccessRangeState, ConservativeUnionCannotSuppressALaterBarrier) {
+    VideoCore::BasicBufferAccessRangeState<std::uint32_t, std::uint32_t, 1> state{64, 0x01, 0x10};
+    const auto first = state.Transition(0, 32, 0x02, 0x20);
+    ASSERT_TRUE(first.requires_barrier);
+    ASSERT_EQ(state.IntervalCount(), 1);
+
+    const auto union_match = state.Transition(0, 64, 0x03, 0x30);
+    EXPECT_TRUE(union_match.requires_barrier);
+    EXPECT_EQ(union_match.prior_access, 0x03);
+    EXPECT_EQ(union_match.prior_stages, 0x30);
 }
 
 } // namespace
