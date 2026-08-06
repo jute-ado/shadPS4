@@ -16,6 +16,11 @@ namespace VideoCore {
     return will_gpu_write;
 }
 
+[[nodiscard]] constexpr bool ShouldInvalidateTextureCacheBeforeGpuBufferFill(
+    bool is_gds, bool requires_gpu_fill) noexcept {
+    return !is_gds && requires_gpu_fill;
+}
+
 struct PhysicalBackingAliasMigrationCopy {
     u64 source_offset{};
     u64 destination_offset{};

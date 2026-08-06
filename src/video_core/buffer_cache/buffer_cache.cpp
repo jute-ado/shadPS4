@@ -573,6 +573,9 @@ void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gd
             return;
         }
     }
+    if (ShouldInvalidateTextureCacheBeforeGpuBufferFill(is_gds, true)) {
+        texture_cache.InvalidateMemoryFromGPU(address, num_bytes);
+    }
     Buffer* buffer = [&] {
         if (is_gds) {
             return &gds_buffer;
