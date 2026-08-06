@@ -195,7 +195,12 @@ void FaultManager::ProcessFaultBuffer() {
                             end);
                 return;
             }
-            MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));
+            if (!MakeDmaFaultRangeResident(buffer_cache, start,
+                                           static_cast<u32>(end - start))) {
+                LOG_ERROR(Render_Vulkan,
+                          "Failed to make authoritative DMA fault range resident {:#x}-{:#x}",
+                          start, end);
+            }
         });
         fault_areas[area] = 0;
     });

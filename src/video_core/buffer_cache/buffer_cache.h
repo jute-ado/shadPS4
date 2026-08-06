@@ -102,6 +102,7 @@ public:
     BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size);
     [[nodiscard]] bool EndPhysicalBackingTextureOverlap(
         std::span<const PhysicalBackingTextureToken> tokens);
+    [[nodiscard]] bool TransitionAuthoritativeTextureForDmaRead(VAddr device_addr, u32 size);
 
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
@@ -209,7 +210,8 @@ private:
     [[nodiscard]] bool ChangeRegister(BufferId buffer_id);
 
     void MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size);
-    [[nodiscard]] bool TransitionPhysicalBackingTexturesForGpuWrite(VAddr device_addr, u64 size);
+    [[nodiscard]] bool TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_addr,
+                                                                        u64 size);
     [[nodiscard]] bool AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                                Buffer& target_buffer,
                                                                VAddr device_addr, u64 size);

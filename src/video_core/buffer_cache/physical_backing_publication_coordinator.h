@@ -403,6 +403,129 @@ public:
         return result;
     }
 
+    /// Atomically replaces complete texture ownership with full-page dirty cache mirrors.
+    /// No imported-backing delta is exposed between the two authoritative owners.
+    [[nodiscard]] std::optional<PhysicalBackingCachePublicationBatch>
+    TransitionTexturePagesToDirtyCachePages(
+        std::span<const PhysicalBackingTextureToken> texture_tokens,
+        std::span<const PhysicalBackingCachePageRequest> requests) {
+        if (texture_tokens.empty() || requests.empty()) {
+            return std::nullopt;
+        }
+
+        std::unordered_map<u64, std::unordered_set<u64>> release_generations;
+        std::unordered_set<u64> texture_pages;
+        for (const auto& token : texture_tokens) {
+            if (token.generation == 0 || token.physical_pages.empty()) {
+                return std::nullopt;
+            }
+            for (size_t index = 0; index < token.physical_pages.size(); ++index) {
+                const u64 physical_offset = token.physical_pages[index];
+                if (!IsPageAligned(physical_offset) ||
+                    (index != 0 && physical_offset <= token.physical_pages[index - 1])) {
+                    return std::nullopt;
+                }
+                const auto block_it = texture_block_generations.find(physical_offset);
+                if (block_it == texture_block_generations.end() ||
+                    !block_it->second.contains(token.generation) ||
+                    !release_generations[physical_offset].emplace(token.generation).second) {
+                    return std::nullopt;
+                }
+                texture_pages.emplace(physical_offset);
+            }
+        }
+        for (const auto& [physical_offset, generations] : release_generations) {
+            const auto block_it = texture_block_generations.find(physical_offset);
+            if (block_it == texture_block_generations.end() || block_it->second != generations) {
+                return std::nullopt;
+            }
+        }
+
+        struct PendingOwner {
+            VAddr guest_page{};
+            u64 physical_offset{};
+            PhysicalBackingDeviceAddress override_page_address{};
+        };
+        std::vector<PendingOwner> pending;
+        pending.reserve(requests.size());
+        std::unordered_set<VAddr> guest_pages;
+        std::unordered_set<u64> requested_physical_pages;
+        size_t alias_count = 0;
+        for (const auto& request : requests) {
+            if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
+                request.override_page_address.value >
+                    std::numeric_limits<u64>::max() - (PageSize - 1) ||
+                !guest_pages.emplace(request.guest_page).second) {
+                return std::nullopt;
+            }
+            const auto mapping_it = mapping_tokens.find(request.guest_page);
+            if (mapping_it == mapping_tokens.end()) {
+                return std::nullopt;
+            }
+            const u64 physical_offset = mapping_it->second.physical_offset;
+            const auto aliases_it = physical_aliases.find(physical_offset);
+            if (!requested_physical_pages.emplace(physical_offset).second ||
+                aliases_it == physical_aliases.end() || aliases_it->second.empty() ||
+                active_cache_owners.contains(physical_offset) ||
+                pending_writebacks.contains(physical_offset)) {
+                return std::nullopt;
+            }
+            if (aliases_it->second.size() > std::numeric_limits<size_t>::max() - alias_count) {
+                return std::nullopt;
+            }
+            alias_count += aliases_it->second.size();
+            pending.push_back(
+                {request.guest_page, physical_offset, request.override_page_address});
+        }
+        if (requested_physical_pages != texture_pages ||
+            pending.size() > std::numeric_limits<u64>::max() - last_owner_generation) {
+            return std::nullopt;
+        }
+
+        PhysicalBackingCachePublicationBatch result;
+        result.owners.reserve(pending.size());
+        result.deltas.reserve(alias_count);
+        active_cache_owners.reserve(active_cache_owners.size() + pending.size());
+        std::vector<PhysicalBackingCachePageToken> staged_tokens;
+        staged_tokens.reserve(pending.size());
+        for (size_t index = 0; index < pending.size(); ++index) {
+            const auto& owner = pending[index];
+            const u64 owner_generation = last_owner_generation + index + 1;
+            const auto publication = state.ActivateOverride(
+                owner.physical_offset, owner.override_page_address, owner_generation);
+            if (!publication) {
+                for (auto token_it = staged_tokens.rbegin(); token_it != staged_tokens.rend();
+                     ++token_it) {
+                    static_cast<void>(state.RetireClean(token_it->publication));
+                }
+                return std::nullopt;
+            }
+            staged_tokens.push_back({*publication});
+        }
+
+        for (const u64 physical_offset : texture_pages) {
+            texture_block_generations.erase(physical_offset);
+        }
+        last_owner_generation += pending.size();
+        for (size_t index = 0; index < pending.size(); ++index) {
+            const auto& owner = pending[index];
+            const auto& token = staged_tokens[index];
+            active_cache_owners.emplace(
+                owner.physical_offset,
+                ActiveCacheOwner{
+                    .token = token,
+                    .dirty_slices = {{0, static_cast<u32>(PageSize)}},
+                });
+            result.owners.push_back({owner.guest_page, token});
+            for (const VAddr guest_page : physical_aliases.find(owner.physical_offset)->second) {
+                result.deltas.push_back(
+                    {guest_page, PublishedAddress(guest_page, owner.physical_offset)});
+            }
+        }
+        std::ranges::sort(result.deltas, {}, &PhysicalBackingBdaDelta::guest_page);
+        return result;
+    }
+
     [[nodiscard]] std::optional<u64> ResolvePhysicalPageForGuest(VAddr guest_page) const {
         if (!IsPageAligned(guest_page)) {
             return std::nullopt;

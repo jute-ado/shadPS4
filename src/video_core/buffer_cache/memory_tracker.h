@@ -44,6 +44,16 @@ public:
             });
     }
 
+    /// Mark a region as modified by GPU work performed outside SynchronizeBuffer's write path.
+    void MarkRegionAsGpuModified(VAddr dirty_cpu_addr, u64 query_size) {
+        IteratePages<false>(dirty_cpu_addr, query_size,
+                            [](RegionManager* manager, u64 offset, size_t size) {
+                                std::scoped_lock lk{manager->lock};
+                                manager->template ChangeRegionState<Type::GPU, true>(
+                                    manager->GetCpuAddr() + offset, size);
+                            });
+    }
+
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
         IteratePages<false>(dirty_cpu_addr, query_size,

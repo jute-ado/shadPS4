@@ -9,6 +9,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <boost/container/small_vector.hpp>
 #include <queue>
 #include <tsl/robin_map.h>
@@ -98,6 +99,22 @@ public:
 
     [[nodiscard]] bool ReleasePhysicalBackingTextureOwnershipForBufferWrite(
         ImageId image_id, std::span<const u64> physical_pages);
+
+    template <typename Transition>
+    [[nodiscard]] bool TransitionAllPhysicalBackingTextureOwnershipForBufferAccess(
+        ImageId image_id, Transition&& transition) {
+        std::scoped_lock lock{mutex};
+        const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
+        if (physical_tokens == physical_backing_texture_tokens.end() ||
+            physical_tokens->second.empty() ||
+            !std::forward<Transition>(transition)(
+                std::span<const PhysicalBackingTextureToken>{physical_tokens->second})) {
+            return false;
+        }
+        slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
+        physical_backing_texture_tokens.erase(physical_tokens);
+        return true;
+    }
 
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);

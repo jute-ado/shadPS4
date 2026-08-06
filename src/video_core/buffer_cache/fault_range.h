@@ -24,9 +24,13 @@ constexpr bool IsProcessableDmaFaultRange(VAddr start, VAddr end, VAddr address_
 }
 
 template <typename BufferCache>
-void MakeDmaFaultRangeResident(BufferCache& buffer_cache, VAddr start, u32 size) {
+bool MakeDmaFaultRangeResident(BufferCache& buffer_cache, VAddr start, u32 size) {
+    if (!buffer_cache.TransitionAuthoritativeTextureForDmaRead(start, size)) {
+        return false;
+    }
     buffer_cache.FindBuffer(start, size);
     buffer_cache.SynchronizeBuffersInRange(start, size);
+    return true;
 }
 
 } // namespace VideoCore

@@ -12,6 +12,17 @@
 
 namespace VideoCore {
 
+enum class PhysicalBackingTextureProducer {
+    Copy,
+    ComputeShader,
+};
+
+[[nodiscard]] constexpr PhysicalBackingTextureProducer PhysicalBackingTextureMirrorProducer(
+    bool is_tiled) noexcept {
+    return is_tiled ? PhysicalBackingTextureProducer::ComputeShader
+                    : PhysicalBackingTextureProducer::Copy;
+}
+
 [[nodiscard]] constexpr bool ShouldAcquirePhysicalBackingBufferOwnership(
     bool will_gpu_write) noexcept {
     return will_gpu_write;
@@ -32,6 +43,30 @@ struct PhysicalBackingTextureBufferTransition {
     VAddr base{};
     u32 size{};
 };
+
+[[nodiscard]] constexpr std::optional<PhysicalBackingTextureBufferTransition>
+PlanPhysicalBackingTextureOwnershipSpan(VAddr image_base, u64 image_size) noexcept {
+    constexpr u64 PageSize = 16_KB;
+    constexpr u64 PageMask = PageSize - 1;
+    constexpr u64 Max = std::numeric_limits<u64>::max();
+    if (image_size == 0 || image_base > Max - image_size) {
+        return std::nullopt;
+    }
+    const VAddr aligned_base = image_base & ~PageMask;
+    const VAddr image_end = image_base + image_size;
+    if (image_end > Max - PageMask) {
+        return std::nullopt;
+    }
+    const VAddr aligned_end = (image_end + PageMask) & ~PageMask;
+    const u64 aligned_size = aligned_end - aligned_base;
+    if (aligned_size == 0 || aligned_size > std::numeric_limits<u32>::max()) {
+        return std::nullopt;
+    }
+    return PhysicalBackingTextureBufferTransition{
+        .base = aligned_base,
+        .size = static_cast<u32>(aligned_size),
+    };
+}
 
 [[nodiscard]] constexpr std::optional<PhysicalBackingTextureBufferTransition>
 PlanPhysicalBackingTextureBufferTransition(VAddr image_base, u64 image_size, VAddr write_address,
