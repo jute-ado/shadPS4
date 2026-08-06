@@ -68,8 +68,8 @@ public:
 
     explicit FakeBackingApi(Failure failure_ = Failure::None) : failure{failure_} {}
 
-    void* CreateFileMapping(void* file, u32 desired_access, u32 page_protection,
-                            u32 allocation_attributes, u64 maximum_size) override {
+    void* CreatePageFileMapping(void* file, u32 desired_access, u32 page_protection,
+                                u32 allocation_attributes, u64 maximum_size) override {
         events.emplace_back("create");
         create_args = {file, desired_access, page_protection, allocation_attributes, maximum_size};
         return failure == Failure::Create ? nullptr : mapping;
@@ -92,7 +92,7 @@ public:
         return failure == Failure::WrongMapBase ? wrong_base : placeholder;
     }
 
-    bool UnmapPreservingPlaceholder(void*, u8* base, u32 flags) override {
+    bool UnmapView(void*, u8* base, u32 flags) override {
         events.emplace_back("unmap");
         unmap_base = base;
         unmap_flags = flags;
@@ -174,8 +174,13 @@ TEST(WindowsAddressSpaceBacking, RollsBackEachFailedAcquisitionStage) {
 
     for (const auto& test_case : cases) {
         auto api = std::make_shared<FakeBackingApi>(test_case.failure);
+        api->cleanup_succeeds = false;
         EXPECT_EQ(WindowsAddressSpaceBacking::Create(api, Process, BackingSize), nullptr);
         EXPECT_EQ(api->events, test_case.events);
+        if (test_case.failure == FakeBackingApi::Failure::WrongMapBase) {
+            EXPECT_EQ(api->unmap_base, api->wrong_base);
+            EXPECT_EQ(api->unmap_flags, 0);
+        }
     }
 }
 
