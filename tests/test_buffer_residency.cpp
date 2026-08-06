@@ -449,6 +449,22 @@ TEST(BufferResidency, ExpandsPhysicalWritebackSlicesToVulkanCopyAlignment) {
               (std::vector<Copy>{{0x4000, 0x20000, 4}, {0x8000, 0x24000, 8}}));
 }
 
+TEST(BufferResidency, InitializesNewPhysicalOwnerFromTheWholeCanonicalPage) {
+    using Copy = VideoCore::PhysicalBackingOwnerInitializationCopy;
+    constexpr VAddr buffer_base = 0x100000;
+    constexpr VAddr guest_page = buffer_base + 0x4000;
+
+    EXPECT_EQ(VideoCore::PlanPhysicalBackingOwnerInitializationCopy(
+                  buffer_base, 0x10000, guest_page),
+              (Copy{guest_page, 0x4000, 16_KB}));
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingOwnerInitializationCopy(
+                     buffer_base, 0x10000, guest_page + 1)
+                     .has_value());
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingOwnerInitializationCopy(
+                     buffer_base, 0x4001, guest_page)
+                     .has_value());
+}
+
 TEST(BufferResidency, PhysicalWritebackTrackerDoesNotRequireUnrelatedWait) {
     VideoCore::PhysicalBackingWritebackTracker tracker;
     constexpr std::array first_pages{u64{0x20000}};
