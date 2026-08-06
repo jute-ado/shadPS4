@@ -10,6 +10,7 @@
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -188,17 +189,32 @@ std::vector<ImageId> TextureCache::FindPhysicalBackingImagesForPages(
     return images;
 }
 
-bool TextureCache::ReleasePhysicalBackingTextureOwnershipForBufferWrite(ImageId image_id) {
+bool TextureCache::ReleasePhysicalBackingTextureOwnershipForBufferWrite(
+    ImageId image_id, std::span<const u64> physical_pages) {
     std::scoped_lock lock{mutex};
     const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
-    if (physical_tokens == physical_backing_texture_tokens.end()) {
+    if (physical_tokens == physical_backing_texture_tokens.end() || physical_pages.empty()) {
         return false;
     }
-    if (!buffer_cache.EndPhysicalBackingTextureOverlap(physical_tokens->second)) {
+    std::vector<PhysicalBackingTextureToken> selected;
+    std::vector<PhysicalBackingTextureToken> retained;
+    selected.reserve(physical_tokens->second.size());
+    retained.reserve(physical_tokens->second.size());
+    for (const auto& token : physical_tokens->second) {
+        auto& destination = PhysicalBackingPagesIntersect(token.physical_pages, physical_pages)
+                                ? selected
+                                : retained;
+        destination.push_back(token);
+    }
+    if (selected.empty() || !buffer_cache.EndPhysicalBackingTextureOverlap(selected)) {
         return false;
     }
     slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
-    physical_backing_texture_tokens.erase(physical_tokens);
+    if (retained.empty()) {
+        physical_backing_texture_tokens.erase(physical_tokens);
+    } else {
+        physical_tokens->second = std::move(retained);
+    }
     return true;
 }
 

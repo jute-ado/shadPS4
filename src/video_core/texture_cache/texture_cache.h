@@ -96,7 +96,8 @@ public:
     [[nodiscard]] std::vector<ImageId> FindPhysicalBackingImagesForPages(
         std::span<const u64> physical_pages);
 
-    [[nodiscard]] bool ReleasePhysicalBackingTextureOwnershipForBufferWrite(ImageId image_id);
+    [[nodiscard]] bool ReleasePhysicalBackingTextureOwnershipForBufferWrite(
+        ImageId image_id, std::span<const u64> physical_pages);
 
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);

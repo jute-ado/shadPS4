@@ -140,6 +140,9 @@ bool BufferCache::TransitionPhysicalBackingTexturesForGpuWrite(VAddr device_addr
     }
 
     const auto images = texture_cache.FindPhysicalBackingImagesForPages(physical_pages);
+    if (images.size() > 1) {
+        return false;
+    }
     for (const ImageId image_id : images) {
         Image& image = texture_cache.GetImage(image_id);
         const auto transition = PlanPhysicalBackingTextureBufferTransition(
@@ -149,7 +152,8 @@ bool BufferCache::TransitionPhysicalBackingTexturesForGpuWrite(VAddr device_addr
         }
         const BufferId image_buffer_id = FindBuffer(transition->base, transition->size);
         Buffer& image_buffer = slot_buffers[image_buffer_id];
-        if (!SynchronizeBufferFromImage(image_buffer, transition->base, transition->size)) {
+        if (!image_buffer.IsInBounds(device_addr, size) ||
+            !SynchronizeBufferFromImage(image_buffer, transition->base, transition->size)) {
             return false;
         }
         const vk::BufferMemoryBarrier2 image_copy_barrier{
@@ -167,13 +171,16 @@ bool BufferCache::TransitionPhysicalBackingTexturesForGpuWrite(VAddr device_addr
             .bufferMemoryBarrierCount = 1,
             .pBufferMemoryBarriers = &image_copy_barrier,
         });
-        if (!texture_cache.ReleasePhysicalBackingTextureOwnershipForBufferWrite(image_id) ||
-            !AcquirePhysicalBackingOwnersForGpuWrite(image_buffer_id, image_buffer,
-                                                     transition->base, transition->size)) {
+        if (!texture_cache.ReleasePhysicalBackingTextureOwnershipForBufferWrite(image_id,
+                                                                                 physical_pages)) {
+            return false;
+        }
+        if (!AcquirePhysicalBackingOwnersForGpuWrite(image_buffer_id, image_buffer, device_addr,
+                                                     size)) {
             return false;
         }
         gpu_modified_ranges.Add(transition->base, transition->size);
-        MarkPhysicalBackingGpuDirty(transition->base, transition->size);
+        MarkPhysicalBackingGpuDirty(device_addr, size);
     }
     return true;
 }

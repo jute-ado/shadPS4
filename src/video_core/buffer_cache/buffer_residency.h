@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <span>
@@ -45,6 +46,13 @@ PlanPhysicalBackingTextureBufferTransition(VAddr image_base, u64 image_size, VAd
         .base = image_base,
         .size = static_cast<u32>(image_size),
     };
+}
+
+template <typename Left, typename Right>
+[[nodiscard]] constexpr bool PhysicalBackingPagesIntersect(const Left& left,
+                                                           const Right& right) noexcept {
+    return std::ranges::any_of(left,
+                               [&](const auto& page) { return std::ranges::contains(right, page); });
 }
 
 [[nodiscard]] constexpr std::optional<PhysicalBackingAliasMigrationCopy>
