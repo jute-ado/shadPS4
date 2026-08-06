@@ -353,6 +353,21 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool MarkCachePageGpuDirtyForGuest(VAddr guest_page, u32 offset, u32 size) {
+        if (!IsPageAligned(guest_page)) {
+            return false;
+        }
+        const auto mapping_it = mapping_tokens.find(guest_page);
+        if (mapping_it == mapping_tokens.end()) {
+            return false;
+        }
+        const auto owner_it = active_cache_owners.find(mapping_it->second.physical_offset);
+        if (owner_it == active_cache_owners.end()) {
+            return false;
+        }
+        return MarkCachePageGpuDirty(owner_it->second.token, offset, size);
+    }
+
     [[nodiscard]] std::optional<PhysicalBackingOwnerRetirement> RetireOwnerForCpuWrite(
         VAddr guest_page) {
         const auto mapping_it = mapping_tokens.find(guest_page);
