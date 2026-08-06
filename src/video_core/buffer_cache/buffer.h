@@ -47,14 +47,23 @@ struct UniqueBuffer {
     UniqueBuffer(const UniqueBuffer&) = delete;
     UniqueBuffer& operator=(const UniqueBuffer&) = delete;
 
-    UniqueBuffer(UniqueBuffer&& other)
-        : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+    UniqueBuffer(UniqueBuffer&& other) noexcept
+        : device{std::exchange(other.device, vk::Device{})},
+          allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
-          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)} {}
-    UniqueBuffer& operator=(UniqueBuffer&& other) {
-        buffer = std::exchange(other.buffer, VK_NULL_HANDLE);
+          buffer{std::exchange(other.buffer, vk::Buffer{})},
+          bda_addr{std::exchange(other.bda_addr, 0)} {}
+    UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        UniqueBuffer previous{std::move(*this)};
+        device = std::exchange(other.device, vk::Device{});
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+        buffer = std::exchange(other.buffer, vk::Buffer{});
+        bda_addr = std::exchange(other.bda_addr, 0);
         return *this;
     }
 
