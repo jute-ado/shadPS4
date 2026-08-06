@@ -153,6 +153,29 @@ TEST(PhysicalBackingPublicationCoordinator, DirtyCacheOwnerZerosAliasesUntilPhys
     EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, AtomicallyUnmapsMappedPageSubset) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestC, OtherPhysicalPage, PageSize, 8},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    constexpr std::array pages{GuestA, GuestC};
+
+    const auto deltas = coordinator.UnmapPages(pages);
+
+    ASSERT_TRUE(deltas.has_value());
+    ASSERT_EQ(deltas->size(), 2);
+    EXPECT_EQ((*deltas)[0].guest_page, GuestA);
+    EXPECT_EQ((*deltas)[0].device_address.value, 0);
+    EXPECT_EQ((*deltas)[1].guest_page, GuestC);
+    EXPECT_EQ((*deltas)[1].device_address.value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value,
+              ImportedBase + PhysicalPage);
+}
+
 TEST(PhysicalBackingPublicationCoordinator, PublishesSubmittedGpuWritebackBatchAtomically) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
@@ -258,6 +281,29 @@ TEST(PhysicalBackingPublicationCoordinator, ResolvesActiveOwnerThroughAnyPhysica
     ASSERT_TRUE(alias_owner.has_value());
     EXPECT_EQ(*alias_owner, owner->token);
     EXPECT_FALSE(coordinator.ResolveActiveCachePageForGuest(GuestA + PageSize));
+}
+
+TEST(PhysicalBackingPublicationCoordinator, SelectsNewAliasPublishedToActiveOwnerForProtection) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array initial_span{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(initial_span));
+    const auto owner = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+    constexpr std::array new_alias_span{
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+
+    const auto deltas = coordinator.MapSpans(new_alias_span);
+    ASSERT_TRUE(deltas.has_value());
+    const auto owned_deltas = coordinator.SelectActiveCacheOwnerDeltas(*deltas);
+
+    ASSERT_EQ(owned_deltas.size(), 1);
+    EXPECT_EQ(owned_deltas.front().guest_page, GuestB);
+    EXPECT_EQ(owned_deltas.front().device_address.value, OverrideBase);
 }
 
 TEST(PhysicalBackingPublicationCoordinator, ResolvesSharedPhysicalPageAcrossGuestAliases) {
