@@ -100,3 +100,8 @@ TEST(BufferResidency, PlansFullPageCopyBeforeWritableAliasMigration) {
     EXPECT_FALSE(VideoCore::PlanPhysicalBackingAliasMigrationCopy(
         0x1000'0000, PageSize, 0x1000'4000, 0x2000'0000, PageSize, 0x2000'0000));
 }
+
+TEST(BufferResidency, DefersPhysicalBackingOwnershipUntilGpuWrite) {
+    EXPECT_FALSE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(false));
+    EXPECT_TRUE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(true));
+}
