@@ -192,4 +192,27 @@ TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysica
     EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, GuestPageRegistrationUsesMonotonicOwnerTokens) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+
+    const auto first = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(coordinator.RetireCachePageClean(first->token));
+    const auto second = coordinator.ActivateCachePageForGuest(
+        GuestB, PhysicalBackingDeviceAddress{OverrideBase + PageSize}, false);
+    ASSERT_TRUE(second.has_value());
+
+    EXPECT_GT(second->token.publication.owner_generation,
+              first->token.publication.owner_generation);
+    EXPECT_FALSE(coordinator.RetireCachePageClean(first->token));
+    ASSERT_TRUE(coordinator.RetireCachePageClean(second->token));
+}
+
 } // namespace
