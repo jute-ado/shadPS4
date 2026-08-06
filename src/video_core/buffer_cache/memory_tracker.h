@@ -15,6 +15,7 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "video_core/buffer_cache/buffer_fault_admission.h"
 #include "video_core/buffer_cache/readonly_stream_snapshot.h"
 #include "video_core/buffer_cache/region_manager.h"
 
@@ -76,6 +77,7 @@ public:
             cpu_addr, size,
             [is_registered, &tracked, &on_flush, &on_preserve](RegionManager* manager, u64 offset,
                                                                size_t size) {
+                const bool owned_before_lock = manager->IsRegionCpuTracked(offset, size);
                 bool admitted = false;
                 const bool should_flush = [&] {
                     // Perform both the GPU modification check and CPU state change with the lock
@@ -83,7 +85,8 @@ public:
                     // modified. If we need to flush the flush function is going to perform CPU
                     // state change.
                     std::scoped_lock lk{manager->lock};
-                    if (!is_registered && !manager->IsRegionCpuTracked(offset, size)) {
+                    if (!IsBufferFaultOwned(is_registered, owned_before_lock,
+                                            manager->IsRegionCpuTracked(offset, size))) {
                         return false;
                     }
                     admitted = true;

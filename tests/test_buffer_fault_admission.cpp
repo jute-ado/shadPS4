@@ -46,10 +46,8 @@ TEST(BufferFaultAdmission, RequiresRegistrationOrExactPageTrackerOwnership) {
     static constexpr VAddr TransientProtectedPage = ManagerBase + VideoCore::TRACKER_BYTES_PER_PAGE;
     static constexpr VAddr UnrelatedDirtyPage = ManagerBase + 2 * VideoCore::TRACKER_BYTES_PER_PAGE;
 
-    VideoCore::RegionManager manager;
-    manager.SetCpuAddress(ManagerBase);
-    manager.GetRegionBits<VideoCore::Type::CPU>().Fill();
-    manager.GetRegionBits<VideoCore::Type::CPU>().Unset(1);
+    VideoCore::RegionManager manager{nullptr, ManagerBase};
+    manager.ChangeRegionState<VideoCore::Type::CPU, false, false>(TransientProtectedPage, 1);
 
     const auto process_fault = [&](VAddr address, bool is_registered) {
         int invalidation_count = 0;
@@ -73,14 +71,12 @@ TEST(BufferFaultAdmission, RetainsExactOwnershipSampleWhileWaitingForTransaction
     static constexpr VAddr ManagerBase = 8_MB;
     static constexpr VAddr SnapshotPage = ManagerBase + VideoCore::TRACKER_BYTES_PER_PAGE;
 
-    VideoCore::RegionManager manager;
-    manager.SetCpuAddress(ManagerBase);
-    manager.GetRegionBits<VideoCore::Type::CPU>().Fill();
-    manager.GetRegionBits<VideoCore::Type::CPU>().Unset(1);
+    VideoCore::RegionManager manager{nullptr, ManagerBase};
+    manager.ChangeRegionState<VideoCore::Type::CPU, false, false>(SnapshotPage, 1);
 
     const bool owned_before_wait =
         manager.IsRegionCpuTracked(SnapshotPage - manager.GetCpuAddr(), 1);
-    manager.GetRegionBits<VideoCore::Type::CPU>().Set(1);
+    manager.ChangeRegionState<VideoCore::Type::CPU, true, false>(SnapshotPage, 1);
     const bool owned_after_wait =
         manager.IsRegionCpuTracked(SnapshotPage - manager.GetCpuAddr(), 1);
 

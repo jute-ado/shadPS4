@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -76,7 +79,7 @@ public:
      * @param dirty_addr    Base address to mark or unmark as modified
      * @param size          Size in bytes to mark or unmark as modified
      */
-    template <Type type, bool enable>
+    template <Type type, bool enable, bool notify_tracker = true>
     void ChangeRegionState(u64 dirty_addr, u64 size) noexcept(type == Type::GPU) {
         RENDERER_TRACE;
         const size_t offset = dirty_addr - cpu_addr;
@@ -94,7 +97,7 @@ public:
             bits.UnsetRange(start_page, end_page);
         }
         if constexpr (type == Type::CPU) {
-            UpdateProtection<!enable, false>();
+            UpdateProtection<!enable, false, notify_tracker>();
         } else if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise) {
             UpdateProtection<enable, true>();
         }
@@ -165,10 +168,19 @@ public:
         if (start_page >= NUM_PAGES_PER_REGION || end_page <= start_page) {
             return false;
         }
-        for (size_t page = start_page; page < end_page; ++page) {
-            if (!cpu.Get(page)) {
+        size_t page = start_page;
+        while (page < end_page) {
+            const size_t word = page / CpuTrackedWordBits;
+            const size_t first_bit = page % CpuTrackedWordBits;
+            const size_t word_end = std::min(end_page, (word + 1) * CpuTrackedWordBits);
+            const size_t bit_count = word_end - page;
+            const u64 mask = bit_count == CpuTrackedWordBits
+                                 ? ~u64{0}
+                                 : ((u64{1} << bit_count) - 1) << first_bit;
+            if ((cpu_tracked[word].load(std::memory_order_acquire) & mask) != 0) {
                 return true;
             }
+            page = word_end;
         }
         return false;
     }
@@ -185,7 +197,7 @@ private:
      *
      * @tparam track True when the tracker should start tracking the new pages
      */
-    template <bool track, bool is_read>
+    template <bool track, bool is_read, bool notify_tracker = true>
     void UpdateProtection() {
         RENDERER_TRACE;
         RegionBits mask = is_read ? (~gpu ^ readable) : (cpu ^ writeable);
@@ -197,7 +209,40 @@ private:
         } else {
             writeable = cpu;
         }
-        tracker->UpdatePageWatchersForRegion<track, is_read>(cpu_addr, mask);
+        // A fault snapshots exact-page ownership before waiting for this manager's lock. Publish
+        // ownership before installing the OS watcher, and withdraw it only after removing that
+        // watcher, so a fault already in flight retains valid admission through snapshot cleanup.
+        if constexpr (!is_read && track) {
+            UpdateCpuTrackedPages<true>(mask);
+        }
+        if constexpr (notify_tracker) {
+            tracker->UpdatePageWatchersForRegion<track, is_read>(cpu_addr, mask);
+        }
+        if constexpr (!is_read && !track) {
+            UpdateCpuTrackedPages<false>(mask);
+        }
+    }
+
+    template <bool track>
+    void UpdateCpuTrackedPages(const RegionBits& mask) noexcept {
+        for (const auto& [range_begin, range_end] : mask) {
+            size_t page = range_begin;
+            while (page < range_end) {
+                const size_t word = page / CpuTrackedWordBits;
+                const size_t first_bit = page % CpuTrackedWordBits;
+                const size_t word_end = std::min(range_end, (word + 1) * CpuTrackedWordBits);
+                const size_t bit_count = word_end - page;
+                const u64 word_mask = bit_count == CpuTrackedWordBits
+                                          ? ~u64{0}
+                                          : ((u64{1} << bit_count) - 1) << first_bit;
+                if constexpr (track) {
+                    cpu_tracked[word].fetch_or(word_mask, std::memory_order_release);
+                } else {
+                    cpu_tracked[word].fetch_and(~word_mask, std::memory_order_release);
+                }
+                page = word_end;
+            }
+        }
     }
 
     PageManager* tracker;
@@ -206,6 +251,9 @@ private:
     RegionBits gpu;
     RegionBits writeable;
     RegionBits readable;
+    static constexpr size_t CpuTrackedWordBits = 64;
+    static constexpr size_t CpuTrackedWordCount = NUM_PAGES_PER_REGION / CpuTrackedWordBits;
+    std::array<std::atomic<u64>, CpuTrackedWordCount> cpu_tracked{};
 };
 
 } // namespace VideoCore

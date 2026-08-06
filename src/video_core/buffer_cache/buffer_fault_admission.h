@@ -8,6 +8,11 @@
 
 namespace VideoCore {
 
+[[nodiscard]] constexpr bool IsBufferFaultOwned(bool is_registered, bool owned_before_lock,
+                                                bool owned_after_lock) noexcept {
+    return is_registered || owned_before_lock || owned_after_lock;
+}
+
 template <typename Invalidate, typename MarkDirty>
 [[nodiscard]] bool ProcessTrackedBufferFault(Invalidate&& invalidate, MarkDirty&& mark_dirty) {
     if (!std::invoke(std::forward<Invalidate>(invalidate))) {
