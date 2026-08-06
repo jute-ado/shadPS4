@@ -7,6 +7,7 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/pending_operation_queue.h"
 
 namespace Vulkan {
 
@@ -119,12 +120,11 @@ void Scheduler::Wait(u64 tick) {
 }
 
 void Scheduler::PopPendingOperations() {
-    std::unique_lock lk(priority_pending_ops_mutex);
     master_semaphore.Refresh();
-    while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        pending_ops.front().callback();
-        pending_ops.pop();
-    }
+    DrainReadyPendingOperations(
+        pending_ops, is_draining_pending_operations,
+        [this](const PendingOp& operation) { return IsFree(operation.gpu_tick); },
+        [](PendingOp& operation) { operation.callback(); });
 }
 
 void Scheduler::AllocateWorkerCommandBuffers() {
@@ -150,52 +150,54 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
-    const u64 signal_value = master_semaphore.NextTick();
+    {
+        std::scoped_lock lk{submit_mutex};
+        const u64 signal_value = master_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
-    auto* profiler_ctx = instance.GetProfilerContext();
-    if (profiler_ctx) {
-        profiler_scope->~VkCtxScope();
-        TracyVkCollect(profiler_ctx, current_cmdbuf);
-    }
+        auto* profiler_ctx = instance.GetProfilerContext();
+        if (profiler_ctx) {
+            profiler_scope->~VkCtxScope();
+            TracyVkCollect(profiler_ctx, current_cmdbuf);
+        }
 #endif
 
-    EndRendering();
-    Check(current_cmdbuf.end());
+        EndRendering();
+        Check(current_cmdbuf.end());
 
-    const vk::Semaphore timeline = master_semaphore.Handle();
-    info.AddSignal(timeline, signal_value);
+        const vk::Semaphore timeline = master_semaphore.Handle();
+        info.AddSignal(timeline, signal_value);
 
-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
-        vk::PipelineStageFlagBits::eAllCommands,
-        vk::PipelineStageFlagBits::eColorAttachmentOutput,
-    };
+        static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
+            vk::PipelineStageFlagBits::eAllCommands,
+            vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        };
 
-    const vk::TimelineSemaphoreSubmitInfo timeline_si = {
-        .waitSemaphoreValueCount = info.num_wait_semas,
-        .pWaitSemaphoreValues = info.wait_ticks.data(),
-        .signalSemaphoreValueCount = info.num_signal_semas,
-        .pSignalSemaphoreValues = info.signal_ticks.data(),
-    };
+        const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+            .waitSemaphoreValueCount = info.num_wait_semas,
+            .pWaitSemaphoreValues = info.wait_ticks.data(),
+            .signalSemaphoreValueCount = info.num_signal_semas,
+            .pSignalSemaphoreValues = info.signal_ticks.data(),
+        };
 
-    const vk::SubmitInfo submit_info = {
-        .pNext = &timeline_si,
-        .waitSemaphoreCount = info.num_wait_semas,
-        .pWaitSemaphores = info.wait_semas.data(),
-        .pWaitDstStageMask = wait_stage_masks.data(),
-        .commandBufferCount = 1U,
-        .pCommandBuffers = &current_cmdbuf,
-        .signalSemaphoreCount = info.num_signal_semas,
-        .pSignalSemaphores = info.signal_semas.data(),
-    };
+        const vk::SubmitInfo submit_info = {
+            .pNext = &timeline_si,
+            .waitSemaphoreCount = info.num_wait_semas,
+            .pWaitSemaphores = info.wait_semas.data(),
+            .pWaitDstStageMask = wait_stage_masks.data(),
+            .commandBufferCount = 1U,
+            .pCommandBuffers = &current_cmdbuf,
+            .signalSemaphoreCount = info.num_signal_semas,
+            .pSignalSemaphores = info.signal_semas.data(),
+        };
 
-    ImGui::Core::TextureManager::Submit();
-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+        ImGui::Core::TextureManager::Submit();
+        auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+        ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
-    master_semaphore.Refresh();
-    AllocateWorkerCommandBuffers();
+        master_semaphore.Refresh();
+        AllocateWorkerCommandBuffers();
+    }
 
     // Apply pending operations
     PopPendingOperations();
