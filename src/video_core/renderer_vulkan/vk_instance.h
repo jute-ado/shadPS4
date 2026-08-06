@@ -124,6 +124,23 @@ public:
         return attachment_feedback_loop;
     }
 
+    /// Returns true when host allocations can be imported as Vulkan memory.
+    bool IsExternalMemoryHostSupported() const {
+        return external_memory_host;
+    }
+
+    vk::DeviceSize MinImportedHostPointerAlignment() const {
+        return external_memory_host_props.minImportedHostPointerAlignment;
+    }
+
+    vk::DeviceSize MaxBufferSize() const {
+        return vk13_props.maxBufferSize;
+    }
+
+    vk::DeviceSize MaxMemoryAllocationSize() const {
+        return maintenance_3_props.maxMemoryAllocationSize;
+    }
+
     /// Returns true when VK_EXT_custom_border_color is supported
     bool IsCustomBorderColorSupported() const {
         return custom_border_color;
@@ -360,6 +377,10 @@ public:
         return vk12_props;
     }
 
+    const vk::PhysicalDeviceVulkan12Features& GetVk12Features() const noexcept {
+        return vk12_features;
+    }
+
     /// Returns the memory properties of the physical device.
     const vk::PhysicalDeviceMemoryProperties& GetMemoryProperties() const noexcept {
         return memory_properties;
@@ -475,6 +496,8 @@ private:
     vk::PhysicalDeviceVulkan11Properties vk11_props;
     vk::PhysicalDeviceVulkan12Properties vk12_props;
     vk::PhysicalDeviceVulkan13Properties vk13_props;
+    vk::PhysicalDeviceMaintenance3Properties maintenance_3_props;
+    vk::PhysicalDeviceExternalMemoryHostPropertiesEXT external_memory_host_props;
     vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor_props;
     vk::PhysicalDeviceFeatures features;
     vk::PhysicalDeviceVulkan12Features vk12_features;
@@ -517,6 +540,7 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
+    bool external_memory_host{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool supports_memory_budget{};
