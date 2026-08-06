@@ -266,5 +266,10 @@ TEST(ExactAddressSpaceHostImportProbe, RequiresCanonicalAndGuestAliasVisibilityE
     EXPECT_TRUE(HasRequiredExactHostVisibilityEvidence(true, true));
 }
 
+TEST(ExactAddressSpaceHostImportProbe, RequiresTheGuestPageTableLookupPath) {
+    EXPECT_FALSE(HasRequiredExactGuestPublicationEvidence(true, true, false));
+    EXPECT_TRUE(HasRequiredExactGuestPublicationEvidence(true, true, true));
+}
+
 } // namespace
 } // namespace Vulkan
