@@ -393,6 +393,7 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
     physical_pages.erase(std::ranges::unique(physical_pages).begin(), physical_pages.end());
 
     PhysicalBackingCommandAliasPlan plan;
+    std::unordered_set<u64> written_pages;
     plan.pages.reserve(physical_pages.size());
     for (const u64 physical_page : physical_pages) {
         PhysicalBackingCommandPagePlan page_plan{.physical_page = physical_page};
@@ -410,6 +411,9 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
                 page_plan.writer = access.resource;
             }
         }
+        if (page_plan.writer) {
+            written_pages.insert(physical_page);
+        }
         plan.pages.push_back(std::move(page_plan));
     }
 
@@ -417,7 +421,11 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
         if (access.physical_pages.empty()) {
             continue;
         }
-        if (access.is_read) {
+        const bool touches_written_page =
+            std::ranges::any_of(access.physical_pages, [&](u64 physical_page) {
+                return written_pages.contains(physical_page);
+            });
+        if (access.is_read && touches_written_page) {
             plan.read_snapshot_order.push_back(access.resource);
         }
         if (access.is_written) {
