@@ -204,7 +204,12 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
         texture_cache.TransitionPhysicalBackingTextureOwnershipComponentForBufferAccess(
             component->oldest_to_newest_images,
             [&](std::span<const PhysicalBackingTextureToken> tokens) {
+                struct ExistingOwner {
+                    BufferId buffer_id{};
+                    PhysicalBackingCachePageToken token{};
+                };
                 size_t token_page_count = 0;
+                std::unordered_map<u64, ExistingOwner> existing_owners;
                 for (const auto& token : tokens) {
                     if (token.physical_pages.size() >
                         std::numeric_limits<size_t>::max() - token_page_count) {
@@ -212,7 +217,26 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
                     }
                     token_page_count += token.physical_pages.size();
                     for (const u64 physical_page : token.physical_pages) {
-                        if (physical_backing_owner_buffers.contains(physical_page)) {
+                        const auto owner_buffer_it =
+                            physical_backing_owner_buffers.find(physical_page);
+                        if (owner_buffer_it == physical_backing_owner_buffers.end()) {
+                            continue;
+                        }
+                        const auto owners_it =
+                            physical_backing_cache_pages.find(owner_buffer_it->second);
+                        if (owners_it == physical_backing_cache_pages.end()) {
+                            return false;
+                        }
+                        const auto owner_it = std::ranges::find_if(
+                            owners_it->second, [&](const PhysicalBackingCachePageOwner& owner) {
+                                return owner.token.publication.physical_offset == physical_page &&
+                                       !owner.pending_writeback.has_value();
+                            });
+                        if (owner_it == owners_it->second.end() ||
+                            !existing_owners
+                                 .emplace(physical_page,
+                                          ExistingOwner{owner_buffer_it->second, owner_it->token})
+                                 .second) {
                             return false;
                         }
                     }
@@ -233,11 +257,38 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
                     return false;
                 }
                 for (const auto& owner : publication->owners) {
-                    target_owners.push_back({.guest_page = owner.guest_page, .token = owner.token});
-                    const auto [owner_it, owner_inserted] = physical_backing_owner_buffers.emplace(
-                        owner.token.publication.physical_offset, image_buffer_id);
-                    ASSERT_MSG(owner_inserted && owner_it->second == image_buffer_id,
-                               "Prevalidated texture mirror owner insertion failed");
+                    const u64 physical_page = owner.token.publication.physical_offset;
+                    const auto existing_it = existing_owners.find(physical_page);
+                    if (existing_it == existing_owners.end()) {
+                        target_owners.push_back(
+                            {.guest_page = owner.guest_page, .token = owner.token});
+                        const auto [owner_it, owner_inserted] =
+                            physical_backing_owner_buffers.emplace(physical_page, image_buffer_id);
+                        ASSERT_MSG(owner_inserted && owner_it->second == image_buffer_id,
+                                   "Prevalidated texture mirror owner insertion failed");
+                        continue;
+                    }
+
+                    const ExistingOwner& existing = existing_it->second;
+                    auto source_owners_it = physical_backing_cache_pages.find(existing.buffer_id);
+                    ASSERT(source_owners_it != physical_backing_cache_pages.end());
+                    auto& source_owners = source_owners_it->second;
+                    const auto source_owner_it =
+                        std::ranges::find(source_owners, existing.token,
+                                          &PhysicalBackingCachePageOwner::token);
+                    ASSERT(source_owner_it != source_owners.end());
+                    if (existing.buffer_id == image_buffer_id) {
+                        source_owner_it->guest_page = owner.guest_page;
+                        source_owner_it->token = owner.token;
+                    } else {
+                        source_owners.erase(source_owner_it);
+                        if (source_owners.empty()) {
+                            physical_backing_cache_pages.erase(source_owners_it);
+                        }
+                        target_owners.push_back(
+                            {.guest_page = owner.guest_page, .token = owner.token});
+                    }
+                    physical_backing_owner_buffers.find(physical_page)->second = image_buffer_id;
                 }
                 publication_deltas = std::move(publication->deltas);
                 return true;
@@ -430,9 +481,6 @@ BufferCache::BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size) {
     if (!TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size)) {
         return std::nullopt;
     }
-    if (!RetirePhysicalBackingOwnersForCpuWrite(device_addr, size)) {
-        return std::nullopt;
-    }
     const VAddr end = device_addr + size;
     for (VAddr page = Common::AlignDown(device_addr, CACHING_PAGESIZE); page < end;
          page += CACHING_PAGESIZE) {
@@ -475,7 +523,8 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
     if (physical_backing_coordinator && size != 0) {
         bool retired = false;
         liverpool->SendCommand<true>([this, device_addr, size, &retired] {
-            retired = RetirePhysicalBackingOwnersForCpuWrite(device_addr, size);
+            retired = TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size) &&
+                      RetirePhysicalBackingOwnersForCpuWrite(device_addr, size);
         });
         if (!retired) {
             LOG_ERROR(Render_Vulkan,
