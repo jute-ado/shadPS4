@@ -235,4 +235,32 @@ TEST(PhysicalBackingPublicationCoordinator, ReportsTrackedGuestPublicationWithou
     EXPECT_EQ(blocked->value, 0);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, ActivatesBufferPagesAsOneAtomicPublicationBatch) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, OtherPhysicalPage, PageSize, 8},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto existing = coordinator.ActivateCachePageForGuest(
+        GuestB, PhysicalBackingDeviceAddress{OverrideBase + PageSize}, false);
+    ASSERT_TRUE(existing.has_value());
+
+    constexpr std::array requests{
+        VideoCore::PhysicalBackingCachePageRequest{GuestA,
+                                                   PhysicalBackingDeviceAddress{OverrideBase}},
+        VideoCore::PhysicalBackingCachePageRequest{
+            GuestB, PhysicalBackingDeviceAddress{OverrideBase + 2 * PageSize}},
+    };
+    EXPECT_FALSE(coordinator.ActivateCachePagesForGuests(requests));
+
+    const auto guest_a = coordinator.ResolveGuestPagePublication(GuestA);
+    const auto guest_b = coordinator.ResolveGuestPagePublication(GuestB);
+    ASSERT_TRUE(guest_a.has_value());
+    ASSERT_TRUE(guest_b.has_value());
+    EXPECT_EQ(guest_a->value, ImportedBase + PhysicalPage);
+    EXPECT_EQ(guest_b->value, OverrideBase + PageSize);
+}
+
 } // namespace
