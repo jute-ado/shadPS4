@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/buffer_cache/dma_publication_gate.h"
+#include "video_core/renderer_vulkan/dma_discovery_policy.h"
 
 namespace {
 
@@ -85,6 +86,30 @@ TEST(DmaPublicationGate, EligibilityExcludesWorkWithUnreplayableSideEffects) {
     traits = eligible;
     traits.storage_image_writes = true;
     EXPECT_FALSE(VideoCore::IsDmaDiscoveryEligible(traits));
+}
+
+TEST(DmaDiscoveryPolicy, DiscoveryNeverClearsOrConsumesAttachmentMetadata) {
+    const auto cleared = VideoCore::ResolveDmaAttachmentPolicy(
+        true, VideoCore::DmaAttachmentMode::Discovery);
+    EXPECT_FALSE(cleared.load_clear);
+    EXPECT_FALSE(cleared.consume_metadata);
+
+    const auto loaded = VideoCore::ResolveDmaAttachmentPolicy(
+        false, VideoCore::DmaAttachmentMode::Discovery);
+    EXPECT_FALSE(loaded.load_clear);
+    EXPECT_FALSE(loaded.consume_metadata);
+}
+
+TEST(DmaDiscoveryPolicy, PublicationPreservesClearAndConsumesMetadata) {
+    const auto cleared = VideoCore::ResolveDmaAttachmentPolicy(
+        true, VideoCore::DmaAttachmentMode::Publication);
+    EXPECT_TRUE(cleared.load_clear);
+    EXPECT_TRUE(cleared.consume_metadata);
+
+    const auto loaded = VideoCore::ResolveDmaAttachmentPolicy(
+        false, VideoCore::DmaAttachmentMode::Publication);
+    EXPECT_FALSE(loaded.load_clear);
+    EXPECT_TRUE(loaded.consume_metadata);
 }
 
 } // namespace
