@@ -1320,10 +1320,9 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size) {
 }
 
 bool Rasterizer::PrepareGpuEventMemoryWrite(VAddr addr, u64 size) {
-    if (!physical_backing_coordinator || !IsMapped(addr, size)) {
-        return true;
-    }
-    return InvalidateMemory(addr, size);
+    return VideoCore::PrepareGpuEventMemoryWrite(
+        physical_backing_coordinator != nullptr,
+        [this, addr, size] { return buffer_cache.PreparePhysicalBackingHostWrite(addr, size); });
 }
 
 void Rasterizer::ProcessDownloadImages() {

@@ -26,6 +26,13 @@ template <typename TransitionTextures, typename RetireBufferOwners, typename Syn
            std::invoke(std::forward<SynchronizeWritebacks>(synchronize_writebacks));
 }
 
+template <typename PreparePhysicalOwnership>
+[[nodiscard]] bool PrepareGpuEventMemoryWrite(bool has_imported_physical_backing,
+                                              PreparePhysicalOwnership&& prepare_physical) {
+    return !has_imported_physical_backing ||
+           std::invoke(std::forward<PreparePhysicalOwnership>(prepare_physical));
+}
+
 enum class PhysicalBackingTextureProducer {
     Copy,
     ComputeShader,
