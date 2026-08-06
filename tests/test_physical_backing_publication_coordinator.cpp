@@ -288,4 +288,30 @@ TEST(PhysicalBackingPublicationCoordinator, ActivatesBufferPagesAsOneAtomicPubli
     EXPECT_EQ(guest_b->value, OverrideBase + PageSize);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, BatchReturnsOneOwnerForPhysicalAliases) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    constexpr std::array requests{
+        VideoCore::PhysicalBackingCachePageRequest{GuestA,
+                                                   PhysicalBackingDeviceAddress{OverrideBase}},
+        VideoCore::PhysicalBackingCachePageRequest{
+            GuestB, PhysicalBackingDeviceAddress{OverrideBase + PageSize}},
+    };
+
+    const auto batch = coordinator.ActivateCachePagesForGuests(requests);
+
+    ASSERT_TRUE(batch.has_value());
+    ASSERT_EQ(batch->owners.size(), 1);
+    EXPECT_EQ(batch->owners[0].guest_page, GuestA);
+    EXPECT_EQ(batch->owners[0].token.publication.physical_offset, PhysicalPage);
+    ASSERT_EQ(batch->deltas.size(), 2);
+    EXPECT_EQ(batch->deltas[0].device_address.value, OverrideBase);
+    EXPECT_EQ(batch->deltas[1].device_address.value, OverrideBase);
+}
+
 } // namespace
