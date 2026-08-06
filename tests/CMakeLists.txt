@@ -267,6 +267,32 @@ target_compile_features(shadps4_external_host_memory_probe_test PRIVATE cxx_std_
 target_link_libraries(shadps4_external_host_memory_probe_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_external_host_memory_probe_test)
 
+# One-shot hardware mechanism probe. This is intentionally separate from the emulator app: it
+# imports only a bounded synthetic page-file mapping and never publishes guest BDA pages.
+add_executable(shadps4_external_host_memory_import_probe
+    ${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/external_host_memory_import_probe_main.cpp
+)
+target_include_directories(shadps4_external_host_memory_import_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_external_host_memory_import_probe PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_external_host_memory_import_probe PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+target_link_libraries(shadps4_external_host_memory_import_probe PRIVATE
+    Vulkan::Headers
+    nlohmann_json::nlohmann_json
+)
+if (WIN32)
+    target_link_libraries(shadps4_external_host_memory_import_probe PRIVATE onecore)
+    target_compile_definitions(shadps4_external_host_memory_import_probe PRIVATE
+        NTDDI_VERSION=0x0A000006
+        _WIN32_WINNT=0x0A00
+        WINVER=0x0A00
+    )
+endif()
+
 add_executable(shadps4_cpu_page_write_snapshot_test
     test_cpu_page_write_snapshot.cpp
 )
