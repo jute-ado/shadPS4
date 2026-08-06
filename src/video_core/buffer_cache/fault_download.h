@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 
 #include "video_core/buffer_cache/dma_publication_gate.h"
 
@@ -39,5 +40,27 @@ struct BoundedFaultDownloadCount {
     }
     return DmaFaultEpoch::Clean();
 }
+
+class DmaFaultEpochCompletion {
+public:
+    constexpr void Reset() {
+        epoch.reset();
+    }
+
+    constexpr void Complete(DmaFaultEpoch completed_epoch) {
+        epoch = completed_epoch;
+    }
+
+    [[nodiscard]] constexpr bool IsComplete() const {
+        return epoch.has_value();
+    }
+
+    [[nodiscard]] constexpr DmaFaultEpoch ValueOrInvalid() const {
+        return epoch.value_or(DmaFaultEpoch::Invalid());
+    }
+
+private:
+    std::optional<DmaFaultEpoch> epoch;
+};
 
 } // namespace VideoCore

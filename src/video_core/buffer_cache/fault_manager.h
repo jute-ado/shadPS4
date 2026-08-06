@@ -5,6 +5,7 @@
 
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/dma_publication_gate.h"
+#include "video_core/buffer_cache/fault_download.h"
 #include "video_core/buffer_cache/range_set.h"
 
 namespace VideoCore {
@@ -39,7 +40,7 @@ private:
     Buffer fault_buffer;
     Buffer download_buffer;
     std::array<u64, MaxPendingFaults> fault_areas{};
-    std::array<DmaFaultEpoch, MaxPendingFaults> fault_epochs{};
+    std::array<DmaFaultEpochCompletion, MaxPendingFaults> fault_epochs{};
     u32 current_area{};
     vk::UniqueDescriptorSetLayout fault_process_desc_layout;
     vk::UniquePipeline fault_process_pipeline;
