@@ -124,3 +124,12 @@ TEST(BufferResidency, PreservesWholeTextureBeforePartialGpuBufferWrite) {
     EXPECT_FALSE(VideoCore::PlanPhysicalBackingTextureBufferTransition(
         0x1000'0000, 0x24'0000, 0x1023'f800, 0x1000));
 }
+
+TEST(BufferResidency, ReleasesOnlyTextureTokensConflictingWithBufferWrite) {
+    constexpr std::array texture_pages{0x1000ULL, 0x2000ULL};
+    constexpr std::array conflicting_pages{0x2000ULL, 0x3000ULL};
+    constexpr std::array unrelated_pages{0x3000ULL, 0x4000ULL};
+
+    EXPECT_TRUE(VideoCore::PhysicalBackingPagesIntersect(texture_pages, conflicting_pages));
+    EXPECT_FALSE(VideoCore::PhysicalBackingPagesIntersect(texture_pages, unrelated_pages));
+}
