@@ -218,6 +218,20 @@ TEST(PhysicalBackingPublicationCoordinator, ResolvesActiveOwnerThroughAnyPhysica
     EXPECT_FALSE(coordinator.ResolveActiveCachePageForGuest(GuestA + PageSize));
 }
 
+TEST(PhysicalBackingPublicationCoordinator, ResolvesSharedPhysicalPageAcrossGuestAliases) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+
+    EXPECT_EQ(coordinator.ResolvePhysicalPageForGuest(GuestA), PhysicalPage);
+    EXPECT_EQ(coordinator.ResolvePhysicalPageForGuest(GuestB), PhysicalPage);
+    EXPECT_FALSE(coordinator.ResolvePhysicalPageForGuest(GuestC));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysicalAlias) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
