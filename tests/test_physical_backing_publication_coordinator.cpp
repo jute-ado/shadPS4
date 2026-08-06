@@ -333,4 +333,26 @@ TEST(PhysicalBackingPublicationCoordinator, BatchReturnsOneOwnerForPhysicalAlias
     EXPECT_EQ(batch->deltas[1].device_address.value, OverrideBase);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, RetiresAllocationBeforePhysicalPageReuse) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array first_span{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(first_span));
+    ASSERT_TRUE(coordinator.UnmapRange(GuestA, PageSize));
+    constexpr std::array retirements{
+        Core::PhysicalBackingRetirement{PhysicalPage, PageSize, 7},
+    };
+
+    ASSERT_TRUE(coordinator.RetirePhysicalAllocations(retirements));
+
+    constexpr std::array reused_span{
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 8},
+    };
+    const auto reused = coordinator.MapSpans(reused_span);
+    ASSERT_TRUE(reused.has_value());
+    EXPECT_EQ(reused->front().device_address.value, ImportedBase + PhysicalPage);
+}
+
 } // namespace
