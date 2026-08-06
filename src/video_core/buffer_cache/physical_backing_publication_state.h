@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <concepts>
+#include <functional>
 #include <limits>
 #include <optional>
+#include <type_traits>
 #include <unordered_map>
 
 #include "common/types.h"
@@ -70,12 +73,8 @@ public:
                                                                      u64 allocation_generation) {
         if (!eligible || mapping_generation == 0 || allocation_generation == 0 ||
             !IsPageAligned(guest_page) || !IsPhysicalPageEligible(physical_offset) ||
-            !HasCompletePage(guest_page) || guest_mappings.contains(guest_page)) {
-            return std::nullopt;
-        }
-        const auto generation_it = guest_generations.find(guest_page);
-        if (generation_it != guest_generations.end() &&
-            mapping_generation <= generation_it->second) {
+            !HasCompletePage(guest_page) || guest_mappings.contains(guest_page) ||
+            mapping_generation <= last_mapping_generation) {
             return std::nullopt;
         }
 
@@ -111,7 +110,7 @@ public:
         }
         physical.mapping_epoch = *next_epoch;
         ++physical.alias_count;
-        guest_generations.insert_or_assign(guest_page, mapping_generation);
+        last_mapping_generation = mapping_generation;
         return guest_it->second;
     }
 
@@ -166,6 +165,7 @@ public:
         u64 physical_offset, PhysicalBackingDeviceAddress override_page_address,
         u64 owner_generation) {
         if (!eligible || owner_generation == 0 || override_page_address.value == 0 ||
+            !HasCompletePage(override_page_address.value) ||
             !IsPhysicalPageEligible(physical_offset)) {
             return std::nullopt;
         }
@@ -231,23 +231,29 @@ public:
         };
     }
 
-    [[nodiscard]] bool CompleteOrderedWriteback(const PhysicalBackingWriteback& writeback) {
+    /// Runs the caller's ordered physical-memory copy before making imported
+    /// backing visible again. The callback is never invoked for a stale token
+    /// and observes AwaitingWriteback publication for the entire copy. A false
+    /// result leaves the same token pending so the caller can retry safely.
+    template <typename Commit>
+        requires std::invocable<Commit&> && std::convertible_to<std::invoke_result_t<Commit&>, bool>
+    [[nodiscard]] bool CommitOrderedWriteback(const PhysicalBackingWriteback& writeback,
+                                              Commit&& commit) {
+        if (!MatchesWriteback(writeback)) {
+            return false;
+        }
+
+        if (!static_cast<bool>(std::invoke(commit))) {
+            return false;
+        }
+
+        // The callback may re-enter policy code. Revalidate every generation
+        // before publishing rather than retaining an iterator across that call.
         const auto physical_it = physical_pages.find(writeback.physical_offset);
-        if (physical_it == physical_pages.end()) {
+        if (!MatchesWriteback(writeback) || physical_it == physical_pages.end()) {
             return false;
         }
-
-        PhysicalPageState& physical = physical_it->second;
-        if (physical.publication != Publication::AwaitingWriteback ||
-            physical.allocation_generation != writeback.allocation_generation ||
-            physical.owner_generation != writeback.owner_generation ||
-            physical.state_generation != writeback.state_generation ||
-            physical.mapping_epoch != writeback.mapping_epoch ||
-            physical.writeback_generation != writeback.writeback_generation) {
-            return false;
-        }
-
-        RestoreImportedBacking(physical);
+        RestoreImportedBacking(physical_it->second);
         return true;
     }
 
@@ -308,7 +314,7 @@ private:
     }
 
     [[nodiscard]] static constexpr bool HasCompletePage(u64 address) noexcept {
-        return address <= std::numeric_limits<u64>::max() - PageSize;
+        return address <= std::numeric_limits<u64>::max() - (PageSize - 1);
     }
 
     [[nodiscard]] static constexpr std::optional<u64> NextGeneration(u64 generation) noexcept {
@@ -321,7 +327,7 @@ private:
     [[nodiscard]] static constexpr bool IsBackingEligible(PhysicalBackingDeviceAddress base,
                                                           u64 size) noexcept {
         return base.value != 0 && size >= PageSize && IsPageAligned(size) &&
-               base.value <= std::numeric_limits<u64>::max() - (size - PageSize);
+               base.value <= std::numeric_limits<u64>::max() - (size - 1);
     }
 
     [[nodiscard]] bool IsPhysicalPageEligible(u64 physical_offset) const noexcept {
@@ -344,6 +350,20 @@ private:
         return physical_it;
     }
 
+    [[nodiscard]] bool MatchesWriteback(const PhysicalBackingWriteback& writeback) const {
+        const auto physical_it = physical_pages.find(writeback.physical_offset);
+        if (physical_it == physical_pages.end()) {
+            return false;
+        }
+        const PhysicalPageState& physical = physical_it->second;
+        return physical.publication == Publication::AwaitingWriteback &&
+               physical.allocation_generation == writeback.allocation_generation &&
+               physical.owner_generation == writeback.owner_generation &&
+               physical.state_generation == writeback.state_generation &&
+               physical.mapping_epoch == writeback.mapping_epoch &&
+               physical.writeback_generation == writeback.writeback_generation;
+    }
+
     static void RestoreImportedBacking(PhysicalPageState& physical) noexcept {
         physical.publication = Publication::ImportedBacking;
         physical.override_address = {};
@@ -353,8 +373,8 @@ private:
     PhysicalBackingDeviceAddress imported_base{};
     u64 backing_size{};
     bool eligible{};
+    u64 last_mapping_generation{};
     std::unordered_map<VAddr, PhysicalBackingMapping> guest_mappings;
-    std::unordered_map<VAddr, u64> guest_generations;
     PhysicalPages physical_pages;
 };
 
