@@ -6,6 +6,7 @@
 #include <bit>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -137,6 +138,13 @@ struct ExternalAddressSpaceImportResources {
     Lease lease;
     Memory memory;
     Buffer buffer;
+};
+
+/** Keeps partial construction failures in Vulkan's required buffer-before-memory order. */
+template <typename Memory, typename Buffer>
+struct ExternalAddressSpaceImportStaging {
+    std::optional<Memory> memory;
+    std::optional<Buffer> buffer;
 };
 
 class ExternalAddressSpaceImportOwnership {
