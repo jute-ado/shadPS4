@@ -107,7 +107,8 @@ PlanPhysicalBackingTextureOwnershipComponent(
     std::vector<bool> is_selected(records.size());
     std::unordered_set<u32> image_indices;
     for (const auto& record : records) {
-        if (record.image_index == 0 || !image_indices.emplace(record.image_index).second ||
+        if (record.image_index == std::numeric_limits<u32>::max() ||
+            !image_indices.emplace(record.image_index).second ||
             !PlanPhysicalBackingTextureOwnershipSpan(record.guest_base, record.guest_size)) {
             return std::nullopt;
         }
@@ -147,6 +148,7 @@ PlanPhysicalBackingTextureOwnershipComponent(
     });
     VAddr component_base = std::numeric_limits<VAddr>::max();
     VAddr component_end = 0;
+    std::unordered_set<u64> component_physical_pages;
     PhysicalBackingTextureOwnershipComponent result;
     result.ordered_image_indices.reserve(selected.size());
     for (const auto* record : selected) {
@@ -154,6 +156,8 @@ PlanPhysicalBackingTextureOwnershipComponent(
             PlanPhysicalBackingTextureOwnershipSpan(record->guest_base, record->guest_size);
         component_base = std::min(component_base, span->base);
         component_end = std::max(component_end, span->base + span->size);
+        component_physical_pages.insert(record->physical_pages.begin(),
+                                        record->physical_pages.end());
         result.ordered_image_indices.push_back(record->image_index);
     }
     const u64 component_size = component_end - component_base;
@@ -164,7 +168,7 @@ PlanPhysicalBackingTextureOwnershipComponent(
         .base = component_base,
         .size = static_cast<u32>(component_size),
     };
-    result.physical_pages.assign(reachable_pages.begin(), reachable_pages.end());
+    result.physical_pages.assign(component_physical_pages.begin(), component_physical_pages.end());
     std::ranges::sort(result.physical_pages);
     return result;
 }
