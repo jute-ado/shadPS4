@@ -201,6 +201,23 @@ TEST(ExternalAddressSpaceBackingImport, ResourceOwnerDestroysBufferThenMemoryThe
     EXPECT_EQ(log, (std::vector<std::string_view>{"buffer", "memory", "lease"}));
 }
 
+TEST(ExternalAddressSpaceBackingImport, StagingDestroysBoundBufferBeforeImportedMemoryOnFailure) {
+    std::vector<std::string_view> log;
+    {
+        ExternalAddressSpaceImportStaging<LoggedResource, LoggedResource> staging;
+        staging.buffer.emplace(log, "buffer");
+        staging.memory.emplace(log, "memory");
+    }
+    EXPECT_EQ(log, (std::vector<std::string_view>{"buffer", "memory"}));
+
+    log.clear();
+    {
+        ExternalAddressSpaceImportStaging<LoggedResource, LoggedResource> staging;
+        staging.buffer.emplace(log, "buffer");
+    }
+    EXPECT_EQ(log, (std::vector<std::string_view>{"buffer"}));
+}
+
 TEST(ExternalAddressSpaceBackingImport, FailsClosedOnZeroDeviceAddressAndNeverPublishes) {
     ExternalAddressSpaceImportOwnership ownership;
     EXPECT_TRUE(ownership.RetainLease());
