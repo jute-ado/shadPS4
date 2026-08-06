@@ -168,6 +168,34 @@ TEST(PhysicalBackingPublicationCoordinator,
     EXPECT_EQ(writers->deltas[2].device_address.value, OverrideBase);
 }
 
+TEST(PhysicalBackingPublicationCoordinator,
+     ResolvesAndSafelyRetiresGpuWriterThroughPhysicalAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    ASSERT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize));
+    const auto writer = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(writer.has_value());
+
+    const auto alias_owner = coordinator.ResolveActiveCachePageForGuest(GuestB);
+    ASSERT_TRUE(alias_owner.has_value());
+    EXPECT_EQ(*alias_owner, writer->token);
+
+    const auto retired = coordinator.RetireCachePageToGpuWriteSuppressed(*alias_owner);
+    ASSERT_TRUE(retired.has_value());
+    ASSERT_EQ(retired->size(), 2);
+    EXPECT_EQ((*retired)[0].device_address.value, 0);
+    EXPECT_EQ((*retired)[1].device_address.value, 0);
+    EXPECT_FALSE(coordinator.ResolveActiveCachePageForGuest(GuestA));
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
+}
+
 TEST(PhysicalBackingPublicationCoordinator, RollsBackWholeBatchWhenOnePageIsRejected) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
