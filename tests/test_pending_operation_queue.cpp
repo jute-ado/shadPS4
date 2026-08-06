@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <functional>
 #include <queue>
 #include <vector>
@@ -13,7 +14,7 @@ namespace {
 
 struct PendingOperation {
     std::function<void()> callback;
-    u64 gpu_tick{};
+    std::uint64_t gpu_tick{};
 };
 
 TEST(PendingOperationQueue, ExtractsReadyCallbacksBeforeAllowingReentrantEnqueue) {
@@ -55,6 +56,34 @@ TEST(PendingOperationQueue, LeavesTheFirstIncompleteOperationQueued) {
     ASSERT_EQ(ready.size(), 1);
     ASSERT_EQ(pending.size(), 1);
     EXPECT_EQ(pending.front().gpu_tick, 9);
+}
+
+TEST(PendingOperationQueue, ReentrantDrainPreservesOlderCallbackOrder) {
+    std::queue<PendingOperation> pending;
+    std::vector<int> calls;
+    bool is_draining = false;
+    std::function<void()> drain;
+    drain = [&] {
+        Vulkan::DrainReadyPendingOperations(
+            pending, is_draining,
+            [](const PendingOperation& operation) { return operation.gpu_tick <= 7; },
+            [](PendingOperation& operation) { operation.callback(); });
+    };
+    pending.push({
+        .callback = [&] {
+            calls.push_back(1);
+            pending.push({.callback = [&] { calls.push_back(3); }, .gpu_tick = 7});
+            drain();
+        },
+        .gpu_tick = 7,
+    });
+    pending.push({.callback = [&] { calls.push_back(2); }, .gpu_tick = 7});
+
+    drain();
+
+    EXPECT_EQ(calls, (std::vector<int>{1, 2, 3}));
+    EXPECT_FALSE(is_draining);
+    EXPECT_TRUE(pending.empty());
 }
 
 } // namespace
