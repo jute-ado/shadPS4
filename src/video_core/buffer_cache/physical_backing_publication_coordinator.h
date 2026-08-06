@@ -129,15 +129,15 @@ public:
                     RollbackMappings(mapped);
                     return std::nullopt;
                 }
-                auto mapping = state.MapGuestPage(span.guest_base + offset,
-                                                  span.physical_offset + offset,
-                                                  *mapping_generation,
-                                                  span.allocation_generation);
+                auto mapping =
+                    state.MapGuestPage(span.guest_base + offset, span.physical_offset + offset,
+                                       *mapping_generation, span.allocation_generation);
                 if (!mapping) {
                     RollbackMappings(mapped);
                     return std::nullopt;
                 }
-                const auto address = PublishedAddress(mapping->guest_page, mapping->physical_offset);
+                const auto address =
+                    PublishedAddress(mapping->guest_page, mapping->physical_offset);
                 if (address.value == 0 &&
                     !state.IsImportedBackingSuppressedForGpuWrite(mapping->physical_offset)) {
                     static_cast<void>(state.UnmapGuestPage(*mapping));
@@ -156,8 +156,8 @@ public:
     /// Hides imported backing for every mapped physical page touched by a GPU
     /// write. Unmapped guest pages require no delta and are deliberately skipped.
     /// The complete mapped range is preflighted before any publication changes.
-    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
-    SuppressGuestRangeForGpuWrite(VAddr guest_base, u64 size) {
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> SuppressGuestRangeForGpuWrite(
+        VAddr guest_base, u64 size) {
         if (size == 0 || guest_base >= AddressSpaceSize || size > AddressSpaceSize - guest_base) {
             return std::nullopt;
         }
@@ -199,8 +199,8 @@ public:
     }
 
     /// Atomically removes a complete guest range and returns zero page-table deltas.
-    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> UnmapRange(
-        VAddr guest_base, u64 size) {
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> UnmapRange(VAddr guest_base,
+                                                                                 u64 size) {
         if (size == 0 || !IsPageAligned(guest_base) || !IsPageAligned(size) ||
             guest_base >= AddressSpaceSize || size > AddressSpaceSize - guest_base) {
             return std::nullopt;
@@ -318,8 +318,8 @@ public:
     }
 
     /// Atomically publishes every distinct physical page in one synchronized GPU buffer.
-    [[nodiscard]] std::optional<PhysicalBackingCachePublicationBatch>
-    ActivateCachePagesForGuests(std::span<const PhysicalBackingCachePageRequest> requests) {
+    [[nodiscard]] std::optional<PhysicalBackingCachePublicationBatch> ActivateCachePagesForGuests(
+        std::span<const PhysicalBackingCachePageRequest> requests) {
         if (requests.empty()) {
             return std::nullopt;
         }
@@ -333,7 +333,7 @@ public:
         std::vector<PendingOwner> pending;
         pending.reserve(requests.size());
         std::unordered_set<VAddr> guest_pages;
-        std::unordered_set<u64> physical_pages;
+        std::unordered_map<u64, PhysicalBackingDeviceAddress> physical_pages;
         u64 next_owner_generation = last_owner_generation;
         for (const auto& request : requests) {
             if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
@@ -345,7 +345,12 @@ public:
                 return std::nullopt;
             }
             const u64 physical_offset = mapping_it->second.physical_offset;
-            if (!physical_pages.emplace(physical_offset).second) {
+            const auto [physical_it, physical_inserted] =
+                physical_pages.emplace(physical_offset, request.override_page_address);
+            if (!physical_inserted) {
+                if (physical_it->second != request.override_page_address) {
+                    return std::nullopt;
+                }
                 continue;
             }
             if (!physical_aliases.contains(physical_offset) ||
@@ -360,8 +365,8 @@ public:
                                            next_owner_generation)) {
                 return std::nullopt;
             }
-            pending.push_back({request.guest_page, physical_offset,
-                               request.override_page_address, next_owner_generation});
+            pending.push_back({request.guest_page, physical_offset, request.override_page_address,
+                               next_owner_generation});
         }
         if (pending.empty()) {
             return std::nullopt;
@@ -400,8 +405,8 @@ public:
         return PublishedAddress(guest_page, mapping_it->second.physical_offset);
     }
 
-    [[nodiscard]] std::optional<PhysicalBackingCachePageToken>
-    ResolveActiveCachePageForGuest(VAddr guest_page) const {
+    [[nodiscard]] std::optional<PhysicalBackingCachePageToken> ResolveActiveCachePageForGuest(
+        VAddr guest_page) const {
         if (!IsPageAligned(guest_page)) {
             return std::nullopt;
         }
@@ -421,6 +426,7 @@ public:
         const auto owner_it = FindActiveCacheOwner(token);
         if (owner_it == active_cache_owners.end() ||
             !physical_aliases.contains(token.publication.physical_offset) ||
+            !owner_it->second.dirty_slices.empty() ||
             !state.RetireToGpuWriteSuppressed(token.publication)) {
             return std::nullopt;
         }
@@ -440,8 +446,8 @@ public:
         return MakeAliasDeltas(token.publication.physical_offset);
     }
 
-    [[nodiscard]] std::optional<PhysicalBackingDirtyCachePagePublication>
-    RetireCachePageGpuDirty(const PhysicalBackingCachePageToken& token) {
+    [[nodiscard]] std::optional<PhysicalBackingDirtyCachePagePublication> RetireCachePageGpuDirty(
+        const PhysicalBackingCachePageToken& token) {
         const auto owner_it = FindActiveCacheOwner(token);
         if (owner_it == active_cache_owners.end() ||
             !physical_aliases.contains(token.publication.physical_offset)) {
@@ -459,8 +465,8 @@ public:
         };
     }
 
-    [[nodiscard]] bool MarkCachePageGpuDirty(const PhysicalBackingCachePageToken& token,
-                                             u32 offset, u32 size) {
+    [[nodiscard]] bool MarkCachePageGpuDirty(const PhysicalBackingCachePageToken& token, u32 offset,
+                                             u32 size) {
         const auto owner_it = FindActiveCacheOwner(token);
         if (owner_it == active_cache_owners.end() || size == 0 || offset >= PageSize ||
             size > PageSize - offset) {
@@ -505,8 +511,8 @@ public:
     }
 
     template <typename Commit>
-    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
-    CommitCachePageWriteback(const PhysicalBackingWriteback& writeback, Commit&& commit) {
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> CommitCachePageWriteback(
+        const PhysicalBackingWriteback& writeback, Commit&& commit) {
         const auto pending_it = pending_writebacks.find(writeback.physical_offset);
         if (pending_it == pending_writebacks.end() || pending_it->second != writeback ||
             !physical_aliases.contains(writeback.physical_offset) ||
@@ -639,8 +645,7 @@ private:
         return state.Resolve(guest_page);
     }
 
-    [[nodiscard]] std::vector<PhysicalBackingBdaDelta> MakeAliasDeltas(
-        u64 physical_offset) const {
+    [[nodiscard]] std::vector<PhysicalBackingBdaDelta> MakeAliasDeltas(u64 physical_offset) const {
         std::vector<PhysicalBackingBdaDelta> deltas;
         const auto aliases_it = physical_aliases.find(physical_offset);
         if (aliases_it == physical_aliases.end()) {
@@ -682,8 +687,8 @@ private:
                 auto& previous = slices[output - 1];
                 const u32 previous_end = previous.offset + previous.size;
                 if (slice.offset <= previous_end) {
-                    previous.size = std::max(previous_end, slice.offset + slice.size) -
-                                    previous.offset;
+                    previous.size =
+                        std::max(previous_end, slice.offset + slice.size) - previous.offset;
                     continue;
                 }
             }
