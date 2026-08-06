@@ -215,4 +215,25 @@ TEST(BufferAccessProvenanceTrace, FiltersOrdinaryAccessButKeepsGpuWriteToVertexT
     std::filesystem::remove_all(root);
 }
 
+TEST(BufferAccessProvenanceTrace, FiltersReadOnlyMultiRoleBuffers) {
+    const auto root =
+        std::filesystem::temp_directory_path() /
+        ("shadps4-buffer-access-provenance-read-only-" +
+         std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(root);
+    const auto path = root / "trace.jsonl";
+
+    {
+        VideoCore::BasicBufferAccessProvenanceTrace<std::uint32_t> trace{{path, 4, 16}};
+        trace.BeginCommand(40, 80);
+        trace.Observe(3, 0, 64, Role::ShaderRead, 0x01, 0x10, false);
+        trace.Observe(3, 64, 64, Role::VertexRead, 0x02, 0x20, false);
+        trace.CommitCommand();
+    }
+
+    const auto lines = ReadJsonLines(path);
+    ASSERT_EQ(lines.size(), 1);
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
