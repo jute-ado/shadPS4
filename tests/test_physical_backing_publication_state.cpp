@@ -61,8 +61,8 @@ TEST(PhysicalBackingPublicationState, DirtyRetirementSuppressesAliasesUntilOrder
 
     const auto writeback = state.RetireGpuDirty(*override);
     ASSERT_TRUE(writeback.has_value());
-    EXPECT_EQ(state.Resolve(GuestA).value, 0);
-    EXPECT_EQ(state.Resolve(GuestB).value, 0);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+    EXPECT_EQ(state.Resolve(GuestB).value, u64{0});
 
     ASSERT_TRUE(state.CompleteOrderedWriteback(*writeback));
     EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
@@ -83,7 +83,7 @@ TEST(PhysicalBackingPublicationState, StaleMappingGenerationCannotRestoreDirtyPa
     ASSERT_TRUE(state.UnmapGuestPage(*old_mapping));
     ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 2, 1));
     EXPECT_FALSE(state.CompleteOrderedWriteback(*stale_writeback));
-    EXPECT_EQ(state.Resolve(GuestA).value, 0);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
 
     const auto replacement = state.ActivateOverride(
         PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase + PageSize}, 2);
@@ -112,7 +112,7 @@ TEST(PhysicalBackingPublicationState, StaleOwnerCompletionCannotReplaceNewerOwne
     ASSERT_TRUE(current_writeback.has_value());
 
     EXPECT_FALSE(state.CompleteOrderedWriteback(*stale_writeback));
-    EXPECT_EQ(state.Resolve(GuestA).value, 0);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
     EXPECT_TRUE(state.CompleteOrderedWriteback(*current_writeback));
     EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
 }
@@ -124,7 +124,7 @@ TEST(PhysicalBackingPublicationState, UnmappingOneAliasDoesNotAffectAnother) {
     ASSERT_TRUE(state.MapGuestPage(GuestB, PhysicalPage, 2, 1));
 
     ASSERT_TRUE(state.UnmapGuestPage(*first));
-    EXPECT_EQ(state.Resolve(GuestA).value, 0);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
     EXPECT_EQ(state.Resolve(GuestB).value, ImportedBase + PhysicalPage);
     EXPECT_FALSE(state.UnmapGuestPage(*first));
 }
@@ -158,7 +158,7 @@ TEST(PhysicalBackingPublicationState, InvalidAndConflictingMappingsFailClosed) {
     EXPECT_FALSE(state.MapGuestPage(GuestB, PhysicalPage, 5, 0));
     EXPECT_FALSE(state.MapGuestPage(GuestB, PhysicalPage, 5, 2));
     EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
-    EXPECT_EQ(state.Resolve(GuestB).value, 0);
+    EXPECT_EQ(state.Resolve(GuestB).value, u64{0});
 }
 
 TEST(PhysicalBackingPublicationState, AddressAndBackingOverflowsFailClosed) {
