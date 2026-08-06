@@ -5,6 +5,8 @@
 
 #include <cstddef>
 
+#include "video_core/buffer_cache/dma_publication_gate.h"
+
 namespace VideoCore {
 
 inline constexpr size_t FaultDownloadSlotCount = 1024;
@@ -22,6 +24,20 @@ struct BoundedFaultDownloadCount {
         .address_count = reported_count < address_capacity ? reported_count : address_capacity,
         .overflowed = reported_count > address_capacity,
     };
+}
+
+[[nodiscard]] constexpr DmaFaultEpoch ClassifyDmaFaultEpoch(
+    BoundedFaultDownloadCount count, size_t invalid_fault_count) {
+    if (count.overflowed) {
+        return DmaFaultEpoch::Overflow();
+    }
+    if (invalid_fault_count != 0) {
+        return DmaFaultEpoch::Invalid();
+    }
+    if (count.address_count != 0) {
+        return DmaFaultEpoch::FaultCount(count.address_count);
+    }
+    return DmaFaultEpoch::Clean();
 }
 
 } // namespace VideoCore

@@ -611,6 +611,10 @@ void BufferCache::ProcessFaultBuffer() {
     fault_manager.ProcessFaultBuffer();
 }
 
+DmaFaultEpoch BufferCache::ProcessFaultBufferSynchronous() {
+    return fault_manager.ProcessFaultBufferSynchronous();
+}
+
 void BufferCache::Register(BufferId buffer_id) {
     ChangeRegister<true>(buffer_id);
 }
