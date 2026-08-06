@@ -155,11 +155,12 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
         return false;
     }
     std::vector<PhysicalBackingTextureBufferTransition> image_spans;
-    image_spans.reserve(component->oldest_to_newest_image_indices.size());
+    image_spans.reserve(component->oldest_to_newest_images.size());
     std::vector<PhysicalBackingTexturePageSource> page_source_candidates;
     const std::unordered_set<u64> component_physical_pages(component->physical_pages.begin(),
                                                            component->physical_pages.end());
-    for (const u32 image_index : component->oldest_to_newest_image_indices) {
+    for (const auto& ownership_image : component->oldest_to_newest_images) {
+        const u32 image_index = ownership_image.image_index;
         const ImageId image_id{image_index};
         const Image& image = texture_cache.GetImage(image_id);
         const auto image_span = PlanPhysicalBackingTextureOwnershipSpan(image.info.guest_address,
@@ -174,7 +175,8 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
             const auto physical =
                 physical_backing_coordinator->ResolvePhysicalPageForGuest(guest_page);
             if (physical && component_physical_pages.contains(*physical)) {
-                page_source_candidates.push_back({*physical, guest_page});
+                page_source_candidates.push_back(
+                    {*physical, guest_page, ownership_image.gpu_write_order, image_index});
             }
         }
     }
@@ -200,7 +202,7 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
     std::vector<PhysicalBackingBdaDelta> publication_deltas;
     const bool transitioned =
         texture_cache.TransitionPhysicalBackingTextureOwnershipComponentForBufferAccess(
-            component->oldest_to_newest_image_indices,
+            component->oldest_to_newest_images,
             [&](std::span<const PhysicalBackingTextureToken> tokens) {
                 size_t token_page_count = 0;
                 for (const auto& token : tokens) {

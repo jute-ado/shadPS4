@@ -198,6 +198,8 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerBegin(fmt::format("EliminateFastClear:MRT={:#x}:M={:#x}", col_buf.Address(),
                                  col_buf.CmaskAddress()));
     image.Clear(clear_value, desc.view_info.range);
+    const std::array outputs{image_id};
+    texture_cache.RecordPhysicalBackingTextureGpuWrites(outputs);
     ScopeMarkerEnd();
 }
 
@@ -246,6 +248,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
+    RecordPhysicalBackingTextureGpuWrites(&state);
     ResetBindings();
 }
 
@@ -325,6 +328,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
+    RecordPhysicalBackingTextureGpuWrites(&state);
     ResetBindings();
 }
 
@@ -355,6 +359,7 @@ void Rasterizer::DispatchDirect() {
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
+    RecordPhysicalBackingTextureGpuWrites(nullptr);
     ResetBindings();
 }
 
@@ -387,6 +392,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
+    RecordPhysicalBackingTextureGpuWrites(nullptr);
     ResetBindings();
 }
 
@@ -422,6 +428,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    physical_backing_texture_gpu_write_outputs.clear();
 
     bool uses_dma = false;
 
@@ -446,7 +453,48 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         fault_process_pending = true;
     }
 
+    for (const auto image_id : physical_backing_texture_gpu_write_outputs) {
+        texture_cache.PreparePhysicalBackingTextureGpuWrite(image_id);
+    }
+
     return true;
+}
+
+void Rasterizer::TrackPhysicalBackingTextureGpuWriteOutput(VideoCore::ImageId image_id) {
+    if (image_id && !std::ranges::contains(physical_backing_texture_gpu_write_outputs, image_id)) {
+        physical_backing_texture_gpu_write_outputs.push_back(image_id);
+    }
+}
+
+void Rasterizer::RecordPhysicalBackingTextureGpuWrites(const RenderState* render_state) {
+    if (render_state) {
+        for (u32 cb = 0; cb < render_state->num_color_attachments; ++cb) {
+            TrackPhysicalBackingTextureGpuWriteOutput(cb_descs[cb].first);
+        }
+
+        const auto& regs = liverpool->regs;
+        const auto& depth_attachment = render_state->depth_stencil_attachment;
+        const bool depth_write = regs.depth_control.depth_enable &&
+                                 regs.depth_control.depth_write_enable &&
+                                 !regs.depth_view.z_read_only;
+        const auto& stencil = regs.stencil_control;
+        const bool stencil_op_writes = stencil.stencil_fail_front != AmdGpu::StencilFunc::Keep ||
+                                       stencil.stencil_zpass_front != AmdGpu::StencilFunc::Keep ||
+                                       stencil.stencil_zfail_front != AmdGpu::StencilFunc::Keep ||
+                                       stencil.stencil_fail_back != AmdGpu::StencilFunc::Keep ||
+                                       stencil.stencil_zpass_back != AmdGpu::StencilFunc::Keep ||
+                                       stencil.stencil_zfail_back != AmdGpu::StencilFunc::Keep;
+        const bool stencil_write = regs.depth_control.stencil_enable &&
+                                   !regs.depth_view.stencil_read_only &&
+                                   (regs.stencil_ref_front.stencil_write_mask != 0 ||
+                                    regs.stencil_ref_back.stencil_write_mask != 0) &&
+                                   stencil_op_writes;
+        if (depth_write || stencil_write || depth_attachment.depth_clear ||
+            depth_attachment.stencil_clear) {
+            TrackPhysicalBackingTextureGpuWriteOutput(db_desc.first);
+        }
+    }
+    texture_cache.RecordPhysicalBackingTextureGpuWrites(physical_backing_texture_gpu_write_outputs);
 }
 
 bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
@@ -535,6 +583,8 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Perform image copy
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
+    const auto dst_image_id = desc0.is_written ? image0_id : image1_id;
+    texture_cache.PreparePhysicalBackingTextureGpuWrite(dst_image_id);
     if (instance.IsMaintenance8Supported() ||
         src_image.info.props.is_depth == dst_image.info.props.is_depth) {
         dst_image.CopyImage(src_image);
@@ -545,6 +595,8 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     }
     dst_image.flags |= VideoCore::ImageFlagBits::GpuModified;
     dst_image.flags &= ~VideoCore::ImageFlagBits::Dirty;
+    const std::array outputs{dst_image_id};
+    texture_cache.RecordPhysicalBackingTextureGpuWrites(outputs);
     return true;
 }
 
@@ -602,9 +654,12 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
             },
         .extent = image1.info.resources,
     };
+    texture_cache.PreparePhysicalBackingTextureGpuWrite(image1_id);
     image1.Clear(clear, range);
     image1.flags |= VideoCore::ImageFlagBits::GpuModified;
     image1.flags &= ~VideoCore::ImageFlagBits::Dirty;
+    const std::array outputs{image1_id};
+    texture_cache.RecordPhysicalBackingTextureGpuWrites(outputs);
     return true;
 }
 
@@ -764,6 +819,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
+            if (is_storage) {
+                TrackPhysicalBackingTextureGpuWriteOutput(image_id);
+            }
 
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
@@ -970,13 +1028,18 @@ void Rasterizer::Resolve() {
     const auto& mrt1_hint = liverpool->last_cb_extent[1];
     VideoCore::TextureCache::ImageDesc mrt0_desc{liverpool->regs.color_buffers[0], mrt0_hint};
     VideoCore::TextureCache::ImageDesc mrt1_desc{liverpool->regs.color_buffers[1], mrt1_hint};
-    auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
-    auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
+    const auto mrt0_image_id = texture_cache.FindImage(mrt0_desc, true);
+    const auto mrt1_image_id = texture_cache.FindImage(mrt1_desc, true);
+    auto& mrt0_image = texture_cache.GetImage(mrt0_image_id);
+    auto& mrt1_image = texture_cache.GetImage(mrt1_image_id);
+    texture_cache.PreparePhysicalBackingTextureGpuWrite(mrt1_image_id);
 
     ScopeMarkerBegin(fmt::format("Resolve:MRT0={:#x}:MRT1={:#x}",
                                  liverpool->regs.color_buffers[0].Address(),
                                  liverpool->regs.color_buffers[1].Address()));
     mrt1_image.Resolve(mrt0_image, mrt0_desc.view_info.range, mrt1_desc.view_info.range);
+    const std::array outputs{mrt1_image_id};
+    texture_cache.RecordPhysicalBackingTextureGpuWrites(outputs);
     ScopeMarkerEnd();
 }
 
@@ -990,8 +1053,11 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
         regs.depth_buffer, regs.depth_view, regs.depth_control,
         regs.depth_htile_data_base.GetAddress(), liverpool->last_db_extent, true);
 
-    auto& read_image = texture_cache.GetImage(texture_cache.FindImage(read_desc));
-    auto& write_image = texture_cache.GetImage(texture_cache.FindImage(write_desc));
+    const auto read_image_id = texture_cache.FindImage(read_desc);
+    const auto write_image_id = texture_cache.FindImage(write_desc);
+    auto& read_image = texture_cache.GetImage(read_image_id);
+    auto& write_image = texture_cache.GetImage(write_image_id);
+    texture_cache.PreparePhysicalBackingTextureGpuWrite(write_image_id);
 
     VideoCore::SubresourceRange sub_range;
     sub_range.base.layer = liverpool->regs.depth_view.slice_start;
@@ -1037,6 +1103,8 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
     scheduler.CommandBuffer().copyImage(read_image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                                         write_image.GetImage(),
                                         vk::ImageLayout::eTransferDstOptimal, region);
+    const std::array outputs{write_image_id};
+    texture_cache.RecordPhysicalBackingTextureGpuWrites(outputs);
 
     ScopeMarkerEnd();
 }

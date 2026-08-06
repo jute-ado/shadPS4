@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "core/physical_backing_provenance.h"
@@ -115,6 +117,8 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void TrackPhysicalBackingTextureGpuWriteOutput(VideoCore::ImageId image_id);
+    void RecordPhysicalBackingTextureGpuWrites(const RenderState* render_state);
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {
@@ -150,6 +154,8 @@ private:
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+    boost::container::small_vector<VideoCore::ImageId, Shader::NUM_IMAGES>
+        physical_backing_texture_gpu_write_outputs;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;

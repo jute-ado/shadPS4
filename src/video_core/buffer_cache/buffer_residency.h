@@ -32,6 +32,42 @@ enum class PhysicalBackingTextureProducer {
     return will_gpu_write;
 }
 
+class PhysicalBackingTextureWriteOrderTracker {
+public:
+    [[nodiscard]] bool Acquire(u32 image_index) {
+        return write_orders.try_emplace(image_index, 0).second;
+    }
+
+    [[nodiscard]] bool MarkGpuWrites(std::span<const u32> image_indices) {
+        if (image_indices.empty() || last_write_order == std::numeric_limits<u64>::max()) {
+            return false;
+        }
+        for (const u32 image_index : image_indices) {
+            if (!write_orders.contains(image_index)) {
+                return false;
+            }
+        }
+        const u64 write_order = ++last_write_order;
+        for (const u32 image_index : image_indices) {
+            write_orders[image_index] = write_order;
+        }
+        return true;
+    }
+
+    [[nodiscard]] u64 Get(u32 image_index) const {
+        const auto order = write_orders.find(image_index);
+        return order == write_orders.end() ? 0 : order->second;
+    }
+
+    [[nodiscard]] bool Release(u32 image_index) {
+        return write_orders.erase(image_index) == 1;
+    }
+
+private:
+    std::unordered_map<u32, u64> write_orders;
+    u64 last_write_order{};
+};
+
 [[nodiscard]] constexpr bool ShouldInvalidateTextureCacheBeforeGpuBufferFill(
     bool is_gds, bool requires_gpu_fill) noexcept {
     return !is_gds && requires_gpu_fill;
@@ -52,12 +88,19 @@ struct PhysicalBackingTextureOwnershipRecord {
     u32 image_index{};
     VAddr guest_base{};
     u64 guest_size{};
-    u64 binding_order{};
+    u64 gpu_write_order{};
     std::vector<u64> physical_pages;
 };
 
+struct PhysicalBackingTextureOwnershipImage {
+    u32 image_index{};
+    u64 gpu_write_order{};
+
+    auto operator<=>(const PhysicalBackingTextureOwnershipImage&) const = default;
+};
+
 struct PhysicalBackingTextureOwnershipComponent {
-    std::vector<u32> oldest_to_newest_image_indices;
+    std::vector<PhysicalBackingTextureOwnershipImage> oldest_to_newest_images;
     PhysicalBackingTextureBufferTransition ownership_span{};
     std::vector<u64> physical_pages;
 };
@@ -65,6 +108,8 @@ struct PhysicalBackingTextureOwnershipComponent {
 struct PhysicalBackingTexturePageSource {
     u64 physical_page{};
     VAddr guest_page{};
+    u64 gpu_write_order{};
+    u32 image_index{};
 
     auto operator<=>(const PhysicalBackingTexturePageSource&) const = default;
 };
@@ -76,18 +121,27 @@ PlanPhysicalBackingTexturePageSources(
     if (oldest_to_newest_candidates.empty()) {
         return std::nullopt;
     }
-    std::unordered_map<u64, VAddr> newest_guest_page;
-    newest_guest_page.reserve(oldest_to_newest_candidates.size());
+    std::unordered_map<u64, PhysicalBackingTexturePageSource> newest_sources;
+    newest_sources.reserve(oldest_to_newest_candidates.size());
     for (const auto& candidate : oldest_to_newest_candidates) {
         if ((candidate.physical_page & PageMask) != 0 || (candidate.guest_page & PageMask) != 0) {
             return std::nullopt;
         }
-        newest_guest_page[candidate.physical_page] = candidate.guest_page;
+        const auto existing = newest_sources.find(candidate.physical_page);
+        if (existing == newest_sources.end()) {
+            newest_sources.emplace(candidate.physical_page, candidate);
+        } else if (candidate.gpu_write_order > existing->second.gpu_write_order) {
+            existing->second = candidate;
+        } else if (candidate.gpu_write_order == existing->second.gpu_write_order &&
+                   (candidate.guest_page != existing->second.guest_page ||
+                    candidate.image_index != existing->second.image_index)) {
+            return std::nullopt;
+        }
     }
     std::vector<PhysicalBackingTexturePageSource> sources;
-    sources.reserve(newest_guest_page.size());
-    for (const auto& [physical_page, guest_page] : newest_guest_page) {
-        sources.push_back({physical_page, guest_page});
+    sources.reserve(newest_sources.size());
+    for (const auto& [_, source] : newest_sources) {
+        sources.push_back(source);
     }
     std::ranges::sort(sources, {}, &PhysicalBackingTexturePageSource::physical_page);
     return sources;
@@ -175,14 +229,14 @@ PlanPhysicalBackingTextureOwnershipComponent(
     }
 
     std::ranges::sort(selected, [](const auto* left, const auto* right) {
-        return std::tie(left->binding_order, left->image_index) <
-               std::tie(right->binding_order, right->image_index);
+        return std::tie(left->gpu_write_order, left->image_index) <
+               std::tie(right->gpu_write_order, right->image_index);
     });
     VAddr component_base = std::numeric_limits<VAddr>::max();
     VAddr component_end = 0;
     std::unordered_set<u64> component_physical_pages;
     PhysicalBackingTextureOwnershipComponent result;
-    result.oldest_to_newest_image_indices.reserve(selected.size());
+    result.oldest_to_newest_images.reserve(selected.size());
     for (const auto* record : selected) {
         const auto span =
             PlanPhysicalBackingTextureOwnershipSpan(record->guest_base, record->guest_size);
@@ -190,7 +244,7 @@ PlanPhysicalBackingTextureOwnershipComponent(
         component_end = std::max(component_end, span->base + span->size);
         component_physical_pages.insert(record->physical_pages.begin(),
                                         record->physical_pages.end());
-        result.oldest_to_newest_image_indices.push_back(record->image_index);
+        result.oldest_to_newest_images.push_back({record->image_index, record->gpu_write_order});
     }
     const u64 component_size = component_end - component_base;
     if (component_size == 0 || component_size > std::numeric_limits<u32>::max()) {
