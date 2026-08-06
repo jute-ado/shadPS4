@@ -373,7 +373,9 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
                                                              .resource = access.resource,
                                                          });
         }
-        found->is_read |= !access.is_written;
+        // A writable GPU resource may still read or preserve bytes outside the actual write.
+        // Snapshot every access before command-wide writer preparation.
+        found->is_read = true;
         found->is_written |= access.is_written;
         found->physical_pages.insert(found->physical_pages.end(), access.physical_pages.begin(),
                                      access.physical_pages.end());

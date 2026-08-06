@@ -154,13 +154,16 @@ public:
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
     /// Retrieves an image view with the properties of the specified image id.
-    [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc);
+    [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc,
+                                         bool prepare_write = true);
 
     /// Retrieves the render target with specified properties
-    [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc);
+    [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc,
+                                              bool prepare_write = true);
 
     /// Retrieves the depth target with specified properties
-    [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc);
+    [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc,
+                                             bool prepare_write = true);
 
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {

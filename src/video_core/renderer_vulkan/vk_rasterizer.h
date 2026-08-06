@@ -116,6 +116,8 @@ private:
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
+    [[nodiscard]] bool PreparePhysicalBackingGpuCommand(const Pipeline* pipeline);
+    [[nodiscard]] bool DepthStencilAttachmentWillWrite() const;
     bool BindResources(const Pipeline* pipeline);
     void TrackPhysicalBackingTextureGpuWriteOutput(VideoCore::ImageId image_id);
     void RecordPhysicalBackingTextureGpuWrites(const RenderState* render_state);

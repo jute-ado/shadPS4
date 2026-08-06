@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
@@ -417,9 +418,174 @@ void Rasterizer::OnSubmit() {
     buffer_cache.RunGarbageCollector();
 }
 
+bool Rasterizer::DepthStencilAttachmentWillWrite() const {
+    if (!db_desc.first) {
+        return false;
+    }
+    const auto& regs = liverpool->regs;
+    const bool depth_write = regs.depth_control.depth_enable &&
+                             regs.depth_control.depth_write_enable &&
+                             !regs.depth_view.z_read_only;
+    const auto& stencil = regs.stencil_control;
+    const bool stencil_op_writes = stencil.stencil_fail_front != AmdGpu::StencilFunc::Keep ||
+                                   stencil.stencil_zpass_front != AmdGpu::StencilFunc::Keep ||
+                                   stencil.stencil_zfail_front != AmdGpu::StencilFunc::Keep ||
+                                   stencil.stencil_fail_back != AmdGpu::StencilFunc::Keep ||
+                                   stencil.stencil_zpass_back != AmdGpu::StencilFunc::Keep ||
+                                   stencil.stencil_zfail_back != AmdGpu::StencilFunc::Keep;
+    const bool stencil_write = regs.depth_control.stencil_enable &&
+                               !regs.depth_view.stencil_read_only &&
+                               (regs.stencil_ref_front.stencil_write_mask != 0 ||
+                                regs.stencil_ref_back.stencil_write_mask != 0) &&
+                               stencil_op_writes;
+    const auto& desc = db_desc.second;
+    const u32 slice = desc.view_info.range.base.layer;
+    const VAddr htile_address = regs.depth_htile_data_base.GetAddress();
+    const bool depth_clear = regs.depth_render_control.depth_clear_enable ||
+                             texture_cache.IsMetaCleared(htile_address, slice);
+    const bool stencil_clear = regs.depth_render_control.stencil_clear_enable;
+    return depth_write || stencil_write || depth_clear || stencil_clear;
+}
+
+bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    struct ResourceRange {
+        Resource resource{};
+        VAddr address{};
+        u32 size{};
+    };
+
+    std::vector<ResourceRange> resources;
+    std::vector<Access> accesses;
+    u32 next_buffer_resource{};
+    const auto add_access = [&](Kind kind, VAddr address, u64 size, bool is_written,
+                                std::optional<u32> texture_index = std::nullopt) {
+        if (address == 0 || size == 0 || size > std::numeric_limits<u32>::max()) {
+            return false;
+        }
+        Resource resource;
+        if (kind == Kind::Texture) {
+            if (!texture_index) {
+                return false;
+            }
+            resource = {kind, *texture_index};
+        } else {
+            const auto matching_buffer =
+                std::ranges::find_if(resources, [&](const ResourceRange& range) {
+                    return range.resource.kind == Kind::Buffer && range.address == address &&
+                           range.size == size;
+                });
+            resource = matching_buffer == resources.end()
+                           ? Resource{kind, next_buffer_resource++}
+                           : matching_buffer->resource;
+        }
+        auto resource_it = std::ranges::find(resources, resource, &ResourceRange::resource);
+        if (resource_it == resources.end()) {
+            resource_it = resources.emplace(resources.end(),
+                                            ResourceRange{resource, address,
+                                                          static_cast<u32>(size)});
+        }
+        const auto physical_pages = buffer_cache.ResolvePhysicalBackingPages(address, size);
+        if (!physical_pages) {
+            return false;
+        }
+        accesses.push_back({resource_it->resource, is_written, *physical_pages});
+        return true;
+    };
+
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        for (const auto& desc : stage->buffers) {
+            const auto vsharp = desc.GetSharp(*stage);
+            if (desc.IsSpecial() || vsharp.base_address == 0 || vsharp.GetSize() == 0) {
+                continue;
+            }
+            const u64 binding_size = desc.GetBindingSize(vsharp);
+            const u64 size = memory->ClampRangeSize(vsharp.base_address, binding_size);
+            if (!add_access(Kind::Buffer, vsharp.base_address, size, desc.is_written)) {
+                return false;
+            }
+        }
+        for (const auto& image_resource : stage->images) {
+            const auto tsharp = image_resource.GetSharp(*stage);
+            if (texture_cache.IsMeta(tsharp.Address()) || tsharp.Address() == 0 ||
+                tsharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid) {
+                continue;
+            }
+            const u32 num_bindings = image_resource.NumBindings(*stage);
+            for (u32 index = 0; index < num_bindings; ++index) {
+                VideoCore::TextureCache::ImageDesc desc{tsharp, image_resource};
+                if (image_resource.mip_fallback_mode ==
+                    Shader::MipStorageFallbackMode::ConstantIndex) {
+                    desc.view_info.range.base.level += image_resource.constant_mip_index;
+                    desc.view_info.range.extent.levels = 1;
+                } else if (image_resource.mip_fallback_mode ==
+                           Shader::MipStorageFallbackMode::DynamicIndex) {
+                    desc.view_info.range.base.level += index;
+                    desc.view_info.range.extent.levels = 1;
+                }
+                auto image_id = texture_cache.FindImage(desc);
+                auto* image = &texture_cache.GetImage(image_id);
+                if (VideoCore::ShouldUseAssociatedDepthForView(desc.view_info.format)) {
+                    if (const auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+                        image_id = depth_image_id;
+                        image = &texture_cache.GetImage(image_id);
+                    }
+                }
+                if (!add_access(Kind::Texture, image->info.guest_address, image->info.guest_size,
+                                image_resource.is_written, image_id.index)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (!pipeline->IsCompute()) {
+        const auto* graphics_pipeline = static_cast<const GraphicsPipeline*>(pipeline);
+        const u32 num_color_attachments =
+            std::bit_width(graphics_pipeline->GetGraphicsKey().mrt_mask);
+        for (u32 cb = 0; cb < num_color_attachments; ++cb) {
+            const auto& [image_id, desc] = cb_descs[cb];
+            if (image_id && !add_access(Kind::Texture, desc.info.guest_address,
+                                        desc.info.guest_size, true, image_id.index)) {
+                return false;
+            }
+        }
+        if (db_desc.first && !add_access(Kind::Texture, db_desc.second.info.guest_address,
+                                         db_desc.second.info.guest_size,
+                                         DepthStencilAttachmentWillWrite(), db_desc.first.index)) {
+            return false;
+        }
+    }
+
+    const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
+    if (!plan) {
+        LOG_ERROR(Render_Vulkan,
+                  "Rejected GPU command with competing physical-backing writers");
+        return false;
+    }
+    for (const Resource resource : plan->read_snapshot_order) {
+        const auto range = std::ranges::find(resources, resource, &ResourceRange::resource);
+        ASSERT(range != resources.end());
+        if (!buffer_cache.TransitionAuthoritativeTextureForDmaRead(range->address, range->size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
+        return false;
+    }
+
+    if (!PreparePhysicalBackingGpuCommand(pipeline)) {
+        ResetBindings();
         return false;
     }
 
@@ -451,6 +617,22 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         // We only use fault buffer for DMA right now.
         buffer_cache.SynchronizeDmaBuffers();
         fault_process_pending = true;
+    }
+
+    if (!pipeline->IsCompute()) {
+        const auto* graphics_pipeline = static_cast<const GraphicsPipeline*>(pipeline);
+        const u32 num_color_attachments =
+            std::bit_width(graphics_pipeline->GetGraphicsKey().mrt_mask);
+        for (u32 cb = 0; cb < num_color_attachments; ++cb) {
+            auto& [image_id, desc] = cb_descs[cb];
+            if (image_id && texture_cache.GetImage(image_id).binding.needs_rebind) {
+                image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+            }
+            TrackPhysicalBackingTextureGpuWriteOutput(image_id);
+        }
+        if (DepthStencilAttachmentWillWrite()) {
+            TrackPhysicalBackingTextureGpuWriteOutput(db_desc.first);
+        }
     }
 
     for (const auto image_id : physical_backing_texture_gpu_write_outputs) {
@@ -818,7 +1000,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             bound_images.emplace_back(image_id);
 
             auto& image = texture_cache.GetImage(image_id);
-            auto& image_view = texture_cache.FindTexture(image_id, desc);
+            auto& image_view = texture_cache.FindTexture(image_id, desc, false);
             if (is_storage) {
                 TrackPhysicalBackingTextureGpuWriteOutput(image_id);
             }
@@ -921,7 +1103,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         }
         texture_cache.UpdateImage(image_id);
         image->SetBackingSamples(key.color_samples[cb]);
-        const auto& image_view = texture_cache.FindRenderTarget(image_id, desc);
+        const auto& image_view = texture_cache.FindRenderTarget(image_id, desc, false);
         const auto slice = image_view.info.range.base.layer;
         const auto mip = image_view.info.range.base.level;
 
@@ -965,7 +1147,8 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     if (auto image_id = db_desc.first; image_id) {
         auto& desc = db_desc.second;
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
-        const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
+        texture_cache.UpdateImage(image_id);
+        const auto& image_view = texture_cache.FindDepthTarget(image_id, desc, false);
         auto& image = texture_cache.GetImage(image_id);
 
         const auto slice = image_view.info.range.base.layer;

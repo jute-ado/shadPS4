@@ -695,10 +695,14 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
-ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, bool prepare_write) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
-        PreparePhysicalBackingTextureGpuWrite(image_id);
+        if (prepare_write) {
+            PreparePhysicalBackingTextureGpuWrite(image_id);
+        } else {
+            UpdateImage(image_id);
+        }
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
@@ -710,9 +714,12 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     return image.FindView(desc.view_info);
 }
 
-ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc,
+                                          bool prepare_write) {
     Image& image = slot_images[image_id];
-    PreparePhysicalBackingTextureGpuWrite(image_id);
+    if (prepare_write) {
+        PreparePhysicalBackingTextureGpuWrite(image_id);
+    }
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
@@ -735,9 +742,12 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     return image.FindView(desc.view_info, false);
 }
 
-ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc,
+                                         bool prepare_write) {
     Image& image = slot_images[image_id];
-    PreparePhysicalBackingTextureGpuWrite(image_id);
+    if (prepare_write) {
+        PreparePhysicalBackingTextureGpuWrite(image_id);
+    }
     image.usage.depth_target = 1u;
 
     // Register meta data for this depth buffer

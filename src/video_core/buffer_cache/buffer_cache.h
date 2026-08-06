@@ -104,6 +104,8 @@ public:
     [[nodiscard]] bool EndPhysicalBackingTextureOverlap(
         std::span<const PhysicalBackingTextureToken> tokens);
     [[nodiscard]] bool TransitionAuthoritativeTextureForDmaRead(VAddr device_addr, u32 size);
+    [[nodiscard]] std::optional<std::vector<u64>> ResolvePhysicalBackingPages(
+        VAddr device_addr, u64 size) const;
 
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {

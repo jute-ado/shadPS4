@@ -257,6 +257,28 @@ bool BufferCache::TransitionAuthoritativeTextureForDmaRead(VAddr device_addr, u3
     return TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size);
 }
 
+std::optional<std::vector<u64>> BufferCache::ResolvePhysicalBackingPages(VAddr device_addr,
+                                                                         u64 size) const {
+    std::vector<u64> physical_pages;
+    if (!physical_backing_coordinator || size == 0) {
+        return physical_pages;
+    }
+    if (device_addr > std::numeric_limits<VAddr>::max() - size) {
+        return std::nullopt;
+    }
+    const VAddr end = device_addr + size;
+    for (VAddr guest_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); guest_page < end;
+         guest_page += CACHING_PAGESIZE) {
+        if (const auto physical =
+                physical_backing_coordinator->ResolvePhysicalPageForGuest(guest_page)) {
+            physical_pages.push_back(*physical);
+        }
+    }
+    std::ranges::sort(physical_pages);
+    physical_pages.erase(std::ranges::unique(physical_pages).begin(), physical_pages.end());
+    return physical_pages;
+}
+
 bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                           Buffer& target_buffer, VAddr device_addr,
                                                           u64 size) {
