@@ -621,6 +621,7 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
+        AcquirePhysicalBackingTextureOwnership(image_id, image);
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
@@ -634,6 +635,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    AcquirePhysicalBackingTextureOwnership(image_id, image);
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
@@ -660,6 +662,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    AcquirePhysicalBackingTextureOwnership(image_id, image);
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
@@ -812,11 +815,6 @@ void TextureCache::RegisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
-    const auto physical_tokens = buffer_cache.BeginPhysicalBackingTextureOverlap(
-        image.info.guest_address, image.info.guest_size);
-    ASSERT_MSG(physical_tokens.has_value(),
-               "Failed to establish physical backing texture ownership");
-    physical_backing_texture_tokens.emplace(image_id, std::move(*physical_tokens));
     image.flags |= ImageFlagBits::Registered;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
@@ -824,16 +822,28 @@ void TextureCache::RegisterImage(ImageId image_id) {
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
 }
 
+void TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, const Image& image) {
+    const bool already_owned = physical_backing_texture_tokens.contains(image_id);
+    if (!ShouldAcquirePhysicalBackingTextureOwnership(already_owned, true)) {
+        return;
+    }
+    const auto physical_tokens = buffer_cache.BeginPhysicalBackingTextureOverlap(
+        image.info.guest_address, image.info.guest_size);
+    ASSERT_MSG(physical_tokens.has_value(),
+               "Failed to establish physical backing texture ownership");
+    physical_backing_texture_tokens.emplace(image_id, std::move(*physical_tokens));
+}
+
 void TextureCache::UnregisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
-    const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
-    ASSERT_MSG(physical_tokens != physical_backing_texture_tokens.end(),
-               "Missing physical backing texture ownership");
-    ASSERT_MSG(buffer_cache.EndPhysicalBackingTextureOverlap(physical_tokens->second),
-               "Failed to release physical backing texture ownership");
-    physical_backing_texture_tokens.erase(physical_tokens);
+    if (const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
+        physical_tokens != physical_backing_texture_tokens.end()) {
+        ASSERT_MSG(buffer_cache.EndPhysicalBackingTextureOverlap(physical_tokens->second),
+                   "Failed to release physical backing texture ownership");
+        physical_backing_texture_tokens.erase(physical_tokens);
+    }
     image.flags &= ~ImageFlagBits::Registered;
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);

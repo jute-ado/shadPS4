@@ -17,6 +17,11 @@
 
 namespace VideoCore {
 
+[[nodiscard]] constexpr bool ShouldAcquirePhysicalBackingTextureOwnership(
+    bool is_already_gpu_modified, bool will_gpu_write) noexcept {
+    return will_gpu_write && !is_already_gpu_modified;
+}
+
 struct PhysicalBackingBdaDelta {
     VAddr guest_page{};
     PhysicalBackingDeviceAddress device_address{};
