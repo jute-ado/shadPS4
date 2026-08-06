@@ -192,6 +192,25 @@ TEST(PhysicalBackingPublicationCoordinator, MarksGpuDirtyThroughAnyPhysicalAlias
     EXPECT_EQ(retirement->dirty_slices[0].size, 128);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, ResolvesActiveOwnerThroughAnyPhysicalAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+
+    const auto alias_owner = coordinator.ResolveActiveCachePageForGuest(GuestB);
+
+    ASSERT_TRUE(alias_owner.has_value());
+    EXPECT_EQ(*alias_owner, owner->token);
+    EXPECT_FALSE(coordinator.ResolveActiveCachePageForGuest(GuestA + PageSize));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysicalAlias) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
