@@ -669,3 +669,25 @@ TEST(BufferResidency, FailedPhysicalHostWritePreparationStopsBeforePublication) 
     EXPECT_EQ(operations,
               (std::vector<std::string>{"texture-transition", "buffer-retirement"}));
 }
+
+TEST(BufferResidency, GpuEventWriteSkipsPhysicalPreparationWithoutImportedBacking) {
+    bool prepared{};
+
+    EXPECT_TRUE(VideoCore::PrepareGpuEventMemoryWrite(false, [&] {
+        prepared = true;
+        return true;
+    }));
+
+    EXPECT_FALSE(prepared);
+}
+
+TEST(BufferResidency, GpuEventWritePreparesOnlyImportedPhysicalOwnership) {
+    bool prepared{};
+
+    EXPECT_TRUE(VideoCore::PrepareGpuEventMemoryWrite(true, [&] {
+        prepared = true;
+        return true;
+    }));
+
+    EXPECT_TRUE(prepared);
+}
