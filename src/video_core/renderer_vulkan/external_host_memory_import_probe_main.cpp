@@ -112,6 +112,35 @@ struct Arguments {
     return "unknown";
 }
 
+[[nodiscard]] constexpr std::string_view DispositionName(
+    Vulkan::ExternalHostProbeDisposition disposition) {
+    using enum Vulkan::ExternalHostProbeDisposition;
+    switch (disposition) {
+    case Pass:
+        return "pass";
+    case Unsupported:
+        return "unsupported";
+    case Error:
+        return "error";
+    }
+    return "error";
+}
+
+[[nodiscard]] constexpr Vulkan::ExternalHostProbeVkResultClass ClassifyVkResult(vk::Result result) {
+    using enum Vulkan::ExternalHostProbeVkResultClass;
+    switch (result) {
+    case vk::Result::eSuccess:
+        return Success;
+    case vk::Result::eErrorInvalidExternalHandle:
+        return ErrorInvalidExternalHandle;
+    case vk::Result::eErrorOutOfHostMemory:
+    case vk::Result::eErrorOutOfDeviceMemory:
+        return ErrorOutOfMemory;
+    default:
+        return ErrorUnknown;
+    }
+}
+
 [[nodiscard]] std::optional<std::uint64_t> ParseUnsigned(std::string_view value) {
     int base = 10;
     if (value.starts_with("0x") || value.starts_with("0X")) {
@@ -183,6 +212,7 @@ struct Arguments {
         {"externalHostEnabled", false},
         {"bufferDeviceAddressFeature", false},
         {"bufferDeviceAddressEnabled", false},
+        {"cleanupAttempted", false},
         {"cleanupComplete", false},
         {"durationMs", 0},
         {"status", "error"},
@@ -202,12 +232,21 @@ struct Arguments {
     return result;
 }
 
+struct PagefileCleanupState {
+    Vulkan::ExternalHostProbeCleanupResult result{};
+#ifdef _WIN32
+    DWORD unmap_error{};
+    DWORD close_error{};
+#endif
+};
+
 struct PagefileBacking {
 #ifdef _WIN32
     HANDLE mapping{};
 #endif
     void* pointer{};
     std::uint64_t size{};
+    PagefileCleanupState* cleanup{};
 
     PagefileBacking() = default;
     PagefileBacking(const PagefileBacking&) = delete;
@@ -217,18 +256,33 @@ struct PagefileBacking {
 #ifdef _WIN32
         : mapping{std::exchange(other.mapping, nullptr)},
 #endif
-          pointer{std::exchange(other.pointer, nullptr)}, size{std::exchange(other.size, 0)} {
+          pointer{std::exchange(other.pointer, nullptr)}, size{std::exchange(other.size, 0)},
+          cleanup{std::exchange(other.cleanup, nullptr)} {
     }
 
     PagefileBacking& operator=(PagefileBacking&&) = delete;
 
     ~PagefileBacking() {
+        Finalize();
+    }
+
+    void Finalize() noexcept {
 #ifdef _WIN32
         if (pointer != nullptr) {
-            UnmapViewOfFile(pointer);
+            cleanup->result.unmap_attempted = true;
+            cleanup->result.unmap_succeeded = UnmapViewOfFile(pointer) != FALSE;
+            if (!cleanup->result.unmap_succeeded) {
+                cleanup->unmap_error = GetLastError();
+            }
+            pointer = nullptr;
         }
         if (mapping != nullptr) {
-            CloseHandle(mapping);
+            cleanup->result.close_attempted = true;
+            cleanup->result.close_succeeded = CloseHandle(mapping) != FALSE;
+            if (!cleanup->result.close_succeeded) {
+                cleanup->close_error = GetLastError();
+            }
+            mapping = nullptr;
         }
 #endif
     }
@@ -242,8 +296,10 @@ struct PagefileBacking {
     }
 };
 
-[[nodiscard]] PagefileBacking AllocatePagefileBacking(std::uint64_t size) {
+[[nodiscard]] PagefileBacking AllocatePagefileBacking(std::uint64_t size,
+                                                      PagefileCleanupState& cleanup) {
     PagefileBacking backing;
+    backing.cleanup = &cleanup;
 #ifdef _WIN32
     backing.mapping =
         CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT,
@@ -263,7 +319,9 @@ struct PagefileBacking {
 
 [[nodiscard]] Json InitialAttempt(std::string_view handle_name) {
     return Json{
+        {"backingProvenance", "windows_page_file_mapping"},
         {"handleType", handle_name},
+        {"disposition", "error"},
         {"completedStage", "not_started"},
         {"failureStage", "not_started"},
         {"failure", "none"},
@@ -288,6 +346,13 @@ struct PagefileBacking {
         {"bindVkResult", "not_called"},
         {"deviceAddressNonzero", false},
         {"deviceAddressModuloAlignment", nullptr},
+        {"cleanupAttempted", false},
+        {"unmapAttempted", false},
+        {"unmapSucceeded", false},
+        {"unmapWin32Error", 0},
+        {"closeAttempted", false},
+        {"closeSucceeded", false},
+        {"closeWin32Error", 0},
         {"cleanupComplete", false},
         {"durationMs", 0},
     };
@@ -301,21 +366,38 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
     attempt["succeeded"] = result.Succeeded();
 }
 
-[[nodiscard]] Json ProbeHandle(vk::PhysicalDevice physical_device, vk::Device device,
-                               vk::ExternalMemoryHandleTypeFlagBits handle_type,
-                               std::string_view handle_name, std::uint64_t requested_backing_size,
-                               std::size_t min_pointer_alignment) {
+struct HandleProbeOutput {
+    Json report;
+    Vulkan::ExternalHostProbeDisposition disposition;
+};
+
+[[nodiscard]] HandleProbeOutput ProbeHostAllocation(vk::PhysicalDevice physical_device,
+                                                    vk::Device device,
+                                                    std::uint64_t requested_backing_size,
+                                                    std::size_t min_pointer_alignment) {
     using namespace Vulkan;
 
+    constexpr auto provenance = ExternalHostBackingProvenance::PageFileMapping;
+    static_assert(AllowedExternalHostHandleTypes(provenance) ==
+                  ExternalHostHandleClass::HostAllocation);
+    constexpr auto handle_type = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
+
     const auto started = std::chrono::steady_clock::now();
-    Json attempt = InitialAttempt(handle_name);
+    Json attempt = InitialAttempt("host_allocation_ext");
+    PagefileCleanupState cleanup;
+    ExternalHostMemoryProbeFailure final_failure = ExternalHostMemoryProbeFailure::UnexpectedStage;
+    ExternalHostProbeVkResultClass relevant_vk_result = ExternalHostProbeVkResultClass::NotCalled;
     [&] {
         ExternalHostMemoryProbeProgress progress;
+        const auto record_progress = [&] {
+            RecordProgress(attempt, progress);
+            final_failure = progress.Result().failure;
+        };
         const auto complete_stage = [&](ExternalHostMemoryProbeStage stage) {
             if (progress.Complete(stage)) {
                 return true;
             }
-            RecordProgress(attempt, progress);
+            record_progress();
             return false;
         };
         if (!complete_stage(ExternalHostMemoryProbeStage::Capability)) {
@@ -325,7 +407,7 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (!std::has_single_bit(min_pointer_alignment) || min_pointer_alignment > MaxBackingSize) {
             progress.Fail(ExternalHostMemoryProbeStage::Backing,
                           ExternalHostMemoryProbeFailure::InvalidPointerAlignment);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         const auto remainder = requested_backing_size & (min_pointer_alignment - 1);
@@ -335,15 +417,15 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (aligned_size < requested_backing_size || aligned_size > MaxBackingSize) {
             progress.Fail(ExternalHostMemoryProbeStage::Backing,
                           ExternalHostMemoryProbeFailure::BackingValidationFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
 
-        auto backing = AllocatePagefileBacking(aligned_size);
+        auto backing = AllocatePagefileBacking(aligned_size, cleanup);
         if (!backing) {
             progress.Fail(ExternalHostMemoryProbeStage::Backing,
                           ExternalHostMemoryProbeFailure::BackingAllocationFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         attempt["backingSizeBytes"] = backing.size;
@@ -354,7 +436,7 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (backing_validation != ImportedHostAllocationValidation::Valid) {
             progress.Fail(ExternalHostMemoryProbeStage::Backing,
                           ExternalHostMemoryProbeFailure::BackingValidationFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::Backing)) {
@@ -383,7 +465,7 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (!attempt["importable"].get<bool>() || !compatible) {
             progress.Fail(ExternalHostMemoryProbeStage::ExternalBufferProperties,
                           ExternalHostMemoryProbeFailure::HandleTypeNotImportable);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::ExternalBufferProperties)) {
@@ -399,10 +481,11 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         };
         auto [buffer_result, buffer] = device.createBufferUnique(buffer_info);
         attempt["bufferCreateVkResult"] = vk::to_string(buffer_result);
+        relevant_vk_result = ClassifyVkResult(buffer_result);
         if (buffer_result != vk::Result::eSuccess) {
             progress.Fail(ExternalHostMemoryProbeStage::BufferCreation,
                           ExternalHostMemoryProbeFailure::BufferCreationFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::BufferCreation)) {
@@ -418,7 +501,7 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (requirement_validation != ImportedHostAllocationValidation::Valid) {
             progress.Fail(ExternalHostMemoryProbeStage::MemoryRequirements,
                           ExternalHostMemoryProbeFailure::MemoryRequirementsInvalid);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::MemoryRequirements)) {
@@ -428,10 +511,11 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         auto [host_result, host_properties] =
             device.getMemoryHostPointerPropertiesEXT(handle_type, backing.pointer);
         attempt["hostPointerQueryVkResult"] = vk::to_string(host_result);
+        relevant_vk_result = ClassifyVkResult(host_result);
         if (host_result != vk::Result::eSuccess) {
             progress.Fail(ExternalHostMemoryProbeStage::HostPointerProperties,
                           ExternalHostMemoryProbeFailure::HostPointerQueryFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         attempt["hostPointerMemoryTypeBits"] = host_properties.memoryTypeBits;
@@ -456,7 +540,7 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
                                   ImportedHostMemoryTypeSelectionFailure::NoCoherentMemoryType
                               ? ExternalHostMemoryProbeFailure::NoCoherentMemoryType
                               : ExternalHostMemoryProbeFailure::NoCompatibleMemoryType);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         const auto selected_flags = physical_memory.memoryTypes[*selection.index].propertyFlags;
@@ -483,10 +567,11 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         };
         auto [memory_result, memory] = device.allocateMemoryUnique(allocation_info);
         attempt["memoryAllocateVkResult"] = vk::to_string(memory_result);
+        relevant_vk_result = ClassifyVkResult(memory_result);
         if (memory_result != vk::Result::eSuccess) {
             progress.Fail(ExternalHostMemoryProbeStage::MemoryAllocation,
                           ExternalHostMemoryProbeFailure::MemoryAllocationFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::MemoryAllocation)) {
@@ -495,10 +580,11 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
 
         const auto bind_result = device.bindBufferMemory(*buffer, *memory, 0);
         attempt["bindVkResult"] = vk::to_string(bind_result);
+        relevant_vk_result = ClassifyVkResult(bind_result);
         if (bind_result != vk::Result::eSuccess) {
             progress.Fail(ExternalHostMemoryProbeStage::MemoryBinding,
                           ExternalHostMemoryProbeFailure::MemoryBindingFailed);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::MemoryBinding)) {
@@ -513,7 +599,7 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (address == 0) {
             progress.Fail(ExternalHostMemoryProbeStage::DeviceAddress,
                           ExternalHostMemoryProbeFailure::ZeroDeviceAddress);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::DeviceAddress)) {
@@ -524,19 +610,29 @@ void RecordProgress(Json& attempt, const Vulkan::ExternalHostMemoryProbeProgress
         if (!owner.IsRetained()) {
             progress.Fail(ExternalHostMemoryProbeStage::Retained,
                           ExternalHostMemoryProbeFailure::ZeroDeviceAddress);
-            RecordProgress(attempt, progress);
+            record_progress();
             return;
         }
         if (!complete_stage(ExternalHostMemoryProbeStage::Retained)) {
             return;
         }
-        RecordProgress(attempt, progress);
+        record_progress();
     }();
-    attempt["cleanupComplete"] = true;
+    const auto disposition = ClassifyExternalHostProbeAttempt(attempt["succeeded"].get<bool>(),
+                                                              final_failure, relevant_vk_result);
+    attempt["disposition"] = DispositionName(disposition);
+    attempt["cleanupAttempted"] = cleanup.result.unmap_attempted || cleanup.result.close_attempted;
+    attempt["unmapAttempted"] = cleanup.result.unmap_attempted;
+    attempt["unmapSucceeded"] = cleanup.result.unmap_succeeded;
+    attempt["unmapWin32Error"] = cleanup.unmap_error;
+    attempt["closeAttempted"] = cleanup.result.close_attempted;
+    attempt["closeSucceeded"] = cleanup.result.close_succeeded;
+    attempt["closeWin32Error"] = cleanup.close_error;
+    attempt["cleanupComplete"] = cleanup.result.Complete();
     attempt["durationMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - started)
                                 .count();
-    return attempt;
+    return {.report = std::move(attempt), .disposition = disposition};
 }
 
 } // namespace
@@ -545,6 +641,7 @@ int main(int argc, char** argv) {
     const auto started = std::chrono::steady_clock::now();
     Json report = BaseReport();
     int exit_code = 70;
+    bool normal_scope_exit = false;
     try {
         exit_code = [&]() -> int {
             std::string argument_error;
@@ -594,7 +691,6 @@ int main(int argc, char** argv) {
             if (matches.size() != 1) {
                 report["matchingDeviceCount"] = matches.size();
                 if (matches.empty()) {
-                    report["status"] = "unsupported";
                     report["reason"] = "target_device_not_found";
                 } else {
                     report["reason"] = "device_identity_ambiguous";
@@ -698,47 +794,41 @@ int main(int argc, char** argv) {
             report["externalHostEnabled"] = true;
             report["bufferDeviceAddressEnabled"] = true;
 
-            report["attempts"].push_back(ProbeHandle(
-                physical_device, *device, vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT,
-                "host_allocation_ext", arguments->backing_size, min_alignment));
-            report["attempts"].push_back(ProbeHandle(
-                physical_device, *device,
-                vk::ExternalMemoryHandleTypeFlagBits::eHostMappedForeignMemoryEXT,
-                "host_mapped_foreign_memory_ext", arguments->backing_size, min_alignment));
-
-            const bool any_success =
-                std::ranges::any_of(report["attempts"], [](const auto& attempt) {
-                    return attempt.at("succeeded").template get<bool>();
-                });
-            if (any_success) {
-                report["status"] = "pass";
-                report["reason"] = "at_least_one_handle_type_retained";
+            auto host_allocation = ProbeHostAllocation(physical_device, *device,
+                                                       arguments->backing_size, min_alignment);
+            report["attempts"].push_back(std::move(host_allocation.report));
+            const std::array dispositions{host_allocation.disposition};
+            const auto disposition = ClassifyExternalHostProbeResult(dispositions);
+            report["status"] = DispositionName(disposition);
+            if (disposition == Vulkan::ExternalHostProbeDisposition::Pass) {
+                report["reason"] = "host_allocation_retained";
                 return 0;
             }
-            constexpr std::array unsupported_failures{
-                "invalid_pointer_alignment",   "backing_validation_failed",
-                "memory_requirements_invalid", "handle_type_not_importable",
-                "host_pointer_query_failed",   "no_compatible_memory_type",
-                "no_coherent_memory_type",     "memory_allocation_failed",
-                "zero_device_address"};
-            const bool all_unsupported =
-                std::ranges::all_of(report["attempts"], [&](const auto& attempt) {
-                    const auto failure = attempt.at("failure").template get<std::string>();
-                    return std::ranges::find(unsupported_failures, failure) !=
-                           unsupported_failures.end();
-                });
-            report["status"] = all_unsupported ? "unsupported" : "error";
-            report["reason"] =
-                all_unsupported ? "no_supported_host_import_path" : "probe_operation_failed";
+            report["reason"] = disposition == Vulkan::ExternalHostProbeDisposition::Unsupported
+                                   ? "host_allocation_incompatible"
+                                   : "host_allocation_probe_error";
             return 2;
         }();
+        normal_scope_exit = true;
     } catch (const std::exception& exception) {
         report["status"] = "error";
         report["reason"] = "unexpected_exception";
         report["exception"] = BoundedDiagnosticText(exception.what());
         exit_code = 70;
     }
-    report["cleanupComplete"] = true;
+    bool cleanup_attempted = false;
+    bool cleanup_complete = normal_scope_exit;
+    for (const auto& attempt : report["attempts"]) {
+        cleanup_attempted |= attempt.at("cleanupAttempted").get<bool>();
+        cleanup_complete &= attempt.at("cleanupComplete").get<bool>();
+    }
+    report["cleanupAttempted"] = cleanup_attempted;
+    report["cleanupComplete"] = cleanup_complete;
+    if (!cleanup_complete) {
+        report["status"] = "error";
+        report["reason"] = "cleanup_failed";
+        exit_code = 70;
+    }
     report["durationMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now() - started)
                                .count();
