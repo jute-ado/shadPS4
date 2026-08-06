@@ -375,6 +375,84 @@ TEST(BufferResidency, LeavesUncontendedReadOnlyPagesOutOfCommandSnapshots) {
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{writer}));
 }
 
+TEST(BufferResidency, KeepsAlreadyOwnedTextureAuthorityAcrossRepeatedGpuWrites) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    constexpr u64 page = 0xab8e'0000;
+    const Resource buffer{Kind::Buffer, 20};
+    const Resource texture{Kind::Texture, 21};
+
+    const auto sole_texture_writer =
+        VideoCore::PlanPhysicalBackingGpuCommandAliases(std::array{Access{texture, true, {page}}});
+
+    ASSERT_TRUE(sole_texture_writer.has_value());
+    EXPECT_TRUE(VideoCore::ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
+        buffer, *sole_texture_writer, true));
+    EXPECT_TRUE(VideoCore::ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
+        texture, *sole_texture_writer, false));
+    EXPECT_FALSE(VideoCore::ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
+        texture, *sole_texture_writer, true));
+}
+
+TEST(BufferResidency, TransitionsOwnedTextureAuthorityForCompetingGpuWriters) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    constexpr u64 page = 0xab8f'0000;
+    const Resource buffer{Kind::Buffer, 22};
+    const Resource texture{Kind::Texture, 23};
+    const auto read_only_texture = VideoCore::PlanPhysicalBackingGpuCommandAliases(
+        std::array{Access{texture, false, {page}}, Access{buffer, true, {page}}});
+    const auto competing_writers = VideoCore::PlanPhysicalBackingGpuCommandAliases(
+        std::array{Access{texture, true, {page}}, Access{buffer, true, {page}}});
+
+    ASSERT_TRUE(read_only_texture.has_value());
+    ASSERT_TRUE(competing_writers.has_value());
+    EXPECT_TRUE(VideoCore::ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
+        texture, *read_only_texture, true));
+    EXPECT_TRUE(VideoCore::ShouldTransitionPhysicalBackingReadSnapshotToBuffer(
+        texture, *competing_writers, true));
+}
+
+TEST(BufferResidency, RetainsOnlyCompleteExclusiveTextureOwnership) {
+    using Record = VideoCore::PhysicalBackingTextureOwnershipRecord;
+    constexpr u64 page_a = 0xab90'0000;
+    constexpr u64 page_b = 0xab90'4000;
+    const std::array exclusive_records{Record{
+        .image_index = 24,
+        .guest_base = 0x114c'0000'00,
+        .guest_size = 0x8000,
+        .gpu_write_order = 10,
+        .physical_pages = {page_a, page_b},
+    }};
+    const std::array overlapping_records{
+        exclusive_records.front(),
+        Record{
+            .image_index = 25,
+            .guest_base = 0x114d'0000'00,
+            .guest_size = 0x4000,
+            .gpu_write_order = 20,
+            .physical_pages = {page_b},
+        },
+    };
+    constexpr std::array complete_pages{page_a, page_b};
+    constexpr std::array partial_pages{page_a, page_b, page_b + 16_KB};
+    const auto exclusive =
+        VideoCore::PlanPhysicalBackingTextureOwnershipComponent(exclusive_records, complete_pages);
+    const auto overlapping = VideoCore::PlanPhysicalBackingTextureOwnershipComponent(
+        overlapping_records, complete_pages);
+
+    ASSERT_TRUE(exclusive.has_value());
+    ASSERT_TRUE(overlapping.has_value());
+    EXPECT_TRUE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
+        24, complete_pages, *exclusive));
+    EXPECT_FALSE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
+        24, partial_pages, *exclusive));
+    EXPECT_FALSE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
+        24, complete_pages, *overlapping));
+}
+
 TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
     using Owner = VideoCore::PhysicalBackingCachePageOwnerLocation;
     constexpr u64 requested_page = 0xab8d'0000;
