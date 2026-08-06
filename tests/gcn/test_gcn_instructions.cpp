@@ -117,19 +117,25 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     ASSERT_FALSE(instructions.empty());
 
     u32 get_bda_pointer_id = 0;
+    u32 bda_pagetable_id = 0;
     u32 u64_type = 0;
     u32 page_limit = 0;
     u32 u64_zero = 0;
     for (const auto& inst : instructions) {
-        if (inst.opcode == spv::OpName && inst.words.size() >= 3 &&
-            SpirvLiteralString(inst.words, 2) == "get_bda_pointer") {
-            get_bda_pointer_id = inst.words[1];
+        if (inst.opcode == spv::OpName && inst.words.size() >= 3) {
+            const auto name = SpirvLiteralString(inst.words, 2);
+            if (name == "get_bda_pointer") {
+                get_bda_pointer_id = inst.words[1];
+            } else if (name == "bda_pagetable") {
+                bda_pagetable_id = inst.words[1];
+            }
         } else if (inst.opcode == spv::OpTypeInt && inst.words.size() == 4 &&
                    inst.words[2] == 64U && inst.words[3] == 0U) {
             u64_type = inst.words[1];
         }
     }
     ASSERT_NE(get_bda_pointer_id, 0U);
+    ASSERT_NE(bda_pagetable_id, 0U);
     ASSERT_NE(u64_type, 0U);
 
     // The DMA page table covers the 40-bit guest address space with 16 KiB pages.
@@ -214,14 +220,23 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     EXPECT_TRUE(valid_path_adds_offset);
 
     bool in_invalid_block = false;
-    bool invalid_block_accesses_descriptor = false;
+    bool invalid_block_accesses_bda = false;
+    bool invalid_path_records_fault = false;
+    u32 invalid_fault_pointer = 0;
     bool invalid_path_returns_zero = false;
     for (size_t i = function_begin; i < function_end; ++i) {
         const auto& inst = instructions[i];
         if (inst.opcode == spv::OpLabel) {
             in_invalid_block = inst.words[1] == invalid_label;
-        } else if (in_invalid_block && inst.opcode == spv::OpAccessChain) {
-            invalid_block_accesses_descriptor = true;
+        } else if (in_invalid_block && inst.opcode == spv::OpAccessChain &&
+                   inst.words.size() >= 5) {
+            invalid_block_accesses_bda |= inst.words[3] == bda_pagetable_id;
+            if (inst.words[3] != bda_pagetable_id) {
+                invalid_fault_pointer = inst.words[2];
+            }
+        } else if (in_invalid_block && inst.opcode == spv::OpAtomicOr &&
+                   inst.words.size() >= 7) {
+            invalid_path_records_fault |= inst.words[3] == invalid_fault_pointer;
         }
         if (inst.opcode == spv::OpPhi) {
             for (size_t operand = 3; operand + 1 < inst.words.size(); operand += 2) {
@@ -230,7 +245,8 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
             }
         }
     }
-    EXPECT_FALSE(invalid_block_accesses_descriptor);
+    EXPECT_FALSE(invalid_block_accesses_bda);
+    EXPECT_TRUE(invalid_path_records_fault);
     EXPECT_TRUE(invalid_path_returns_zero);
 }
 
