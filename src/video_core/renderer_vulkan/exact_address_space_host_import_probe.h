@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -13,8 +14,7 @@
 
 namespace Vulkan {
 
-inline constexpr std::uint64_t ExactAddressSpaceBaseBackingSize =
-    Core::AddressSpaceBaseBackingSize;
+inline constexpr std::uint64_t ExactAddressSpaceBaseBackingSize = Core::AddressSpaceBaseBackingSize;
 inline constexpr std::uint64_t ExactAddressSpaceMaxExtraDmemMbytes = 20000;
 
 [[nodiscard]] constexpr std::optional<std::uint64_t> CalculateExactAddressSpaceBackingSize(
@@ -41,6 +41,18 @@ enum class ExactBackingSizeValidation : std::uint8_t {
         return ExactBackingSizeValidation::ExceedsHostSizeT;
     }
     return ExactBackingSizeValidation::Valid;
+}
+
+[[nodiscard]] constexpr bool IsExactImportedPointerAligned(std::uintptr_t pointer,
+                                                           std::uint64_t alignment) noexcept {
+    return pointer != 0 && std::has_single_bit(alignment) && pointer % alignment == 0;
+}
+
+[[nodiscard]] constexpr bool IsExactHostImportAlignmentValid(std::uint64_t allocation_size,
+                                                             std::uintptr_t pointer,
+                                                             std::uint64_t alignment) noexcept {
+    return allocation_size != 0 && IsExactImportedPointerAligned(pointer, alignment) &&
+           allocation_size % alignment == 0;
 }
 
 // Semantic mirror of the production Windows AddressSpace allocation recipe. Keeping the recipe
@@ -96,10 +108,20 @@ struct ExactWindowsAddressSpaceBacking {
     std::uint64_t size{};
 };
 
+struct ExactWindowsBackingRollback {
+    bool unmap_attempted{};
+    bool unmap_succeeded{};
+    bool release_attempted{};
+    bool release_succeeded{};
+    bool close_attempted{};
+    bool close_succeeded{};
+};
+
 template <typename Adapter>
 struct ExactWindowsBackingAcquisition {
     ExactWindowsAddressSpaceBacking<Adapter> backing{};
     ExactWindowsBackingFailure failure{ExactWindowsBackingFailure::None};
+    ExactWindowsBackingRollback rollback{};
     bool rollback_complete{true};
 };
 
@@ -117,7 +139,9 @@ template <typename Adapter>
     backing.reservation = adapter.ReservePlaceholder(size, ExactReservePlaceholderRecipe);
     if (!backing.reservation) {
         result.failure = ExactWindowsBackingFailure::PlaceholderReservationFailed;
-        result.rollback_complete = adapter.CloseMapping(backing.mapping);
+        result.rollback.close_attempted = true;
+        result.rollback.close_succeeded = adapter.CloseMapping(backing.mapping);
+        result.rollback_complete = result.rollback.close_succeeded;
         backing.mapping = {};
         return result;
     }
@@ -126,11 +150,17 @@ template <typename Adapter>
     if (backing.pointer == nullptr ||
         !adapter.ViewMatchesReservation(backing.reservation, backing.pointer)) {
         result.failure = ExactWindowsBackingFailure::ViewMappingFailed;
-        const bool unmapped = backing.pointer == nullptr ||
-                              adapter.UnmapPreservingPlaceholder(backing.pointer);
-        const bool released = adapter.ReleasePlaceholder(backing.reservation);
-        const bool closed = adapter.CloseMapping(backing.mapping);
-        result.rollback_complete = unmapped && released && closed;
+        if (backing.pointer != nullptr) {
+            result.rollback.unmap_attempted = true;
+            result.rollback.unmap_succeeded = adapter.UnmapPreservingPlaceholder(backing.pointer);
+        }
+        result.rollback.release_attempted = true;
+        result.rollback.release_succeeded = adapter.ReleasePlaceholder(backing.reservation);
+        result.rollback.close_attempted = true;
+        result.rollback.close_succeeded = adapter.CloseMapping(backing.mapping);
+        result.rollback_complete =
+            (!result.rollback.unmap_attempted || result.rollback.unmap_succeeded) &&
+            result.rollback.release_succeeded && result.rollback.close_succeeded;
         backing.reservation = {};
         backing.mapping = {};
         return result;
@@ -156,7 +186,8 @@ template <typename Adapter>
     }
     result.unmap_succeeded =
         backing.pointer == nullptr || adapter.UnmapPreservingPlaceholder(backing.pointer);
-    result.release_succeeded = !backing.reservation || adapter.ReleasePlaceholder(backing.reservation);
+    result.release_succeeded =
+        !backing.reservation || adapter.ReleasePlaceholder(backing.reservation);
     result.close_succeeded = !backing.mapping || adapter.CloseMapping(backing.mapping);
     if (!result.unmap_succeeded || !result.release_succeeded || !result.close_succeeded) {
         result.failure = ExactWindowsBackingFailure::CleanupFailed;
@@ -241,6 +272,63 @@ enum class ExactHostImportDisposition : std::uint8_t {
     Error,
 };
 
+enum class ExactWindowsBackingErrorClass : std::uint8_t {
+    ResourceLimited,
+    Other,
+};
+
+[[nodiscard]] constexpr ExactWindowsBackingErrorClass ClassifyExactWindowsBackingErrorCode(
+    std::uint32_t error_code) noexcept {
+    // Stable Win32 values from winerror.h: ERROR_NOT_ENOUGH_MEMORY, ERROR_OUTOFMEMORY, and
+    // ERROR_COMMITMENT_LIMIT. Everything else fails closed as a lifecycle error.
+    switch (error_code) {
+    case 8:
+    case 14:
+    case 1455:
+        return ExactWindowsBackingErrorClass::ResourceLimited;
+    default:
+        return ExactWindowsBackingErrorClass::Other;
+    }
+}
+
+enum class ExactVulkanFailureClass : std::uint8_t {
+    InvalidExternalHandle,
+    OutOfMemory,
+    Other,
+};
+
+struct ExactSelectedMemoryTypeEvidence {
+    std::uint32_t property_flags{};
+    bool host_coherent{};
+};
+
+[[nodiscard]] constexpr ExactSelectedMemoryTypeEvidence MakeExactSelectedMemoryTypeEvidence(
+    std::uint32_t property_flags, std::uint32_t host_coherent_flag) noexcept {
+    return {.property_flags = property_flags,
+            .host_coherent = static_cast<bool>(property_flags & host_coherent_flag)};
+}
+
+[[nodiscard]] constexpr ExactHostImportFailure ClassifyExactBackingAcquisitionFailure(
+    ExactWindowsBackingErrorClass error_class, bool rollback_complete) noexcept {
+    if (!rollback_complete || error_class == ExactWindowsBackingErrorClass::Other) {
+        return ExactHostImportFailure::Win32LifecycleFailed;
+    }
+    return ExactHostImportFailure::BackingCommitFailed;
+}
+
+[[nodiscard]] constexpr ExactHostImportFailure ClassifyExactVulkanFailure(
+    ExactVulkanFailureClass failure_class) noexcept {
+    switch (failure_class) {
+    case ExactVulkanFailureClass::InvalidExternalHandle:
+        return ExactHostImportFailure::HandleNotImportable;
+    case ExactVulkanFailureClass::OutOfMemory:
+        return ExactHostImportFailure::VulkanOutOfMemory;
+    case ExactVulkanFailureClass::Other:
+        return ExactHostImportFailure::VulkanCallFailed;
+    }
+    return ExactHostImportFailure::VulkanCallFailed;
+}
+
 [[nodiscard]] constexpr ExactHostImportDisposition ClassifyExactHostImportFailure(
     ExactHostImportFailure failure) noexcept {
     switch (failure) {
@@ -251,10 +339,10 @@ enum class ExactHostImportDisposition : std::uint8_t {
     case ExactHostImportFailure::HandleNotImportable:
     case ExactHostImportFailure::NoCompatibleMemoryType:
     case ExactHostImportFailure::NoCoherentMemoryType:
+    case ExactHostImportFailure::DeviceLimitExceeded:
         return ExactHostImportDisposition::Unsupported;
     case ExactHostImportFailure::RequirementExceedsBacking:
     case ExactHostImportFailure::RequirementAlignmentMismatch:
-    case ExactHostImportFailure::DeviceLimitExceeded:
         return ExactHostImportDisposition::ExactDesignIncompatible;
     case ExactHostImportFailure::BackingCommitFailed:
     case ExactHostImportFailure::VulkanOutOfMemory:
