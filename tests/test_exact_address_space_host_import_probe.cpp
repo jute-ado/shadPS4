@@ -83,12 +83,11 @@ struct FakeWindowsBackingAdapter {
 
 TEST(ExactAddressSpaceHostImportProbe, UsesProductionWindowsBackingRecipeAndCleanupOrder) {
     FakeWindowsBackingAdapter adapter;
-    auto acquisition = AcquireExactWindowsAddressSpaceBacking(
-        adapter, ExactAddressSpaceBaseBackingSize);
+    auto acquisition =
+        AcquireExactWindowsAddressSpaceBacking(adapter, ExactAddressSpaceBaseBackingSize);
     ASSERT_EQ(acquisition.failure, ExactWindowsBackingFailure::None);
-    EXPECT_EQ(adapter.calls, (std::vector<std::string_view>{
-                                 "create_mapping", "reserve_placeholder",
-                                 "map_replace_placeholder"}));
+    EXPECT_EQ(adapter.calls, (std::vector<std::string_view>{"create_mapping", "reserve_placeholder",
+                                                            "map_replace_placeholder"}));
     EXPECT_TRUE(adapter.create_recipe.create_file_mapping2);
     EXPECT_TRUE(adapter.create_recipe.invalid_page_file);
     EXPECT_TRUE(adapter.create_recipe.file_map_all_access);
@@ -106,24 +105,23 @@ TEST(ExactAddressSpaceHostImportProbe, UsesProductionWindowsBackingRecipeAndClea
               ExactWindowsBackingFailure::VulkanResourcesStillOwned);
     EXPECT_EQ(adapter.calls.size(), 3u);
 
-    const auto cleanup =
-        ReleaseExactWindowsAddressSpaceBacking(adapter, acquisition.backing, true);
+    const auto cleanup = ReleaseExactWindowsAddressSpaceBacking(adapter, acquisition.backing, true);
     EXPECT_EQ(cleanup.failure, ExactWindowsBackingFailure::None);
-    EXPECT_EQ(adapter.calls, (std::vector<std::string_view>{
-                                 "create_mapping", "reserve_placeholder",
-                                 "map_replace_placeholder", "unmap_preserve_placeholder",
-                                 "release_placeholder", "close_mapping"}));
+    EXPECT_EQ(adapter.calls,
+              (std::vector<std::string_view>{
+                  "create_mapping", "reserve_placeholder", "map_replace_placeholder",
+                  "unmap_preserve_placeholder", "release_placeholder", "close_mapping"}));
 }
 
 TEST(ExactAddressSpaceHostImportProbe, RollsBackEveryPartiallyAcquiredWindowsResource) {
     FakeWindowsBackingAdapter reserve_failure;
     reserve_failure.reserve_succeeds = false;
-    auto reserve = AcquireExactWindowsAddressSpaceBacking(
-        reserve_failure, ExactAddressSpaceBaseBackingSize);
+    auto reserve =
+        AcquireExactWindowsAddressSpaceBacking(reserve_failure, ExactAddressSpaceBaseBackingSize);
     EXPECT_EQ(reserve.failure, ExactWindowsBackingFailure::PlaceholderReservationFailed);
-    EXPECT_EQ(reserve_failure.calls, (std::vector<std::string_view>{
-                                         "create_mapping", "reserve_placeholder",
-                                         "close_mapping"}));
+    EXPECT_EQ(
+        reserve_failure.calls,
+        (std::vector<std::string_view>{"create_mapping", "reserve_placeholder", "close_mapping"}));
     EXPECT_FALSE(reserve.rollback.unmap_attempted);
     EXPECT_FALSE(reserve.rollback.release_attempted);
     EXPECT_TRUE(reserve.rollback.close_attempted);
@@ -131,12 +129,13 @@ TEST(ExactAddressSpaceHostImportProbe, RollsBackEveryPartiallyAcquiredWindowsRes
 
     FakeWindowsBackingAdapter map_failure;
     map_failure.map_succeeds = false;
-    auto map = AcquireExactWindowsAddressSpaceBacking(map_failure, ExactAddressSpaceBaseBackingSize);
+    auto map =
+        AcquireExactWindowsAddressSpaceBacking(map_failure, ExactAddressSpaceBaseBackingSize);
     EXPECT_EQ(map.failure, ExactWindowsBackingFailure::ViewMappingFailed);
-    EXPECT_EQ(map_failure.calls, (std::vector<std::string_view>{
-                                     "create_mapping", "reserve_placeholder",
-                                     "map_replace_placeholder", "release_placeholder",
-                                     "close_mapping"}));
+    EXPECT_EQ(map_failure.calls,
+              (std::vector<std::string_view>{"create_mapping", "reserve_placeholder",
+                                             "map_replace_placeholder", "release_placeholder",
+                                             "close_mapping"}));
     EXPECT_FALSE(map.rollback.unmap_attempted);
     EXPECT_TRUE(map.rollback.release_attempted);
     EXPECT_TRUE(map.rollback.release_succeeded);
@@ -192,6 +191,13 @@ TEST(ExactAddressSpaceHostImportProbe, RejectsTheActualImportedPointerWhenItIsMi
 }
 
 TEST(ExactAddressSpaceHostImportProbe, DistinguishesResourceLimitsFromWin32LifecycleErrors) {
+    EXPECT_EQ(ClassifyExactWindowsBackingErrorCode(8),
+              ExactWindowsBackingErrorClass::ResourceLimited);
+    EXPECT_EQ(ClassifyExactWindowsBackingErrorCode(14),
+              ExactWindowsBackingErrorClass::ResourceLimited);
+    EXPECT_EQ(ClassifyExactWindowsBackingErrorCode(1455),
+              ExactWindowsBackingErrorClass::ResourceLimited);
+    EXPECT_EQ(ClassifyExactWindowsBackingErrorCode(87), ExactWindowsBackingErrorClass::Other);
     EXPECT_EQ(ClassifyExactBackingAcquisitionFailure(ExactWindowsBackingErrorClass::ResourceLimited,
                                                      true),
               ExactHostImportFailure::BackingCommitFailed);
