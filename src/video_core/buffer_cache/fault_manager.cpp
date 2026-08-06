@@ -86,6 +86,7 @@ void FaultManager::ProcessFaultBuffer() {
         scheduler.Wait(wait_tick);
         scheduler.PopPendingOperations();
     }
+    fault_epochs[current_area].Reset();
 
     const u32 offset = current_area * PageFaultAreaSize;
     u8* mapped = download_buffer.mapped_data.data() + offset;
@@ -193,7 +194,7 @@ void FaultManager::ProcessFaultBuffer() {
                         "Ignored {} invalid or unmapped GPU fault page(s), first at {:#x}",
                         invalid_fault_count, first_invalid_fault);
         }
-        fault_epochs[area] = ClassifyDmaFaultEpoch(fault_count, invalid_fault_count);
+        fault_epochs[area].Complete(ClassifyDmaFaultEpoch(fault_count, invalid_fault_count));
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
             const bool is_processable = IsProcessableDmaFaultRange(
                 start, end, address_space_size,
@@ -218,7 +219,10 @@ DmaFaultEpoch FaultManager::ProcessFaultBufferSynchronous() {
     ProcessFaultBuffer();
     scheduler.Finish();
     scheduler.PopPendingOperations();
-    return fault_epochs[area];
+    if (!fault_epochs[area].IsComplete()) {
+        LOG_ERROR(Render_Vulkan, "Synchronous DMA fault epoch did not complete");
+    }
+    return fault_epochs[area].ValueOrInvalid();
 }
 
 } // namespace VideoCore
