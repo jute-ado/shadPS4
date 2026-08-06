@@ -137,6 +137,37 @@ TEST(PhysicalBackingPublicationCoordinator,
     EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, OverrideBase);
 }
 
+TEST(PhysicalBackingPublicationCoordinator,
+     PublishesSuppressedGpuWriterPagesAsOneAtomicBatch) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestA + PageSize, OtherPhysicalPage, PageSize, 8},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    ASSERT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, 2 * PageSize));
+    constexpr std::array requests{
+        VideoCore::PhysicalBackingCachePageRequest{GuestA,
+                                                   PhysicalBackingDeviceAddress{OverrideBase}},
+        VideoCore::PhysicalBackingCachePageRequest{
+            GuestA + PageSize, PhysicalBackingDeviceAddress{OverrideBase + PageSize}},
+    };
+
+    const auto writers = coordinator.ActivateCachePagesForGuests(requests);
+
+    ASSERT_TRUE(writers.has_value());
+    ASSERT_EQ(writers->owners.size(), 2);
+    ASSERT_EQ(writers->deltas.size(), 3);
+    EXPECT_EQ(writers->deltas[0].guest_page, GuestA);
+    EXPECT_EQ(writers->deltas[0].device_address.value, OverrideBase);
+    EXPECT_EQ(writers->deltas[1].guest_page, GuestA + PageSize);
+    EXPECT_EQ(writers->deltas[1].device_address.value, OverrideBase + PageSize);
+    EXPECT_EQ(writers->deltas[2].guest_page, GuestB);
+    EXPECT_EQ(writers->deltas[2].device_address.value, OverrideBase);
+}
+
 TEST(PhysicalBackingPublicationCoordinator, RollsBackWholeBatchWhenOnePageIsRejected) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
