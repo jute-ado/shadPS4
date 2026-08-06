@@ -80,7 +80,8 @@ public:
 
         auto [physical_it, inserted] = physical_pages.try_emplace(physical_offset);
         PhysicalPageState& physical = physical_it->second;
-        if (!inserted && physical.allocation_generation != allocation_generation) {
+        if (!inserted && (physical.publication == Publication::CommittingWriteback ||
+                          physical.allocation_generation != allocation_generation)) {
             return std::nullopt;
         }
         const auto next_epoch = NextGeneration(physical.mapping_epoch);
@@ -125,6 +126,9 @@ public:
             return false;
         }
         PhysicalPageState& physical = physical_it->second;
+        if (physical.publication == Publication::CommittingWriteback) {
+            return false;
+        }
         const auto next_epoch = NextGeneration(physical.mapping_epoch);
         if (!next_epoch) {
             return false;
@@ -156,6 +160,7 @@ public:
         case Publication::CacheOverride:
             return physical.override_address;
         case Publication::AwaitingWriteback:
+        case Publication::CommittingWriteback:
             return {};
         }
         return {};
@@ -231,29 +236,36 @@ public:
         };
     }
 
-    /// Runs the caller's ordered physical-memory copy before making imported
-    /// backing visible again. The callback is never invoked for a stale token
-    /// and observes AwaitingWriteback publication for the entire copy. A false
-    /// result leaves the same token pending so the caller can retry safely.
+    /// Runs the caller's synchronous ordered physical-memory copy before making
+    /// imported backing visible again. The callback must complete the copy before
+    /// returning; merely submitting asynchronous work is not sufficient. The
+    /// callback is never invoked for a stale token, observes zero publication for
+    /// the entire copy, and excludes every mutation of the same physical page. A
+    /// false result or exception restores the same retryable AwaitingWriteback token.
     template <typename Commit>
         requires std::invocable<Commit&> && std::convertible_to<std::invoke_result_t<Commit&>, bool>
     [[nodiscard]] bool CommitOrderedWriteback(const PhysicalBackingWriteback& writeback,
                                               Commit&& commit) {
-        if (!MatchesWriteback(writeback)) {
+        if (!MatchesWriteback(writeback, Publication::AwaitingWriteback)) {
             return false;
         }
 
+        physical_pages.find(writeback.physical_offset)->second.publication =
+            Publication::CommittingWriteback;
+        CommitRollback rollback{*this, writeback};
         if (!static_cast<bool>(std::invoke(commit))) {
             return false;
         }
 
-        // The callback may re-enter policy code. Revalidate every generation
-        // before publishing rather than retaining an iterator across that call.
+        // Re-find after the callback because permitted mutations of other pages
+        // may have rehashed the physical-page table.
         const auto physical_it = physical_pages.find(writeback.physical_offset);
-        if (!MatchesWriteback(writeback) || physical_it == physical_pages.end()) {
+        if (physical_it == physical_pages.end() ||
+            !MatchesWriteback(writeback, Publication::CommittingWriteback)) {
             return false;
         }
         RestoreImportedBacking(physical_it->second);
+        rollback.Release();
         return true;
     }
 
@@ -272,7 +284,7 @@ public:
             return false;
         }
         PhysicalPageState& physical = physical_it->second;
-        if (physical.alias_count != 0 ||
+        if (physical.publication == Publication::CommittingWriteback || physical.alias_count != 0 ||
             physical.allocation_generation != previous_allocation_generation) {
             return false;
         }
@@ -294,6 +306,7 @@ private:
         ImportedBacking,
         CacheOverride,
         AwaitingWriteback,
+        CommittingWriteback,
     };
 
     struct PhysicalPageState {
@@ -308,6 +321,31 @@ private:
     };
 
     using PhysicalPages = std::unordered_map<u64, PhysicalPageState>;
+
+    class CommitRollback {
+    public:
+        CommitRollback(PhysicalBackingPublicationState& owner,
+                       const PhysicalBackingWriteback& writeback) noexcept
+            : owner{owner}, writeback{writeback} {}
+
+        CommitRollback(const CommitRollback&) = delete;
+        CommitRollback& operator=(const CommitRollback&) = delete;
+
+        ~CommitRollback() {
+            if (armed) {
+                owner.RollbackWriteback(writeback);
+            }
+        }
+
+        void Release() noexcept {
+            armed = false;
+        }
+
+    private:
+        PhysicalBackingPublicationState& owner;
+        PhysicalBackingWriteback writeback;
+        bool armed{true};
+    };
 
     [[nodiscard]] static constexpr bool IsPageAligned(u64 value) noexcept {
         return (value & (PageSize - 1)) == 0;
@@ -350,18 +388,26 @@ private:
         return physical_it;
     }
 
-    [[nodiscard]] bool MatchesWriteback(const PhysicalBackingWriteback& writeback) const {
+    [[nodiscard]] bool MatchesWriteback(const PhysicalBackingWriteback& writeback,
+                                        Publication publication) const {
         const auto physical_it = physical_pages.find(writeback.physical_offset);
         if (physical_it == physical_pages.end()) {
             return false;
         }
         const PhysicalPageState& physical = physical_it->second;
-        return physical.publication == Publication::AwaitingWriteback &&
+        return physical.publication == publication &&
                physical.allocation_generation == writeback.allocation_generation &&
                physical.owner_generation == writeback.owner_generation &&
                physical.state_generation == writeback.state_generation &&
                physical.mapping_epoch == writeback.mapping_epoch &&
                physical.writeback_generation == writeback.writeback_generation;
+    }
+
+    void RollbackWriteback(const PhysicalBackingWriteback& writeback) {
+        if (MatchesWriteback(writeback, Publication::CommittingWriteback)) {
+            physical_pages.find(writeback.physical_offset)->second.publication =
+                Publication::AwaitingWriteback;
+        }
     }
 
     static void RestoreImportedBacking(PhysicalPageState& physical) noexcept {
