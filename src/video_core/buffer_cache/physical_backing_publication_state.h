@@ -227,10 +227,13 @@ public:
         }
 
         PhysicalPageState& physical = physical_it->second;
+        const bool replaces_suppressed_writer =
+            physical.publication == Publication::GpuWriteSuppressed;
         const bool replaces_stale_writeback =
             physical.publication == Publication::AwaitingWriteback &&
             owner_generation > physical.owner_generation;
-        if (physical.publication != Publication::ImportedBacking && !replaces_stale_writeback) {
+        if (physical.publication != Publication::ImportedBacking &&
+            !replaces_suppressed_writer && !replaces_stale_writeback) {
             return std::nullopt;
         }
         const auto next_state = NextGeneration(physical.state_generation);
