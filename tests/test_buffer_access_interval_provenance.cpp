@@ -78,6 +78,45 @@ TEST(BufferAccessProvenanceTrace, ParsesOnlyExplicitBoundedRequests) {
         VideoCore::BufferAccessProvenanceTraceRequest::Parse("buffer-access.jsonl", "0", "1024"));
     EXPECT_FALSE(VideoCore::BufferAccessProvenanceTraceRequest::Parse("buffer-access.jsonl", "16",
                                                                       "unbounded"));
+
+    const auto windowed = VideoCore::BufferAccessProvenanceTraceRequest::Parse(
+        "buffer-access.jsonl", "16", "1024", "45000", "60000");
+    ASSERT_TRUE(windowed.has_value());
+    EXPECT_EQ(windowed->start_elapsed_ms, 45000);
+    EXPECT_EQ(windowed->duration_ms, 60000);
+    EXPECT_FALSE(VideoCore::BufferAccessProvenanceTraceRequest::Parse(
+        "buffer-access.jsonl", "16", "1024", "45000", ""));
+}
+
+TEST(BufferAccessProvenanceTrace, RecordsOnlyInsideTheBoundedElapsedWindow) {
+    const auto root =
+        std::filesystem::temp_directory_path() /
+        ("shadps4-buffer-access-provenance-window-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(root);
+    const auto path = root / "trace.jsonl";
+
+    {
+        VideoCore::BasicBufferAccessProvenanceTrace<std::uint32_t> trace{
+            {path, 4, 16, 10, 5}};
+        trace.BeginCommand(30, 70, 9'999'999);
+        EXPECT_FALSE(trace.Observe(5, 0, 64, Role::VertexRead | Role::IndexRead, 0x01, 0x10,
+                                   false));
+        trace.CommitCommand();
+
+        trace.BeginCommand(31, 71, 10'000'000);
+        EXPECT_TRUE(trace.Observe(5, 0, 64, Role::VertexRead | Role::IndexRead, 0x01, 0x10,
+                                  false));
+        trace.CommitCommand();
+
+        trace.BeginCommand(32, 72, 15'000'000);
+        EXPECT_TRUE(trace.IsComplete());
+    }
+
+    const auto lines = ReadJsonLines(path);
+    ASSERT_EQ(lines.size(), 2);
+    EXPECT_EQ(lines[1].at("commandId"), 31);
+    EXPECT_EQ(lines[1].at("traceElapsedNanoseconds"), 10'000'000);
+    std::filesystem::remove_all(root);
 }
 
 TEST(BufferAccessProvenanceTrace, WritesExactIntervalsForMultiRoleCommandsWithinLimits) {
