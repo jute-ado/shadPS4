@@ -6,10 +6,13 @@
 #include <gtest/gtest.h>
 
 #include "video_core/buffer_cache/buffer_access_interval_provenance.h"
+#include "video_core/buffer_cache/buffer_access_range_batch.h"
 
 namespace {
 
 using RangeState = VideoCore::BasicBufferAccessRangeState<std::uint32_t>;
+using RangeBatch =
+    VideoCore::BasicBufferAccessRangeBatch<std::uint32_t, std::uint32_t, std::uint32_t>;
 
 TEST(BufferAccessRangeState, DisjointTransitionsRetainTheirIndependentPriorAccess) {
     RangeState state{128, 0x01, 0x10};
@@ -26,8 +29,8 @@ TEST(BufferAccessRangeState, DisjointTransitionsRetainTheirIndependentPriorAcces
     EXPECT_EQ(state.IntervalCount(), 2);
 }
 
-TEST(BufferAccessRangeState, RepeatedMatchingAccessNeedsNoBarrierOrStateSplit) {
-    RangeState state{128, 0x01, 0x10};
+TEST(BufferAccessRangeState, RepeatedMatchingReadNeedsNoBarrierOrStateSplit) {
+    RangeState state{128, 0x01, 0x10, 0x02};
 
     const auto repeated = state.Transition(32, 64, 0x01, 0x10);
 
@@ -35,6 +38,16 @@ TEST(BufferAccessRangeState, RepeatedMatchingAccessNeedsNoBarrierOrStateSplit) {
     EXPECT_EQ(repeated.prior_access, 0x01);
     EXPECT_EQ(repeated.prior_stages, 0x10);
     EXPECT_EQ(state.IntervalCount(), 1);
+}
+
+TEST(BufferAccessRangeState, RepeatedMatchingWriteStillRequiresDependency) {
+    RangeState state{128, 0x02, 0x10, 0x02};
+
+    const auto repeated = state.Transition(32, 64, 0x02, 0x10);
+
+    EXPECT_TRUE(repeated.requires_barrier);
+    EXPECT_EQ(repeated.prior_access, 0x02);
+    EXPECT_EQ(repeated.prior_stages, 0x10);
 }
 
 TEST(BufferAccessRangeState, OverlapUnionsOnlyTheCoveredPriorIntervals) {
@@ -76,6 +89,44 @@ TEST(BufferAccessRangeState, ConservativeUnionCannotSuppressALaterBarrier) {
     EXPECT_TRUE(union_match.requires_barrier);
     EXPECT_EQ(union_match.prior_access, 0x03);
     EXPECT_EQ(union_match.prior_stages, 0x30);
+}
+
+TEST(BufferAccessRangeBatch, OverlappingCurrentAccessesAreOrderIndependentAndRangeScoped) {
+    RangeBatch write_then_read;
+    write_then_read.Add(7, 0, 64, 0x02, 0x20);
+    write_then_read.Add(7, 32, 64, 0x01, 0x10);
+
+    RangeBatch read_then_write;
+    read_then_write.Add(7, 32, 64, 0x01, 0x10);
+    read_then_write.Add(7, 0, 64, 0x02, 0x20);
+
+    ASSERT_EQ(write_then_read.Entries().size(), 3);
+    EXPECT_EQ(write_then_read.Entries(), read_then_write.Entries());
+    EXPECT_EQ(write_then_read.Entries()[0], (RangeBatch::Entry{7, 0, 32, 0x02, 0x20}));
+    EXPECT_EQ(write_then_read.Entries()[1], (RangeBatch::Entry{7, 32, 32, 0x03, 0x30}));
+    EXPECT_EQ(write_then_read.Entries()[2], (RangeBatch::Entry{7, 64, 32, 0x01, 0x10}));
+}
+
+TEST(BufferAccessRangeBatch, DisjointRangesAndDifferentBuffersStayIndependent) {
+    RangeBatch batch;
+    batch.Add(11, 128, 32, 0x04, 0x40);
+    batch.Add(11, 0, 32, 0x01, 0x10);
+    batch.Add(12, 0, 32, 0x02, 0x20);
+
+    ASSERT_EQ(batch.Entries().size(), 3);
+    EXPECT_EQ(batch.Entries()[0], (RangeBatch::Entry{11, 0, 32, 0x01, 0x10}));
+    EXPECT_EQ(batch.Entries()[1], (RangeBatch::Entry{11, 128, 32, 0x04, 0x40}));
+    EXPECT_EQ(batch.Entries()[2], (RangeBatch::Entry{12, 0, 32, 0x02, 0x20}));
+}
+
+TEST(BufferAccessRangeBatch, ClearStartsANewCommand) {
+    RangeBatch batch;
+    batch.Add(17, 0, 64, 0x02, 0x20);
+    batch.Clear();
+    batch.Add(17, 0, 64, 0x01, 0x10);
+
+    ASSERT_EQ(batch.Entries().size(), 1);
+    EXPECT_EQ(batch.Entries()[0], (RangeBatch::Entry{17, 0, 64, 0x01, 0x10}));
 }
 
 } // namespace
