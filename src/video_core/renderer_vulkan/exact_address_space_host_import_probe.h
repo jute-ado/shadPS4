@@ -304,6 +304,11 @@ struct ExactSelectedMemoryTypeEvidence {
     bool host_coherent{};
 };
 
+[[nodiscard]] constexpr bool HasRequiredExactHostVisibilityEvidence(
+    bool canonical_view_verified, bool guest_alias_verified) noexcept {
+    return canonical_view_verified && guest_alias_verified;
+}
+
 [[nodiscard]] constexpr ExactSelectedMemoryTypeEvidence MakeExactSelectedMemoryTypeEvidence(
     std::uint32_t property_flags, std::uint32_t host_coherent_flag) noexcept {
     return {.property_flags = property_flags,

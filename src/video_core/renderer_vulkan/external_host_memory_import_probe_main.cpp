@@ -815,8 +815,7 @@ public:
         AddCapability(spv::Capability::Int64);
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
-        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64,
-                       spv::MemoryModel::GLSL450);
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
 
         const auto void_type = TypeVoid();
         const auto u32_type = TypeUInt(32);
@@ -854,19 +853,18 @@ public:
         const auto input_u32x3_pointer = TypePointer(spv::StorageClass::Input, u32x3_type);
         const auto global_invocation_id =
             AddGlobalVariable(input_u32x3_pointer, spv::StorageClass::Input);
-        Decorate(global_invocation_id, spv::Decoration::BuiltIn,
-                 spv::BuiltIn::GlobalInvocationId);
+        Decorate(global_invocation_id, spv::Decoration::BuiltIn, spv::BuiltIn::GlobalInvocationId);
 
         const auto physical_block_pointer =
             TypePointer(spv::StorageClass::PhysicalStorageBuffer, storage_block_type);
         const auto physical_u32_pointer =
             TypePointer(spv::StorageClass::PhysicalStorageBuffer, u32_type);
 
-        const auto main_function = OpFunction(void_type, spv::FunctionControlMask::MaskNone,
-                                              TypeFunction(void_type));
+        const auto main_function =
+            OpFunction(void_type, spv::FunctionControlMask::MaskNone, TypeFunction(void_type));
         AddLabel();
-        const auto invocation = OpCompositeExtract(
-            u32_type, OpLoad(u32x3_type, global_invocation_id), 0u);
+        const auto invocation =
+            OpCompositeExtract(u32_type, OpLoad(u32x3_type, global_invocation_id), 0u);
         const auto descriptor_pointer =
             OpAccessChain(storage_u32_pointer, descriptor_input, zero, invocation);
         const auto descriptor_value = OpLoad(u32_type, descriptor_pointer);
@@ -890,8 +888,8 @@ public:
 
         AddExecutionMode(main_function, spv::ExecutionMode::LocalSize,
                          static_cast<std::uint32_t>(ExactVisibilityWordCount), 1u, 1u);
-        AddEntryPoint(spv::ExecutionModel::GLCompute, main_function, "main",
-                      global_invocation_id, descriptor_input, output, push);
+        AddEntryPoint(spv::ExecutionModel::GLCompute, main_function, "main", global_invocation_id,
+                      descriptor_input, output, push);
     }
 };
 
@@ -913,9 +911,63 @@ struct ExactMappedMemoryGuard {
     }
 };
 
+struct ExactGuestAliasView {
+    HANDLE process{GetCurrentProcess()};
+    void* base{};
+    std::byte* write_pointer{};
+
+    ExactGuestAliasView() = default;
+    ExactGuestAliasView(const ExactGuestAliasView&) = delete;
+    ExactGuestAliasView& operator=(const ExactGuestAliasView&) = delete;
+    ExactGuestAliasView(ExactGuestAliasView&& other) noexcept
+        : process{other.process}, base{std::exchange(other.base, nullptr)},
+          write_pointer{std::exchange(other.write_pointer, nullptr)} {}
+    ExactGuestAliasView& operator=(ExactGuestAliasView&&) = delete;
+
+    ~ExactGuestAliasView() {
+        if (base != nullptr) {
+            UnmapViewOfFile2(process, base, MEM_PRESERVE_PLACEHOLDER);
+            VirtualFreeEx(process, base, 0, MEM_RELEASE);
+        }
+    }
+};
+
+[[nodiscard]] std::optional<ExactGuestAliasView> MapExactGuestAlias(HANDLE mapping,
+                                                                    std::uint64_t offset,
+                                                                    std::size_t byte_count) {
+    SYSTEM_INFO system_info{};
+    GetSystemInfo(&system_info);
+    const auto granularity = static_cast<std::uint64_t>(system_info.dwAllocationGranularity);
+    if (granularity == 0 || offset > std::numeric_limits<std::uint64_t>::max() - byte_count) {
+        return std::nullopt;
+    }
+    const auto view_offset = offset - offset % granularity;
+    const auto delta = offset - view_offset;
+    const auto required = delta + byte_count;
+    const auto view_size = ((required + granularity - 1) / granularity) * granularity;
+    auto reservation =
+        VirtualAlloc2(GetCurrentProcess(), nullptr, view_size,
+                      MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
+    if (reservation == nullptr) {
+        return std::nullopt;
+    }
+    auto mapped = MapViewOfFile3(mapping, GetCurrentProcess(), reservation, view_offset, view_size,
+                                 MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+    if (mapped != reservation) {
+        if (mapped != nullptr) {
+            UnmapViewOfFile2(GetCurrentProcess(), mapped, MEM_PRESERVE_PLACEHOLDER);
+        }
+        VirtualFreeEx(GetCurrentProcess(), reservation, 0, MEM_RELEASE);
+        return std::nullopt;
+    }
+    ExactGuestAliasView view;
+    view.base = mapped;
+    view.write_pointer = static_cast<std::byte*>(mapped) + delta;
+    return view;
+}
+
 [[nodiscard]] std::optional<std::uint32_t> FindExactVisibilityMemoryType(
-    vk::PhysicalDevice physical_device, std::uint32_t allowed,
-    vk::MemoryPropertyFlags required) {
+    vk::PhysicalDevice physical_device, std::uint32_t allowed, vk::MemoryPropertyFlags required) {
     const auto properties = physical_device.getMemoryProperties();
     for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
         if ((allowed & (std::uint32_t{1} << index)) != 0 &&
@@ -940,7 +992,7 @@ struct ExactMappedMemoryGuard {
 [[nodiscard]] ExactVisibilityProbeOutput VerifyExactHostVisibility(
     vk::PhysicalDevice physical_device, vk::Device device, std::uint32_t queue_family_index,
     vk::Buffer imported_buffer, vk::DeviceAddress imported_address, void* host_pointer,
-    std::uint64_t backing_size) {
+    HANDLE backing_mapping, std::uint64_t backing_size) {
     ExactVisibilityProbeOutput result;
     const auto fail = [&](std::string_view reason) {
         result.failure = reason;
@@ -980,8 +1032,7 @@ struct ExactMappedMemoryGuard {
     if (device.bindBufferMemory(*output_buffer, *output_memory, 0) != vk::Result::eSuccess) {
         return fail("output_memory_binding_failed");
     }
-    auto [map_result, mapped] =
-        device.mapMemory(*output_memory, 0, ExactVisibilityOutputByteCount);
+    auto [map_result, mapped] = device.mapMemory(*output_memory, 0, ExactVisibilityOutputByteCount);
     if (map_result != vk::Result::eSuccess || mapped == nullptr) {
         return fail("output_memory_mapping_failed");
     }
@@ -1038,8 +1089,8 @@ struct ExactMappedMemoryGuard {
         .module = *shader_module,
         .pName = "main",
     };
-    auto [pipeline_result, pipeline] = device.createComputePipelineUnique(
-        {}, {.stage = stage, .layout = *pipeline_layout});
+    auto [pipeline_result, pipeline] =
+        device.createComputePipelineUnique({}, {.stage = stage, .layout = *pipeline_layout});
     if (pipeline_result != vk::Result::eSuccess) {
         return fail("compute_pipeline_creation_failed");
     }
@@ -1091,124 +1142,146 @@ struct ExactMappedMemoryGuard {
         (4ull << 30) + 0x4000ull,
         backing_size - 0x4000ull,
     };
-    for (std::size_t trial_index = 0; trial_index < offsets.size(); ++trial_index) {
-        const auto offset = offsets[trial_index];
-        std::array<std::uint32_t, ExactVisibilityWordCount> expected{};
-        for (std::size_t index = 0; index < expected.size(); ++index) {
-            expected[index] = 0xa5c30000u ^
-                              (static_cast<std::uint32_t>(trial_index) * 0x01010101u) ^
-                              (static_cast<std::uint32_t>(index) * 0x9e3779b9u);
-        }
-        std::memcpy(static_cast<std::byte*>(host_pointer) + offset, expected.data(),
-                    ExactVisibilityByteCount);
-        std::memset(mapped, 0, ExactVisibilityOutputByteCount);
-
-        const vk::DescriptorBufferInfo input_info{
-            .buffer = imported_buffer,
-            .offset = offset,
-            .range = ExactVisibilityByteCount,
-        };
-        const vk::DescriptorBufferInfo output_info{
-            .buffer = *output_buffer,
-            .offset = 0,
-            .range = ExactVisibilityOutputByteCount,
-        };
-        const std::array writes{
-            vk::WriteDescriptorSet{
-                .dstSet = *descriptor_sets.front(),
-                .dstBinding = 0,
-                .descriptorCount = 1,
-                .descriptorType = vk::DescriptorType::eStorageBuffer,
-                .pBufferInfo = &input_info,
-            },
-            vk::WriteDescriptorSet{
-                .dstSet = *descriptor_sets.front(),
-                .dstBinding = 1,
-                .descriptorCount = 1,
-                .descriptorType = vk::DescriptorType::eStorageBuffer,
-                .pBufferInfo = &output_info,
-            },
-        };
-        device.updateDescriptorSets(writes, {});
-
-        auto& command_buffer = command_buffers.front();
-        if (command_buffer->reset({}) != vk::Result::eSuccess ||
-            command_buffer->begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}) !=
-                vk::Result::eSuccess) {
-            return fail("command_buffer_begin_failed");
-        }
-        const vk::MemoryBarrier host_to_shader{
-            .srcAccessMask = vk::AccessFlagBits::eHostWrite,
-            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
-        };
-        command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eHost,
-                                        vk::PipelineStageFlagBits::eComputeShader, {},
-                                        host_to_shader, {}, {});
-        command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
-        command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0,
-                                           *descriptor_sets.front(), {});
-        const vk::DeviceAddress trial_address = imported_address + offset;
-        command_buffer->pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
-                                      sizeof(trial_address), &trial_address);
-        command_buffer->dispatch(1, 1, 1);
-        const vk::MemoryBarrier shader_to_host{
-            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
-            .dstAccessMask = vk::AccessFlagBits::eHostRead,
-        };
-        command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                        vk::PipelineStageFlagBits::eHost, {}, shader_to_host, {},
-                                        {});
-        if (command_buffer->end() != vk::Result::eSuccess) {
-            return fail("command_buffer_end_failed");
-        }
-        const vk::CommandBuffer submitted = *command_buffer;
-        const vk::SubmitInfo submit{
-            .commandBufferCount = 1,
-            .pCommandBuffers = &submitted,
-        };
-        if (device.resetFences(*fence) != vk::Result::eSuccess ||
-            queue.submit(submit, *fence) != vk::Result::eSuccess) {
-            return fail("queue_submission_failed");
-        }
-        if (device.waitForFences(*fence, true, 10'000'000'000ull) != vk::Result::eSuccess) {
-            return fail("queue_fence_wait_failed");
-        }
-
-        const auto actual = std::span{static_cast<const std::uint32_t*>(mapped),
-                                      ExactVisibilityWordCount * 2};
-        std::size_t descriptor_mismatches{};
-        std::size_t bda_mismatches{};
-        std::optional<std::size_t> descriptor_first_mismatch;
-        std::optional<std::size_t> bda_first_mismatch;
-        for (std::size_t index = 0; index < expected.size(); ++index) {
-            if (actual[index] != expected[index]) {
-                descriptor_first_mismatch = descriptor_first_mismatch.value_or(index);
-                ++descriptor_mismatches;
+    bool canonical_view_verified{};
+    bool guest_alias_verified{};
+    for (const bool use_guest_alias : {false, true}) {
+        for (std::size_t offset_index = 0; offset_index < offsets.size(); ++offset_index) {
+            const auto offset = offsets[offset_index];
+            const auto trial_index = offset_index + (use_guest_alias ? offsets.size() : 0);
+            std::array<std::uint32_t, ExactVisibilityWordCount> expected{};
+            for (std::size_t index = 0; index < expected.size(); ++index) {
+                expected[index] = 0xa5c30000u ^
+                                  (static_cast<std::uint32_t>(trial_index) * 0x01010101u) ^
+                                  (static_cast<std::uint32_t>(index) * 0x9e3779b9u);
             }
-            if (actual[ExactVisibilityWordCount + index] != expected[index]) {
-                bda_first_mismatch = bda_first_mismatch.value_or(index);
-                ++bda_mismatches;
+            std::optional<ExactGuestAliasView> guest_alias;
+            std::byte* write_pointer = static_cast<std::byte*>(host_pointer) + offset;
+            if (use_guest_alias) {
+                auto mapped_alias =
+                    MapExactGuestAlias(backing_mapping, offset, ExactVisibilityByteCount);
+                if (!mapped_alias) {
+                    return fail("guest_alias_mapping_failed");
+                }
+                guest_alias.emplace(std::move(*mapped_alias));
+                write_pointer = guest_alias->write_pointer;
             }
-        }
-        result.trials.push_back({
-            {"offset", offset},
-            {"expectedHash", ExactVisibilityHash(expected)},
-            {"descriptorHash", ExactVisibilityHash(actual.first(ExactVisibilityWordCount))},
-            {"bdaHash", ExactVisibilityHash(actual.subspan(ExactVisibilityWordCount))},
-            {"descriptorMismatchCount", descriptor_mismatches},
-            {"bdaMismatchCount", bda_mismatches},
-            {"descriptorFirstMismatch", descriptor_first_mismatch},
-            {"bdaFirstMismatch", bda_first_mismatch},
-        });
-        if (descriptor_mismatches != 0 || bda_mismatches != 0) {
-            result.failure = descriptor_mismatches != 0 && bda_mismatches != 0
-                                 ? "descriptor_and_bda_data_mismatch"
-                             : descriptor_mismatches != 0 ? "descriptor_data_mismatch"
-                                                          : "bda_data_mismatch";
-            return result;
+            std::memcpy(write_pointer, expected.data(), ExactVisibilityByteCount);
+            std::memset(mapped, 0, ExactVisibilityOutputByteCount);
+
+            const vk::DescriptorBufferInfo input_info{
+                .buffer = imported_buffer,
+                .offset = offset,
+                .range = ExactVisibilityByteCount,
+            };
+            const vk::DescriptorBufferInfo output_info{
+                .buffer = *output_buffer,
+                .offset = 0,
+                .range = ExactVisibilityOutputByteCount,
+            };
+            const std::array writes{
+                vk::WriteDescriptorSet{
+                    .dstSet = *descriptor_sets.front(),
+                    .dstBinding = 0,
+                    .descriptorCount = 1,
+                    .descriptorType = vk::DescriptorType::eStorageBuffer,
+                    .pBufferInfo = &input_info,
+                },
+                vk::WriteDescriptorSet{
+                    .dstSet = *descriptor_sets.front(),
+                    .dstBinding = 1,
+                    .descriptorCount = 1,
+                    .descriptorType = vk::DescriptorType::eStorageBuffer,
+                    .pBufferInfo = &output_info,
+                },
+            };
+            device.updateDescriptorSets(writes, {});
+
+            auto& command_buffer = command_buffers.front();
+            if (command_buffer->reset({}) != vk::Result::eSuccess ||
+                command_buffer->begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}) !=
+                    vk::Result::eSuccess) {
+                return fail("command_buffer_begin_failed");
+            }
+            const vk::MemoryBarrier host_to_shader{
+                .srcAccessMask = vk::AccessFlagBits::eHostWrite,
+                .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+            };
+            command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eHost,
+                                            vk::PipelineStageFlagBits::eComputeShader, {},
+                                            host_to_shader, {}, {});
+            command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
+            command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0,
+                                               *descriptor_sets.front(), {});
+            const vk::DeviceAddress trial_address = imported_address + offset;
+            command_buffer->pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                          sizeof(trial_address), &trial_address);
+            command_buffer->dispatch(1, 1, 1);
+            const vk::MemoryBarrier shader_to_host{
+                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+                .dstAccessMask = vk::AccessFlagBits::eHostRead,
+            };
+            command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                            vk::PipelineStageFlagBits::eHost, {}, shader_to_host,
+                                            {}, {});
+            if (command_buffer->end() != vk::Result::eSuccess) {
+                return fail("command_buffer_end_failed");
+            }
+            const vk::CommandBuffer submitted = *command_buffer;
+            const vk::SubmitInfo submit{
+                .commandBufferCount = 1,
+                .pCommandBuffers = &submitted,
+            };
+            if (device.resetFences(*fence) != vk::Result::eSuccess ||
+                queue.submit(submit, *fence) != vk::Result::eSuccess) {
+                return fail("queue_submission_failed");
+            }
+            if (device.waitForFences(*fence, true, 10'000'000'000ull) != vk::Result::eSuccess) {
+                return fail("queue_fence_wait_failed");
+            }
+
+            const auto actual =
+                std::span{static_cast<const std::uint32_t*>(mapped), ExactVisibilityWordCount * 2};
+            std::size_t descriptor_mismatches{};
+            std::size_t bda_mismatches{};
+            std::optional<std::size_t> descriptor_first_mismatch;
+            std::optional<std::size_t> bda_first_mismatch;
+            for (std::size_t index = 0; index < expected.size(); ++index) {
+                if (actual[index] != expected[index]) {
+                    descriptor_first_mismatch = descriptor_first_mismatch.value_or(index);
+                    ++descriptor_mismatches;
+                }
+                if (actual[ExactVisibilityWordCount + index] != expected[index]) {
+                    bda_first_mismatch = bda_first_mismatch.value_or(index);
+                    ++bda_mismatches;
+                }
+            }
+            result.trials.push_back({
+                {"offset", offset},
+                {"writeSource", use_guest_alias ? "guest_alias_view" : "canonical_view"},
+                {"expectedHash", ExactVisibilityHash(expected)},
+                {"descriptorHash", ExactVisibilityHash(actual.first(ExactVisibilityWordCount))},
+                {"bdaHash", ExactVisibilityHash(actual.subspan(ExactVisibilityWordCount))},
+                {"descriptorMismatchCount", descriptor_mismatches},
+                {"bdaMismatchCount", bda_mismatches},
+                {"descriptorFirstMismatch", descriptor_first_mismatch},
+                {"bdaFirstMismatch", bda_first_mismatch},
+            });
+            if (descriptor_mismatches != 0 || bda_mismatches != 0) {
+                result.failure = descriptor_mismatches != 0 && bda_mismatches != 0
+                                     ? "descriptor_and_bda_data_mismatch"
+                                 : descriptor_mismatches != 0 ? "descriptor_data_mismatch"
+                                                              : "bda_data_mismatch";
+                return result;
+            }
+            canonical_view_verified |= !use_guest_alias;
+            guest_alias_verified |= use_guest_alias;
         }
     }
-    result.succeeded = true;
+    result.succeeded = Vulkan::HasRequiredExactHostVisibilityEvidence(canonical_view_verified,
+                                                                      guest_alias_verified);
+    if (!result.succeeded) {
+        return fail("required_visibility_evidence_incomplete");
+    }
     result.failure = "none";
     return result;
 }
@@ -1454,9 +1527,9 @@ struct ExactMappedMemoryGuard {
             return;
         }
         attempt["dataVerificationAttempted"] = true;
-        auto visibility = VerifyExactHostVisibility(
-            physical_device, device, queue_family_index, *buffer, address,
-            acquisition.backing.pointer, backing_size);
+        auto visibility = VerifyExactHostVisibility(physical_device, device, queue_family_index,
+                                                    *buffer, address, acquisition.backing.pointer,
+                                                    acquisition.backing.mapping, backing_size);
         attempt["dataVerificationPassed"] = visibility.succeeded;
         attempt["dataVerificationFailure"] = visibility.failure;
         attempt["dataVerificationTrials"] = std::move(visibility.trials);
