@@ -40,8 +40,13 @@ struct PhysicalBackingCachePageRequest {
     PhysicalBackingDeviceAddress override_page_address{};
 };
 
+struct PhysicalBackingCachePageActivation {
+    VAddr guest_page{};
+    PhysicalBackingCachePageToken token{};
+};
+
 struct PhysicalBackingCachePublicationBatch {
-    std::vector<PhysicalBackingCachePageToken> tokens;
+    std::vector<PhysicalBackingCachePageActivation> owners;
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
@@ -235,6 +240,7 @@ public:
         }
 
         struct PendingOwner {
+            VAddr guest_page{};
             u64 physical_offset{};
             PhysicalBackingDeviceAddress override_page_address{};
         };
@@ -261,7 +267,8 @@ public:
                 texture_block_generations.contains(physical_offset)) {
                 return std::nullopt;
             }
-            pending.push_back({physical_offset, request.override_page_address});
+            pending.push_back({request.guest_page, physical_offset,
+                               request.override_page_address});
         }
         if (pending.empty() ||
             pending.size() > std::numeric_limits<u64>::max() - last_owner_generation) {
@@ -284,8 +291,11 @@ public:
             tokens.push_back({*publication});
         }
 
-        PhysicalBackingCachePublicationBatch result{.tokens = std::move(tokens)};
-        for (const auto& token : result.tokens) {
+        PhysicalBackingCachePublicationBatch result;
+        result.owners.reserve(tokens.size());
+        for (size_t index = 0; index < tokens.size(); ++index) {
+            const auto& token = tokens[index];
+            result.owners.push_back({pending[index].guest_page, token});
             active_cache_owners.emplace(token.publication.physical_offset,
                                         ActiveCacheOwner{.token = token});
             auto deltas = MakeAliasDeltas(token.publication.physical_offset);
