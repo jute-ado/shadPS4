@@ -36,8 +36,8 @@ GuestBdaFallbackRange MakeFallback(VAddr guest_address, u64 size, u64 backing_id
 
 TEST(GuestBdaPageDirectory, MapsPhysicalFallbackAtPageGranularity) {
     GuestBdaPageDirectory directory;
-    const auto mapping = directory.MapFallback(
-        MakeFallback(0x20'0000, 2 * PageSize, 7, 0x80'0000, 0x1'0000'0000));
+    const auto mapping =
+        directory.MapFallback(MakeFallback(0x20'0000, 2 * PageSize, 7, 0x80'0000, 0x1'0000'0000));
     ASSERT_TRUE(mapping.has_value());
 
     const auto first = directory.ResolvePage(0x20'0000);
@@ -45,8 +45,8 @@ TEST(GuestBdaPageDirectory, MapsPhysicalFallbackAtPageGranularity) {
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(first->device_address, GuestBdaDeviceAddress{0x1'0000'0000});
-    EXPECT_EQ(first->physical.backing_id, 7);
-    EXPECT_EQ(first->physical.offset, 0x80'0000);
+    EXPECT_EQ(first->physical.backing_id, u64{7});
+    EXPECT_EQ(first->physical.offset, u64{0x80'0000});
     EXPECT_EQ(first->provenance, GuestBdaPageProvenance::PhysicalFallback);
     EXPECT_EQ(second->device_address, GuestBdaDeviceAddress{0x1'0000'0000 + PageSize});
     EXPECT_EQ(second->physical.offset, 0x80'0000 + PageSize);
@@ -54,8 +54,8 @@ TEST(GuestBdaPageDirectory, MapsPhysicalFallbackAtPageGranularity) {
 
 TEST(GuestBdaPageDirectory, CacheOverrideRestoresOnlyCoherentFallback) {
     GuestBdaPageDirectory directory;
-    const auto mapping = directory.MapFallback(
-        MakeFallback(0x40'0000, 2 * PageSize, 11, 0x100'0000, 0x2'0000'0000));
+    const auto mapping =
+        directory.MapFallback(MakeFallback(0x40'0000, 2 * PageSize, 11, 0x100'0000, 0x2'0000'0000));
     ASSERT_TRUE(mapping.has_value());
 
     const auto first_override =
@@ -66,8 +66,8 @@ TEST(GuestBdaPageDirectory, CacheOverrideRestoresOnlyCoherentFallback) {
     EXPECT_EQ(cached->device_address, GuestBdaDeviceAddress{0x3'0000'0000 + PageSize});
     EXPECT_EQ(cached->provenance, GuestBdaPageProvenance::CacheOverride);
 
-    EXPECT_TRUE(directory.UnregisterCache(*first_override,
-                                          GuestBdaCacheCoherence::CoherentWithBacking));
+    EXPECT_TRUE(
+        directory.UnregisterCache(*first_override, GuestBdaCacheCoherence::CoherentWithBacking));
     const auto restored = directory.ResolvePage(0x40'0000 + PageSize);
     ASSERT_TRUE(restored.has_value());
     EXPECT_EQ(restored->device_address, GuestBdaDeviceAddress{0x2'0000'0000 + PageSize});
@@ -98,8 +98,8 @@ TEST(GuestBdaPageDirectory, UnsupportedAndDirtyFallbackMappingsFailClosed) {
     EXPECT_FALSE(directory.MapFallback(incoherent).has_value());
     EXPECT_FALSE(directory.ResolvePage(incoherent.guest.address).has_value());
 
-    auto dirty = MakeFallback(0x70'0000 + PageSize, PageSize, 2, PageSize,
-                              0x6'0000'0000 + PageSize);
+    auto dirty =
+        MakeFallback(0x70'0000 + PageSize, PageSize, 2, PageSize, 0x6'0000'0000 + PageSize);
     dirty.gpu_dirty = true;
     EXPECT_FALSE(directory.MapFallback(dirty).has_value());
     EXPECT_FALSE(directory.ResolvePage(dirty.guest.address).has_value());
@@ -107,37 +107,36 @@ TEST(GuestBdaPageDirectory, UnsupportedAndDirtyFallbackMappingsFailClosed) {
 
 TEST(GuestBdaPageDirectory, UnmapAndRemapRejectStaleOverrides) {
     GuestBdaPageDirectory directory;
-    const auto old_mapping = directory.MapFallback(
-        MakeFallback(0x80'0000, PageSize, 3, 0, 0x7'0000'0000));
+    const auto old_mapping =
+        directory.MapFallback(MakeFallback(0x80'0000, PageSize, 3, 0, 0x7'0000'0000));
     ASSERT_TRUE(old_mapping.has_value());
     const auto old_override =
         directory.RegisterCache(*old_mapping, GuestBdaDeviceAddress{0x8'0000'0000});
     ASSERT_TRUE(old_override.has_value());
     EXPECT_TRUE(directory.Unmap(*old_mapping));
 
-    const auto new_mapping = directory.MapFallback(
-        MakeFallback(0x80'0000, PageSize, 4, 0x20'0000, 0x9'0000'0000));
+    const auto new_mapping =
+        directory.MapFallback(MakeFallback(0x80'0000, PageSize, 4, 0x20'0000, 0x9'0000'0000));
     ASSERT_TRUE(new_mapping.has_value());
     EXPECT_NE(old_mapping->generation, new_mapping->generation);
-    EXPECT_FALSE(directory.RegisterCache(*old_mapping,
-                                         GuestBdaDeviceAddress{0xA'0000'0000})
-                     .has_value());
-    EXPECT_FALSE(directory.UnregisterCache(*old_override,
-                                           GuestBdaCacheCoherence::CoherentWithBacking));
+    EXPECT_FALSE(
+        directory.RegisterCache(*old_mapping, GuestBdaDeviceAddress{0xA'0000'0000}).has_value());
+    EXPECT_FALSE(
+        directory.UnregisterCache(*old_override, GuestBdaCacheCoherence::CoherentWithBacking));
 
     const auto current = directory.ResolvePage(0x80'0000);
     ASSERT_TRUE(current.has_value());
     EXPECT_EQ(current->device_address, GuestBdaDeviceAddress{0x9'0000'0000});
-    EXPECT_EQ(current->physical.backing_id, 4);
+    EXPECT_EQ(current->physical.backing_id, u64{4});
     EXPECT_EQ(current->provenance, GuestBdaPageProvenance::PhysicalFallback);
 }
 
 TEST(GuestBdaPageDirectory, PhysicalAliasesResolveToSameBackingOffset) {
     GuestBdaPageDirectory directory;
-    const auto first = directory.MapFallback(
-        MakeFallback(0xA0'0000, PageSize, 17, 0x400'0000, 0xB'0000'0000));
-    const auto alias = directory.MapFallback(
-        MakeFallback(0xC0'0000, PageSize, 17, 0x400'0000, 0xB'0000'0000));
+    const auto first =
+        directory.MapFallback(MakeFallback(0xA0'0000, PageSize, 17, 0x400'0000, 0xB'0000'0000));
+    const auto alias =
+        directory.MapFallback(MakeFallback(0xC0'0000, PageSize, 17, 0x400'0000, 0xB'0000'0000));
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(alias.has_value());
 
@@ -153,23 +152,21 @@ TEST(GuestBdaPageDirectory, RejectsUnalignedWraparoundAndOutOfRangeGuestRanges) 
     GuestBdaPageDirectory directory;
     constexpr VAddr AddressLimit = GuestBdaPageDirectory::AddressLimit;
 
-    EXPECT_FALSE(directory.MapFallback(MakeFallback(0x1001, PageSize, 1, 0, 0x1000))
-                     .has_value());
-    EXPECT_FALSE(directory.MapFallback(MakeFallback(0x4000, PageSize - 1, 1, 0, 0x4000))
-                     .has_value());
-    EXPECT_FALSE(directory.MapFallback(MakeFallback(AddressLimit, PageSize, 1, 0, 0x8000))
-                     .has_value());
-    EXPECT_FALSE(directory.MapFallback(
-                                    MakeFallback(AddressLimit - PageSize, 2 * PageSize, 1, 0,
-                                                 0xC000))
-                     .has_value());
-    EXPECT_FALSE(directory.MapFallback(
-                                    MakeFallback(std::numeric_limits<VAddr>::max() - PageSize + 1,
-                                                 2 * PageSize, 1, 0, 0x10'000))
+    EXPECT_FALSE(directory.MapFallback(MakeFallback(0x1001, PageSize, 1, 0, 0x1000)).has_value());
+    EXPECT_FALSE(
+        directory.MapFallback(MakeFallback(0x4000, PageSize - 1, 1, 0, 0x4000)).has_value());
+    EXPECT_FALSE(
+        directory.MapFallback(MakeFallback(AddressLimit, PageSize, 1, 0, 0x8000)).has_value());
+    EXPECT_FALSE(
+        directory.MapFallback(MakeFallback(AddressLimit - PageSize, 2 * PageSize, 1, 0, 0xC000))
+            .has_value());
+    EXPECT_FALSE(directory
+                     .MapFallback(MakeFallback(std::numeric_limits<VAddr>::max() - PageSize + 1,
+                                               2 * PageSize, 1, 0, 0x10'000))
                      .has_value());
 
-    const auto final_page = directory.MapFallback(
-        MakeFallback(AddressLimit - PageSize, PageSize, 1, 0, 0x20'000));
+    const auto final_page =
+        directory.MapFallback(MakeFallback(AddressLimit - PageSize, PageSize, 1, 0, 0x20'000));
     ASSERT_TRUE(final_page.has_value());
     EXPECT_TRUE(directory.ResolvePage(AddressLimit - PageSize).has_value());
     EXPECT_FALSE(directory.ResolvePage(AddressLimit).has_value());
