@@ -153,6 +153,48 @@ TEST(PhysicalBackingPublicationCoordinator, DirtyCacheOwnerZerosAliasesUntilPhys
     EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, PublishesSubmittedGpuWritebackBatchAtomically) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestC, OtherPhysicalPage, PageSize, 9},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto first = coordinator.ActivateCachePage(
+        PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    const auto second = coordinator.ActivateCachePage(
+        OtherPhysicalPage, PhysicalBackingDeviceAddress{OverrideBase + PageSize}, false);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(first->token, 64, 128));
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(second->token, 256, 512));
+    const auto first_retirement = coordinator.RetireCachePageGpuDirty(first->token);
+    const auto second_retirement = coordinator.RetireCachePageGpuDirty(second->token);
+    ASSERT_TRUE(first_retirement.has_value());
+    ASSERT_TRUE(second_retirement.has_value());
+    const std::array submitted{
+        first_retirement->writeback,
+        second_retirement->writeback,
+    };
+
+    const auto restored = coordinator.PublishSubmittedCachePageGpuWritebacks(submitted);
+
+    ASSERT_TRUE(restored.has_value());
+    ASSERT_EQ(restored->size(), 3);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value,
+              ImportedBase + PhysicalPage);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value,
+              ImportedBase + PhysicalPage);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestC)->value,
+              ImportedBase + OtherPhysicalPage);
+    EXPECT_FALSE(coordinator.CommitCachePageWriteback(first_retirement->writeback,
+                                                      [] { return true; }));
+    EXPECT_FALSE(coordinator.CommitCachePageWriteback(second_retirement->writeback,
+                                                      [] { return true; }));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, CpuWriteThroughAliasRetiresPhysicalGpuOwner) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
