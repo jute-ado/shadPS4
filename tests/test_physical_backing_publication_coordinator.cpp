@@ -167,4 +167,29 @@ TEST(PhysicalBackingPublicationCoordinator, CpuWriteThroughAliasRetiresPhysicalG
     EXPECT_EQ(retirement->deltas[1].device_address.value, 0);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysicalAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+
+    const auto overlap = coordinator.BeginTextureOverlap(GuestB, PageSize);
+
+    ASSERT_TRUE(overlap.has_value());
+    ASSERT_EQ(overlap->deltas.size(), 2);
+    EXPECT_EQ(overlap->deltas[0].device_address.value, 0);
+    EXPECT_EQ(overlap->deltas[1].device_address.value, 0);
+    EXPECT_FALSE(coordinator.ActivateCachePage(
+        PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false));
+
+    const auto restored_deltas = coordinator.EndTextureOverlap(overlap->token);
+    ASSERT_TRUE(restored_deltas.has_value());
+    ASSERT_EQ(restored_deltas->size(), 2);
+    EXPECT_EQ((*restored_deltas)[0].device_address.value, ImportedBase + PhysicalPage);
+    EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
+}
+
 } // namespace
