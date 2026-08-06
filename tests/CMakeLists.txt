@@ -257,6 +257,16 @@ target_compile_features(shadps4_cpu_page_write_snapshot_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_cpu_page_write_snapshot_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_cpu_page_write_snapshot_test)
 
+add_executable(shadps4_readonly_stream_snapshot_test
+    test_readonly_stream_snapshot.cpp
+)
+target_include_directories(shadps4_readonly_stream_snapshot_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_readonly_stream_snapshot_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_readonly_stream_snapshot_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_readonly_stream_snapshot_test)
+
 add_executable(shadps4_sparse_memory_test
     test_sparse_memory.cpp
 )
