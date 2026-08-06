@@ -103,37 +103,6 @@ TEST(BufferResidency, PlansFullPageCopyBeforeWritableAliasMigration) {
         0x1000'0000, PageSize, 0x1000'4000, 0x2000'0000, PageSize, 0x2000'0000));
 }
 
-TEST(BufferResidency, PlansOwnerMigrationWhenAResidentBufferIsReplaced) {
-    constexpr VAddr PageSize = 16_KB;
-    constexpr VAddr source_base = 0x1000'4000;
-    constexpr VAddr target_base = 0x1000'0000;
-    constexpr std::array owner_pages{
-        source_base,
-        source_base + 2 * PageSize,
-    };
-
-    const auto migrations = VideoCore::PlanPhysicalBackingOwnerReplacementMigrations(
-        source_base, 3 * PageSize, target_base, 5 * PageSize, owner_pages);
-
-    ASSERT_TRUE(migrations.has_value());
-    EXPECT_EQ(*migrations,
-              (std::vector<VideoCore::PhysicalBackingOwnerReplacementMigration>{
-                  {0, source_base, PageSize},
-                  {1, source_base + 2 * PageSize, 3 * PageSize},
-              }));
-}
-
-TEST(BufferResidency, RejectsOwnerMigrationOutsideTheCopiedReplacementSpan) {
-    constexpr VAddr PageSize = 16_KB;
-    constexpr VAddr source_base = 0x1000'4000;
-    constexpr VAddr target_base = 0x1000'0000;
-    constexpr std::array owner_pages{source_base + 3 * PageSize};
-
-    EXPECT_FALSE(VideoCore::PlanPhysicalBackingOwnerReplacementMigrations(
-                     source_base, 3 * PageSize, target_base, 5 * PageSize, owner_pages)
-                     .has_value());
-}
-
 TEST(BufferResidency, DefersPhysicalBackingOwnershipUntilGpuWrite) {
     EXPECT_FALSE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(false));
     EXPECT_TRUE(VideoCore::ShouldAcquirePhysicalBackingBufferOwnership(true));

@@ -223,8 +223,6 @@ private:
     [[nodiscard]] bool AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                                Buffer& target_buffer,
                                                                VAddr device_addr, u64 size);
-    [[nodiscard]] bool MigratePhysicalBackingOwnersForBufferReplacement(
-        BufferId target_buffer_id, BufferId source_buffer_id);
     [[nodiscard]] bool RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size);
     [[nodiscard]] bool RetirePhysicalBackingCachePagesForCpuWrite(
         BufferId buffer_id, std::span<const u32> owner_indices);

@@ -46,11 +46,6 @@ struct PhysicalBackingCachePageMigration {
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
-struct PhysicalBackingCachePageMigrationBatch {
-    std::vector<PhysicalBackingCachePageMigration> migrations;
-    std::vector<PhysicalBackingBdaDelta> deltas;
-};
-
 struct PhysicalBackingCachePageRequest {
     VAddr guest_page{};
     PhysicalBackingDeviceAddress override_page_address{};
@@ -701,92 +696,6 @@ public:
             .token = owner_it->second.token,
             .deltas = MakeAliasDeltas(physical_offset),
         };
-    }
-
-    /// Atomically transfers distinct live cache owners into replacement buffer storage.
-    [[nodiscard]] std::optional<PhysicalBackingCachePageMigrationBatch>
-    MigrateCachePagesForGuests(std::span<const PhysicalBackingCachePageRequest> requests) {
-        if (requests.empty() ||
-            requests.size() > std::numeric_limits<u64>::max() - last_owner_generation) {
-            return std::nullopt;
-        }
-
-        struct PendingMigration {
-            VAddr guest_page{};
-            u64 physical_offset{};
-            PhysicalBackingDeviceAddress override_page_address{};
-            PhysicalBackingCachePageToken previous_token{};
-        };
-        std::vector<PendingMigration> pending;
-        pending.reserve(requests.size());
-        std::unordered_set<VAddr> guest_pages;
-        std::unordered_set<u64> physical_pages;
-        for (const auto& request : requests) {
-            if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
-                !guest_pages.emplace(request.guest_page).second) {
-                return std::nullopt;
-            }
-            const auto mapping_it = mapping_tokens.find(request.guest_page);
-            if (mapping_it == mapping_tokens.end() ||
-                !physical_pages.emplace(mapping_it->second.physical_offset).second) {
-                return std::nullopt;
-            }
-            const u64 physical_offset = mapping_it->second.physical_offset;
-            const auto owner_it = active_cache_owners.find(physical_offset);
-            if (owner_it == active_cache_owners.end() ||
-                pending_writebacks.contains(physical_offset)) {
-                return std::nullopt;
-            }
-            // A replacement copies the retained cache mirror without taking texture authority.
-            // Active texture tokens continue to suppress every alias until their overlap ends.
-            pending.push_back({request.guest_page, physical_offset,
-                               request.override_page_address, owner_it->second.token});
-        }
-
-        std::vector<PhysicalBackingOverrideMigrationRequest> state_requests;
-        state_requests.reserve(pending.size());
-        for (size_t index = 0; index < pending.size(); ++index) {
-            state_requests.push_back({
-                .current = pending[index].previous_token.publication,
-                .override_page_address = pending[index].override_page_address,
-                .owner_generation = last_owner_generation + index + 1,
-            });
-        }
-
-        PhysicalBackingCachePageMigrationBatch result;
-        result.migrations.reserve(pending.size());
-        std::vector<std::vector<PhysicalBackingBdaDelta>> migration_deltas;
-        migration_deltas.reserve(pending.size());
-        size_t delta_count = 0;
-        for (const auto& migration : pending) {
-            auto deltas = MakeAliasDeltas(migration.physical_offset);
-            if (deltas.size() > std::numeric_limits<size_t>::max() - delta_count) {
-                return std::nullopt;
-            }
-            delta_count += deltas.size();
-            migration_deltas.push_back(std::move(deltas));
-        }
-        result.deltas.reserve(delta_count);
-
-        const auto migrated_overrides = state.MigrateOverrides(state_requests);
-        if (!migrated_overrides) {
-            return std::nullopt;
-        }
-        last_owner_generation += pending.size();
-
-        for (size_t index = 0; index < pending.size(); ++index) {
-            auto owner_it = active_cache_owners.find(pending[index].physical_offset);
-            owner_it->second.token = {(*migrated_overrides)[index]};
-            result.migrations.push_back({
-                .previous_token = pending[index].previous_token,
-                .token = owner_it->second.token,
-                .deltas = std::move(migration_deltas[index]),
-            });
-            const auto& deltas = result.migrations.back().deltas;
-            result.deltas.insert(result.deltas.end(), deltas.begin(), deltas.end());
-        }
-        std::ranges::sort(result.deltas, {}, &PhysicalBackingBdaDelta::guest_page);
-        return result;
     }
 
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(

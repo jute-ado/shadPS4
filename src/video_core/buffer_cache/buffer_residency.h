@@ -79,14 +79,6 @@ struct PhysicalBackingAliasMigrationCopy {
     u64 size{};
 };
 
-struct PhysicalBackingOwnerReplacementMigration {
-    u32 owner_index{};
-    VAddr guest_page{};
-    u64 destination_offset{};
-
-    auto operator<=>(const PhysicalBackingOwnerReplacementMigration&) const = default;
-};
-
 struct PhysicalBackingTextureBufferTransition {
     VAddr base{};
     u32 size{};
@@ -313,29 +305,6 @@ PlanPhysicalBackingAliasMigrationCopy(VAddr source_base, u64 source_size, VAddr 
         .destination_offset = destination_offset,
         .size = PageSize,
     };
-}
-
-[[nodiscard]] inline std::optional<std::vector<PhysicalBackingOwnerReplacementMigration>>
-PlanPhysicalBackingOwnerReplacementMigrations(VAddr source_base, u64 source_size,
-                                              VAddr destination_base, u64 destination_size,
-                                              std::span<const VAddr> owner_guest_pages) {
-    if (owner_guest_pages.size() > std::numeric_limits<u32>::max()) {
-        return std::nullopt;
-    }
-    std::unordered_set<VAddr> unique_pages;
-    unique_pages.reserve(owner_guest_pages.size());
-    std::vector<PhysicalBackingOwnerReplacementMigration> migrations;
-    migrations.reserve(owner_guest_pages.size());
-    for (u32 owner_index = 0; owner_index < owner_guest_pages.size(); ++owner_index) {
-        const VAddr guest_page = owner_guest_pages[owner_index];
-        const auto copy = PlanPhysicalBackingAliasMigrationCopy(
-            source_base, source_size, guest_page, destination_base, destination_size, guest_page);
-        if (!copy || !unique_pages.emplace(guest_page).second) {
-            return std::nullopt;
-        }
-        migrations.push_back({owner_index, guest_page, copy->destination_offset});
-    }
-    return migrations;
 }
 
 enum class PhysicalBackingTextureConsumer {
