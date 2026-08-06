@@ -458,3 +458,31 @@ TEST(PhysicalBackingPublicationState, ReallocatedPhysicalPageRejectsOldWriteback
     EXPECT_FALSE(stale_commit_called);
     EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
 }
+
+TEST(PhysicalBackingPublicationState, RetiredPhysicalPageRejectsOldWritebackAndFreshlyPublishes) {
+    auto state = MakeState();
+    const auto old_mapping = state.MapGuestPage(GuestA, PhysicalPage, 1, 40);
+    ASSERT_TRUE(old_mapping.has_value());
+    const auto old_override =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 1);
+    ASSERT_TRUE(old_override.has_value());
+    const auto old_writeback = state.RetireGpuDirty(*old_override);
+    ASSERT_TRUE(old_writeback.has_value());
+
+    EXPECT_FALSE(state.RetirePhysicalPage(PhysicalPage, 40));
+    ASSERT_TRUE(state.UnmapGuestPage(*old_mapping));
+    EXPECT_FALSE(state.RetirePhysicalPage(PhysicalPage, 39));
+    ASSERT_TRUE(state.RetirePhysicalPage(PhysicalPage, 40));
+    EXPECT_FALSE(state.RetirePhysicalPage(PhysicalPage, 40));
+
+    bool stale_commit_called = false;
+    EXPECT_FALSE(state.CommitOrderedWriteback(*old_writeback, [&] {
+        stale_commit_called = true;
+        return true;
+    }));
+    EXPECT_FALSE(stale_commit_called);
+
+    EXPECT_FALSE(state.MapGuestPage(GuestA, PhysicalPage, 2, 40));
+    ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 2, 41));
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
