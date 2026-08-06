@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <utility>
 
 #include "common/unique_function.h"
 
@@ -27,6 +28,12 @@ public:
         open = false;
         const auto boundary = ++current_boundary;
         return [this, boundary] { CompleteBoundary(boundary); };
+    }
+
+    template <typename SubmitBoundary>
+    void SubmitBoundaryAndWait(SubmitBoundary&& submit_boundary) {
+        auto complete_boundary = BeginBoundary();
+        std::forward<SubmitBoundary>(submit_boundary)(std::move(complete_boundary));
     }
 
     [[nodiscard]] bool IsBoundaryOpen() const {
