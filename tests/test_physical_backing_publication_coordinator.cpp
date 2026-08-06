@@ -196,6 +196,50 @@ TEST(PhysicalBackingPublicationCoordinator,
     EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
 }
 
+TEST(PhysicalBackingPublicationCoordinator,
+     RejectsConflictingWriterAddressesForOnePhysicalPage) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    ASSERT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize));
+    constexpr std::array requests{
+        VideoCore::PhysicalBackingCachePageRequest{GuestA,
+                                                   PhysicalBackingDeviceAddress{OverrideBase}},
+        VideoCore::PhysicalBackingCachePageRequest{
+            GuestB, PhysicalBackingDeviceAddress{OverrideBase + PageSize}},
+    };
+
+    EXPECT_FALSE(coordinator.ActivateCachePagesForGuests(requests));
+    EXPECT_FALSE(coordinator.ResolveActiveCachePageForGuest(GuestA));
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
+}
+
+TEST(PhysicalBackingPublicationCoordinator,
+     RefusesToDiscardDirtyWriterDuringSuppressedRetirement) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    ASSERT_TRUE(coordinator.SuppressGuestRangeForGpuWrite(GuestA, PageSize));
+    const auto writer = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(writer.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(writer->token, 64, 128));
+
+    EXPECT_FALSE(coordinator.RetireCachePageToGpuWriteSuppressed(writer->token));
+    EXPECT_EQ(coordinator.ResolveActiveCachePageForGuest(GuestB), writer->token);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, OverrideBase);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, OverrideBase);
+}
+
 TEST(PhysicalBackingPublicationCoordinator, RollsBackWholeBatchWhenOnePageIsRejected) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
