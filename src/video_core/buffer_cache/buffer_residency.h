@@ -52,12 +52,12 @@ struct PhysicalBackingTextureOwnershipRecord {
     u32 image_index{};
     VAddr guest_base{};
     u64 guest_size{};
-    u64 write_order{};
+    u64 binding_order{};
     std::vector<u64> physical_pages;
 };
 
 struct PhysicalBackingTextureOwnershipComponent {
-    std::vector<u32> ordered_image_indices;
+    std::vector<u32> oldest_to_newest_image_indices;
     PhysicalBackingTextureBufferTransition ownership_span{};
     std::vector<u64> physical_pages;
 };
@@ -79,8 +79,7 @@ PlanPhysicalBackingTexturePageSources(
     std::unordered_map<u64, VAddr> newest_guest_page;
     newest_guest_page.reserve(oldest_to_newest_candidates.size());
     for (const auto& candidate : oldest_to_newest_candidates) {
-        if ((candidate.physical_page & PageMask) != 0 ||
-            (candidate.guest_page & PageMask) != 0) {
+        if ((candidate.physical_page & PageMask) != 0 || (candidate.guest_page & PageMask) != 0) {
             return std::nullopt;
         }
         newest_guest_page[candidate.physical_page] = candidate.guest_page;
@@ -176,14 +175,14 @@ PlanPhysicalBackingTextureOwnershipComponent(
     }
 
     std::ranges::sort(selected, [](const auto* left, const auto* right) {
-        return std::tie(left->write_order, left->image_index) <
-               std::tie(right->write_order, right->image_index);
+        return std::tie(left->binding_order, left->image_index) <
+               std::tie(right->binding_order, right->image_index);
     });
     VAddr component_base = std::numeric_limits<VAddr>::max();
     VAddr component_end = 0;
     std::unordered_set<u64> component_physical_pages;
     PhysicalBackingTextureOwnershipComponent result;
-    result.ordered_image_indices.reserve(selected.size());
+    result.oldest_to_newest_image_indices.reserve(selected.size());
     for (const auto* record : selected) {
         const auto span =
             PlanPhysicalBackingTextureOwnershipSpan(record->guest_base, record->guest_size);
@@ -191,7 +190,7 @@ PlanPhysicalBackingTextureOwnershipComponent(
         component_end = std::max(component_end, span->base + span->size);
         component_physical_pages.insert(record->physical_pages.begin(),
                                         record->physical_pages.end());
-        result.ordered_image_indices.push_back(record->image_index);
+        result.oldest_to_newest_image_indices.push_back(record->image_index);
     }
     const u64 component_size = component_end - component_base;
     if (component_size == 0 || component_size > std::numeric_limits<u32>::max()) {
@@ -224,8 +223,8 @@ PlanPhysicalBackingTextureBufferTransition(VAddr image_base, u64 image_size, VAd
 template <typename Left, typename Right>
 [[nodiscard]] constexpr bool PhysicalBackingPagesIntersect(const Left& left,
                                                            const Right& right) noexcept {
-    return std::ranges::any_of(left,
-                               [&](const auto& page) { return std::ranges::contains(right, page); });
+    return std::ranges::any_of(
+        left, [&](const auto& page) { return std::ranges::contains(right, page); });
 }
 
 [[nodiscard]] constexpr std::optional<PhysicalBackingAliasMigrationCopy>

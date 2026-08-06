@@ -154,42 +154,53 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
     if (!image_buffer.IsInBounds(ownership_span.base, ownership_span.size)) {
         return false;
     }
-    for (const u32 image_index : component->ordered_image_indices) {
-        if (!SynchronizeBufferFromImage(image_buffer, ImageId{image_index})) {
+    std::vector<PhysicalBackingTextureBufferTransition> image_spans;
+    image_spans.reserve(component->oldest_to_newest_image_indices.size());
+    std::vector<PhysicalBackingTexturePageSource> page_source_candidates;
+    const std::unordered_set<u64> component_physical_pages(component->physical_pages.begin(),
+                                                           component->physical_pages.end());
+    for (const u32 image_index : component->oldest_to_newest_image_indices) {
+        const ImageId image_id{image_index};
+        const Image& image = texture_cache.GetImage(image_id);
+        const auto image_span = PlanPhysicalBackingTextureOwnershipSpan(image.info.guest_address,
+                                                                        image.info.guest_size);
+        if (!image_span || !SynchronizeBufferFromImage(image_buffer, image_id)) {
             return false;
+        }
+        image_spans.push_back(*image_span);
+        const VAddr image_end = image_span->base + image_span->size;
+        for (VAddr guest_page = image_span->base; guest_page < image_end;
+             guest_page += CACHING_PAGESIZE) {
+            const auto physical =
+                physical_backing_coordinator->ResolvePhysicalPageForGuest(guest_page);
+            if (physical && component_physical_pages.contains(*physical)) {
+                page_source_candidates.push_back({*physical, guest_page});
+            }
         }
     }
 
+    const auto page_sources = PlanPhysicalBackingTexturePageSources(page_source_candidates);
+    if (!page_sources || page_sources->size() != component->physical_pages.size()) {
+        return false;
+    }
     std::vector<PhysicalBackingCachePageRequest> requests;
-    requests.reserve(component->physical_pages.size());
-    std::unordered_set<u64> remaining_physical_pages(component->physical_pages.begin(),
-                                                     component->physical_pages.end());
-    const VAddr ownership_end = ownership_span.base + ownership_span.size;
-    for (VAddr guest_page = ownership_span.base;
-         guest_page < ownership_end && !remaining_physical_pages.empty();
-         guest_page += CACHING_PAGESIZE) {
-        const auto physical = physical_backing_coordinator->ResolvePhysicalPageForGuest(guest_page);
-        if (!physical || !remaining_physical_pages.erase(*physical)) {
-            continue;
-        }
-        const u64 target_offset = image_buffer.Offset(guest_page);
+    requests.reserve(page_sources->size());
+    for (const auto& source : *page_sources) {
+        const u64 target_offset = image_buffer.Offset(source.guest_page);
         if (image_buffer.BufferDeviceAddress() > std::numeric_limits<u64>::max() - target_offset) {
             return false;
         }
         requests.push_back({
-            .guest_page = guest_page,
+            .guest_page = source.guest_page,
             .override_page_address =
                 PhysicalBackingDeviceAddress{image_buffer.BufferDeviceAddress() + target_offset},
         });
-    }
-    if (!remaining_physical_pages.empty() || requests.empty()) {
-        return false;
     }
 
     std::vector<PhysicalBackingBdaDelta> publication_deltas;
     const bool transitioned =
         texture_cache.TransitionPhysicalBackingTextureOwnershipComponentForBufferAccess(
-            component->ordered_image_indices,
+            component->oldest_to_newest_image_indices,
             [&](std::span<const PhysicalBackingTextureToken> tokens) {
                 size_t token_page_count = 0;
                 for (const auto& token : tokens) {
@@ -232,8 +243,10 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
     if (!transitioned) {
         return false;
     }
-    gpu_modified_ranges.Add(ownership_span.base, ownership_span.size);
-    memory_tracker->MarkRegionAsGpuModified(ownership_span.base, ownership_span.size);
+    for (const auto& image_span : image_spans) {
+        gpu_modified_ranges.Add(image_span.base, image_span.size);
+        memory_tracker->MarkRegionAsGpuModified(image_span.base, image_span.size);
+    }
     ApplyPhysicalBackingBdaDeltas(publication_deltas);
     return true;
 }

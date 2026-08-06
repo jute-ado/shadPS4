@@ -195,8 +195,8 @@ TextureCache::PlanPhysicalBackingTextureOwnershipComponent(std::span<const u64> 
     std::vector<PhysicalBackingTextureOwnershipRecord> records;
     records.reserve(physical_backing_texture_tokens.size());
     for (const auto& [image_id, tokens] : physical_backing_texture_tokens) {
-        const auto write_order = physical_backing_texture_write_orders.find(image_id);
-        if (write_order == physical_backing_texture_write_orders.end()) {
+        const auto binding_order = physical_backing_texture_binding_orders.find(image_id);
+        if (binding_order == physical_backing_texture_binding_orders.end()) {
             return std::nullopt;
         }
         const Image& image = slot_images[image_id];
@@ -204,7 +204,7 @@ TextureCache::PlanPhysicalBackingTextureOwnershipComponent(std::span<const u64> 
             .image_index = image_id.index,
             .guest_base = image.info.guest_address,
             .guest_size = image.info.guest_size,
-            .write_order = write_order->second,
+            .binding_order = binding_order->second,
         };
         for (const auto& token : tokens) {
             record.physical_pages.insert(record.physical_pages.end(), token.physical_pages.begin(),
@@ -241,7 +241,7 @@ bool TextureCache::ReleasePhysicalBackingTextureOwnershipForBufferWrite(
     slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
     if (retained.empty()) {
         physical_backing_texture_tokens.erase(physical_tokens);
-        physical_backing_texture_write_orders.erase(image_id);
+        physical_backing_texture_binding_orders.erase(image_id);
     } else {
         physical_tokens->second = std::move(retained);
     }
@@ -906,10 +906,10 @@ void TextureCache::RegisterImage(ImageId image_id) {
 void TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, const Image& image) {
     const bool already_owned = physical_backing_texture_tokens.contains(image_id);
     if (!ShouldAcquirePhysicalBackingTextureOwnership(already_owned, true)) {
-        ASSERT_MSG(last_physical_backing_texture_write_order != std::numeric_limits<u64>::max(),
-                   "Physical backing texture write order overflow");
-        physical_backing_texture_write_orders[image_id] =
-            ++last_physical_backing_texture_write_order;
+        ASSERT_MSG(last_physical_backing_texture_binding_order != std::numeric_limits<u64>::max(),
+                   "Physical backing texture binding order overflow");
+        physical_backing_texture_binding_orders[image_id] =
+            ++last_physical_backing_texture_binding_order;
         return;
     }
     const auto physical_tokens = buffer_cache.BeginPhysicalBackingTextureOverlap(
@@ -917,10 +917,10 @@ void TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, cons
     ASSERT_MSG(physical_tokens.has_value(),
                "Failed to establish physical backing texture ownership");
     physical_backing_texture_tokens.emplace(image_id, std::move(*physical_tokens));
-    ASSERT_MSG(last_physical_backing_texture_write_order != std::numeric_limits<u64>::max(),
-               "Physical backing texture write order overflow");
-    physical_backing_texture_write_orders.emplace(image_id,
-                                                  ++last_physical_backing_texture_write_order);
+    ASSERT_MSG(last_physical_backing_texture_binding_order != std::numeric_limits<u64>::max(),
+               "Physical backing texture binding order overflow");
+    physical_backing_texture_binding_orders.emplace(image_id,
+                                                    ++last_physical_backing_texture_binding_order);
 }
 
 void TextureCache::UnregisterImage(ImageId image_id) {
@@ -932,7 +932,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
         ASSERT_MSG(buffer_cache.EndPhysicalBackingTextureOverlap(physical_tokens->second),
                    "Failed to release physical backing texture ownership");
         physical_backing_texture_tokens.erase(physical_tokens);
-        physical_backing_texture_write_orders.erase(image_id);
+        physical_backing_texture_binding_orders.erase(image_id);
     }
     image.flags &= ~ImageFlagBits::Registered;
     lru_cache.Free(image.lru_id);

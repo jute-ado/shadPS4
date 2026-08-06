@@ -106,13 +106,13 @@ public:
 
     template <typename Transition>
     [[nodiscard]] bool TransitionPhysicalBackingTextureOwnershipComponentForBufferAccess(
-        std::span<const u32> ordered_image_indices, Transition&& transition) {
+        std::span<const u32> oldest_to_newest_image_indices, Transition&& transition) {
         std::scoped_lock lock{mutex};
-        if (ordered_image_indices.empty()) {
+        if (oldest_to_newest_image_indices.empty()) {
             return false;
         }
         std::vector<PhysicalBackingTextureToken> component_tokens;
-        for (const u32 image_index : ordered_image_indices) {
+        for (const u32 image_index : oldest_to_newest_image_indices) {
             const ImageId image_id{image_index};
             const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
             if (physical_tokens == physical_backing_texture_tokens.end() ||
@@ -126,11 +126,11 @@ public:
                 std::span<const PhysicalBackingTextureToken>{component_tokens})) {
             return false;
         }
-        for (const u32 image_index : ordered_image_indices) {
+        for (const u32 image_index : oldest_to_newest_image_indices) {
             const ImageId image_id{image_index};
             slot_images[image_id].flags |= ImageFlagBits::GpuDirty;
             physical_backing_texture_tokens.erase(image_id);
-            physical_backing_texture_write_orders.erase(image_id);
+            physical_backing_texture_binding_orders.erase(image_id);
         }
         return true;
     }
@@ -385,8 +385,8 @@ private:
     PageTable page_table;
     std::unordered_map<ImageId, std::vector<PhysicalBackingTextureToken>>
         physical_backing_texture_tokens;
-    std::unordered_map<ImageId, u64> physical_backing_texture_write_orders;
-    u64 last_physical_backing_texture_write_order{};
+    std::unordered_map<ImageId, u64> physical_backing_texture_binding_orders;
+    u64 last_physical_backing_texture_binding_order{};
     std::mutex mutex;
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
