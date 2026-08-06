@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -60,6 +61,38 @@ struct PhysicalBackingTextureOwnershipComponent {
     PhysicalBackingTextureBufferTransition ownership_span{};
     std::vector<u64> physical_pages;
 };
+
+struct PhysicalBackingTexturePageSource {
+    u64 physical_page{};
+    VAddr guest_page{};
+
+    auto operator<=>(const PhysicalBackingTexturePageSource&) const = default;
+};
+
+[[nodiscard]] inline std::optional<std::vector<PhysicalBackingTexturePageSource>>
+PlanPhysicalBackingTexturePageSources(
+    std::span<const PhysicalBackingTexturePageSource> oldest_to_newest_candidates) {
+    constexpr u64 PageMask = 16_KB - 1;
+    if (oldest_to_newest_candidates.empty()) {
+        return std::nullopt;
+    }
+    std::unordered_map<u64, VAddr> newest_guest_page;
+    newest_guest_page.reserve(oldest_to_newest_candidates.size());
+    for (const auto& candidate : oldest_to_newest_candidates) {
+        if ((candidate.physical_page & PageMask) != 0 ||
+            (candidate.guest_page & PageMask) != 0) {
+            return std::nullopt;
+        }
+        newest_guest_page[candidate.physical_page] = candidate.guest_page;
+    }
+    std::vector<PhysicalBackingTexturePageSource> sources;
+    sources.reserve(newest_guest_page.size());
+    for (const auto& [physical_page, guest_page] : newest_guest_page) {
+        sources.push_back({physical_page, guest_page});
+    }
+    std::ranges::sort(sources, {}, &PhysicalBackingTexturePageSource::physical_page);
+    return sources;
+}
 
 [[nodiscard]] constexpr std::optional<PhysicalBackingTextureBufferTransition>
 PlanPhysicalBackingTextureOwnershipSpan(VAddr image_base, u64 image_size) noexcept {
