@@ -44,9 +44,15 @@ public:
             return std::nullopt;
         }
 
-        // Conservative RED behavior: model the existing global wait. The focused test requires
-        // selecting only ticks attached to the queried canonical physical pages.
-        return RequiredTickForAll();
+        std::optional<u64> highest;
+        for (const u64 page : physical_pages) {
+            const auto pending = pending_ticks.find(page);
+            if (pending == pending_ticks.end()) {
+                continue;
+            }
+            highest = highest ? std::max(*highest, pending->second) : pending->second;
+        }
+        return highest;
     }
 
     [[nodiscard]] std::optional<u64> RequiredTickForAll() const {
