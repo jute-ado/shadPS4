@@ -445,6 +445,7 @@ public:
             VAddr guest_page{};
             u64 physical_offset{};
             PhysicalBackingDeviceAddress override_page_address{};
+            std::optional<PhysicalBackingCachePageToken> existing_token;
         };
         std::vector<PendingOwner> pending;
         pending.reserve(requests.size());
@@ -464,21 +465,30 @@ public:
             }
             const u64 physical_offset = mapping_it->second.physical_offset;
             const auto aliases_it = physical_aliases.find(physical_offset);
+            const auto owner_it = active_cache_owners.find(physical_offset);
             if (!requested_physical_pages.emplace(physical_offset).second ||
                 aliases_it == physical_aliases.end() || aliases_it->second.empty() ||
-                active_cache_owners.contains(physical_offset) ||
                 pending_writebacks.contains(physical_offset)) {
                 return std::nullopt;
+            }
+            std::optional<PhysicalBackingCachePageToken> existing_token;
+            if (owner_it != active_cache_owners.end()) {
+                if (state.Resolve(request.guest_page) != request.override_page_address) {
+                    return std::nullopt;
+                }
+                existing_token = owner_it->second.token;
             }
             if (aliases_it->second.size() > std::numeric_limits<size_t>::max() - alias_count) {
                 return std::nullopt;
             }
             alias_count += aliases_it->second.size();
-            pending.push_back(
-                {request.guest_page, physical_offset, request.override_page_address});
+            pending.push_back({request.guest_page, physical_offset, request.override_page_address,
+                               existing_token});
         }
+        const auto new_owner_count = static_cast<u64>(std::ranges::count_if(
+            pending, [](const PendingOwner& owner) { return !owner.existing_token.has_value(); }));
         if (requested_physical_pages != texture_pages ||
-            pending.size() > std::numeric_limits<u64>::max() - last_owner_generation) {
+            new_owner_count > std::numeric_limits<u64>::max() - last_owner_generation) {
             return std::nullopt;
         }
 
@@ -486,36 +496,49 @@ public:
         result.owners.reserve(pending.size());
         result.deltas.reserve(alias_count);
         active_cache_owners.reserve(active_cache_owners.size() + pending.size());
-        std::vector<PhysicalBackingCachePageToken> staged_tokens;
-        staged_tokens.reserve(pending.size());
+        std::vector<std::optional<PhysicalBackingCachePageToken>> staged_tokens(pending.size());
+        std::vector<PhysicalBackingCachePageToken> newly_staged_tokens;
+        newly_staged_tokens.reserve(static_cast<size_t>(new_owner_count));
+        u64 new_owner_index = 0;
         for (size_t index = 0; index < pending.size(); ++index) {
             const auto& owner = pending[index];
-            const u64 owner_generation = last_owner_generation + index + 1;
+            if (owner.existing_token) {
+                staged_tokens[index] = owner.existing_token;
+                continue;
+            }
+            const u64 owner_generation = last_owner_generation + ++new_owner_index;
             const auto publication = state.ActivateOverride(
                 owner.physical_offset, owner.override_page_address, owner_generation);
             if (!publication) {
-                for (auto token_it = staged_tokens.rbegin(); token_it != staged_tokens.rend();
+                for (auto token_it = newly_staged_tokens.rbegin();
+                     token_it != newly_staged_tokens.rend();
                      ++token_it) {
                     static_cast<void>(state.RetireClean(token_it->publication));
                 }
                 return std::nullopt;
             }
-            staged_tokens.push_back({*publication});
+            staged_tokens[index] = PhysicalBackingCachePageToken{*publication};
+            newly_staged_tokens.push_back(*staged_tokens[index]);
         }
 
         for (const u64 physical_offset : texture_pages) {
             texture_block_generations.erase(physical_offset);
         }
-        last_owner_generation += pending.size();
+        last_owner_generation += new_owner_count;
         for (size_t index = 0; index < pending.size(); ++index) {
             const auto& owner = pending[index];
-            const auto& token = staged_tokens[index];
-            active_cache_owners.emplace(
-                owner.physical_offset,
-                ActiveCacheOwner{
-                    .token = token,
-                    .dirty_slices = {{0, static_cast<u32>(PageSize)}},
-                });
+            const auto& token = *staged_tokens[index];
+            if (owner.existing_token) {
+                active_cache_owners.find(owner.physical_offset)->second.dirty_slices = {
+                    {0, static_cast<u32>(PageSize)}};
+            } else {
+                active_cache_owners.emplace(
+                    owner.physical_offset,
+                    ActiveCacheOwner{
+                        .token = token,
+                        .dirty_slices = {{0, static_cast<u32>(PageSize)}},
+                    });
+            }
             result.owners.push_back({owner.guest_page, token});
             for (const VAddr guest_page : physical_aliases.find(owner.physical_offset)->second) {
                 result.deltas.push_back(
