@@ -4,10 +4,12 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <boost/icl/separate_interval_set.hpp>
 #include "common/arch.h"
 #include "common/enum.h"
 #include "common/types.h"
+#include "core/address_space_backing_lease.h"
 
 namespace Core {
 
@@ -36,6 +38,8 @@ public:
     [[nodiscard]] u64 BackingSize() const noexcept {
         return backing_size;
     }
+
+    [[nodiscard]] std::optional<AddressSpaceBackingLease> AcquireBackingLease() const noexcept;
 
     [[nodiscard]] VAddr SystemManagedVirtualBase() noexcept {
         return reinterpret_cast<VAddr>(system_managed_base);
