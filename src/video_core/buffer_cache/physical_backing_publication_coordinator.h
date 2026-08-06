@@ -93,6 +93,38 @@ public:
         return deltas;
     }
 
+    /// Atomically removes a complete guest range and returns zero page-table deltas.
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> UnmapRange(
+        VAddr guest_base, u64 size) {
+        if (size == 0 || !IsPageAligned(guest_base) || !IsPageAligned(size) ||
+            guest_base >= AddressSpaceSize || size > AddressSpaceSize - guest_base) {
+            return std::nullopt;
+        }
+
+        const size_t page_count = static_cast<size_t>(size / PageSize);
+        std::vector<PhysicalBackingMapping> mappings;
+        mappings.reserve(page_count);
+        for (u64 offset = 0; offset < size; offset += PageSize) {
+            const auto mapping_it = mapping_tokens.find(guest_base + offset);
+            if (mapping_it == mapping_tokens.end() ||
+                !state.CanUnmapGuestPage(mapping_it->second)) {
+                return std::nullopt;
+            }
+            mappings.push_back(mapping_it->second);
+        }
+
+        std::vector<PhysicalBackingBdaDelta> deltas;
+        deltas.reserve(page_count);
+        for (const PhysicalBackingMapping& mapping : mappings) {
+            if (!state.UnmapGuestPage(mapping)) {
+                return std::nullopt;
+            }
+            mapping_tokens.erase(mapping.guest_page);
+            deltas.push_back({mapping.guest_page, {}});
+        }
+        return deltas;
+    }
+
 private:
     [[nodiscard]] static constexpr bool IsPageAligned(u64 value) noexcept {
         return (value & (PageSize - 1)) == 0;
