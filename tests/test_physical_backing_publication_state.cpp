@@ -263,6 +263,83 @@ TEST(PhysicalBackingPublicationState, ThrowingWritebackCallbackRestoresRetryable
     EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationState, AliasFreeWritebackRejectsReallocationUntilCommitEnds) {
+    auto state = MakeState();
+    const auto mapping = state.MapGuestPage(GuestA, PhysicalPage, 1, 1);
+    ASSERT_TRUE(mapping.has_value());
+    const auto override =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 1);
+    ASSERT_TRUE(override.has_value());
+    ASSERT_TRUE(state.UnmapGuestPage(*mapping));
+    const auto writeback = state.RetireGpuDirty(*override);
+    ASSERT_TRUE(writeback.has_value());
+
+    u32 commit_count = 0;
+    EXPECT_FALSE(state.CommitOrderedWriteback(*writeback, [&] {
+        ++commit_count;
+        EXPECT_FALSE(state.ReallocatePhysicalPage(PhysicalPage, 1, 2));
+        return false;
+    }));
+    EXPECT_EQ(commit_count, 1u);
+
+    EXPECT_THROW((void)state.CommitOrderedWriteback(
+                     *writeback,
+                     [&]() -> bool {
+                         ++commit_count;
+                         EXPECT_FALSE(state.ReallocatePhysicalPage(PhysicalPage, 1, 2));
+                         throw std::runtime_error{"synthetic alias-free writeback failure"};
+                     }),
+                 std::runtime_error);
+    EXPECT_EQ(commit_count, 2u);
+
+    EXPECT_TRUE(state.CommitOrderedWriteback(*writeback, [&] {
+        ++commit_count;
+        return true;
+    }));
+    EXPECT_EQ(commit_count, 3u);
+    ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 2, 1));
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
+
+TEST(PhysicalBackingPublicationState, UnrelatedPhysicalMutationDoesNotInvalidateCommitGuard) {
+    auto state = MakeState();
+    ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 1, 1));
+    const auto override =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 1);
+    ASSERT_TRUE(override.has_value());
+    const auto writeback = state.RetireGpuDirty(*override);
+    ASSERT_TRUE(writeback.has_value());
+
+    u64 mapping_generation = 2;
+    u64 guest_page_index = 1;
+    EXPECT_FALSE(state.CommitOrderedWriteback(*writeback, [&] {
+        for (u64 physical_page_index = 0; physical_page_index < 16; ++physical_page_index) {
+            const u64 physical_offset = physical_page_index * PageSize;
+            if (physical_offset == PhysicalPage) {
+                continue;
+            }
+            EXPECT_TRUE(state.MapGuestPage(GuestA + guest_page_index * PageSize, physical_offset,
+                                           mapping_generation, 1));
+            ++mapping_generation;
+            ++guest_page_index;
+        }
+
+        const auto unrelated_override =
+            state.ActivateOverride(0, PhysicalBackingDeviceAddress{OverrideBase + 8 * PageSize}, 1);
+        EXPECT_TRUE(unrelated_override.has_value());
+        if (unrelated_override) {
+            EXPECT_TRUE(state.RetireClean(*unrelated_override));
+        }
+        EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+        return false;
+    }));
+
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+    EXPECT_EQ(state.Resolve(GuestB).value, ImportedBase);
+    EXPECT_TRUE(state.CommitOrderedWriteback(*writeback, [] { return true; }));
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
+
 TEST(PhysicalBackingPublicationState, UnmappingOneAliasDoesNotAffectAnother) {
     auto state = MakeState();
     const auto first = state.MapGuestPage(GuestA, PhysicalPage, 1, 1);
