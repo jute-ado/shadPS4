@@ -158,6 +158,29 @@ target_compile_features(shadps4_address_space_backing_size_test PRIVATE cxx_std_
 target_link_libraries(shadps4_address_space_backing_size_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_address_space_backing_size_test)
 
+if (WIN32)
+    add_executable(shadps4_windows_address_space_backing_test
+        test_windows_address_space_backing.cpp
+    )
+    target_include_directories(shadps4_windows_address_space_backing_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_compile_features(shadps4_windows_address_space_backing_test PRIVATE cxx_std_23)
+    target_compile_definitions(shadps4_windows_address_space_backing_test PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        NTDDI_VERSION=0x0A000006
+        _WIN32_WINNT=0x0A00
+        WINVER=0x0A00
+    )
+    target_link_libraries(shadps4_windows_address_space_backing_test PRIVATE
+        GTest::gtest_main
+        Boost::headers
+        onecore
+    )
+    list(APPEND TEST_TARGETS shadps4_windows_address_space_backing_test)
+endif()
+
 add_executable(shadps4_gnm_graphics_event_test
     test_gnm_graphics_event.cpp
 )
