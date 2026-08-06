@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
+
 #include "common/debug.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -447,6 +450,52 @@ bool Rasterizer::DepthStencilAttachmentWillWrite() const {
 }
 
 bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
+    enum class ProfileOutcome : size_t {
+        Success,
+        AccessFailure,
+        PlanFailure,
+        TransitionFailure,
+        Count,
+    };
+    static std::atomic<u64> profile_calls{};
+    static std::atomic<u64> profile_time_us{};
+    static std::atomic<u64> profile_resources{};
+    static std::atomic<u64> profile_pages{};
+    static std::array<std::atomic<u64>, static_cast<size_t>(ProfileOutcome::Count)>
+        profile_outcomes{};
+
+    const u64 profile_call = profile_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto profile_start = std::chrono::steady_clock::now();
+    u64 profile_resolved_pages{};
+    const auto finish_profile = [&](bool result, ProfileOutcome outcome, size_t resource_count) {
+        const u64 elapsed_us =
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - profile_start)
+                                 .count());
+        profile_time_us.fetch_add(elapsed_us, std::memory_order_relaxed);
+        profile_resources.fetch_add(resource_count, std::memory_order_relaxed);
+        profile_pages.fetch_add(profile_resolved_pages, std::memory_order_relaxed);
+        profile_outcomes[static_cast<size_t>(outcome)].fetch_add(1, std::memory_order_relaxed);
+        if (profile_call >= 128 && (profile_call & (profile_call - 1)) == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "Physical command profile calls={} success={} access_fail={} plan_fail={} "
+                     "transition_fail={} total_us={} last_us={} resources={} pages={}",
+                     profile_call,
+                     profile_outcomes[static_cast<size_t>(ProfileOutcome::Success)].load(
+                         std::memory_order_relaxed),
+                     profile_outcomes[static_cast<size_t>(ProfileOutcome::AccessFailure)].load(
+                         std::memory_order_relaxed),
+                     profile_outcomes[static_cast<size_t>(ProfileOutcome::PlanFailure)].load(
+                         std::memory_order_relaxed),
+                     profile_outcomes[static_cast<size_t>(ProfileOutcome::TransitionFailure)].load(
+                         std::memory_order_relaxed),
+                     profile_time_us.load(std::memory_order_relaxed), elapsed_us,
+                     profile_resources.load(std::memory_order_relaxed),
+                     profile_pages.load(std::memory_order_relaxed));
+        }
+        return result;
+    };
+
     using Kind = VideoCore::PhysicalBackingCommandResourceKind;
     using Resource = VideoCore::PhysicalBackingCommandResource;
     using Access = VideoCore::PhysicalBackingCommandAccess;
@@ -475,6 +524,7 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         if (!physical_pages) {
             return false;
         }
+        profile_resolved_pages += physical_pages->size();
         accesses.push_back({resource, is_written, *physical_pages});
         return true;
     };
@@ -493,7 +543,7 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
             const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
             if (!add_access(Kind::Buffer, vsharp.base_address, size, desc.is_written,
                             buffer_id.index)) {
-                return false;
+                return finish_profile(false, ProfileOutcome::AccessFailure, resources.size());
             }
         }
         for (const auto& image_resource : stage->images) {
@@ -524,7 +574,7 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
                 }
                 if (!add_access(Kind::Texture, image->info.guest_address, image->info.guest_size,
                                 image_resource.is_written, image_id.index)) {
-                    return false;
+                    return finish_profile(false, ProfileOutcome::AccessFailure, resources.size());
                 }
             }
         }
@@ -538,20 +588,20 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
             const auto& [image_id, desc] = cb_descs[cb];
             if (image_id && !add_access(Kind::Texture, desc.info.guest_address,
                                         desc.info.guest_size, true, image_id.index)) {
-                return false;
+                return finish_profile(false, ProfileOutcome::AccessFailure, resources.size());
             }
         }
         if (db_desc.first && !add_access(Kind::Texture, db_desc.second.info.guest_address,
                                          db_desc.second.info.guest_size,
                                          DepthStencilAttachmentWillWrite(), db_desc.first.index)) {
-            return false;
+            return finish_profile(false, ProfileOutcome::AccessFailure, resources.size());
         }
     }
 
     const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
     if (!plan) {
         LOG_ERROR(Render_Vulkan, "Rejected GPU command with invalid physical-backing aliases");
-        return false;
+        return finish_profile(false, ProfileOutcome::PlanFailure, resources.size());
     }
     for (const Resource resource : plan->read_snapshot_order) {
         bool found = false;
@@ -561,12 +611,12 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
             }
             found = true;
             if (!buffer_cache.TransitionAuthoritativeTextureForDmaRead(range.address, range.size)) {
-                return false;
+                return finish_profile(false, ProfileOutcome::TransitionFailure, resources.size());
             }
         }
         ASSERT(found);
     }
-    return true;
+    return finish_profile(true, ProfileOutcome::Success, resources.size());
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
