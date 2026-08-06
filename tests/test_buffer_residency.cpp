@@ -445,12 +445,12 @@ TEST(BufferResidency, RetainsOnlyCompleteExclusiveTextureOwnership) {
 
     ASSERT_TRUE(exclusive.has_value());
     ASSERT_TRUE(overlapping.has_value());
-    EXPECT_TRUE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
-        24, complete_pages, *exclusive));
-    EXPECT_FALSE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
-        24, partial_pages, *exclusive));
-    EXPECT_FALSE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(
-        24, complete_pages, *overlapping));
+    EXPECT_TRUE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(24, complete_pages,
+                                                                               *exclusive));
+    EXPECT_FALSE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(24, partial_pages,
+                                                                                *exclusive));
+    EXPECT_FALSE(VideoCore::HasCompleteExclusivePhysicalBackingTextureOwnership(24, complete_pages,
+                                                                                *overlapping));
 }
 
 TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
