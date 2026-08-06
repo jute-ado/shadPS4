@@ -216,6 +216,18 @@ public:
                                  has_texture_overlap);
     }
 
+    [[nodiscard]] std::optional<PhysicalBackingDeviceAddress> ResolveGuestPagePublication(
+        VAddr guest_page) const {
+        if (!IsPageAligned(guest_page)) {
+            return std::nullopt;
+        }
+        const auto mapping_it = mapping_tokens.find(guest_page);
+        if (mapping_it == mapping_tokens.end()) {
+            return std::nullopt;
+        }
+        return PublishedAddress(guest_page, mapping_it->second.physical_offset);
+    }
+
     [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(
         const PhysicalBackingCachePageToken& token) {
         const auto owner_it = FindActiveCacheOwner(token);
