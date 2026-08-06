@@ -133,3 +133,10 @@ TEST(BufferResidency, ReleasesOnlyTextureTokensConflictingWithBufferWrite) {
     EXPECT_TRUE(VideoCore::PhysicalBackingPagesIntersect(texture_pages, conflicting_pages));
     EXPECT_FALSE(VideoCore::PhysicalBackingPagesIntersect(texture_pages, unrelated_pages));
 }
+
+TEST(BufferResidency, TracksTheActualTextureMirrorProducer) {
+    EXPECT_EQ(VideoCore::PhysicalBackingTextureMirrorProducer(true),
+              VideoCore::PhysicalBackingTextureProducer::ComputeShader);
+    EXPECT_EQ(VideoCore::PhysicalBackingTextureMirrorProducer(false),
+              VideoCore::PhysicalBackingTextureProducer::Copy);
+}
