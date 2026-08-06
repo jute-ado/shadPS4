@@ -734,10 +734,11 @@ public:
             const u64 physical_offset = mapping_it->second.physical_offset;
             const auto owner_it = active_cache_owners.find(physical_offset);
             if (owner_it == active_cache_owners.end() ||
-                pending_writebacks.contains(physical_offset) ||
-                texture_block_generations.contains(physical_offset)) {
+                pending_writebacks.contains(physical_offset)) {
                 return std::nullopt;
             }
+            // A replacement copies the retained cache mirror without taking texture authority.
+            // Active texture tokens continue to suppress every alias until their overlap ends.
             pending.push_back({request.guest_page, physical_offset,
                                request.override_page_address, owner_it->second.token});
         }
