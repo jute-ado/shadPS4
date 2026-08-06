@@ -551,13 +551,22 @@ bool BufferCache::RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 
                (*retirements)[end_index].buffer_index == buffer_index) {
             ++end_index;
         }
-        std::vector<u32> owner_indices;
-        owner_indices.reserve(end_index - begin);
-        for (size_t index = begin; index < end_index; ++index) {
-            owner_indices.push_back((*retirements)[index].owner_index);
-        }
-        if (!RetirePhysicalBackingCachePagesForCpuWrite(BufferId{buffer_index}, owner_indices)) {
+        const auto batches = PlanPhysicalBackingRetirementBatches(
+            end_index - begin, download_buffer.SizeBytes() / 2, CACHING_PAGESIZE);
+        if (!batches) {
             return false;
+        }
+        for (auto batch = batches->rbegin(); batch != batches->rend(); ++batch) {
+            std::vector<u32> owner_indices;
+            owner_indices.reserve(batch->count);
+            for (size_t index = begin + batch->begin;
+                 index < begin + batch->begin + batch->count; ++index) {
+                owner_indices.push_back((*retirements)[index].owner_index);
+            }
+            if (!RetirePhysicalBackingCachePagesForCpuWrite(BufferId{buffer_index},
+                                                             owner_indices)) {
+                return false;
+            }
         }
         begin = end_index;
     }

@@ -406,7 +406,26 @@ PlanPhysicalBackingRetirementBatches(size_t owner_count, u64 staging_budget,
     if (owner_count == 0) {
         return std::vector<PhysicalBackingRetirementBatch>{};
     }
-    return std::vector<PhysicalBackingRetirementBatch>{{0, owner_count}};
+    if (staging_budget == 0 || maximum_bytes_per_owner == 0 ||
+        maximum_bytes_per_owner > staging_budget) {
+        return std::nullopt;
+    }
+    const u64 owners_per_batch_u64 = staging_budget / maximum_bytes_per_owner;
+    const size_t owners_per_batch = static_cast<size_t>(
+        std::min<u64>(owners_per_batch_u64, std::numeric_limits<size_t>::max()));
+    if (owners_per_batch == 0) {
+        return std::nullopt;
+    }
+
+    std::vector<PhysicalBackingRetirementBatch> batches;
+    batches.reserve(owner_count / owners_per_batch +
+                    static_cast<size_t>(owner_count % owners_per_batch != 0));
+    for (size_t begin = 0; begin < owner_count;) {
+        const size_t count = std::min(owners_per_batch, owner_count - begin);
+        batches.push_back({begin, count});
+        begin += count;
+    }
+    return batches;
 }
 
 [[nodiscard]] inline std::optional<PhysicalBackingCommandAliasPlan>
