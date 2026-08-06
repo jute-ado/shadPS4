@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/tiling_work_range.h"
 
 namespace VideoCore {
 
@@ -126,6 +127,21 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
     download_buffer.Commit();
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
+    boost::container::small_vector<vk::BufferMemoryBarrier2, 1> barriers;
+    for (const auto& copy : copies) {
+        if (auto barrier = buffer.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                                             vk::PipelineStageFlagBits2::eTransfer, copy.srcOffset,
+                                             copy.size)) {
+            barriers.push_back(*barrier);
+        }
+    }
+    if (!barriers.empty()) {
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = static_cast<u32>(barriers.size()),
+            .pBufferMemoryBarriers = barriers.data(),
+        });
+    }
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
     const auto write_data = [&]() {
         auto* memory = Core::Memory::Instance();
@@ -149,9 +165,8 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
     }
 }
 
-void BufferCache::BindVertexBuffers(
-    const Vulkan::GraphicsPipeline& pipeline,
-    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+void BufferCache::BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
+                                    BufferAccessRangeBatch& buffer_accesses) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -214,11 +229,8 @@ void BufferCache::BindVertexBuffers(
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
         if (IsRegionGpuModified(range.base_address, size)) {
-            if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
-                                                  vk::PipelineStageFlagBits2::eVertexAttributeInput,
-                                                  offset, size)) {
-                barriers.emplace_back(*barrier);
-            }
+            buffer_accesses.Add(buffer, offset, size, vk::AccessFlagBits2::eVertexAttributeRead,
+                                vk::PipelineStageFlagBits2::eVertexAttributeInput);
         }
     }
 
@@ -256,8 +268,7 @@ void BufferCache::BindVertexBuffers(
     }
 }
 
-void BufferCache::BindIndexBuffer(
-    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+void BufferCache::BindIndexBuffer(u32 index_offset, BufferAccessRangeBatch& buffer_accesses) {
     const auto& regs = liverpool->regs;
 
     // Figure out index type and size.
@@ -271,11 +282,8 @@ void BufferCache::BindIndexBuffer(
     const u32 index_buffer_size = regs.num_indices * index_size;
     const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
     if (IsRegionGpuModified(index_address, index_buffer_size)) {
-        if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
-                                                 vk::PipelineStageFlagBits2::eIndexInput, offset,
-                                                 index_buffer_size)) {
-            barriers.emplace_back(*barrier);
-        }
+        buffer_accesses.Add(vk_buffer, offset, index_buffer_size, vk::AccessFlagBits2::eIndexRead,
+                            vk::PipelineStageFlagBits2::eIndexInput);
     }
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
@@ -805,16 +813,25 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
                "Texel buffer aliases image subresources {:x} : {:x}", device_addr,
                image.info.guest_address);
     const u32 buf_offset = buffer.Offset(image.info.guest_address);
+    if (buf_offset > buffer.SizeBytes()) {
+        return false;
+    }
+    std::array<BasicTilingMipRange, 16> mip_ranges{};
+    if (image.info.resources.levels > mip_ranges.size()) {
+        return false;
+    }
+    for (u32 mip = 0; mip < image.info.resources.levels; ++mip) {
+        const auto& mip_info = image.info.mips_layout[mip];
+        mip_ranges[mip] = {.offset = mip_info.offset, .size = mip_info.size};
+    }
+    const auto work = ComputeTilingWorkRange(
+        std::span{mip_ranges}.first(image.info.resources.levels), buffer.SizeBytes() - buf_offset);
     boost::container::small_vector<vk::BufferImageCopy, 8> buffer_copies;
-    u32 copy_size = 0;
-    for (u32 mip = 0; mip < image.info.resources.levels; mip++) {
+    for (u32 mip = 0; mip < work.num_mips; mip++) {
         const auto& mip_info = image.info.mips_layout[mip];
         const u32 width = std::max(image.info.size.width >> mip, 1u);
         const u32 height = std::max(image.info.size.height >> mip, 1u);
         const u32 depth = std::max(image.info.size.depth >> mip, 1u);
-        if (buf_offset + mip_info.offset + mip_info.size > buffer.SizeBytes()) {
-            break;
-        }
         buffer_copies.push_back(vk::BufferImageCopy{
             .bufferOffset = mip_info.offset,
             .bufferRowLength = mip_info.pitch,
@@ -828,19 +845,20 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
             .imageOffset = {0, 0, 0},
             .imageExtent = {width, height, depth},
         });
-        copy_size += mip_info.size;
     }
-    if (copy_size == 0) {
+    if (buffer_copies.empty()) {
         return false;
     }
     auto& tile_manager = texture_cache.GetTileManager();
-    tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
+    tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, work.buffer_span,
+                           work.dispatch_size);
     if (image.info.props.is_tiled) {
         buffer.RecordAccess(vk::AccessFlagBits2::eShaderWrite,
-                            vk::PipelineStageFlagBits2::eComputeShader, buf_offset, copy_size);
+                            vk::PipelineStageFlagBits2::eComputeShader, buf_offset,
+                            work.buffer_span);
     } else {
         buffer.RecordAccess(vk::AccessFlagBits2::eMemoryRead,
-                            vk::PipelineStageFlagBits2::eAllCommands, buf_offset, copy_size);
+                            vk::PipelineStageFlagBits2::eAllCommands, buf_offset, work.buffer_span);
     }
     return true;
 }

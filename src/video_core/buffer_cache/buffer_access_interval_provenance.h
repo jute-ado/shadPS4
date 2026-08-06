@@ -27,8 +27,9 @@ public:
 
     BasicBufferAccessRangeState() = default;
 
-    BasicBufferAccessRangeState(std::uint64_t size, Access initial_access, Stages initial_stages)
-        : total_size{size} {
+    BasicBufferAccessRangeState(std::uint64_t size, Access initial_access, Stages initial_stages,
+                                Access write_accesses = {})
+        : total_size{size}, write_access_mask{write_accesses} {
         if (size != 0) {
             intervals[0] = State{
                 .offset = 0,
@@ -50,20 +51,35 @@ public:
         TransitionResult result{};
         bool saw_prior = false;
         bool destination_matches_prior = true;
+        bool prior_has_write = false;
+        std::size_t exact_interval = MaxIntervals;
         for (std::size_t i = 0; i < interval_count; ++i) {
             const auto& state = intervals[i];
             if (!Overlaps(offset, size, state.offset, state.size)) {
                 continue;
             }
             saw_prior = true;
+            if (state.offset == offset && state.size == size) {
+                exact_interval = i;
+            }
             result.prior_access |= state.access;
             result.prior_stages |= state.stages;
+            prior_has_write |= static_cast<bool>(state.access & write_access_mask);
             destination_matches_prior &= !state.conservative &&
                                          state.access == destination_access &&
                                          state.stages == destination_stages;
         }
-        result.requires_barrier = saw_prior && !destination_matches_prior;
+        const bool destination_has_write =
+            static_cast<bool>(destination_access & write_access_mask);
+        result.requires_barrier =
+            saw_prior && (!destination_matches_prior || prior_has_write || destination_has_write);
         if (!result.requires_barrier) {
+            return result;
+        }
+        if (exact_interval != MaxIntervals) {
+            intervals[exact_interval].access = destination_access;
+            intervals[exact_interval].stages = destination_stages;
+            intervals[exact_interval].conservative = false;
             return result;
         }
 
@@ -170,6 +186,7 @@ private:
     std::array<State, MaxIntervals> intervals{};
     std::uint64_t total_size{};
     std::size_t interval_count{};
+    Access write_access_mask{};
 };
 
 } // namespace VideoCore

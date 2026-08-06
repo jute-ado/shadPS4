@@ -1079,6 +1079,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/amdgpu/tiling.h
                src/video_core/buffer_cache/buffer.cpp
                src/video_core/buffer_cache/buffer.h
+               src/video_core/buffer_cache/buffer_access_interval_provenance.h
+               src/video_core/buffer_cache/buffer_access_range_batch.h
                src/video_core/buffer_cache/buffer_cache.cpp
                src/video_core/buffer_cache/buffer_cache.h
                src/video_core/buffer_cache/fault_manager.cpp
@@ -1142,6 +1144,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/texture_cache/texture_cache.h
                src/video_core/texture_cache/tile_manager.cpp
                src/video_core/texture_cache/tile_manager.h
+               src/video_core/texture_cache/tiling_work_range.h
                src/video_core/texture_cache/types.h
                src/video_core/cache_storage.cpp
                src/video_core/cache_storage.h

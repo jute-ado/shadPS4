@@ -242,13 +242,14 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                            vk::Buffer out_buffer, u32 out_offset, u32 copy_size) {
+                            vk::Buffer out_buffer, u32 out_offset, u64 buffer_span,
+                            u64 dispatch_size) {
     const auto& info = in_image.info;
     if (!info.props.is_tiled) {
         for (auto& copy : buffer_copies) {
             copy.bufferOffset += out_offset;
         }
-        in_image.Download(buffer_copies, out_buffer, out_offset, copy_size);
+        in_image.Download(buffer_copies, out_buffer, out_offset, buffer_span);
         return;
     }
 
@@ -277,20 +278,20 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     });
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    in_image.Download(buffer_copies, temp_buffer, 0, copy_size);
+    in_image.Download(buffer_copies, temp_buffer, 0, buffer_span);
 
     scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, GetTilingPipeline(info, true));
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = out_buffer,
         .offset = out_offset,
-        .range = info.guest_size,
+        .range = buffer_span,
     };
 
     const vk::DescriptorBufferInfo linear_buffer_info{
         .buffer = temp_buffer,
         .offset = 0,
-        .range = info.guest_size,
+        .range = dispatch_size,
     };
 
     const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
@@ -321,7 +322,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     }};
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
-    const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
+    const auto dim_x = static_cast<u32>((dispatch_size / (info.num_bits / 8)) / 64);
     cmdbuf.dispatch(dim_x, 1, 1);
 }
 

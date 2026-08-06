@@ -207,11 +207,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_accesses);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+        buffer_cache.BindIndexBuffer(index_offset, buffer_accesses);
     }
 
+    FinalizeBufferAccesses();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
@@ -255,9 +256,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_accesses);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
+        buffer_cache.BindIndexBuffer(0, buffer_accesses);
     }
 
     const auto& [buffer, base] =
@@ -269,19 +270,14 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
     }
 
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect, base,
-                                          stride * max_count)) {
-        buffer_barriers.emplace_back(*barrier);
-    }
+    buffer_accesses.Add(buffer, base, stride * max_count, vk::AccessFlagBits2::eIndirectCommandRead,
+                        vk::PipelineStageFlagBits2::eDrawIndirect);
     if (count_buffer) {
-        if (auto barrier = count_buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                                    vk::PipelineStageFlagBits2::eDrawIndirect,
-                                                    count_base, 4)) {
-            buffer_barriers.emplace_back(*barrier);
-        }
+        buffer_accesses.Add(count_buffer, count_base, 4, vk::AccessFlagBits2::eIndirectCommandRead,
+                            vk::PipelineStageFlagBits2::eDrawIndirect);
     }
 
+    FinalizeBufferAccesses();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
@@ -336,6 +332,7 @@ void Rasterizer::DispatchDirect() {
     }
 
     scheduler.EndRendering();
+    FinalizeBufferAccesses();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -362,12 +359,11 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
 
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect, base, size)) {
-        buffer_barriers.emplace_back(*barrier);
-    }
+    buffer_accesses.Add(buffer, base, size, vk::AccessFlagBits2::eIndirectCommandRead,
+                        vk::PipelineStageFlagBits2::eDrawIndirect);
 
     scheduler.EndRendering();
+    FinalizeBufferAccesses();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -407,6 +403,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     set_write_index = 0;
     set_writes.clear();
     buffer_barriers.clear();
+    buffer_accesses.Clear();
     buffer_infos.clear();
     image_infos.clear();
 
@@ -653,12 +650,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
-            if (auto barrier = vk_buffer->GetBarrier(
-                    desc.is_written ? vk::AccessFlagBits2::eShaderWrite
-                                    : vk::AccessFlagBits2::eShaderRead,
-                    vk::PipelineStageFlagBits2::eAllCommands, offset_aligned, size + adjust)) {
-                buffer_barriers.emplace_back(*barrier);
+            vk::AccessFlags2 access = vk::AccessFlagBits2::eShaderRead;
+            if (desc.is_written) {
+                access |= vk::AccessFlagBits2::eShaderWrite;
             }
+            buffer_accesses.Add(vk_buffer, offset_aligned, size + adjust, access,
+                                vk::PipelineStageFlagBits2::eAllCommands);
             if (desc.is_written && desc.is_formatted) {
                 texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
             }
@@ -674,6 +671,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
     }
+}
+
+void Rasterizer::FinalizeBufferAccesses() {
+    for (const auto& access : buffer_accesses.Entries()) {
+        if (auto barrier =
+                access.key->GetBarrier(access.access, access.stages, access.offset, access.size)) {
+            buffer_barriers.emplace_back(*barrier);
+        }
+    }
+    buffer_accesses.Clear();
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {

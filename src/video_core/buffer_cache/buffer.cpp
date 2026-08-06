@@ -107,7 +107,9 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
       access_state{size_bytes_,
                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
                        vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
-                   vk::PipelineStageFlagBits2::eAllCommands} {
+                   vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransferWrite |
+                       vk::AccessFlagBits2::eShaderWrite} {
     // Create buffer object.
     const vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,

@@ -8,6 +8,7 @@
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/buffer_access_range_batch.h"
 #include "video_core/buffer_cache/cpu_page_write_snapshot.h"
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
@@ -29,6 +30,8 @@ class GraphicsPipeline;
 namespace VideoCore {
 
 using BufferId = Common::SlotId;
+using BufferAccessRangeBatch =
+    BasicBufferAccessRangeBatch<Buffer*, vk::AccessFlags2, vk::PipelineStageFlags2>;
 
 class TextureCache;
 class MemoryTracker;
@@ -113,11 +116,10 @@ public:
 
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
-                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+                           BufferAccessRangeBatch& buffer_accesses);
 
     /// Bind host index buffer for the current draw.
-    void BindIndexBuffer(u32 index_offset,
-                         boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+    void BindIndexBuffer(u32 index_offset, BufferAccessRangeBatch& buffer_accesses);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
