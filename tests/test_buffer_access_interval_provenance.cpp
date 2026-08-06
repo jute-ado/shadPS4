@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstdint>
 
 #include <gtest/gtest.h>
 
 #include "video_core/buffer_cache/buffer_access_interval_provenance.h"
 #include "video_core/buffer_cache/buffer_access_range_batch.h"
+#include "video_core/texture_cache/tiling_work_range.h"
 
 namespace {
 
@@ -101,7 +103,7 @@ TEST(BufferAccessRangeBatch, OverlappingCurrentAccessesAreOrderIndependentAndRan
     read_then_write.Add(7, 0, 64, 0x02, 0x20);
 
     ASSERT_EQ(write_then_read.Entries().size(), 3);
-    EXPECT_EQ(write_then_read.Entries(), read_then_write.Entries());
+    EXPECT_TRUE(std::ranges::equal(write_then_read.Entries(), read_then_write.Entries()));
     EXPECT_EQ(write_then_read.Entries()[0], (RangeBatch::Entry{7, 0, 32, 0x02, 0x20}));
     EXPECT_EQ(write_then_read.Entries()[1], (RangeBatch::Entry{7, 32, 32, 0x03, 0x30}));
     EXPECT_EQ(write_then_read.Entries()[2], (RangeBatch::Entry{7, 64, 32, 0x01, 0x10}));
@@ -127,6 +129,70 @@ TEST(BufferAccessRangeBatch, ClearStartsANewCommand) {
 
     ASSERT_EQ(batch.Entries().size(), 1);
     EXPECT_EQ(batch.Entries()[0], (RangeBatch::Entry{17, 0, 64, 0x01, 0x10}));
+}
+
+TEST(BufferAccessRangeBatch, DeterministicOverlaysMatchAByteReferenceModel) {
+    RangeBatch batch;
+    std::array<std::array<std::uint32_t, 64>, 2> reference_access{};
+    std::array<std::array<std::uint32_t, 64>, 2> reference_stages{};
+    std::uint32_t sequence = 0xC001D00D;
+    for (std::uint32_t operation = 0; operation < 96; ++operation) {
+        sequence = sequence * 1664525U + 1013904223U;
+        const std::uint32_t key_index = sequence & 1U;
+        const std::uint32_t offset = (sequence >> 8) % 56;
+        const std::uint32_t size = 1 + ((sequence >> 16) % (64 - offset));
+        const std::uint32_t access = 1U << (operation % 8);
+        const std::uint32_t stages = 1U << (8 + operation % 8);
+        batch.Add(100 + key_index, offset, size, access, stages);
+        for (std::uint32_t byte = offset; byte < offset + size; ++byte) {
+            reference_access[key_index][byte] |= access;
+            reference_stages[key_index][byte] |= stages;
+        }
+    }
+
+    std::array<std::array<std::uint32_t, 64>, 2> actual_access{};
+    std::array<std::array<std::uint32_t, 64>, 2> actual_stages{};
+    std::array<std::uint64_t, 2> prior_end{};
+    for (const auto& entry : batch.Entries()) {
+        const auto key_index = entry.key - 100;
+        ASSERT_LT(key_index, 2U);
+        EXPECT_GE(entry.offset, prior_end[key_index]);
+        prior_end[key_index] = entry.offset + entry.size;
+        ASSERT_LE(prior_end[key_index], 64U);
+        for (auto byte = entry.offset; byte < entry.offset + entry.size; ++byte) {
+            actual_access[key_index][byte] = entry.access;
+            actual_stages[key_index][byte] = entry.stages;
+        }
+    }
+    EXPECT_EQ(actual_access, reference_access);
+    EXPECT_EQ(actual_stages, reference_stages);
+}
+
+TEST(TilingWorkRange, StopsBeforeTheFirstMipThatDoesNotFit) {
+    const std::array mips = {
+        VideoCore::BasicTilingMipRange{.offset = 0, .size = 128},
+        VideoCore::BasicTilingMipRange{.offset = 128, .size = 64},
+        VideoCore::BasicTilingMipRange{.offset = 192, .size = 32},
+    };
+
+    const auto work = VideoCore::ComputeTilingWorkRange(mips, 192);
+
+    EXPECT_EQ(work.num_mips, 2);
+    EXPECT_EQ(work.buffer_span, 192);
+    EXPECT_EQ(work.dispatch_size, 192);
+}
+
+TEST(TilingWorkRange, DistinguishesSparseBufferSpanFromDispatchBytes) {
+    const std::array mips = {
+        VideoCore::BasicTilingMipRange{.offset = 0, .size = 64},
+        VideoCore::BasicTilingMipRange{.offset = 128, .size = 32},
+    };
+
+    const auto work = VideoCore::ComputeTilingWorkRange(mips, 160);
+
+    EXPECT_EQ(work.num_mips, 2);
+    EXPECT_EQ(work.buffer_span, 160);
+    EXPECT_EQ(work.dispatch_size, 96);
 }
 
 } // namespace
