@@ -116,13 +116,15 @@ ExternalAddressSpaceBacking::ExternalAddressSpaceBacking(const Instance& instanc
         .usage = ImportedBufferUsage,
         .sharingMode = vk::SharingMode::eExclusive,
     };
-    auto [buffer_result, candidate_buffer] = device.createBufferUnique(buffer_info);
+    ExternalAddressSpaceImportStaging<vk::UniqueDeviceMemory, vk::UniqueBuffer> candidates;
+    auto [buffer_result, created_buffer] = device.createBufferUnique(buffer_info);
     if (buffer_result != vk::Result::eSuccess) {
         LogUnavailable("buffer creation failed");
         return;
     }
+    candidates.buffer.emplace(std::move(created_buffer));
 
-    const auto memory_requirements = device.getBufferMemoryRequirements(*candidate_buffer);
+    const auto memory_requirements = device.getBufferMemoryRequirements(**candidates.buffer);
     const auto [host_pointer_result, host_pointer_properties] =
         device.getMemoryHostPointerPropertiesEXT(HostAllocationHandle, lease.Base());
     if (host_pointer_result != vk::Result::eSuccess) {
@@ -170,7 +172,7 @@ ExternalAddressSpaceBacking::ExternalAddressSpaceBacking(const Instance& instanc
         .pHostPointer = lease.Base(),
     };
     const vk::MemoryDedicatedAllocateInfo dedicated_info{
-        .buffer = *candidate_buffer,
+        .buffer = **candidates.buffer,
     };
     const vk::MemoryAllocateFlagsInfo allocation_flags{
         .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
@@ -184,24 +186,27 @@ ExternalAddressSpaceBacking::ExternalAddressSpaceBacking(const Instance& instanc
         dedicated_info,
         allocation_flags,
     };
-    auto [memory_result, candidate_memory] =
+    auto [memory_result, created_memory] =
         device.allocateMemoryUnique(allocation_chain.get<vk::MemoryAllocateInfo>());
     if (memory_result != vk::Result::eSuccess) {
         LogUnavailable("host memory import failed");
         return;
     }
-    if (device.bindBufferMemory(*candidate_buffer, *candidate_memory, 0) != vk::Result::eSuccess) {
+    candidates.memory.emplace(std::move(created_memory));
+    if (device.bindBufferMemory(**candidates.buffer, **candidates.memory, 0) !=
+        vk::Result::eSuccess) {
         LogUnavailable("imported memory bind failed");
         return;
     }
 
-    const vk::DeviceAddress address = device.getBufferAddress({.buffer = *candidate_buffer});
+    const vk::DeviceAddress address = device.getBufferAddress({.buffer = **candidates.buffer});
     if (address == 0) {
         LogUnavailable("buffer device address is zero");
         return;
     }
 
-    resources.emplace(std::move(lease), std::move(candidate_memory), std::move(candidate_buffer));
+    resources.emplace(std::move(lease), std::move(*candidates.memory),
+                      std::move(*candidates.buffer));
     device_address = address;
     LOG_INFO(
         Render_Vulkan,
