@@ -7,6 +7,7 @@
 #include "common/scope_exit.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_access_provenance_trace.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
@@ -22,6 +23,22 @@ static constexpr size_t StagingBufferSize = 512_MB;
 static constexpr size_t DownloadBufferSize = 32_MB;
 static constexpr size_t UboStreamBufferSize = 64_MB;
 static constexpr size_t DeviceBufferSize = 128_MB;
+
+static BufferBarrierObservation BarrierObservation(
+    const std::optional<vk::BufferMemoryBarrier2>& barrier) {
+    if (!barrier.has_value()) {
+        return {};
+    }
+    return BufferBarrierObservation{
+        .emitted = true,
+        .offset = barrier->offset,
+        .size = barrier->size,
+        .source_access = static_cast<VkAccessFlags2>(barrier->srcAccessMask),
+        .source_stages = static_cast<VkPipelineStageFlags2>(barrier->srcStageMask),
+        .destination_access = static_cast<VkAccessFlags2>(barrier->dstAccessMask),
+        .destination_stages = static_cast<VkPipelineStageFlags2>(barrier->dstStageMask),
+    };
+}
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          AmdGpu::Liverpool* liverpool_, TextureCache& texture_cache_,
@@ -151,7 +168,8 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 
 void BufferCache::BindVertexBuffers(
     const Vulkan::GraphicsPipeline& pipeline,
-    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    BufferAccessProvenanceTrace* access_trace) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -213,12 +231,21 @@ void BufferCache::BindVertexBuffers(
         const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
+        std::optional<vk::BufferMemoryBarrier2> barrier;
         if (IsRegionGpuModified(range.base_address, size)) {
-            if (auto barrier =
-                    buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
-                                       vk::PipelineStageFlagBits2::eVertexAttributeInput)) {
+            barrier = buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
+                                         vk::PipelineStageFlagBits2::eVertexAttributeInput);
+            if (barrier.has_value()) {
                 barriers.emplace_back(*barrier);
             }
+        }
+        if (access_trace != nullptr) {
+            access_trace->Observe(
+                buffer, offset, size, BufferAccessRole::VertexRead,
+                static_cast<VkAccessFlags2>(vk::AccessFlagBits2::eVertexAttributeRead),
+                static_cast<VkPipelineStageFlags2>(
+                    vk::PipelineStageFlagBits2::eVertexAttributeInput),
+                false, BarrierObservation(barrier));
         }
     }
 
@@ -257,7 +284,8 @@ void BufferCache::BindVertexBuffers(
 }
 
 void BufferCache::BindIndexBuffer(
-    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    BufferAccessProvenanceTrace* access_trace) {
     const auto& regs = liverpool->regs;
 
     // Figure out index type and size.
@@ -270,11 +298,20 @@ void BufferCache::BindIndexBuffer(
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
     const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
+    std::optional<vk::BufferMemoryBarrier2> barrier;
     if (IsRegionGpuModified(index_address, index_buffer_size)) {
-        if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
-                                                 vk::PipelineStageFlagBits2::eIndexInput)) {
+        barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
+                                        vk::PipelineStageFlagBits2::eIndexInput);
+        if (barrier.has_value()) {
             barriers.emplace_back(*barrier);
         }
+    }
+    if (access_trace != nullptr) {
+        access_trace->Observe(
+            vk_buffer, offset, index_buffer_size, BufferAccessRole::IndexRead,
+            static_cast<VkAccessFlags2>(vk::AccessFlagBits2::eIndexRead),
+            static_cast<VkPipelineStageFlags2>(vk::PipelineStageFlagBits2::eIndexInput), false,
+            BarrierObservation(barrier));
     }
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);

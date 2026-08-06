@@ -94,7 +94,16 @@ TEST(BufferAccessProvenanceTrace, WritesExactIntervalsForMultiRoleCommandsWithin
         trace.CommitCommand();
 
         trace.BeginCommand(12, 51);
-        trace.Observe(7, 0, 64, Role::ShaderReadWrite, 0x06, 0x20, true);
+        trace.Observe(7, 0, 64, Role::ShaderReadWrite, 0x06, 0x20, true,
+                      VideoCore::BufferBarrierObservation{
+                          .emitted = true,
+                          .offset = 0,
+                          .size = 64,
+                          .source_access = 0x100,
+                          .source_stages = 0x200,
+                          .destination_access = 0x400,
+                          .destination_stages = 0x800,
+                      });
         trace.Observe(7, 64, 64, Role::VertexRead, 0x08, 0x40, false);
         trace.Observe(7, 64, 64, Role::IndexRead, 0x10, 0x80, false);
         trace.CommitCommand();
@@ -111,12 +120,51 @@ TEST(BufferAccessProvenanceTrace, WritesExactIntervalsForMultiRoleCommandsWithin
     EXPECT_EQ(lines[1].at("size"), 64);
     EXPECT_EQ(lines[1].at("prior").at("commandId"), 11);
     EXPECT_EQ(lines[1].at("observations").size(), 1);
+    EXPECT_EQ(lines[1].at("observations")[0].at("resultingBarrier").at("sourceAccess"), 0x100);
+    EXPECT_EQ(lines[1].at("observations")[0].at("resultingBarrier").at("destinationStages"), 0x800);
 
     EXPECT_EQ(lines[2].at("offset"), 64);
     EXPECT_EQ(lines[2].at("size"), 64);
     EXPECT_EQ(lines[2].at("prior").at("commandId"), 11);
     EXPECT_EQ(lines[2].at("observations").size(), 2);
     EXPECT_TRUE(lines[2].at("interesting").at("multiRole"));
+    std::filesystem::remove_all(root);
+}
+
+TEST(BufferAccessProvenanceTrace, FiltersOrdinaryAccessButKeepsGpuWriteToVertexTransition) {
+    const auto root =
+        std::filesystem::temp_directory_path() /
+        ("shadps4-buffer-access-provenance-filter-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(root);
+    const auto path = root / "trace.jsonl";
+
+    {
+        VideoCore::BasicBufferAccessProvenanceTrace<std::uint32_t> trace{{path, 4, 16}};
+        trace.BeginCommand(20, 60);
+        trace.Observe(9, 0, 64, Role::ShaderRead, 0x01, 0x10, false);
+        trace.CommitCommand();
+
+        trace.BeginCommand(21, 61);
+        trace.Observe(9, 0, 64, Role::ShaderRead, 0x01, 0x10, false);
+        trace.CommitCommand();
+
+        trace.BeginCommand(22, 62);
+        trace.Observe(9, 128, 64, Role::ShaderReadWrite, 0x02, 0x20, true);
+        trace.CommitCommand();
+
+        trace.BeginCommand(23, 63);
+        trace.Observe(9, 128, 64, Role::VertexRead, 0x04, 0x40, false);
+        trace.CommitCommand();
+    }
+
+    const auto lines = ReadJsonLines(path);
+    ASSERT_EQ(lines.size(), 2);
+    EXPECT_EQ(lines[1].at("commandId"), 23);
+    EXPECT_EQ(lines[1].at("offset"), 128);
+    EXPECT_EQ(lines[1].at("size"), 64);
+    EXPECT_EQ(lines[1].at("prior").at("commandId"), 22);
+    EXPECT_FALSE(lines[1].at("interesting").at("multiRole"));
+    EXPECT_TRUE(lines[1].at("interesting").at("gpuWriteToVertexOrIndex"));
     std::filesystem::remove_all(root);
 }
 

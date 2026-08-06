@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -16,6 +18,10 @@ struct Liverpool;
 
 namespace Core {
 class MemoryManager;
+}
+
+namespace VideoCore {
+class BufferAccessProvenanceTrace;
 }
 
 namespace Vulkan {
@@ -100,9 +106,13 @@ private:
     bool FilterDraw();
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
-                     Shader::PushData& push_data);
+                     Shader::PushData& push_data,
+                     VideoCore::BufferAccessProvenanceTrace* access_trace);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
-    bool BindResources(const Pipeline* pipeline);
+    bool BindResources(const Pipeline* pipeline,
+                       VideoCore::BufferAccessProvenanceTrace* access_trace);
+
+    VideoCore::BufferAccessProvenanceTrace* BeginBufferAccessProvenanceCommand();
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {
@@ -128,6 +138,8 @@ private:
     boost::icl::interval_set<VAddr> mapped_ranges;
     Common::SharedFirstMutex mapped_ranges_mutex;
     PipelineCache pipeline_cache;
+    std::unique_ptr<VideoCore::BufferAccessProvenanceTrace> buffer_access_provenance_trace;
+    u64 buffer_access_provenance_command_id{};
 
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;

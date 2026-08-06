@@ -201,6 +201,11 @@ public:
         return transitions;
     }
 
+    void CancelCommand() noexcept {
+        current.clear();
+        command_active = false;
+    }
+
 private:
     struct StateInterval {
         std::uint64_t offset{};

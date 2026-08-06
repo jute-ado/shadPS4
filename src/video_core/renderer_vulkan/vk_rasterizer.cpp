@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_access_provenance_trace.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -20,6 +21,22 @@
 #endif
 
 namespace Vulkan {
+
+static VideoCore::BufferBarrierObservation BarrierObservation(
+    const std::optional<vk::BufferMemoryBarrier2>& barrier) {
+    if (!barrier.has_value()) {
+        return {};
+    }
+    return VideoCore::BufferBarrierObservation{
+        .emitted = true,
+        .offset = barrier->offset,
+        .size = barrier->size,
+        .source_access = static_cast<VkAccessFlags2>(barrier->srcAccessMask),
+        .source_stages = static_cast<VkPipelineStageFlags2>(barrier->srcStageMask),
+        .destination_access = static_cast<VkAccessFlags2>(barrier->dstAccessMask),
+        .destination_stages = static_cast<VkPipelineStageFlags2>(barrier->dstStageMask),
+    };
+}
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -38,7 +55,9 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       buffer_cache{instance, scheduler, liverpool_, texture_cache, page_manager},
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
-      pipeline_cache{instance, scheduler, liverpool} {
+      pipeline_cache{instance, scheduler, liverpool},
+      buffer_access_provenance_trace{
+          VideoCore::BufferAccessProvenanceTrace::CreateFromEnvironment()} {
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -46,6 +65,15 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
 }
 
 Rasterizer::~Rasterizer() = default;
+
+VideoCore::BufferAccessProvenanceTrace* Rasterizer::BeginBufferAccessProvenanceCommand() {
+    auto* trace = buffer_access_provenance_trace.get();
+    if (trace == nullptr || trace->IsComplete()) {
+        return nullptr;
+    }
+    trace->BeginCommand(++buffer_access_provenance_command_id, scheduler.CurrentTick());
+    return trace;
+}
 
 void Rasterizer::CpSync() {
     scheduler.EndRendering();
@@ -201,15 +229,19 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    auto* access_trace = BeginBufferAccessProvenanceCommand();
     PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    if (!BindResources(pipeline, access_trace)) {
+        if (access_trace != nullptr) {
+            access_trace->CancelCommand();
+        }
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, access_trace);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers, access_trace);
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
@@ -231,6 +263,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
+    if (access_trace != nullptr) {
+        access_trace->CommitCommand();
+    }
     ResetBindings();
 }
 
@@ -249,15 +284,19 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    auto* access_trace = BeginBufferAccessProvenanceCommand();
     PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    if (!BindResources(pipeline, access_trace)) {
+        if (access_trace != nullptr) {
+            access_trace->CancelCommand();
+        }
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, access_trace);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
+        buffer_cache.BindIndexBuffer(0, buffer_barriers, access_trace);
     }
 
     const auto& [buffer, base] =
@@ -269,14 +308,30 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
     }
 
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect)) {
-        buffer_barriers.emplace_back(*barrier);
+    const auto indirect_barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
+                                                     vk::PipelineStageFlagBits2::eDrawIndirect);
+    if (indirect_barrier.has_value()) {
+        buffer_barriers.emplace_back(*indirect_barrier);
+    }
+    if (access_trace != nullptr) {
+        access_trace->Observe(
+            buffer, base, stride * max_count, VideoCore::BufferAccessRole::IndirectRead,
+            static_cast<VkAccessFlags2>(vk::AccessFlagBits2::eIndirectCommandRead),
+            static_cast<VkPipelineStageFlags2>(vk::PipelineStageFlagBits2::eDrawIndirect), false,
+            BarrierObservation(indirect_barrier));
     }
     if (count_buffer) {
-        if (auto barrier = count_buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                                    vk::PipelineStageFlagBits2::eDrawIndirect)) {
-            buffer_barriers.emplace_back(*barrier);
+        const auto count_barrier = count_buffer->GetBarrier(
+            vk::AccessFlagBits2::eIndirectCommandRead, vk::PipelineStageFlagBits2::eDrawIndirect);
+        if (count_barrier.has_value()) {
+            buffer_barriers.emplace_back(*count_barrier);
+        }
+        if (access_trace != nullptr) {
+            access_trace->Observe(
+                count_buffer, count_base, 4, VideoCore::BufferAccessRole::IndirectRead,
+                static_cast<VkAccessFlags2>(vk::AccessFlagBits2::eIndirectCommandRead),
+                static_cast<VkPipelineStageFlags2>(vk::PipelineStageFlagBits2::eDrawIndirect),
+                false, BarrierObservation(count_barrier));
         }
     }
 
@@ -310,6 +365,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
+    if (access_trace != nullptr) {
+        access_trace->CommitCommand();
+    }
     ResetBindings();
 }
 
@@ -329,7 +387,11 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
-    if (!BindResources(pipeline)) {
+    auto* access_trace = BeginBufferAccessProvenanceCommand();
+    if (!BindResources(pipeline, access_trace)) {
+        if (access_trace != nullptr) {
+            access_trace->CancelCommand();
+        }
         return;
     }
 
@@ -340,6 +402,9 @@ void Rasterizer::DispatchDirect() {
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
+    if (access_trace != nullptr) {
+        access_trace->CommitCommand();
+    }
     ResetBindings();
 }
 
@@ -354,15 +419,27 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
-    if (!BindResources(pipeline)) {
+    auto* access_trace = BeginBufferAccessProvenanceCommand();
+    if (!BindResources(pipeline, access_trace)) {
+        if (access_trace != nullptr) {
+            access_trace->CancelCommand();
+        }
         return;
     }
 
     const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
 
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect)) {
+    const auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
+                                            vk::PipelineStageFlagBits2::eDrawIndirect);
+    if (barrier.has_value()) {
         buffer_barriers.emplace_back(*barrier);
+    }
+    if (access_trace != nullptr) {
+        access_trace->Observe(
+            buffer, base, size, VideoCore::BufferAccessRole::IndirectRead,
+            static_cast<VkAccessFlags2>(vk::AccessFlagBits2::eIndirectCommandRead),
+            static_cast<VkPipelineStageFlags2>(vk::PipelineStageFlagBits2::eDrawIndirect), false,
+            BarrierObservation(barrier));
     }
 
     scheduler.EndRendering();
@@ -372,6 +449,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
+    if (access_trace != nullptr) {
+        access_trace->CommitCommand();
+    }
     ResetBindings();
 }
 
@@ -396,7 +476,8 @@ void Rasterizer::OnSubmit() {
     buffer_cache.RunGarbageCollector();
 }
 
-bool Rasterizer::BindResources(const Pipeline* pipeline) {
+bool Rasterizer::BindResources(const Pipeline* pipeline,
+                               VideoCore::BufferAccessProvenanceTrace* access_trace) {
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
         return false;
@@ -420,7 +501,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
         stage->PushUd(binding, push_data);
-        BindBuffers(*stage, binding, push_data);
+        BindBuffers(*stage, binding, push_data, access_trace);
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
     }
@@ -594,7 +675,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 }
 
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
-                             Shader::PushData& push_data) {
+                             Shader::PushData& push_data,
+                             VideoCore::BufferAccessProvenanceTrace* access_trace) {
     buffer_bindings.clear();
 
     for (const auto& desc : stage.buffers) {
@@ -651,11 +733,21 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
-            if (auto barrier =
-                    vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
-                                                          : vk::AccessFlagBits2::eShaderRead,
-                                          vk::PipelineStageFlagBits2::eAllCommands)) {
+            const vk::AccessFlags2 access = desc.is_written ? vk::AccessFlagBits2::eShaderWrite
+                                                            : vk::AccessFlagBits2::eShaderRead;
+            const auto barrier =
+                vk_buffer->GetBarrier(access, vk::PipelineStageFlagBits2::eAllCommands);
+            if (barrier.has_value()) {
                 buffer_barriers.emplace_back(*barrier);
+            }
+            if (access_trace != nullptr) {
+                access_trace->Observe(
+                    vk_buffer, offset, size,
+                    desc.is_written ? VideoCore::BufferAccessRole::ShaderReadWrite
+                                    : VideoCore::BufferAccessRole::ShaderRead,
+                    static_cast<VkAccessFlags2>(access),
+                    static_cast<VkPipelineStageFlags2>(vk::PipelineStageFlagBits2::eAllCommands),
+                    desc.is_written, BarrierObservation(barrier));
             }
             if (desc.is_written && desc.is_formatted) {
                 texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
