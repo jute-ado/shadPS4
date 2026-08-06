@@ -11,6 +11,7 @@
 namespace {
 
 enum class FaultRangeCacheCall {
+    TransitionAuthoritativeTexture,
     Find,
     Synchronize,
 };
@@ -23,6 +24,11 @@ struct RecordedFaultRangeCacheCall {
 
 class RecordingFaultRangeCache {
 public:
+    bool TransitionAuthoritativeTextureForDmaRead(VAddr address, u32 size) {
+        calls.push_back({FaultRangeCacheCall::TransitionAuthoritativeTexture, address, size});
+        return transition_succeeds;
+    }
+
     void FindBuffer(VAddr address, u32 size) {
         calls.push_back({FaultRangeCacheCall::Find, address, size});
     }
@@ -31,6 +37,7 @@ public:
         calls.push_back({FaultRangeCacheCall::Synchronize, address, size});
     }
 
+    bool transition_succeeds{true};
     std::vector<RecordedFaultRangeCacheCall> calls;
 };
 
@@ -82,15 +89,28 @@ TEST(FaultRange, AcceptsMappedGpuFaultRange) {
 TEST(FaultRange, MakesDmaFaultRangeResidentBeforeDirectAccess) {
     RecordingFaultRangeCache cache;
 
-    VideoCore::MakeDmaFaultRangeResident(cache, 0x101E600000, 0x4000);
+    EXPECT_TRUE(VideoCore::MakeDmaFaultRangeResident(cache, 0x101E600000, 0x4000));
 
-    ASSERT_EQ(cache.calls.size(), 2);
-    EXPECT_EQ(cache.calls[0].operation, FaultRangeCacheCall::Find);
+    ASSERT_EQ(cache.calls.size(), 3);
+    EXPECT_EQ(cache.calls[0].operation, FaultRangeCacheCall::TransitionAuthoritativeTexture);
     EXPECT_EQ(cache.calls[0].address, 0x101E600000);
     EXPECT_EQ(cache.calls[0].size, 0x4000);
-    EXPECT_EQ(cache.calls[1].operation, FaultRangeCacheCall::Synchronize);
+    EXPECT_EQ(cache.calls[1].operation, FaultRangeCacheCall::Find);
     EXPECT_EQ(cache.calls[1].address, 0x101E600000);
     EXPECT_EQ(cache.calls[1].size, 0x4000);
+    EXPECT_EQ(cache.calls[2].operation, FaultRangeCacheCall::Synchronize);
+    EXPECT_EQ(cache.calls[2].address, 0x101E600000);
+    EXPECT_EQ(cache.calls[2].size, 0x4000);
+}
+
+TEST(FaultRange, RejectsDmaFaultWhenAuthoritativeTextureCannotTransition) {
+    RecordingFaultRangeCache cache;
+    cache.transition_succeeds = false;
+
+    EXPECT_FALSE(VideoCore::MakeDmaFaultRangeResident(cache, 0x101E600000, 0x4000));
+
+    ASSERT_EQ(cache.calls.size(), 1);
+    EXPECT_EQ(cache.calls[0].operation, FaultRangeCacheCall::TransitionAuthoritativeTexture);
 }
 
 TEST(DmaDirtyRanges, CleanFramesProduceNoSynchronizationWork) {
