@@ -19,6 +19,7 @@ ExternalAddressSpaceImportRequest ValidRequest() {
         .extension_available = true,
         .buffer_device_address_available = true,
         .host_allocation_importable = true,
+        .dedicated_allocation_required = false,
         .lease_pointer = 0x10000,
         .lease_size = 0x8000,
         .import_pointer = 0x10000,
@@ -26,10 +27,31 @@ ExternalAddressSpaceImportRequest ValidRequest() {
         .minimum_imported_pointer_alignment = 0x1000,
         .memory_requirement_size = 0x8000,
         .memory_requirement_alignment = 0x1000,
+        .maximum_buffer_size = 0x10000,
+        .maximum_memory_allocation_size = 0x10000,
         .buffer_memory_type_bits = 0b1110,
         .host_pointer_memory_type_bits = 0b1100,
+        .memory_type_count = 4,
         .host_coherent_property = HostCoherent,
     };
+}
+
+TEST(ExternalAddressSpaceBackingImport, ChecksApplicableDeviceLimitsButNotStorageRange) {
+    const std::array properties{0u, 0u, HostCoherent, HostCoherent};
+    auto request = ValidRequest();
+    request.maximum_buffer_size = request.lease_size - 1;
+    EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
+              ExternalAddressSpaceImportFailure::DeviceLimitExceeded);
+
+    request = ValidRequest();
+    request.maximum_memory_allocation_size = request.lease_size - 1;
+    EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
+              ExternalAddressSpaceImportFailure::DeviceLimitExceeded);
+
+    // maxStorageBufferRange is intentionally absent: BDA access is not descriptor-range limited.
+    request = ValidRequest();
+    EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
+              ExternalAddressSpaceImportFailure::None);
 }
 
 TEST(ExternalAddressSpaceBackingImport, TreatsTheExtensionAsAnOptionalCapability) {
@@ -88,6 +110,13 @@ TEST(ExternalAddressSpaceBackingImport, IntersectsBufferAndHostBitsAndSelectsCoh
     ASSERT_EQ(plan.failure, ExternalAddressSpaceImportFailure::None);
     EXPECT_EQ(plan.compatible_memory_type_bits, 0b1100u);
     EXPECT_EQ(plan.memory_type_index, 3u);
+    EXPECT_TRUE(plan.use_dedicated_allocation);
+
+    request = ValidRequest();
+    request.dedicated_allocation_required = true;
+    const auto dedicated = PlanExternalAddressSpaceBackingImport(request, properties);
+    ASSERT_EQ(dedicated.failure, ExternalAddressSpaceImportFailure::None);
+    EXPECT_TRUE(dedicated.use_dedicated_allocation);
 
     request.host_pointer_memory_type_bits = 0b0001;
     EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
@@ -105,8 +134,16 @@ TEST(ExternalAddressSpaceBackingImport, RejectsOverflowAndIncompleteMemoryProper
     auto request = ValidRequest();
     request.buffer_memory_type_bits = 1u << 5;
     request.host_pointer_memory_type_bits = 1u << 5;
+    request.memory_type_count = 6;
     EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
               ExternalAddressSpaceImportFailure::MemoryPropertyEvidenceMissing);
+
+    request = ValidRequest();
+    request.buffer_memory_type_bits = 1u << 5;
+    request.host_pointer_memory_type_bits = 1u << 5;
+    request.memory_type_count = 4;
+    EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
+              ExternalAddressSpaceImportFailure::MemoryTypeOutOfRange);
 
     request = ValidRequest();
     request.lease_pointer = std::numeric_limits<std::uintptr_t>::max() - 0x100;
