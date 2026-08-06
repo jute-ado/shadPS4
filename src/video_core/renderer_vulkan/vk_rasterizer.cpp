@@ -550,7 +550,7 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
 
     const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
     if (!plan) {
-        LOG_ERROR(Render_Vulkan, "Rejected GPU command with competing physical-backing writers");
+        LOG_ERROR(Render_Vulkan, "Rejected GPU command with invalid physical-backing aliases");
         return false;
     }
     for (const Resource resource : plan->read_snapshot_order) {

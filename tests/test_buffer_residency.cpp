@@ -311,8 +311,7 @@ TEST(BufferResidency, PlansOneAliasHandoffForTheWholeGpuCommand) {
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{buffer}));
     ASSERT_EQ(plan->pages.size(), 1);
     EXPECT_EQ(plan->pages.front().physical_page, page);
-    ASSERT_TRUE(plan->pages.front().writer.has_value());
-    EXPECT_EQ(*plan->pages.front().writer, buffer);
+    EXPECT_EQ(plan->pages.front().writers, (std::vector<Resource>{buffer}));
 }
 
 TEST(BufferResidency, PlansCompetingBufferAndTextureWritersWithoutDroppingGpuCommand) {
@@ -385,8 +384,7 @@ TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
         Owner{41, 1, unrelated_page},
     };
 
-    const auto retirements =
-        VideoCore::PlanPhysicalBackingCachePageRetirements(requested, owners);
+    const auto retirements = VideoCore::PlanPhysicalBackingCachePageRetirements(requested, owners);
 
     ASSERT_TRUE(retirements.has_value());
     EXPECT_EQ(*retirements, (std::vector<Owner>{owners.front()}));
@@ -397,8 +395,8 @@ TEST(BufferResidency, BatchesLargeOwnerRetirementsInsideStagingBudget) {
     constexpr size_t owner_count = 4096;
     constexpr u64 staging_budget = 32_MB;
 
-    const auto batches = VideoCore::PlanPhysicalBackingRetirementBatches(
-        owner_count, staging_budget, 16_KB);
+    const auto batches =
+        VideoCore::PlanPhysicalBackingRetirementBatches(owner_count, staging_budget, 16_KB);
 
     ASSERT_TRUE(batches.has_value());
     EXPECT_EQ(*batches, (std::vector<Batch>{{0, 2048}, {2048, 2048}}));
@@ -415,21 +413,20 @@ TEST(BufferResidency, CoalescesContiguousPhysicalWritebackSlices) {
         Slice{buffer_base + 0xc000, 0x30000, 0x100, 0x200},
     };
 
-    const auto copies = VideoCore::PlanPhysicalBackingGpuWritebackCopies(
-        buffer_base, 0x10000, backing_size, slices);
+    const auto copies = VideoCore::PlanPhysicalBackingGpuWritebackCopies(buffer_base, 0x10000,
+                                                                         backing_size, slices);
 
     ASSERT_TRUE(copies.has_value());
-    EXPECT_EQ(*copies,
-              (std::vector<Copy>{{0x4000, 0x20000, 0x8000}, {0xc100, 0x30100, 0x200}}));
+    EXPECT_EQ(*copies, (std::vector<Copy>{{0x4000, 0x20000, 0x8000}, {0xc100, 0x30100, 0x200}}));
 }
 
 TEST(BufferResidency, WaitsOnlyForGpuWritebacksOverlappingHostAccess) {
     constexpr std::array pending_guest_pages{VAddr{0x10000}, VAddr{0x50000}};
 
-    EXPECT_FALSE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
-        pending_guest_pages, 0x20000, 0x1000));
-    EXPECT_TRUE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
-        pending_guest_pages, 0x13fff, 2));
+    EXPECT_FALSE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(pending_guest_pages,
+                                                                          0x20000, 0x1000));
+    EXPECT_TRUE(
+        VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(pending_guest_pages, 0x13fff, 2));
     EXPECT_FALSE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
         pending_guest_pages, std::numeric_limits<VAddr>::max(), 2));
 }

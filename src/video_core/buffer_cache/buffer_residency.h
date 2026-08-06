@@ -339,7 +339,7 @@ struct PhysicalBackingCommandAccess {
 struct PhysicalBackingCommandPagePlan {
     u64 physical_page{};
     std::vector<PhysicalBackingCommandResource> readers;
-    std::optional<PhysicalBackingCommandResource> writer;
+    std::vector<PhysicalBackingCommandResource> writers;
 };
 
 struct PhysicalBackingCommandAliasPlan {
@@ -474,8 +474,7 @@ PlanPhysicalBackingGpuWritebackCopies(VAddr buffer_base, u64 buffer_size, u64 ba
         if (!coalesced.empty()) {
             auto& previous = coalesced.back();
             if (previous.source_offset <= std::numeric_limits<u64>::max() - previous.size &&
-                previous.destination_offset <=
-                    std::numeric_limits<u64>::max() - previous.size &&
+                previous.destination_offset <= std::numeric_limits<u64>::max() - previous.size &&
                 previous.source_offset + previous.size == copy.source_offset &&
                 previous.destination_offset + previous.size == copy.destination_offset &&
                 copy.size <= std::numeric_limits<u64>::max() - previous.size) {
@@ -563,13 +562,10 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
                 page_plan.readers.push_back(access.resource);
             }
             if (access.is_written) {
-                if (page_plan.writer && *page_plan.writer != access.resource) {
-                    return std::nullopt;
-                }
-                page_plan.writer = access.resource;
+                page_plan.writers.push_back(access.resource);
             }
         }
-        if (page_plan.writer) {
+        if (!page_plan.writers.empty()) {
             written_pages.insert(physical_page);
         }
         plan.pages.push_back(std::move(page_plan));
