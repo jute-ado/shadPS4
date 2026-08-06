@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/buffer_cache/dma_publication_gate.h"
 #include "video_core/buffer_cache/fault_download.h"
 
 namespace VideoCore {
@@ -34,6 +35,21 @@ TEST(FaultDownload, KeepsAnEmptyDownloadClean) {
 
     EXPECT_EQ(count.address_count, 0);
     EXPECT_FALSE(count.overflowed);
+}
+
+TEST(FaultDownload, ClassifiesCleanFaultedInvalidAndOverflowEpochs) {
+    const auto clean = ClassifyDmaFaultEpoch(BoundFaultDownloadCount(0, 1024), 0);
+    EXPECT_EQ(clean.GetStatus(), DmaFaultEpoch::Status::Clean);
+
+    const auto faulted = ClassifyDmaFaultEpoch(BoundFaultDownloadCount(2, 1024), 0);
+    EXPECT_EQ(faulted.GetStatus(), DmaFaultEpoch::Status::Faulted);
+    EXPECT_EQ(faulted.FaultCount(), 2);
+
+    const auto invalid = ClassifyDmaFaultEpoch(BoundFaultDownloadCount(2, 1024), 1);
+    EXPECT_EQ(invalid.GetStatus(), DmaFaultEpoch::Status::Invalid);
+
+    const auto overflow = ClassifyDmaFaultEpoch(BoundFaultDownloadCount(1061, 1024), 1);
+    EXPECT_EQ(overflow.GetStatus(), DmaFaultEpoch::Status::Overflow);
 }
 
 } // namespace
