@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <span>
+
 #include <boost/container/small_vector.hpp>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
@@ -11,6 +13,7 @@
 #include "video_core/buffer_cache/cpu_page_write_snapshot.h"
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
 
@@ -81,6 +84,13 @@ public:
     [[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept {
         return &bda_pagetable_buffer;
     }
+
+    void AttachPhysicalBackingPublicationCoordinator(
+        PhysicalBackingPublicationCoordinator* coordinator) noexcept {
+        physical_backing_coordinator = coordinator;
+    }
+
+    void ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas);
 
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
@@ -225,6 +235,7 @@ private:
     RangeSet gpu_modified_ranges;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
+    PhysicalBackingPublicationCoordinator* physical_backing_coordinator{};
 };
 
 } // namespace VideoCore

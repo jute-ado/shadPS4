@@ -450,12 +450,15 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
     }
     ASSERT_MSG(remaining_size == 0, "Failed to commit pooled memory");
 
+    auto physical_spans = new_vma.CollectPhysicalBackingSpans().value_or(
+        std::vector<PhysicalBackingSpan>{});
+
     // Merge this VMA with similar nearby areas
     MergeAdjacent(vma_map, new_vma_handle);
 
     lk2.unlock();
     if (IsValidGpuMapping(mapped_addr, size)) {
-        rasterizer->MapMemory(mapped_addr, size);
+        rasterizer->MapMemory(mapped_addr, size, std::move(physical_spans));
     }
 
     return ORBIS_OK;
@@ -659,6 +662,8 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         ASSERT_MSG(remaining_size == 0, "Failed to map physical memory");
     }
 
+    auto physical_spans = new_vma.CollectPhysicalBackingSpans().value_or(
+        std::vector<PhysicalBackingSpan>{});
     if (new_vma.type != VMAType::Direct || sdk_version >= Common::ElfInfo::FW_200) {
         // Merge this VMA with similar nearby areas
         // Direct memory mappings only coalesce on SDK version 2.00 or later.
@@ -678,7 +683,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
 
         // If this is not a reservation, then map to GPU and address space
         if (IsValidGpuMapping(mapped_addr, size)) {
-            rasterizer->MapMemory(mapped_addr, size);
+            rasterizer->MapMemory(mapped_addr, size, std::move(physical_spans));
         }
     }
 

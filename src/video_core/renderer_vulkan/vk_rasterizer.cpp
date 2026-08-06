@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -44,6 +45,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
         if (auto lease = memory->GetAddressSpace().AcquireBackingLease()) {
             external_address_space_backing =
                 std::make_unique<ExternalAddressSpaceBacking>(instance, std::move(*lease));
+            if (external_address_space_backing->IsAvailable()) {
+                physical_backing_coordinator =
+                    std::make_unique<VideoCore::PhysicalBackingPublicationCoordinator>(
+                        VideoCore::PhysicalBackingDeviceAddress{
+                            external_address_space_backing->DeviceAddress()},
+                        external_address_space_backing->BackingSize());
+            }
         }
         liverpool->BindRasterizer(this);
     }
@@ -1084,12 +1092,25 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
     return boost::icl::contains(mapped_ranges, range);
 }
 
-void Rasterizer::MapMemory(VAddr addr, u64 size) {
-    {
-        std::scoped_lock lock{mapped_ranges_mutex};
-        mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+void Rasterizer::MapMemory(VAddr addr, u64 size,
+                           std::vector<Core::PhysicalBackingSpan> physical_spans) {
+    auto map = [this, addr, size, physical_spans = std::move(physical_spans)]() mutable {
+        if (physical_backing_coordinator && !physical_spans.empty()) {
+            if (const auto deltas = physical_backing_coordinator->MapSpans(physical_spans)) {
+                buffer_cache.ApplyPhysicalBackingBdaDeltas(*deltas);
+            }
+        }
+        {
+            std::scoped_lock lock{mapped_ranges_mutex};
+            mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        }
+        page_manager.OnGpuMap(addr, size);
+    };
+    if (physical_backing_coordinator) {
+        liverpool->SendCommand<true>(map);
+    } else {
+        map();
     }
-    page_manager.OnGpuMap(addr, size);
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
