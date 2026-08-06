@@ -28,14 +28,20 @@ struct BufferAccessProvenanceTraceRequest {
     std::filesystem::path path;
     std::uint64_t record_limit{};
     std::uint64_t observation_limit{};
+    std::uint64_t start_elapsed_ms{};
+    std::uint64_t duration_ms{};
 
     static std::optional<BufferAccessProvenanceTraceRequest> Parse(
         std::string_view path_value, std::string_view record_limit_value,
-        std::string_view observation_limit_value) {
+        std::string_view observation_limit_value, std::string_view start_elapsed_ms_value = {},
+        std::string_view duration_ms_value = {}) {
         constexpr std::uint64_t MaxRecordLimit = 1'000'000;
         constexpr std::uint64_t MaxObservationLimit = 50'000'000;
+        constexpr std::uint64_t MaxWindowMilliseconds = 3'600'000;
         std::uint64_t record_limit{};
         std::uint64_t observation_limit{};
+        std::uint64_t start_elapsed_ms{};
+        std::uint64_t duration_ms{};
         const auto record_result =
             std::from_chars(record_limit_value.data(),
                             record_limit_value.data() + record_limit_value.size(), record_limit);
@@ -51,10 +57,34 @@ struct BufferAccessProvenanceTraceRequest {
             observation_limit < record_limit || observation_limit > MaxObservationLimit) {
             return std::nullopt;
         }
+        const bool has_start = !start_elapsed_ms_value.empty();
+        const bool has_duration = !duration_ms_value.empty();
+        if (has_start != has_duration) {
+            return std::nullopt;
+        }
+        if (has_start) {
+            const auto start_result = std::from_chars(
+                start_elapsed_ms_value.data(),
+                start_elapsed_ms_value.data() + start_elapsed_ms_value.size(), start_elapsed_ms);
+            const auto duration_result =
+                std::from_chars(duration_ms_value.data(),
+                                duration_ms_value.data() + duration_ms_value.size(), duration_ms);
+            if (start_result.ec != std::errc{} ||
+                start_result.ptr != start_elapsed_ms_value.data() + start_elapsed_ms_value.size() ||
+                duration_result.ec != std::errc{} ||
+                duration_result.ptr != duration_ms_value.data() + duration_ms_value.size() ||
+                start_elapsed_ms > MaxWindowMilliseconds || duration_ms == 0 ||
+                duration_ms > MaxWindowMilliseconds ||
+                start_elapsed_ms + duration_ms > MaxWindowMilliseconds) {
+                return std::nullopt;
+            }
+        }
         return BufferAccessProvenanceTraceRequest{
             .path = std::filesystem::path{path_value},
             .record_limit = record_limit,
             .observation_limit = observation_limit,
+            .start_elapsed_ms = start_elapsed_ms,
+            .duration_ms = duration_ms,
         };
     }
 };
@@ -68,7 +98,9 @@ public:
               std::chrono::duration_cast<std::chrono::nanoseconds>(
                   std::chrono::system_clock::now().time_since_epoch())
                   .count())},
-          record_limit{request.record_limit}, observation_limit{request.observation_limit} {
+          record_limit{request.record_limit}, observation_limit{request.observation_limit},
+          start_elapsed_ns{request.start_elapsed_ms * 1'000'000},
+          duration_ns{request.duration_ms * 1'000'000} {
         output.open(request.path, std::ios::out | std::ios::app | std::ios::binary);
         if (!output) {
             throw std::runtime_error{"Cannot create buffer access provenance trace"};
@@ -81,6 +113,8 @@ public:
                       {"elapsedClock", "trace_elapsed_nanoseconds"},
                       {"recordLimit", record_limit},
                       {"observationLimit", observation_limit},
+                      {"startElapsedMilliseconds", request.start_elapsed_ms},
+                      {"durationMilliseconds", request.duration_ms},
                   }
                       .dump()
                << '\n';
@@ -91,16 +125,29 @@ public:
     BasicBufferAccessProvenanceTrace& operator=(const BasicBufferAccessProvenanceTrace&) = delete;
 
     void BeginCommand(std::uint64_t command_id, std::uint64_t tick) {
+        const auto elapsed_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                  trace_start)
+                .count());
+        BeginCommand(command_id, tick, elapsed_ns);
+    }
+
+    void BeginCommand(std::uint64_t command_id, std::uint64_t tick,
+                      std::uint64_t trace_elapsed_ns) {
         if (complete) {
+            return;
+        }
+        if (trace_elapsed_ns < start_elapsed_ns) {
+            return;
+        }
+        if (duration_ns != 0 && trace_elapsed_ns >= start_elapsed_ns + duration_ns) {
+            complete = true;
             return;
         }
         tracker.BeginCommand(command_id, tick);
         current_command_id = command_id;
         current_tick = tick;
-        current_trace_elapsed_ns = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
-                                                                  trace_start)
-                .count());
+        current_trace_elapsed_ns = trace_elapsed_ns;
         current_timestamp_ns = trace_start_timestamp_ns + current_trace_elapsed_ns;
         command_active = true;
     }
@@ -282,6 +329,8 @@ private:
     std::uint64_t trace_start_timestamp_ns{};
     std::uint64_t record_limit{};
     std::uint64_t observation_limit{};
+    std::uint64_t start_elapsed_ns{};
+    std::uint64_t duration_ns{};
     std::uint64_t record_count{};
     std::uint64_t observation_count{};
     std::uint64_t current_command_id{};
@@ -303,7 +352,11 @@ public:
         const auto* record_limit = std::getenv("SHADPS4_BUFFER_ACCESS_PROVENANCE_RECORD_LIMIT");
         const auto* observation_limit =
             std::getenv("SHADPS4_BUFFER_ACCESS_PROVENANCE_OBSERVATION_LIMIT");
-        if (path == nullptr && record_limit == nullptr && observation_limit == nullptr) {
+        const auto* start_elapsed_ms =
+            std::getenv("SHADPS4_BUFFER_ACCESS_PROVENANCE_START_MS");
+        const auto* duration_ms = std::getenv("SHADPS4_BUFFER_ACCESS_PROVENANCE_DURATION_MS");
+        if (path == nullptr && record_limit == nullptr && observation_limit == nullptr &&
+            start_elapsed_ms == nullptr && duration_ms == nullptr) {
             return {};
         }
         if (path == nullptr || record_limit == nullptr || observation_limit == nullptr) {
@@ -311,7 +364,10 @@ public:
             return {};
         }
         const auto request =
-            BufferAccessProvenanceTraceRequest::Parse(path, record_limit, observation_limit);
+            BufferAccessProvenanceTraceRequest::Parse(
+                path, record_limit, observation_limit,
+                start_elapsed_ms == nullptr ? std::string_view{} : std::string_view{start_elapsed_ms},
+                duration_ms == nullptr ? std::string_view{} : std::string_view{duration_ms});
         if (!request.has_value()) {
             std::cerr << "[Diagnostic] Invalid buffer access provenance trace request.\n";
             return {};
