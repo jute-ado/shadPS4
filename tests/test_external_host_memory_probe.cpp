@@ -4,6 +4,9 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -113,6 +116,116 @@ TEST(ExternalHostMemoryProbe, IgnoresCompatibilityBitsBeyondProvidedMemoryProper
     EXPECT_EQ(absent.failure, ImportedHostMemoryTypeSelectionFailure::NoCompatibleMemoryType);
     EXPECT_FALSE(absent.index.has_value());
     EXPECT_EQ(absent.compatible_bits, 0u);
+}
+
+TEST(ExternalHostMemoryProbe, RecordsOrderedStagesAndFailsClosedOnProtocolViolations) {
+    ExternalHostMemoryProbeProgress progress;
+
+    EXPECT_TRUE(progress.Complete(ExternalHostMemoryProbeStage::Capability));
+    EXPECT_TRUE(progress.Complete(ExternalHostMemoryProbeStage::Backing));
+    EXPECT_FALSE(progress.Complete(ExternalHostMemoryProbeStage::BufferCreation));
+
+    const auto& result = progress.Result();
+    EXPECT_EQ(result.completed_stage, ExternalHostMemoryProbeStage::Backing);
+    EXPECT_EQ(result.failure_stage, ExternalHostMemoryProbeStage::BufferCreation);
+    EXPECT_EQ(result.failure, ExternalHostMemoryProbeFailure::UnexpectedStage);
+    EXPECT_FALSE(result.Succeeded());
+
+    progress.Fail(ExternalHostMemoryProbeStage::HostPointerProperties,
+                  ExternalHostMemoryProbeFailure::HostPointerQueryFailed);
+    EXPECT_EQ(progress.Result().failure, ExternalHostMemoryProbeFailure::UnexpectedStage);
+}
+
+TEST(ExternalHostMemoryProbe, SucceedsOnlyAfterNonzeroDeviceAddressIsRetained) {
+    ExternalHostMemoryProbeProgress progress;
+    for (const auto stage : {ExternalHostMemoryProbeStage::Capability,
+                             ExternalHostMemoryProbeStage::Backing,
+                             ExternalHostMemoryProbeStage::ExternalBufferProperties,
+                             ExternalHostMemoryProbeStage::BufferCreation,
+                             ExternalHostMemoryProbeStage::MemoryRequirements,
+                             ExternalHostMemoryProbeStage::HostPointerProperties,
+                             ExternalHostMemoryProbeStage::MemoryTypeSelection,
+                             ExternalHostMemoryProbeStage::MemoryAllocation,
+                             ExternalHostMemoryProbeStage::MemoryBinding,
+                             ExternalHostMemoryProbeStage::DeviceAddress}) {
+        ASSERT_TRUE(progress.Complete(stage));
+    }
+    EXPECT_FALSE(progress.Result().Succeeded());
+
+    progress.Fail(ExternalHostMemoryProbeStage::Retained,
+                  ExternalHostMemoryProbeFailure::ZeroDeviceAddress);
+    EXPECT_FALSE(progress.Result().Succeeded());
+
+    ExternalHostMemoryProbeProgress success;
+    for (const auto stage : {ExternalHostMemoryProbeStage::Capability,
+                             ExternalHostMemoryProbeStage::Backing,
+                             ExternalHostMemoryProbeStage::ExternalBufferProperties,
+                             ExternalHostMemoryProbeStage::BufferCreation,
+                             ExternalHostMemoryProbeStage::MemoryRequirements,
+                             ExternalHostMemoryProbeStage::HostPointerProperties,
+                             ExternalHostMemoryProbeStage::MemoryTypeSelection,
+                             ExternalHostMemoryProbeStage::MemoryAllocation,
+                             ExternalHostMemoryProbeStage::MemoryBinding,
+                             ExternalHostMemoryProbeStage::DeviceAddress,
+                             ExternalHostMemoryProbeStage::Retained}) {
+        ASSERT_TRUE(success.Complete(stage));
+    }
+    EXPECT_TRUE(success.Result().Succeeded());
+}
+
+struct TrackedProbeHandle {
+    std::vector<std::string>* destruction_order{};
+    std::string name;
+
+    TrackedProbeHandle() = default;
+
+    TrackedProbeHandle(std::vector<std::string>& order, std::string name_)
+        : destruction_order{&order}, name{std::move(name_)} {}
+
+    TrackedProbeHandle(TrackedProbeHandle&& other) noexcept
+        : destruction_order{std::exchange(other.destruction_order, nullptr)},
+          name{std::move(other.name)} {}
+
+    TrackedProbeHandle& operator=(TrackedProbeHandle&&) = delete;
+    TrackedProbeHandle(const TrackedProbeHandle&) = delete;
+    TrackedProbeHandle& operator=(const TrackedProbeHandle&) = delete;
+
+    ~TrackedProbeHandle() {
+        if (destruction_order != nullptr) {
+            destruction_order->push_back(name);
+        }
+    }
+
+    explicit operator bool() const noexcept {
+        return destruction_order != nullptr;
+    }
+};
+
+TEST(ExternalHostMemoryProbe, RawImportOwnerDestroysBufferBeforeImportedMemory) {
+    std::vector<std::string> destruction_order;
+    {
+        ExternalHostMemoryImportOwner<TrackedProbeHandle, TrackedProbeHandle> owner{
+            TrackedProbeHandle{destruction_order, "memory"},
+            TrackedProbeHandle{destruction_order, "buffer"}, 0x12340000};
+        EXPECT_TRUE(owner.IsRetained());
+        EXPECT_EQ(owner.DeviceAddress(), 0x12340000u);
+    }
+
+    ASSERT_EQ(destruction_order.size(), 2u);
+    EXPECT_EQ(destruction_order[0], "buffer");
+    EXPECT_EQ(destruction_order[1], "memory");
+}
+
+TEST(ExternalHostMemoryProbe, RawImportOwnerRejectsPartialOrZeroAddressOwnership) {
+    std::vector<std::string> destruction_order;
+    ExternalHostMemoryImportOwner<TrackedProbeHandle, TrackedProbeHandle> zero_address{
+        TrackedProbeHandle{destruction_order, "memory-a"},
+        TrackedProbeHandle{destruction_order, "buffer-a"}, 0};
+    EXPECT_FALSE(zero_address.IsRetained());
+
+    ExternalHostMemoryImportOwner<TrackedProbeHandle, TrackedProbeHandle> missing_buffer{
+        TrackedProbeHandle{destruction_order, "memory-b"}, TrackedProbeHandle{}, 0x1000};
+    EXPECT_FALSE(missing_buffer.IsRetained());
 }
 
 } // namespace
