@@ -323,6 +323,7 @@ if (WIN32)
         Vulkan::Headers
         nlohmann_json::nlohmann_json
         onecore
+        sirit
     )
 endif()
 

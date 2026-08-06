@@ -261,6 +261,7 @@ enum class ExactHostImportFailure : std::uint8_t {
     Win32LifecycleFailed,
     VulkanCallFailed,
     ZeroDeviceAddress,
+    DataVerificationFailed,
     CleanupFailed,
     ProtocolViolation,
 };
@@ -352,6 +353,7 @@ struct ExactSelectedMemoryTypeEvidence {
     case ExactHostImportFailure::Win32LifecycleFailed:
     case ExactHostImportFailure::VulkanCallFailed:
     case ExactHostImportFailure::ZeroDeviceAddress:
+    case ExactHostImportFailure::DataVerificationFailed:
     case ExactHostImportFailure::CleanupFailed:
     case ExactHostImportFailure::ProtocolViolation:
         return ExactHostImportDisposition::Error;

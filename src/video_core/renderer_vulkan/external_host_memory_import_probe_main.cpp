@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -26,6 +27,10 @@
 #include "video_core/renderer_vulkan/exact_address_space_host_import_probe.h"
 #include "video_core/renderer_vulkan/external_host_memory_probe.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+#include <sirit/sirit.h>
+#endif
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -381,6 +386,10 @@ struct PagefileBacking {
         {"bindVkResult", "not_called"},
         {"deviceAddressNonzero", false},
         {"deviceAddressModuloAlignment", nullptr},
+        {"dataVerificationAttempted", false},
+        {"dataVerificationPassed", false},
+        {"dataVerificationFailure", "not_started"},
+        {"dataVerificationTrials", Json::array()},
         {"cleanupAttempted", false},
         {"unmapAttempted", false},
         {"unmapSucceeded", false},
@@ -794,9 +803,419 @@ static_assert(ERROR_COMMITMENT_LIMIT == 1455);
     }
 }
 
+constexpr std::size_t ExactVisibilityWordCount = 64;
+constexpr vk::DeviceSize ExactVisibilityByteCount =
+    ExactVisibilityWordCount * sizeof(std::uint32_t);
+constexpr vk::DeviceSize ExactVisibilityOutputByteCount = ExactVisibilityByteCount * 2;
+
+class ExactHostVisibilityShader final : public Sirit::Module {
+public:
+    ExactHostVisibilityShader() : Sirit::Module{0x00010500} {
+        AddCapability(spv::Capability::Shader);
+        AddCapability(spv::Capability::Int64);
+        AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
+        AddExtension("SPV_KHR_physical_storage_buffer");
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64,
+                       spv::MemoryModel::GLSL450);
+
+        const auto void_type = TypeVoid();
+        const auto u32_type = TypeUInt(32);
+        const auto u64_type = TypeUInt(64);
+        const auto u32x3_type = TypeVector(u32_type, 3);
+        const auto zero = Constant(u32_type, 0u);
+        const auto bda_output_base = Constant(u32_type, ExactVisibilityWordCount);
+
+        const auto storage_array_type = TypeRuntimeArray(u32_type);
+        Decorate(storage_array_type, spv::Decoration::ArrayStride, sizeof(std::uint32_t));
+        const auto storage_block_type = TypeStruct(storage_array_type);
+        Decorate(storage_block_type, spv::Decoration::Block);
+        MemberDecorate(storage_block_type, 0u, spv::Decoration::Offset, 0u);
+        const auto storage_block_pointer =
+            TypePointer(spv::StorageClass::StorageBuffer, storage_block_type);
+        const auto storage_u32_pointer = TypePointer(spv::StorageClass::StorageBuffer, u32_type);
+
+        const auto descriptor_input =
+            AddGlobalVariable(storage_block_pointer, spv::StorageClass::StorageBuffer);
+        Decorate(descriptor_input, spv::Decoration::DescriptorSet, 0u);
+        Decorate(descriptor_input, spv::Decoration::Binding, 0u);
+        const auto output =
+            AddGlobalVariable(storage_block_pointer, spv::StorageClass::StorageBuffer);
+        Decorate(output, spv::Decoration::DescriptorSet, 0u);
+        Decorate(output, spv::Decoration::Binding, 1u);
+
+        const auto push_block_type = TypeStruct(u64_type);
+        Decorate(push_block_type, spv::Decoration::Block);
+        MemberDecorate(push_block_type, 0u, spv::Decoration::Offset, 0u);
+        const auto push_block_pointer =
+            TypePointer(spv::StorageClass::PushConstant, push_block_type);
+        const auto push_u64_pointer = TypePointer(spv::StorageClass::PushConstant, u64_type);
+        const auto push = AddGlobalVariable(push_block_pointer, spv::StorageClass::PushConstant);
+
+        const auto input_u32x3_pointer = TypePointer(spv::StorageClass::Input, u32x3_type);
+        const auto global_invocation_id =
+            AddGlobalVariable(input_u32x3_pointer, spv::StorageClass::Input);
+        Decorate(global_invocation_id, spv::Decoration::BuiltIn,
+                 spv::BuiltIn::GlobalInvocationId);
+
+        const auto physical_block_pointer =
+            TypePointer(spv::StorageClass::PhysicalStorageBuffer, storage_block_type);
+        const auto physical_u32_pointer =
+            TypePointer(spv::StorageClass::PhysicalStorageBuffer, u32_type);
+
+        const auto main_function = OpFunction(void_type, spv::FunctionControlMask::MaskNone,
+                                              TypeFunction(void_type));
+        AddLabel();
+        const auto invocation = OpCompositeExtract(
+            u32_type, OpLoad(u32x3_type, global_invocation_id), 0u);
+        const auto descriptor_pointer =
+            OpAccessChain(storage_u32_pointer, descriptor_input, zero, invocation);
+        const auto descriptor_value = OpLoad(u32_type, descriptor_pointer);
+        const auto descriptor_output_pointer =
+            OpAccessChain(storage_u32_pointer, output, zero, invocation);
+        OpStore(descriptor_output_pointer, descriptor_value);
+
+        const auto address_pointer = OpAccessChain(push_u64_pointer, push, zero);
+        const auto address = OpLoad(u64_type, address_pointer);
+        const auto physical_block = OpConvertUToPtr(physical_block_pointer, address);
+        const auto physical_pointer =
+            OpAccessChain(physical_u32_pointer, physical_block, zero, invocation);
+        const auto physical_value =
+            OpLoad(u32_type, physical_pointer, spv::MemoryAccessMask::Aligned, 4u);
+        const auto physical_output_index = OpIAdd(u32_type, bda_output_base, invocation);
+        const auto physical_output_pointer =
+            OpAccessChain(storage_u32_pointer, output, zero, physical_output_index);
+        OpStore(physical_output_pointer, physical_value);
+        OpReturn();
+        OpFunctionEnd();
+
+        AddExecutionMode(main_function, spv::ExecutionMode::LocalSize,
+                         static_cast<std::uint32_t>(ExactVisibilityWordCount), 1u, 1u);
+        AddEntryPoint(spv::ExecutionModel::GLCompute, main_function, "main",
+                      global_invocation_id, descriptor_input, output, push);
+    }
+};
+
+struct ExactVisibilityProbeOutput {
+    bool succeeded{};
+    std::string failure{"not_started"};
+    Json trials = Json::array();
+};
+
+struct ExactMappedMemoryGuard {
+    vk::Device device;
+    vk::DeviceMemory memory;
+    void* pointer{};
+
+    ~ExactMappedMemoryGuard() {
+        if (pointer != nullptr) {
+            device.unmapMemory(memory);
+        }
+    }
+};
+
+[[nodiscard]] std::optional<std::uint32_t> FindExactVisibilityMemoryType(
+    vk::PhysicalDevice physical_device, std::uint32_t allowed,
+    vk::MemoryPropertyFlags required) {
+    const auto properties = physical_device.getMemoryProperties();
+    for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
+        if ((allowed & (std::uint32_t{1} << index)) != 0 &&
+            (properties.memoryTypes[index].propertyFlags & required) == required) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::uint64_t ExactVisibilityHash(std::span<const std::uint32_t> words) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto word : words) {
+        for (std::uint32_t shift = 0; shift < 32; shift += 8) {
+            hash ^= static_cast<std::uint8_t>(word >> shift);
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
+}
+
+[[nodiscard]] ExactVisibilityProbeOutput VerifyExactHostVisibility(
+    vk::PhysicalDevice physical_device, vk::Device device, std::uint32_t queue_family_index,
+    vk::Buffer imported_buffer, vk::DeviceAddress imported_address, void* host_pointer,
+    std::uint64_t backing_size) {
+    ExactVisibilityProbeOutput result;
+    const auto fail = [&](std::string_view reason) {
+        result.failure = reason;
+        return result;
+    };
+    if (backing_size < (4ull << 30) + 0x4000 + ExactVisibilityByteCount) {
+        return fail("backing_too_small_for_high_offset_verification");
+    }
+
+    const vk::BufferCreateInfo output_buffer_info{
+        .size = ExactVisibilityOutputByteCount,
+        .usage = vk::BufferUsageFlagBits::eStorageBuffer,
+        .sharingMode = vk::SharingMode::eExclusive,
+    };
+    auto [output_buffer_result, created_output_buffer] =
+        device.createBufferUnique(output_buffer_info);
+    if (output_buffer_result != vk::Result::eSuccess) {
+        return fail("output_buffer_creation_failed");
+    }
+    vk::UniqueDeviceMemory output_memory;
+    vk::UniqueBuffer output_buffer = std::move(created_output_buffer);
+    const auto output_requirements = device.getBufferMemoryRequirements(*output_buffer);
+    const auto output_memory_type = FindExactVisibilityMemoryType(
+        physical_device, output_requirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    if (!output_memory_type) {
+        return fail("coherent_output_memory_unavailable");
+    }
+    auto [output_memory_result, allocated_output_memory] = device.allocateMemoryUnique({
+        .allocationSize = output_requirements.size,
+        .memoryTypeIndex = *output_memory_type,
+    });
+    if (output_memory_result != vk::Result::eSuccess) {
+        return fail("output_memory_allocation_failed");
+    }
+    output_memory = std::move(allocated_output_memory);
+    if (device.bindBufferMemory(*output_buffer, *output_memory, 0) != vk::Result::eSuccess) {
+        return fail("output_memory_binding_failed");
+    }
+    auto [map_result, mapped] =
+        device.mapMemory(*output_memory, 0, ExactVisibilityOutputByteCount);
+    if (map_result != vk::Result::eSuccess || mapped == nullptr) {
+        return fail("output_memory_mapping_failed");
+    }
+    ExactMappedMemoryGuard mapped_guard{device, *output_memory, mapped};
+
+    ExactHostVisibilityShader shader;
+    const auto shader_code = shader.Assemble();
+    auto [shader_result, shader_module] = device.createShaderModuleUnique({
+        .codeSize = shader_code.size() * sizeof(std::uint32_t),
+        .pCode = shader_code.data(),
+    });
+    if (shader_result != vk::Result::eSuccess) {
+        return fail("shader_module_creation_failed");
+    }
+
+    const std::array layout_bindings{
+        vk::DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        },
+        vk::DescriptorSetLayoutBinding{
+            .binding = 1,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        },
+    };
+    auto [layout_result, descriptor_layout] = device.createDescriptorSetLayoutUnique({
+        .bindingCount = static_cast<std::uint32_t>(layout_bindings.size()),
+        .pBindings = layout_bindings.data(),
+    });
+    if (layout_result != vk::Result::eSuccess) {
+        return fail("descriptor_layout_creation_failed");
+    }
+    const vk::DescriptorSetLayout descriptor_layout_handle = *descriptor_layout;
+    const vk::PushConstantRange push_range{
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .offset = 0,
+        .size = sizeof(vk::DeviceAddress),
+    };
+    auto [pipeline_layout_result, pipeline_layout] = device.createPipelineLayoutUnique({
+        .setLayoutCount = 1,
+        .pSetLayouts = &descriptor_layout_handle,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+    });
+    if (pipeline_layout_result != vk::Result::eSuccess) {
+        return fail("pipeline_layout_creation_failed");
+    }
+    const vk::PipelineShaderStageCreateInfo stage{
+        .stage = vk::ShaderStageFlagBits::eCompute,
+        .module = *shader_module,
+        .pName = "main",
+    };
+    auto [pipeline_result, pipeline] = device.createComputePipelineUnique(
+        {}, {.stage = stage, .layout = *pipeline_layout});
+    if (pipeline_result != vk::Result::eSuccess) {
+        return fail("compute_pipeline_creation_failed");
+    }
+
+    const vk::DescriptorPoolSize pool_size{
+        .type = vk::DescriptorType::eStorageBuffer,
+        .descriptorCount = 2,
+    };
+    auto [pool_result, descriptor_pool] = device.createDescriptorPoolUnique({
+        .maxSets = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+    });
+    if (pool_result != vk::Result::eSuccess) {
+        return fail("descriptor_pool_creation_failed");
+    }
+    auto [set_result, descriptor_sets] = device.allocateDescriptorSetsUnique({
+        .descriptorPool = *descriptor_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &descriptor_layout_handle,
+    });
+    if (set_result != vk::Result::eSuccess || descriptor_sets.size() != 1) {
+        return fail("descriptor_set_allocation_failed");
+    }
+
+    auto [command_pool_result, command_pool] = device.createCommandPoolUnique({
+        .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+        .queueFamilyIndex = queue_family_index,
+    });
+    if (command_pool_result != vk::Result::eSuccess) {
+        return fail("command_pool_creation_failed");
+    }
+    auto [command_result, command_buffers] = device.allocateCommandBuffersUnique({
+        .commandPool = *command_pool,
+        .level = vk::CommandBufferLevel::ePrimary,
+        .commandBufferCount = 1,
+    });
+    if (command_result != vk::Result::eSuccess || command_buffers.size() != 1) {
+        return fail("command_buffer_allocation_failed");
+    }
+    auto [fence_result, fence] = device.createFenceUnique({});
+    if (fence_result != vk::Result::eSuccess) {
+        return fail("fence_creation_failed");
+    }
+    const auto queue = device.getQueue(queue_family_index, 0);
+
+    const std::array<std::uint64_t, 3> offsets{
+        0x4000ull,
+        (4ull << 30) + 0x4000ull,
+        backing_size - 0x4000ull,
+    };
+    for (std::size_t trial_index = 0; trial_index < offsets.size(); ++trial_index) {
+        const auto offset = offsets[trial_index];
+        std::array<std::uint32_t, ExactVisibilityWordCount> expected{};
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            expected[index] = 0xa5c30000u ^
+                              (static_cast<std::uint32_t>(trial_index) * 0x01010101u) ^
+                              (static_cast<std::uint32_t>(index) * 0x9e3779b9u);
+        }
+        std::memcpy(static_cast<std::byte*>(host_pointer) + offset, expected.data(),
+                    ExactVisibilityByteCount);
+        std::memset(mapped, 0, ExactVisibilityOutputByteCount);
+
+        const vk::DescriptorBufferInfo input_info{
+            .buffer = imported_buffer,
+            .offset = offset,
+            .range = ExactVisibilityByteCount,
+        };
+        const vk::DescriptorBufferInfo output_info{
+            .buffer = *output_buffer,
+            .offset = 0,
+            .range = ExactVisibilityOutputByteCount,
+        };
+        const std::array writes{
+            vk::WriteDescriptorSet{
+                .dstSet = *descriptor_sets.front(),
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eStorageBuffer,
+                .pBufferInfo = &input_info,
+            },
+            vk::WriteDescriptorSet{
+                .dstSet = *descriptor_sets.front(),
+                .dstBinding = 1,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eStorageBuffer,
+                .pBufferInfo = &output_info,
+            },
+        };
+        device.updateDescriptorSets(writes, {});
+
+        auto& command_buffer = command_buffers.front();
+        if (command_buffer->reset({}) != vk::Result::eSuccess ||
+            command_buffer->begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}) !=
+                vk::Result::eSuccess) {
+            return fail("command_buffer_begin_failed");
+        }
+        const vk::MemoryBarrier host_to_shader{
+            .srcAccessMask = vk::AccessFlagBits::eHostWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+        };
+        command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eHost,
+                                        vk::PipelineStageFlagBits::eComputeShader, {},
+                                        host_to_shader, {}, {});
+        command_buffer->bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
+        command_buffer->bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0,
+                                           *descriptor_sets.front(), {});
+        const vk::DeviceAddress trial_address = imported_address + offset;
+        command_buffer->pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                      sizeof(trial_address), &trial_address);
+        command_buffer->dispatch(1, 1, 1);
+        const vk::MemoryBarrier shader_to_host{
+            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        };
+        command_buffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                        vk::PipelineStageFlagBits::eHost, {}, shader_to_host, {},
+                                        {});
+        if (command_buffer->end() != vk::Result::eSuccess) {
+            return fail("command_buffer_end_failed");
+        }
+        const vk::CommandBuffer submitted = *command_buffer;
+        const vk::SubmitInfo submit{
+            .commandBufferCount = 1,
+            .pCommandBuffers = &submitted,
+        };
+        if (device.resetFences(*fence) != vk::Result::eSuccess ||
+            queue.submit(submit, *fence) != vk::Result::eSuccess) {
+            return fail("queue_submission_failed");
+        }
+        if (device.waitForFences(*fence, true, 10'000'000'000ull) != vk::Result::eSuccess) {
+            return fail("queue_fence_wait_failed");
+        }
+
+        const auto actual = std::span{static_cast<const std::uint32_t*>(mapped),
+                                      ExactVisibilityWordCount * 2};
+        std::size_t descriptor_mismatches{};
+        std::size_t bda_mismatches{};
+        std::optional<std::size_t> descriptor_first_mismatch;
+        std::optional<std::size_t> bda_first_mismatch;
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            if (actual[index] != expected[index]) {
+                descriptor_first_mismatch = descriptor_first_mismatch.value_or(index);
+                ++descriptor_mismatches;
+            }
+            if (actual[ExactVisibilityWordCount + index] != expected[index]) {
+                bda_first_mismatch = bda_first_mismatch.value_or(index);
+                ++bda_mismatches;
+            }
+        }
+        result.trials.push_back({
+            {"offset", offset},
+            {"expectedHash", ExactVisibilityHash(expected)},
+            {"descriptorHash", ExactVisibilityHash(actual.first(ExactVisibilityWordCount))},
+            {"bdaHash", ExactVisibilityHash(actual.subspan(ExactVisibilityWordCount))},
+            {"descriptorMismatchCount", descriptor_mismatches},
+            {"bdaMismatchCount", bda_mismatches},
+            {"descriptorFirstMismatch", descriptor_first_mismatch},
+            {"bdaFirstMismatch", bda_first_mismatch},
+        });
+        if (descriptor_mismatches != 0 || bda_mismatches != 0) {
+            result.failure = descriptor_mismatches != 0 && bda_mismatches != 0
+                                 ? "descriptor_and_bda_data_mismatch"
+                             : descriptor_mismatches != 0 ? "descriptor_data_mismatch"
+                                                          : "bda_data_mismatch";
+            return result;
+        }
+    }
+    result.succeeded = true;
+    result.failure = "none";
+    return result;
+}
+
 [[nodiscard]] ExactProbeOutput ProbeExactAddressSpaceHostAllocation(
     vk::PhysicalDevice physical_device, vk::Device device, std::uint64_t backing_size,
-    std::size_t min_pointer_alignment) {
+    std::size_t min_pointer_alignment, std::uint32_t queue_family_index) {
     using namespace Vulkan;
     constexpr auto handle_type = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
     constexpr vk::BufferUsageFlags usage =
@@ -988,8 +1407,12 @@ static_assert(ERROR_COMMITMENT_LIMIT == 1455);
 
         const vk::MemoryAllocateFlagsInfo allocation_flags{
             .flags = vk::MemoryAllocateFlagBits::eDeviceAddress};
-        const vk::ImportMemoryHostPointerInfoEXT import_info{
+        const vk::MemoryDedicatedAllocateInfo dedicated_info{
             .pNext = &allocation_flags,
+            .buffer = *buffer,
+        };
+        const vk::ImportMemoryHostPointerInfoEXT import_info{
+            .pNext = &dedicated_info,
             .handleType = handle_type,
             .pHostPointer = acquisition.backing.pointer,
         };
@@ -1027,7 +1450,22 @@ static_assert(ERROR_COMMITMENT_LIMIT == 1455);
             fail(ExactHostImportFailure::ZeroDeviceAddress, "zero_device_address");
             return;
         }
-        if (!protocol.Complete(ExactHostImportStage::DeviceAddress) ||
+        if (!protocol.Complete(ExactHostImportStage::DeviceAddress)) {
+            return;
+        }
+        attempt["dataVerificationAttempted"] = true;
+        auto visibility = VerifyExactHostVisibility(
+            physical_device, device, queue_family_index, *buffer, address,
+            acquisition.backing.pointer, backing_size);
+        attempt["dataVerificationPassed"] = visibility.succeeded;
+        attempt["dataVerificationFailure"] = visibility.failure;
+        attempt["dataVerificationTrials"] = std::move(visibility.trials);
+        if (!visibility.succeeded) {
+            fail(ExactHostImportFailure::DataVerificationFailed,
+                 attempt["dataVerificationFailure"].get<std::string>());
+            return;
+        }
+        if (!protocol.Complete(ExactHostImportStage::DataVerification) ||
             !protocol.Complete(ExactHostImportStage::Retained)) {
             return;
         }
@@ -1187,11 +1625,19 @@ int main(int argc, char** argv) {
                                              vk::PhysicalDeviceVulkan12Features>();
             const auto& features12 = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
             report["bufferDeviceAddressFeature"] = features12.bufferDeviceAddress == VK_TRUE;
+            report["shaderInt64Feature"] = feature_chain.get().features.shaderInt64 == VK_TRUE;
             if (!features12.bufferDeviceAddress) {
                 report["status"] = "unsupported";
                 report["reason"] = "buffer_device_address_unavailable";
                 return 2;
             }
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            if (!feature_chain.get().features.shaderInt64) {
+                report["status"] = "unsupported";
+                report["reason"] = "shader_int64_unavailable";
+                return 2;
+            }
+#endif
 
             const auto queue_families = physical_device.getQueueFamilyProperties();
             const auto queue_it = std::ranges::find_if(queue_families, [](const auto& family) {
@@ -1214,6 +1660,11 @@ int main(int argc, char** argv) {
             const vk::PhysicalDeviceVulkan12Features enabled_features{
                 .bufferDeviceAddress = VK_TRUE,
             };
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            const vk::PhysicalDeviceFeatures enabled_core_features{
+                .shaderInt64 = VK_TRUE,
+            };
+#endif
             constexpr std::array enabled_extensions{VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME};
             const vk::DeviceCreateInfo device_info{
                 .pNext = &enabled_features,
@@ -1221,6 +1672,9 @@ int main(int argc, char** argv) {
                 .pQueueCreateInfos = &queue_info,
                 .enabledExtensionCount = static_cast<std::uint32_t>(enabled_extensions.size()),
                 .ppEnabledExtensionNames = enabled_extensions.data(),
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+                .pEnabledFeatures = &enabled_core_features,
+#endif
             };
             auto [device_result, device] = physical_device.createDeviceUnique(device_info);
             if (device_result != vk::Result::eSuccess) {
@@ -1233,12 +1687,14 @@ int main(int argc, char** argv) {
             report["bufferDeviceAddressEnabled"] = true;
 
 #ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            report["mechanismEvidenceOnly"] = false;
+            report["dataVerificationRequired"] = true;
             auto host_allocation = ProbeExactAddressSpaceHostAllocation(
-                physical_device, *device, arguments->backing_size, min_alignment);
+                physical_device, *device, arguments->backing_size, min_alignment, queue_index);
             report["attempts"].push_back(std::move(host_allocation.report));
             report["status"] = ExactDispositionName(host_allocation.disposition);
             if (host_allocation.disposition == Vulkan::ExactHostImportDisposition::Pass) {
-                report["reason"] = "exact_address_space_host_allocation_retained";
+                report["reason"] = "exact_address_space_host_data_verified";
                 return 0;
             }
             report["reason"] = "exact_address_space_host_allocation_not_retained";
