@@ -432,6 +432,23 @@ TEST(BufferResidency, WaitsOnlyForGpuWritebacksOverlappingHostAccess) {
         pending_guest_pages, std::numeric_limits<VAddr>::max(), 2));
 }
 
+TEST(BufferResidency, ExpandsPhysicalWritebackSlicesToVulkanCopyAlignment) {
+    using Slice = VideoCore::PhysicalBackingGpuWritebackSlice;
+    using Copy = VideoCore::PhysicalBackingGpuWritebackCopy;
+    constexpr VAddr buffer_base = 0x100000;
+    constexpr std::array slices{
+        Slice{buffer_base + 0x4000, 0x20000, 1, 1},
+        Slice{buffer_base + 0x8000, 0x24000, 3, 2},
+    };
+
+    const auto copies = VideoCore::PlanPhysicalBackingGpuWritebackCopies(
+        buffer_base, 0x10000, 0x400000, slices);
+
+    ASSERT_TRUE(copies.has_value());
+    EXPECT_EQ(*copies,
+              (std::vector<Copy>{{0x4000, 0x20000, 4}, {0x8000, 0x24000, 8}}));
+}
+
 TEST(BufferResidency, PhysicalWritebackTrackerDoesNotRequireUnrelatedWait) {
     VideoCore::PhysicalBackingWritebackTracker tracker;
     constexpr std::array first_pages{u64{0x20000}};
@@ -458,9 +475,33 @@ TEST(BufferResidency, PhysicalWritebackTrackerWaitsForLatestSamePageSubmission) 
 
     EXPECT_EQ(tracker.RequiredTick(first_page), 53);
     EXPECT_EQ(tracker.RequiredTickForAll(), 53);
-    tracker.CompleteThrough(47);
+    EXPECT_EQ(tracker.CompleteThrough(47), (std::vector<u64>{0x24000}));
     EXPECT_EQ(tracker.PendingPageCount(), 1);
     EXPECT_EQ(tracker.RequiredTick(first_page), 53);
-    tracker.CompleteThrough(53);
+    EXPECT_EQ(tracker.CompleteThrough(53), (std::vector<u64>{0x20000}));
+    EXPECT_EQ(tracker.PendingPageCount(), 0);
+}
+
+TEST(BufferResidency, PhysicalWritebackSynchronizationUsesExactTickWithoutGlobalFinish) {
+    VideoCore::PhysicalBackingWritebackTracker tracker;
+    constexpr std::array first_page{u64{0x20000}};
+    constexpr std::array second_page{u64{0x24000}};
+    constexpr std::array unrelated_page{u64{0x28000}};
+    ASSERT_TRUE(tracker.Record(first_page, 41));
+    ASSERT_TRUE(tracker.Record(second_page, 47));
+    std::vector<u64> waited_ticks;
+
+    EXPECT_TRUE(VideoCore::SynchronizePhysicalBackingWritebacks(
+                    tracker, unrelated_page,
+                    [&](u64 tick) { waited_ticks.push_back(tick); })
+                    .empty());
+    EXPECT_EQ(VideoCore::SynchronizePhysicalBackingWritebacks(
+                  tracker, first_page, [&](u64 tick) { waited_ticks.push_back(tick); }),
+              (std::vector<u64>{0x20000}));
+    EXPECT_EQ(VideoCore::SynchronizePhysicalBackingWritebacks(
+                  tracker, second_page, [&](u64 tick) { waited_ticks.push_back(tick); }),
+              (std::vector<u64>{0x24000}));
+
+    EXPECT_EQ(waited_ticks, (std::vector<u64>{41, 47}));
     EXPECT_EQ(tracker.PendingPageCount(), 0);
 }
