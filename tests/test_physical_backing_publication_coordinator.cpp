@@ -215,4 +215,24 @@ TEST(PhysicalBackingPublicationCoordinator, GuestPageRegistrationUsesMonotonicOw
     ASSERT_TRUE(coordinator.RetireCachePageClean(second->token));
 }
 
+TEST(PhysicalBackingPublicationCoordinator, ReportsTrackedGuestPublicationWithoutFallback) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+
+    const auto imported = coordinator.ResolveGuestPagePublication(GuestA);
+    ASSERT_TRUE(imported.has_value());
+    EXPECT_EQ(imported->value, ImportedBase + PhysicalPage);
+    EXPECT_FALSE(coordinator.ResolveGuestPagePublication(GuestB));
+
+    const auto overlap = coordinator.BeginTextureOverlap(GuestA, PageSize);
+    ASSERT_TRUE(overlap.has_value());
+    const auto blocked = coordinator.ResolveGuestPagePublication(GuestA);
+    ASSERT_TRUE(blocked.has_value());
+    EXPECT_EQ(blocked->value, 0);
+}
+
 } // namespace
