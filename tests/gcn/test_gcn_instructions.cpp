@@ -106,7 +106,8 @@ TEST_F(GcnTest, direct_memory_fault_bits_are_recorded_atomically) {
 
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
-    EXPECT_EQ(CountSpirvOpcode(result.spirv, spv::Op::OpAtomicOr), 1U);
+    // One atomic records a missing valid page and one records an out-of-range page sentinel.
+    EXPECT_EQ(CountSpirvOpcode(result.spirv, spv::Op::OpAtomicOr), 2U);
 }
 
 TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_access) {
