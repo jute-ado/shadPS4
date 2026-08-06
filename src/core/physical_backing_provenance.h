@@ -33,6 +33,11 @@ struct PhysicalMemoryArea {
     }
 
     [[nodiscard]] bool CanMergeWith(const PhysicalMemoryArea& next) const {
+        constexpr u64 Max = std::numeric_limits<u64>::max();
+        if (size == 0 || next.size == 0 || base > Max - size || next.base > Max - next.size ||
+            size > Max - next.size) {
+            return false;
+        }
         return base + size == next.base && memory_type == next.memory_type &&
                dma_type == next.dma_type && allocation_generation == next.allocation_generation;
     }
@@ -127,6 +132,9 @@ template <typename PhysicalAreas>
     }
 
     std::vector<PhysicalBackingSpan> spans;
+    const auto required_dma_type = mapping_class == PhysicalBackingMappingClass::Direct
+                                       ? PhysicalMemoryType::Mapped
+                                       : PhysicalMemoryType::Committed;
     u64 mapping_offset = 0;
     u64 remaining_size = size;
     auto area_it = areas.begin();
@@ -136,8 +144,8 @@ template <typename PhysicalAreas>
         }
         const auto& area = area_it->second;
         if (area.size == 0 || (area_it->first & PageMask) != 0 || (area.base & PageMask) != 0 ||
-            (area.size & PageMask) != 0 || area.allocation_generation == 0 ||
-            area.size > remaining_size ||
+            (area.size & PageMask) != 0 || area.dma_type != required_dma_type ||
+            area.allocation_generation == 0 || area.size > remaining_size ||
             area.base > std::numeric_limits<u64>::max() - (area.size - 1)) {
             return std::nullopt;
         }
