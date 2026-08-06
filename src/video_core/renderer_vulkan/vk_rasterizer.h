@@ -85,6 +85,9 @@ public:
     }
 
 private:
+    bool RecordDirectDrawAttempt(const GraphicsPipeline* pipeline, bool is_indexed,
+                                 u32 index_offset, VideoCore::DmaAttachmentMode attachment_mode,
+                                 bool force_rasterizer_discard);
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline,
                                VideoCore::DmaAttachmentMode attachment_mode);
@@ -148,6 +151,7 @@ private:
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
+    u64 dma_binding_generation{};
     bool attachment_feedback_loop{};
 };
 

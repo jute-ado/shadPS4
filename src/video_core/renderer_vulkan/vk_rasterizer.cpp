@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/debug.h"
+#include "common/scope_exit.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
@@ -30,6 +31,41 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     push_data.yoffset = regs.viewport_control.yoffset_enable ? regs.viewports[0].yoffset : 0.f;
     push_data.yscale = regs.viewport_control.yscale_enable ? regs.viewports[0].yscale : 1.f;
     return push_data;
+}
+
+static VideoCore::DmaWorkTraits GetDmaWorkTraits(const Pipeline* pipeline) {
+    VideoCore::DmaWorkTraits traits{};
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+
+        if (stage->uses_dma) {
+            switch (stage->l_stage) {
+            case Shader::LogicalStage::Vertex:
+                traits.vertex_dma_reads = true;
+                break;
+            case Shader::LogicalStage::Fragment:
+                traits.fragment_dma_reads = true;
+                break;
+            default:
+                traits.unsupported_stage_dma_reads = true;
+                break;
+            }
+        }
+
+        for (const auto& buffer : stage->buffers) {
+            if (buffer.is_written && (buffer.buffer_type == Shader::BufferType::Guest ||
+                                      buffer.buffer_type == Shader::BufferType::GdsBuffer)) {
+                traits.guest_or_gds_writes = true;
+            }
+        }
+        for (const auto& image : stage->images) {
+            traits.atomics |= image.is_atomic;
+            traits.storage_image_writes |= image.is_written;
+        }
+    }
+    return traits;
 }
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
@@ -195,17 +231,64 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    const auto& regs = liverpool->regs;
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
     }
 
-    PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    const auto record_attempt = [&](VideoCore::DmaAttachmentMode attachment_mode,
+                                    bool force_rasterizer_discard) {
+        return RecordDirectDrawAttempt(pipeline, is_indexed, index_offset, attachment_mode,
+                                       force_rasterizer_discard);
+    };
+    const auto dma_traits = GetDmaWorkTraits(pipeline);
+    if (!VideoCore::IsDmaDiscoveryEligible(dma_traits) ||
+        liverpool->regs.clipper_control.dx_rasterization_kill) {
+        record_attempt(VideoCore::DmaAttachmentMode::Publication, false);
         return;
     }
-    const auto state = BeginRendering(pipeline, VideoCore::DmaAttachmentMode::Publication);
+
+    // Do not let faults from earlier work authorize or reject this draw's publication.
+    if (fault_process_pending) {
+        static_cast<void>(buffer_cache.ProcessFaultBufferSynchronous());
+        fault_process_pending = false;
+    }
+
+    const u64 binding_generation = ++dma_binding_generation;
+    VideoCore::DmaPublicationGate gate{VideoCore::DmaPublicationGate::Config{
+        .maximum_attempts = 3,
+        .binding_generation = binding_generation,
+    }};
+    const auto execution = VideoCore::ExecuteDmaPublicationGate(
+        gate, binding_generation,
+        [&](u32) {
+            if (!record_attempt(VideoCore::DmaAttachmentMode::Discovery, true)) {
+                return VideoCore::DmaFaultEpoch::Invalid();
+            }
+            const auto epoch = buffer_cache.ProcessFaultBufferSynchronous();
+            fault_process_pending = false;
+            return epoch;
+        },
+        [&] { return record_attempt(VideoCore::DmaAttachmentMode::Publication, false); });
+    if (execution == VideoCore::DmaExecutionResult::Aborted) {
+        LOG_WARNING(Render_Vulkan, "Aborted DMA draw publication after {} discovery attempt(s)",
+                    gate.AttemptCount());
+    }
+}
+
+bool Rasterizer::RecordDirectDrawAttempt(const GraphicsPipeline* pipeline, bool is_indexed,
+                                         u32 index_offset,
+                                         VideoCore::DmaAttachmentMode attachment_mode,
+                                         bool force_rasterizer_discard) {
+    const auto& regs = liverpool->regs;
+    PrepareRenderState(pipeline);
+    SCOPE_EXIT {
+        ResetBindings();
+    };
+    if (!BindResources(pipeline)) {
+        return false;
+    }
+    const auto state = BeginRendering(pipeline, attachment_mode);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -214,6 +297,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
+    if (force_rasterizer_discard) {
+        auto& dynamic_state = scheduler.GetDynamicState();
+        dynamic_state.SetRasterizerDiscardEnabled(true);
+        dynamic_state.Commit(instance, scheduler.CommandBuffer());
+    }
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
@@ -231,7 +319,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
-    ResetBindings();
+    return true;
 }
 
 void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 stride,

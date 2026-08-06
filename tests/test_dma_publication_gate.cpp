@@ -104,7 +104,10 @@ TEST(DmaPublicationGate, RebuildsEveryDiscoveryAttemptBeforePublishingOnce) {
             operations.push_back('D');
             return epochs.at(attempt - 1);
         },
-        [&] { operations.push_back('P'); });
+        [&] {
+            operations.push_back('P');
+            return true;
+        });
 
     EXPECT_EQ(result, VideoCore::DmaExecutionResult::Published);
     EXPECT_EQ(operations, (std::vector<char>{'D', 'D', 'P'}));
@@ -113,25 +116,25 @@ TEST(DmaPublicationGate, RebuildsEveryDiscoveryAttemptBeforePublishingOnce) {
 }
 
 TEST(DmaDiscoveryPolicy, DiscoveryNeverClearsOrConsumesAttachmentMetadata) {
-    const auto cleared = VideoCore::ResolveDmaAttachmentPolicy(
-        true, VideoCore::DmaAttachmentMode::Discovery);
+    const auto cleared =
+        VideoCore::ResolveDmaAttachmentPolicy(true, VideoCore::DmaAttachmentMode::Discovery);
     EXPECT_FALSE(cleared.load_clear);
     EXPECT_FALSE(cleared.consume_metadata);
 
-    const auto loaded = VideoCore::ResolveDmaAttachmentPolicy(
-        false, VideoCore::DmaAttachmentMode::Discovery);
+    const auto loaded =
+        VideoCore::ResolveDmaAttachmentPolicy(false, VideoCore::DmaAttachmentMode::Discovery);
     EXPECT_FALSE(loaded.load_clear);
     EXPECT_FALSE(loaded.consume_metadata);
 }
 
 TEST(DmaDiscoveryPolicy, PublicationPreservesClearAndConsumesMetadata) {
-    const auto cleared = VideoCore::ResolveDmaAttachmentPolicy(
-        true, VideoCore::DmaAttachmentMode::Publication);
+    const auto cleared =
+        VideoCore::ResolveDmaAttachmentPolicy(true, VideoCore::DmaAttachmentMode::Publication);
     EXPECT_TRUE(cleared.load_clear);
     EXPECT_TRUE(cleared.consume_metadata);
 
-    const auto loaded = VideoCore::ResolveDmaAttachmentPolicy(
-        false, VideoCore::DmaAttachmentMode::Publication);
+    const auto loaded =
+        VideoCore::ResolveDmaAttachmentPolicy(false, VideoCore::DmaAttachmentMode::Publication);
     EXPECT_FALSE(loaded.load_clear);
     EXPECT_TRUE(loaded.consume_metadata);
 }

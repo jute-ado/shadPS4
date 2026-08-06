@@ -5,7 +5,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
+#include <utility>
 
 namespace VideoCore {
 
@@ -15,6 +17,11 @@ enum class DmaAttemptResult {
     PublishExactlyOnce,
     AbortWithoutPublication,
     Complete,
+};
+
+enum class DmaExecutionResult {
+    Published,
+    Aborted,
 };
 
 class DmaFaultEpoch {
@@ -134,17 +141,43 @@ private:
     std::uint32_t publication_count{};
 };
 
+template <typename DiscoverAttempt, typename Publish>
+DmaExecutionResult ExecuteDmaPublicationGate(DmaPublicationGate& gate,
+                                             std::uint64_t binding_generation,
+                                             DiscoverAttempt&& discover_attempt,
+                                             Publish&& publish) {
+    for (;;) {
+        if (gate.BeginAttempt(binding_generation) != DmaAttemptResult::DiscoverWithoutPublication) {
+            return DmaExecutionResult::Aborted;
+        }
+
+        const auto epoch =
+            std::invoke(std::forward<DiscoverAttempt>(discover_attempt), gate.AttemptCount());
+        switch (gate.CompleteAttempt(epoch)) {
+        case DmaAttemptResult::RetryWithoutPublication:
+            continue;
+        case DmaAttemptResult::PublishExactlyOnce:
+            return std::invoke(std::forward<Publish>(publish)) ? DmaExecutionResult::Published
+                                                               : DmaExecutionResult::Aborted;
+        default:
+            return DmaExecutionResult::Aborted;
+        }
+    }
+}
+
 struct DmaWorkTraits {
     bool vertex_dma_reads{};
     bool fragment_dma_reads{};
+    bool unsupported_stage_dma_reads{};
     bool guest_or_gds_writes{};
     bool atomics{};
     bool storage_image_writes{};
 };
 
 constexpr bool IsDmaDiscoveryEligible(const DmaWorkTraits& traits) {
-    return traits.vertex_dma_reads && !traits.fragment_dma_reads && !traits.guest_or_gds_writes &&
-           !traits.atomics && !traits.storage_image_writes;
+    return traits.vertex_dma_reads && !traits.fragment_dma_reads &&
+           !traits.unsupported_stage_dma_reads && !traits.guest_or_gds_writes && !traits.atomics &&
+           !traits.storage_image_writes;
 }
 
 } // namespace VideoCore

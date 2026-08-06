@@ -21,8 +21,7 @@ static constexpr size_t PageFaultAreaSize = FaultDownloadSlotCount * sizeof(u64)
 FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
                            BufferCache& buffer_cache_, PageManager& page_manager_,
                            u32 caching_pagebits, u64 caching_num_pages_)
-    : scheduler{scheduler_}, buffer_cache{buffer_cache_},
-      page_manager{page_manager_},
+    : scheduler{scheduler_}, buffer_cache{buffer_cache_}, page_manager{page_manager_},
       caching_pagesize{1ULL << caching_pagebits}, caching_num_pages{caching_num_pages_},
       fault_buffer_size{caching_num_pages_ / 8},
       fault_buffer{instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, fault_buffer_size},
@@ -178,8 +177,9 @@ void FaultManager::ProcessFaultBuffer() {
             const VAddr start = fault_buf[i];
             const VAddr end = start + caching_pagesize;
             const bool is_processable = IsProcessableDmaFaultRange(
-                start, end, address_space_size,
-                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+                start, end, address_space_size, [this](VAddr address, u64 size) {
+                    return page_manager.IsGpuMapped(address, size);
+                });
             if (!is_processable) {
                 if (invalid_fault_count++ == 0) {
                     first_invalid_fault = start;
@@ -197,12 +197,13 @@ void FaultManager::ProcessFaultBuffer() {
         fault_epochs[area].Complete(ClassifyDmaFaultEpoch(fault_count, invalid_fault_count));
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
             const bool is_processable = IsProcessableDmaFaultRange(
-                start, end, address_space_size,
-                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+                start, end, address_space_size, [this](VAddr address, u64 size) {
+                    return page_manager.IsGpuMapped(address, size);
+                });
             if (!is_processable) {
                 LOG_WARNING(Render_Vulkan,
-                            "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}", start,
-                            end);
+                            "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}",
+                            start, end);
                 return;
             }
             MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));

@@ -27,8 +27,8 @@ struct BoundedFaultDownloadCount {
     };
 }
 
-[[nodiscard]] constexpr DmaFaultEpoch ClassifyDmaFaultEpoch(
-    BoundedFaultDownloadCount count, size_t invalid_fault_count) {
+[[nodiscard]] constexpr DmaFaultEpoch ClassifyDmaFaultEpoch(BoundedFaultDownloadCount count,
+                                                            size_t invalid_fault_count) {
     if (count.overflowed) {
         return DmaFaultEpoch::Overflow();
     }
