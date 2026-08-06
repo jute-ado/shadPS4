@@ -281,5 +281,11 @@ TEST(ExactAddressSpaceHostImportProbe, RequiresTheGuestPageTableLookupPath) {
         HasRequiredExactGuestPublicationEvidence(true, true, true, true, true, true, true));
 }
 
+TEST(ExactAddressSpaceHostImportProbe, WaitsForIdleBeforeCleanupAfterFenceTimeout) {
+    EXPECT_FALSE(RequiresExactProbeIdleBeforeResourceCleanup(true, false));
+    EXPECT_TRUE(RequiresExactProbeIdleBeforeResourceCleanup(false, false));
+    EXPECT_FALSE(RequiresExactProbeIdleBeforeResourceCleanup(false, true));
+}
+
 } // namespace
 } // namespace Vulkan
