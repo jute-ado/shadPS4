@@ -193,6 +193,7 @@ void FaultManager::ProcessFaultBuffer() {
                         "Ignored {} invalid or unmapped GPU fault page(s), first at {:#x}",
                         invalid_fault_count, first_invalid_fault);
         }
+        fault_epochs[area] = ClassifyDmaFaultEpoch(fault_count, invalid_fault_count);
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
             const bool is_processable = IsProcessableDmaFaultRange(
                 start, end, address_space_size,
@@ -210,6 +211,14 @@ void FaultManager::ProcessFaultBuffer() {
 
     fault_areas[current_area++] = scheduler.CurrentTick();
     current_area %= MaxPendingFaults;
+}
+
+DmaFaultEpoch FaultManager::ProcessFaultBufferSynchronous() {
+    const u32 area = current_area;
+    ProcessFaultBuffer();
+    scheduler.Finish();
+    scheduler.PopPendingOperations();
+    return fault_epochs[area];
 }
 
 } // namespace VideoCore

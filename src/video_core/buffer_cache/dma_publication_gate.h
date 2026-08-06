@@ -19,12 +19,25 @@ enum class DmaAttemptResult {
 
 class DmaFaultEpoch {
 public:
+    enum class Status {
+        Clean,
+        Faulted,
+        Invalid,
+        Overflow,
+    };
+
+    constexpr DmaFaultEpoch() = default;
+
     static constexpr DmaFaultEpoch Clean() {
         return DmaFaultEpoch{Status::Clean, 0};
     }
 
     static constexpr DmaFaultEpoch Faults(std::initializer_list<std::uint64_t> addresses) {
         return DmaFaultEpoch{Status::Faulted, addresses.size()};
+    }
+
+    static constexpr DmaFaultEpoch FaultCount(std::size_t count) {
+        return DmaFaultEpoch{Status::Faulted, count};
     }
 
     static constexpr DmaFaultEpoch Invalid() {
@@ -35,19 +48,20 @@ public:
         return DmaFaultEpoch{Status::Overflow, 0};
     }
 
-private:
-    enum class Status {
-        Clean,
-        Faulted,
-        Invalid,
-        Overflow,
-    };
+    constexpr Status GetStatus() const {
+        return status;
+    }
 
+    constexpr std::size_t FaultCount() const {
+        return fault_count;
+    }
+
+private:
     constexpr DmaFaultEpoch(Status status, std::size_t fault_count)
         : status{status}, fault_count{fault_count} {}
 
-    Status status;
-    std::size_t fault_count;
+    Status status{Status::Clean};
+    std::size_t fault_count{};
 
     friend class DmaPublicationGate;
 };

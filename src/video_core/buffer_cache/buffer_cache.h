@@ -148,6 +148,9 @@ public:
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
+    /// Processes the fault buffer and waits until its exact epoch is available.
+    [[nodiscard]] DmaFaultEpoch ProcessFaultBufferSynchronous();
+
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 
