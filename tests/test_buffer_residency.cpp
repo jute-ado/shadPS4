@@ -412,3 +412,14 @@ TEST(BufferResidency, CoalescesContiguousPhysicalWritebackSlices) {
     EXPECT_EQ(*copies,
               (std::vector<Copy>{{0x4000, 0x20000, 0x8000}, {0xc100, 0x30100, 0x200}}));
 }
+
+TEST(BufferResidency, WaitsOnlyForGpuWritebacksOverlappingHostAccess) {
+    constexpr std::array pending_guest_pages{VAddr{0x10000}, VAddr{0x50000}};
+
+    EXPECT_FALSE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
+        pending_guest_pages, 0x20000, 0x1000));
+    EXPECT_TRUE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
+        pending_guest_pages, 0x13fff, 2));
+    EXPECT_FALSE(VideoCore::PhysicalBackingGpuWritebacksOverlapGuestRange(
+        pending_guest_pages, std::numeric_limits<VAddr>::max(), 2));
+}
