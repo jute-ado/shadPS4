@@ -6,7 +6,18 @@
 #include <functional>
 #include <utility>
 
+#include "common/scope_exit.h"
+
 namespace VideoCore {
+
+template <typename Acquire, typename Snapshot, typename Restore>
+void WithReadonlyStreamPageTransaction(Acquire&& acquire, Snapshot&& snapshot, Restore&& restore) {
+    SCOPE_EXIT {
+        std::invoke(std::forward<Restore>(restore));
+    };
+    std::invoke(std::forward<Acquire>(acquire));
+    std::invoke(std::forward<Snapshot>(snapshot));
+}
 
 template <typename Reserve, typename Transaction, typename Snapshot, typename Commit>
 auto StageReadonlyStreamSnapshot(Reserve&& reserve, Transaction&& transaction, Snapshot&& snapshot,

@@ -99,10 +99,11 @@ struct MutatingGuestRange {
 };
 
 struct CrossManagerGuestRange {
-    static constexpr size_t PageSize = 16;
-    static constexpr size_t ManagerSize = 4 * PageSize;
-    static constexpr size_t RangeBegin = ManagerSize - PageSize - 1;
-    static constexpr size_t RangeSize = 2 * PageSize + 2;
+    static constexpr size_t PageSize = 4 * 1024;
+    static constexpr size_t ManagerSize = 4 * 1024 * 1024;
+    static constexpr size_t PagesPerManager = ManagerSize / PageSize;
+    static constexpr size_t RangeBegin = ManagerSize - 1;
+    static constexpr size_t RangeSize = 64 * 1024;
 
     struct Page {
         bool dirty{true};
@@ -111,14 +112,14 @@ struct CrossManagerGuestRange {
     };
 
     struct Manager {
-        std::array<Page, 4> pages;
+        std::array<Page, PagesPerManager> pages;
         bool locked{};
     };
 
     CrossManagerGuestRange() {
-        managers[0].pages[3] = {
+        managers[0].pages[PagesPerManager - 1] = {
             .dirty = false, .writeable = false, .owner = WatchOwner::Persistent};
-        managers[1].pages[0] = {
+        managers[1].pages[1] = {
             .dirty = false, .writeable = false, .owner = WatchOwner::Persistent};
     }
 
@@ -170,6 +171,7 @@ struct CrossManagerGuestRange {
         events.push_back("snapshot");
         snapshot_saw_all_protected = true;
         ForEachTouchedPage([&](size_t, size_t, const Page& state) {
+            ++snapshot_page_count;
             snapshot_saw_all_protected &= !state.dirty && !state.writeable;
         });
     }
@@ -192,8 +194,17 @@ struct CrossManagerGuestRange {
             return lhs.dirty == rhs.dirty && lhs.writeable == rhs.writeable &&
                    lhs.owner == rhs.owner;
         };
-        return same(managers[0].pages[2], dirty_page) && same(managers[0].pages[3], clean_page) &&
-               same(managers[1].pages[0], clean_page) && same(managers[1].pages[1], dirty_page);
+        bool restored = true;
+        const size_t range_end = RangeBegin + RangeSize;
+        for (size_t address = (RangeBegin / PageSize) * PageSize; address < range_end;
+             address += PageSize) {
+            const size_t manager = address / ManagerSize;
+            const size_t page = (address % ManagerSize) / PageSize;
+            const bool was_clean =
+                (manager == 0 && page == PagesPerManager - 1) || (manager == 1 && page == 1);
+            restored &= same(managers[manager].pages[page], was_clean ? clean_page : dirty_page);
+        }
+        return restored;
     }
 
     std::array<Manager, 2> managers;
@@ -201,6 +212,7 @@ struct CrossManagerGuestRange {
     std::vector<std::string_view> events;
     bool snapshot_saw_all_protected{};
     bool commit_saw_unlocked{};
+    size_t snapshot_page_count{};
     int commit_count{};
 };
 
@@ -248,6 +260,7 @@ TEST(ReadonlyStreamSnapshot, RestoresDirtyAndCleanPagesAcrossUnalignedManagerBou
         [&](std::span<int>) { memory.ObserveSnapshot(); }, [&] { memory.Commit(); });
 
     EXPECT_TRUE(memory.snapshot_saw_all_protected);
+    EXPECT_EQ(memory.snapshot_page_count, 17);
     EXPECT_TRUE(memory.HasOriginalPageState());
     EXPECT_TRUE(memory.commit_saw_unlocked);
     EXPECT_EQ(memory.commit_count, 1);

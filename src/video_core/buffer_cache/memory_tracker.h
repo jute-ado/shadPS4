@@ -13,9 +13,9 @@
 #include <boost/container/static_vector.hpp>
 
 #include "common/debug.h"
-#include "common/scope_exit.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "video_core/buffer_cache/readonly_stream_snapshot.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -166,29 +166,32 @@ public:
         boost::container::static_vector<RegionManager*, MaxManagers> locked_managers;
         boost::container::static_vector<DirtyRange, MaxDirtyRanges> dirty_ranges;
 
-        SCOPE_EXIT {
-            for (const auto& range : dirty_ranges) {
-                range.manager->template ChangeRegionState<Type::CPU, true>(range.address,
-                                                                           range.size);
-            }
-            for (auto manager = locked_managers.rbegin(); manager != locked_managers.rend();
-                 ++manager) {
-                (*manager)->lock.unlock();
-            }
-        };
-
-        IteratePages<true>(
-            query_cpu_range, query_size,
-            [&locked_managers, &dirty_ranges](RegionManager* manager, u64 offset, size_t size) {
-                locked_managers.push_back(manager);
-                manager->lock.lock();
-                manager->template ForEachModifiedRange<Type::CPU, true>(
-                    manager->GetCpuAddr() + offset, size,
-                    [&dirty_ranges, manager](VAddr address, u64 dirty_size) {
-                        dirty_ranges.push_back({manager, address, dirty_size});
-                    });
+        WithReadonlyStreamPageTransaction(
+            [&] {
+                IteratePages<true>(query_cpu_range, query_size,
+                                   [&locked_managers, &dirty_ranges](RegionManager* manager,
+                                                                     u64 offset, size_t size) {
+                                       locked_managers.push_back(manager);
+                                       manager->lock.lock();
+                                       manager->template ForEachModifiedRange<Type::CPU, true>(
+                                           manager->GetCpuAddr() + offset, size,
+                                           [&dirty_ranges, manager](VAddr address, u64 dirty_size) {
+                                               dirty_ranges.push_back(
+                                                   {manager, address, dirty_size});
+                                           });
+                                   });
+            },
+            std::forward<decltype(snapshot)>(snapshot),
+            [&] {
+                for (const auto& range : dirty_ranges) {
+                    range.manager->template ChangeRegionState<Type::CPU, true>(range.address,
+                                                                               range.size);
+                }
+                for (auto manager = locked_managers.rbegin(); manager != locked_managers.rend();
+                     ++manager) {
+                    (*manager)->lock.unlock();
+                }
             });
-        std::invoke(std::forward<decltype(snapshot)>(snapshot));
     }
 
     /// Call 'func' for each GPU modified range and unmark those pages as GPU modified
