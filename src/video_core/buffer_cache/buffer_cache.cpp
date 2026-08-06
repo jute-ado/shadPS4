@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <numeric>
 #include "common/alignment.h"
 #include "common/debug.h"
@@ -393,6 +394,11 @@ std::optional<std::vector<u64>> BufferCache::ResolvePhysicalBackingPages(VAddr d
 }
 
 bool BufferCache::SynchronizePhysicalBackingPages(std::span<const u64> physical_pages) {
+    static std::atomic<u64> call_count{};
+    static std::atomic<u64> page_count{};
+    static std::atomic<u64> wait_count{};
+    static std::atomic<u64> wait_time_us{};
+
     std::vector<u64> ordered_pages{physical_pages.begin(), physical_pages.end()};
     std::ranges::sort(ordered_pages);
     ordered_pages.erase(std::ranges::unique(ordered_pages).begin(), ordered_pages.end());
@@ -401,11 +407,34 @@ bool BufferCache::SynchronizePhysicalBackingPages(std::span<const u64> physical_
         })) {
         return false;
     }
+    const u64 calls = call_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    page_count.fetch_add(ordered_pages.size(), std::memory_order_relaxed);
     const auto required_tick = physical_backing_writeback_tracker.RequiredTick(ordered_pages);
     if (!required_tick) {
+        if (calls >= 1024 && (calls & (calls - 1)) == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "Physical backing wait profile calls={} pages={} waits={} wait_us={}", calls,
+                     page_count.load(std::memory_order_relaxed),
+                     wait_count.load(std::memory_order_relaxed),
+                     wait_time_us.load(std::memory_order_relaxed));
+        }
         return true;
     }
+    const auto wait_start = std::chrono::steady_clock::now();
     scheduler.Wait(*required_tick);
+    const auto elapsed_us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - wait_start)
+                                                .count());
+    const u64 waits = wait_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    const u64 cumulative_wait_us =
+        wait_time_us.fetch_add(elapsed_us, std::memory_order_relaxed) + elapsed_us;
+    if ((waits & (waits - 1)) == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Physical backing wait profile calls={} pages={} waits={} wait_us={} "
+                 "last_wait_us={} tick={}",
+                 calls, page_count.load(std::memory_order_relaxed), waits, cumulative_wait_us,
+                 elapsed_us, *required_tick);
+    }
     std::atomic_thread_fence(std::memory_order_acquire);
     const auto completed_pages =
         physical_backing_writeback_tracker.PagesCompletingThrough(*required_tick);
