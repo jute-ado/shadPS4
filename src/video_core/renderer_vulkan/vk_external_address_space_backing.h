@@ -33,6 +33,10 @@ public:
         return device_address;
     }
 
+    [[nodiscard]] u64 BackingSize() const noexcept {
+        return resources ? resources->lease.Size() : 0;
+    }
+
     [[nodiscard]] static constexpr u64 GuestPagePublicationCount() noexcept {
         return 0;
     }

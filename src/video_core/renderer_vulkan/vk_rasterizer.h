@@ -4,9 +4,11 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "core/physical_backing_provenance.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -18,6 +20,10 @@ struct Liverpool;
 
 namespace Core {
 class MemoryManager;
+}
+
+namespace VideoCore {
+class PhysicalBackingPublicationCoordinator;
 }
 
 namespace Vulkan {
@@ -65,7 +71,8 @@ public:
     bool ReadMemory(VAddr addr, u64 size);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
-    void MapMemory(VAddr addr, u64 size);
+    void MapMemory(VAddr addr, u64 size,
+                   std::vector<Core::PhysicalBackingSpan> physical_spans = {});
     void UnmapMemory(VAddr addr, u64 size);
 
     void CpSync();
@@ -123,6 +130,9 @@ private:
 
     const Instance& instance;
     Scheduler& scheduler;
+    std::unique_ptr<ExternalAddressSpaceBacking> external_address_space_backing;
+    std::unique_ptr<VideoCore::PhysicalBackingPublicationCoordinator>
+        physical_backing_coordinator;
     VideoCore::PageManager page_manager;
     VideoCore::BufferCache buffer_cache;
     VideoCore::TextureCache texture_cache;
@@ -150,7 +160,6 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
-    std::unique_ptr<ExternalAddressSpaceBacking> external_address_space_backing;
 };
 
 } // namespace Vulkan

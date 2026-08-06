@@ -67,6 +67,42 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
 BufferCache::~BufferCache() = default;
 
+void BufferCache::ApplyPhysicalBackingBdaDeltas(
+    std::span<const PhysicalBackingBdaDelta> deltas) {
+    if (deltas.empty()) {
+        return;
+    }
+    std::vector<PhysicalBackingBdaDelta> ordered{deltas.begin(), deltas.end()};
+    std::ranges::sort(ordered, {}, &PhysicalBackingBdaDelta::guest_page);
+    for (size_t index = 0; index < ordered.size(); ++index) {
+        if ((ordered[index].guest_page & (CACHING_PAGESIZE - 1)) != 0 ||
+            ordered[index].guest_page >= (1ULL << 40) ||
+            (index != 0 && ordered[index - 1].guest_page == ordered[index].guest_page)) {
+            return;
+        }
+    }
+
+    size_t run_begin = 0;
+    while (run_begin < ordered.size()) {
+        size_t run_end = run_begin + 1;
+        while (run_end < ordered.size() &&
+               ordered[run_end].guest_page ==
+                   ordered[run_end - 1].guest_page + CACHING_PAGESIZE) {
+            ++run_end;
+        }
+        std::vector<vk::DeviceAddress> addresses;
+        addresses.reserve(run_end - run_begin);
+        for (size_t index = run_begin; index < run_end; ++index) {
+            addresses.push_back(ordered[index].device_address.value);
+        }
+        const u64 page_begin = ordered[run_begin].guest_page >> CACHING_PAGEBITS;
+        WriteDataBuffer(bda_pagetable_buffer, page_begin * sizeof(vk::DeviceAddress),
+                        addresses.data(),
+                        static_cast<u32>(addresses.size() * sizeof(vk::DeviceAddress)));
+        run_begin = run_end;
+    }
+}
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
     if (!IsRegionRegistered(device_addr, size)) {
         return;
