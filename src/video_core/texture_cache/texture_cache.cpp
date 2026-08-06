@@ -851,8 +851,14 @@ void TextureCache::RefreshImage(Image& image) {
 
     const auto [in_buffer, in_offset] =
         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
-    if (auto barrier = in_buffer->GetBarrier(vk::AccessFlagBits2::eTransferRead,
-                                             vk::PipelineStageFlagBits2::eTransfer)) {
+    const auto consumer = PhysicalBackingTextureUploadConsumer(image.info.props.is_tiled);
+    const auto consumer_access = consumer == PhysicalBackingTextureConsumer::ComputeShaderRead
+                                     ? vk::AccessFlagBits2::eShaderRead
+                                     : vk::AccessFlagBits2::eTransferRead;
+    const auto consumer_stage = consumer == PhysicalBackingTextureConsumer::ComputeShaderRead
+                                    ? vk::PipelineStageFlagBits2::eComputeShader
+                                    : vk::PipelineStageFlagBits2::eTransfer;
+    if (auto barrier = in_buffer->GetBarrier(consumer_access, consumer_stage)) {
         scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
             .dependencyFlags = vk::DependencyFlagBits::eByRegion,
             .bufferMemoryBarrierCount = 1,
