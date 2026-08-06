@@ -179,6 +179,7 @@ public:
         struct Group {
             Key key{};
             BufferAccessRole roles{};
+            bool writes{};
         };
         std::vector<Group> groups;
         for (const auto& transition : transitions) {
@@ -187,19 +188,25 @@ public:
                 group = groups.emplace(groups.end(), Group{.key = transition.key});
             }
             group->roles |= transition.current_roles;
+            group->writes |= transition.current_writes;
         }
 
         for (const auto& transition : transitions) {
             const auto group = std::ranges::find(groups, transition.key, &Group::key);
             const bool multi_role = std::popcount(static_cast<std::uint32_t>(group->roles)) > 1;
+            const bool geometry_role =
+                HasBufferAccessRole(group->roles, BufferAccessRole::VertexRead) ||
+                HasBufferAccessRole(group->roles, BufferAccessRole::IndexRead);
+            const bool write_geometry_multi_role = multi_role && group->writes && geometry_role;
             const bool gpu_write_to_geometry =
                 transition.prior.has_value() && transition.prior->writes &&
                 (HasBufferAccessRole(transition.current_roles, BufferAccessRole::VertexRead) ||
                  HasBufferAccessRole(transition.current_roles, BufferAccessRole::IndexRead));
-            if (!multi_role && !gpu_write_to_geometry) {
+            if (!write_geometry_multi_role && !gpu_write_to_geometry) {
                 continue;
             }
-            WriteTransition(transition, multi_role, gpu_write_to_geometry);
+            WriteTransition(transition, multi_role, write_geometry_multi_role,
+                            gpu_write_to_geometry);
             if (record_count >= record_limit) {
                 complete = true;
                 break;
@@ -287,6 +294,7 @@ private:
     }
 
     void WriteTransition(const Transition& transition, bool multi_role,
+                         bool write_geometry_multi_role,
                          bool gpu_write_to_geometry) {
         nlohmann::json observations = nlohmann::json::array();
         for (const auto& observation : transition.observations) {
@@ -314,6 +322,7 @@ private:
                       {"observations", std::move(observations)},
                       {"interesting",
                        {{"multiRole", multi_role},
+                        {"writeGeometryMultiRole", write_geometry_multi_role},
                         {"gpuWriteToVertexOrIndex", gpu_write_to_geometry}}},
                   }
                       .dump()

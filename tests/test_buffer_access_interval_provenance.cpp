@@ -104,8 +104,8 @@ TEST(BufferAccessProvenanceTrace, RecordsOnlyInsideTheBoundedElapsedWindow) {
         trace.CommitCommand();
 
         trace.BeginCommand(31, 71, 10'000'000);
-        EXPECT_TRUE(trace.Observe(5, 0, 64, Role::VertexRead | Role::IndexRead, 0x01, 0x10,
-                                  false));
+        EXPECT_TRUE(trace.Observe(5, 0, 64, Role::ShaderReadWrite, 0x01, 0x10, true));
+        EXPECT_TRUE(trace.Observe(5, 0, 64, Role::VertexRead, 0x02, 0x20, false));
         trace.CommitCommand();
 
         trace.BeginCommand(32, 72, 15'000'000);
