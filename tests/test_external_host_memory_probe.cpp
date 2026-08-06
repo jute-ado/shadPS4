@@ -228,5 +228,81 @@ TEST(ExternalHostMemoryProbe, RawImportOwnerRejectsPartialOrZeroAddressOwnership
     EXPECT_FALSE(missing_buffer.IsRetained());
 }
 
+TEST(ExternalHostMemoryProbe, LimitsHandleTypesToBackingProvenance) {
+    EXPECT_EQ(AllowedExternalHostHandleTypes(ExternalHostBackingProvenance::PageFileMapping),
+              ExternalHostHandleClass::HostAllocation);
+    EXPECT_EQ(AllowedExternalHostHandleTypes(ExternalHostBackingProvenance::ForeignMapped),
+              ExternalHostHandleClass::HostMappedForeignMemory);
+    EXPECT_EQ(AllowedExternalHostHandleTypes(ExternalHostBackingProvenance::Unknown),
+              ExternalHostHandleClass::None);
+}
+
+TEST(ExternalHostMemoryProbe, ClassifiesOnlyCapabilityOrInvalidHandleAsUnsupported) {
+    using enum ExternalHostMemoryProbeFailure;
+    using enum ExternalHostProbeVkResultClass;
+
+    EXPECT_EQ(ClassifyExternalHostProbeAttempt(false, HandleTypeNotImportable, NotCalled),
+              ExternalHostProbeDisposition::Unsupported);
+    EXPECT_EQ(ClassifyExternalHostProbeAttempt(false, HostPointerQueryFailed,
+                                               ErrorInvalidExternalHandle),
+              ExternalHostProbeDisposition::Unsupported);
+    EXPECT_EQ(ClassifyExternalHostProbeAttempt(false, NoCompatibleMemoryType, Success),
+              ExternalHostProbeDisposition::Unsupported);
+
+    for (const auto [failure, vk_result] : {
+             std::pair{InvalidPointerAlignment, NotCalled},
+             std::pair{BackingAllocationFailed, ErrorOutOfMemory},
+             std::pair{BackingValidationFailed, NotCalled},
+             std::pair{MemoryRequirementsInvalid, Success},
+             std::pair{HostPointerQueryFailed, ErrorUnknown},
+             std::pair{MemoryAllocationFailed, ErrorOutOfMemory},
+             std::pair{MemoryAllocationFailed, ErrorUnknown},
+             std::pair{ZeroDeviceAddress, Success},
+             std::pair{UnexpectedStage, NotCalled},
+         }) {
+        EXPECT_EQ(ClassifyExternalHostProbeAttempt(false, failure, vk_result),
+                  ExternalHostProbeDisposition::Error);
+    }
+    EXPECT_EQ(ClassifyExternalHostProbeAttempt(true, None, Success),
+              ExternalHostProbeDisposition::Pass);
+}
+
+TEST(ExternalHostMemoryProbe, AggregatesTopLevelDispositionWithoutHidingErrors) {
+    constexpr std::array unsupported{
+        ExternalHostProbeDisposition::Unsupported,
+        ExternalHostProbeDisposition::Unsupported,
+    };
+    EXPECT_EQ(ClassifyExternalHostProbeResult(unsupported),
+              ExternalHostProbeDisposition::Unsupported);
+
+    constexpr std::array mixed{
+        ExternalHostProbeDisposition::Unsupported,
+        ExternalHostProbeDisposition::Error,
+    };
+    EXPECT_EQ(ClassifyExternalHostProbeResult(mixed), ExternalHostProbeDisposition::Error);
+
+    constexpr std::array pass{
+        ExternalHostProbeDisposition::Error,
+        ExternalHostProbeDisposition::Pass,
+    };
+    EXPECT_EQ(ClassifyExternalHostProbeResult(pass), ExternalHostProbeDisposition::Pass);
+}
+
+TEST(ExternalHostMemoryProbe, ClaimsCleanupOnlyFromExplicitResourceResults) {
+    EXPECT_TRUE(ExternalHostProbeCleanupResult{}.Complete());
+    EXPECT_FALSE(ExternalHostProbeCleanupResult{.unmap_attempted = true}.Complete());
+    EXPECT_FALSE((ExternalHostProbeCleanupResult{
+        .unmap_attempted = true,
+        .unmap_succeeded = true,
+        .close_attempted = true,
+    }.Complete()));
+    EXPECT_TRUE((ExternalHostProbeCleanupResult{
+        .unmap_attempted = true,
+        .unmap_succeeded = true,
+        .close_attempted = true,
+        .close_succeeded = true,
+    }.Complete()));
+}
+
 } // namespace
 } // namespace Vulkan
