@@ -644,6 +644,15 @@ public:
         return true;
     }
 
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingDirtySlice>>
+    ResolveCachePageDirtySlices(const PhysicalBackingCachePageToken& token) const {
+        const auto owner_it = active_cache_owners.find(token.publication.physical_offset);
+        if (owner_it == active_cache_owners.end() || owner_it->second.token != token) {
+            return std::nullopt;
+        }
+        return owner_it->second.dirty_slices;
+    }
+
     [[nodiscard]] bool MarkCachePageGpuDirtyForGuest(VAddr guest_page, u32 offset, u32 size) {
         if (!IsPageAligned(guest_page)) {
             return false;

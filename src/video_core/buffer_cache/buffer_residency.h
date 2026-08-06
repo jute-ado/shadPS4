@@ -361,7 +361,35 @@ struct PhysicalBackingCachePageOwnerLocation {
 PlanPhysicalBackingCachePageRetirements(
     std::span<const u64> requested_physical_pages,
     std::span<const PhysicalBackingCachePageOwnerLocation> owners) {
-    std::vector<PhysicalBackingCachePageOwnerLocation> retirements(owners.begin(), owners.end());
+    constexpr u64 PageMask = 16_KB - 1;
+    std::unordered_set<u64> requested;
+    requested.reserve(requested_physical_pages.size());
+    for (const u64 physical_page : requested_physical_pages) {
+        if ((physical_page & PageMask) != 0) {
+            return std::nullopt;
+        }
+        requested.insert(physical_page);
+    }
+
+    std::unordered_set<u64> owned_physical_pages;
+    owned_physical_pages.reserve(owners.size());
+    std::vector<PhysicalBackingCachePageOwnerLocation> retirements;
+    retirements.reserve(std::min(requested.size(), owners.size()));
+    for (const auto& owner : owners) {
+        if (owner.buffer_index == std::numeric_limits<u32>::max() ||
+            owner.owner_index == std::numeric_limits<u32>::max() ||
+            (owner.physical_page & PageMask) != 0 ||
+            !owned_physical_pages.insert(owner.physical_page).second) {
+            return std::nullopt;
+        }
+        if (requested.contains(owner.physical_page)) {
+            retirements.push_back(owner);
+        }
+    }
+    std::ranges::sort(retirements, [](const auto& lhs, const auto& rhs) {
+        return std::tie(lhs.buffer_index, lhs.owner_index) <
+               std::tie(rhs.buffer_index, rhs.owner_index);
+    });
     return retirements;
 }
 

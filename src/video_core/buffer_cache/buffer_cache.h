@@ -219,6 +219,8 @@ private:
                                                                Buffer& target_buffer,
                                                                VAddr device_addr, u64 size);
     [[nodiscard]] bool RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size);
+    [[nodiscard]] bool RetirePhysicalBackingCachePagesForCpuWrite(
+        BufferId buffer_id, std::span<const u32> owner_indices);
 
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer, bool is_registered = true);
