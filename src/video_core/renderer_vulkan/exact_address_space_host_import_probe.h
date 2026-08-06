@@ -324,6 +324,11 @@ struct ExactSelectedMemoryTypeEvidence {
     return !fence_wait_succeeded && !device_lost;
 }
 
+[[nodiscard]] constexpr bool CanUseOrdinaryExactProbeResourceCleanup(
+    bool idle_succeeded, bool device_lost) noexcept {
+    return idle_succeeded || device_lost;
+}
+
 [[nodiscard]] constexpr ExactSelectedMemoryTypeEvidence MakeExactSelectedMemoryTypeEvidence(
     std::uint32_t property_flags, std::uint32_t host_coherent_flag) noexcept {
     return {.property_flags = property_flags,

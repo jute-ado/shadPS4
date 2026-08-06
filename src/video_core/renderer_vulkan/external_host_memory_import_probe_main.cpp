@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -1386,7 +1387,16 @@ struct ExactGuestAliasView {
             if (wait_result != vk::Result::eSuccess) {
                 if (Vulkan::RequiresExactProbeIdleBeforeResourceCleanup(
                         false, wait_result == vk::Result::eErrorDeviceLost)) {
-                    static_cast<void>(device.waitIdle());
+                    const auto idle_result = device.waitIdle();
+                    if (!Vulkan::CanUseOrdinaryExactProbeResourceCleanup(
+                            idle_result == vk::Result::eSuccess,
+                            idle_result == vk::Result::eErrorDeviceLost)) {
+                        std::cerr << "{\"schema\":\"shadps4.exact-probe-fatal.v1\","
+                                     "\"status\":\"fatal\","
+                                     "\"reason\":\"unsafe_resource_cleanup_prevented\"}\n";
+                        std::cerr.flush();
+                        std::_Exit(EXIT_FAILURE);
+                    }
                 }
                 return fail("queue_fence_wait_failed");
             }
@@ -1580,7 +1590,16 @@ struct ExactGuestAliasView {
         if (wait_result != vk::Result::eSuccess) {
             if (Vulkan::RequiresExactProbeIdleBeforeResourceCleanup(
                     false, wait_result == vk::Result::eErrorDeviceLost)) {
-                static_cast<void>(device.waitIdle());
+                const auto idle_result = device.waitIdle();
+                if (!Vulkan::CanUseOrdinaryExactProbeResourceCleanup(
+                        idle_result == vk::Result::eSuccess,
+                        idle_result == vk::Result::eErrorDeviceLost)) {
+                    std::cerr << "{\"schema\":\"shadps4.exact-probe-fatal.v1\","
+                                 "\"status\":\"fatal\","
+                                 "\"reason\":\"unsafe_resource_cleanup_prevented\"}\n";
+                    std::cerr.flush();
+                    std::_Exit(EXIT_FAILURE);
+                }
             }
             return fail("publication_switch_queue_fence_wait_failed");
         }
