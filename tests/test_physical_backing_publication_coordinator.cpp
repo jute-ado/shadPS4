@@ -22,6 +22,12 @@ constexpr VAddr GuestB = 0x2000'0000ULL;
 constexpr u64 PhysicalPage = 3 * PageSize;
 constexpr u64 OtherPhysicalPage = 5 * PageSize;
 
+TEST(PhysicalBackingPublicationCoordinator, ReadOnlyTexturesDoNotSuppressImportedBacking) {
+    EXPECT_FALSE(VideoCore::ShouldAcquirePhysicalBackingTextureOwnership(false, false));
+    EXPECT_TRUE(VideoCore::ShouldAcquirePhysicalBackingTextureOwnership(false, true));
+    EXPECT_FALSE(VideoCore::ShouldAcquirePhysicalBackingTextureOwnership(true, true));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, MapsPhysicalAliasesToExactImportedAddresses) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
