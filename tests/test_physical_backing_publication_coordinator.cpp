@@ -19,6 +19,7 @@ constexpr u64 ImportedBase = 0x2'0000'0000ULL;
 constexpr u64 OverrideBase = 0x4'0000'0000ULL;
 constexpr VAddr GuestA = 0x1000'0000ULL;
 constexpr VAddr GuestB = 0x2000'0000ULL;
+constexpr VAddr GuestC = 0x3000'0000ULL;
 constexpr u64 PhysicalPage = 3 * PageSize;
 constexpr u64 OtherPhysicalPage = 5 * PageSize;
 
@@ -311,6 +312,36 @@ TEST(PhysicalBackingPublicationCoordinator, ActivatesBufferPagesAsOneAtomicPubli
     ASSERT_TRUE(guest_b.has_value());
     EXPECT_EQ(guest_a->value, ImportedBase + PhysicalPage);
     EXPECT_EQ(guest_b->value, OverrideBase + PageSize);
+}
+
+TEST(PhysicalBackingPublicationCoordinator, AcquiresExistingAliasOwnerAndNewPagesTogether) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestC, OtherPhysicalPage, PageSize, 8},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto existing = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(existing.has_value());
+    constexpr std::array requests{
+        VideoCore::PhysicalBackingCachePageRequest{
+            GuestB, PhysicalBackingDeviceAddress{OverrideBase + PageSize}},
+        VideoCore::PhysicalBackingCachePageRequest{
+            GuestC, PhysicalBackingDeviceAddress{OverrideBase + 2 * PageSize}},
+    };
+
+    const auto acquired = coordinator.AcquireCachePagesForGuests(requests);
+
+    ASSERT_TRUE(acquired.has_value());
+    ASSERT_EQ(acquired->owners.size(), 1);
+    EXPECT_EQ(acquired->owners[0].guest_page, GuestC);
+    ASSERT_EQ(acquired->deltas.size(), 3);
+    EXPECT_EQ(acquired->deltas[0].device_address.value, OverrideBase);
+    EXPECT_EQ(acquired->deltas[1].device_address.value, OverrideBase);
+    EXPECT_EQ(acquired->deltas[2].device_address.value, OverrideBase + 2 * PageSize);
 }
 
 TEST(PhysicalBackingPublicationCoordinator, BatchReturnsOneOwnerForPhysicalAliases) {
