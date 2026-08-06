@@ -803,7 +803,7 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
         }
         if (!physical_requests.empty()) {
             const auto publication =
-                physical_backing_coordinator->ActivateCachePagesForGuests(physical_requests);
+                physical_backing_coordinator->AcquireCachePagesForGuests(physical_requests);
             if (publication) {
                 auto& owners = physical_backing_cache_pages[buffer_id];
                 owners.reserve(publication->owners.size());

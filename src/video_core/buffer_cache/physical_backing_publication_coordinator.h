@@ -349,6 +349,54 @@ public:
         return result;
     }
 
+    /// Acquires unowned pages atomically while retaining any already-valid physical owner.
+    /// Existing owners remain owned by their original cache buffer and must migrate before a
+    /// different alias receives GPU writes.
+    [[nodiscard]] std::optional<PhysicalBackingCachePublicationBatch>
+    AcquireCachePagesForGuests(std::span<const PhysicalBackingCachePageRequest> requests) {
+        if (requests.empty()) {
+            return std::nullopt;
+        }
+        std::vector<PhysicalBackingCachePageRequest> unowned_requests;
+        std::vector<u64> existing_physical_pages;
+        std::unordered_set<VAddr> guest_pages;
+        std::unordered_set<u64> physical_pages;
+        for (const auto& request : requests) {
+            if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
+                !guest_pages.emplace(request.guest_page).second) {
+                return std::nullopt;
+            }
+            const auto mapping_it = mapping_tokens.find(request.guest_page);
+            if (mapping_it == mapping_tokens.end()) {
+                return std::nullopt;
+            }
+            const u64 physical_offset = mapping_it->second.physical_offset;
+            if (!physical_pages.emplace(physical_offset).second) {
+                continue;
+            }
+            if (active_cache_owners.contains(physical_offset)) {
+                existing_physical_pages.push_back(physical_offset);
+            } else {
+                unowned_requests.push_back(request);
+            }
+        }
+
+        PhysicalBackingCachePublicationBatch result;
+        if (!unowned_requests.empty()) {
+            auto acquired = ActivateCachePagesForGuests(unowned_requests);
+            if (!acquired) {
+                return std::nullopt;
+            }
+            result = std::move(*acquired);
+        }
+        for (const u64 physical_offset : existing_physical_pages) {
+            auto deltas = MakeAliasDeltas(physical_offset);
+            result.deltas.insert(result.deltas.end(), deltas.begin(), deltas.end());
+        }
+        std::ranges::sort(result.deltas, {}, &PhysicalBackingBdaDelta::guest_page);
+        return result;
+    }
+
     [[nodiscard]] std::optional<PhysicalBackingDeviceAddress> ResolveGuestPagePublication(
         VAddr guest_page) const {
         if (!IsPageAligned(guest_page)) {
