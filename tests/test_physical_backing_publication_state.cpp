@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <stdexcept>
 
 #include "video_core/buffer_cache/physical_backing_publication_state.h"
 
@@ -17,6 +18,7 @@ constexpr u64 ImportedBase = 0x1'0000'0000;
 constexpr u64 OverrideBase = 0x2'0000'0000;
 constexpr VAddr GuestA = 0x1000'0000;
 constexpr VAddr GuestB = GuestA + PageSize;
+constexpr VAddr GuestC = GuestB + PageSize;
 constexpr u64 PhysicalPage = 3 * PageSize;
 
 PhysicalBackingPublicationState MakeState() {
@@ -161,6 +163,100 @@ TEST(PhysicalBackingPublicationState, FailedWritebackRemainsSuppressedAndCanRetr
     EXPECT_TRUE(state.CommitOrderedWriteback(*writeback, [&] {
         ++commit_count;
         EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+        return true;
+    }));
+    EXPECT_EQ(commit_count, 2u);
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
+
+TEST(PhysicalBackingPublicationState, WritebackCallbackRejectsSamePhysicalPageMutation) {
+    auto state = MakeState();
+    const auto first = state.MapGuestPage(GuestA, PhysicalPage, 1, 1);
+    const auto second = state.MapGuestPage(GuestB, PhysicalPage, 2, 1);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    const auto override =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 1);
+    ASSERT_TRUE(override.has_value());
+    const auto writeback = state.RetireGpuDirty(*override);
+    ASSERT_TRUE(writeback.has_value());
+
+    u32 commit_count = 0;
+    EXPECT_FALSE(state.CommitOrderedWriteback(*writeback, [&] {
+        ++commit_count;
+        EXPECT_FALSE(state.UnmapGuestPage(*first));
+        EXPECT_FALSE(state.MapGuestPage(GuestC, PhysicalPage, 3, 1));
+        EXPECT_FALSE(state.ActivateOverride(
+            PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase + PageSize}, 2));
+        EXPECT_FALSE(state.ReallocatePhysicalPage(PhysicalPage, 1, 2));
+        EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+        EXPECT_EQ(state.Resolve(GuestB).value, u64{0});
+        return false;
+    }));
+    EXPECT_EQ(commit_count, 1u);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+    EXPECT_EQ(state.Resolve(GuestB).value, u64{0});
+    EXPECT_EQ(state.Resolve(GuestC).value, u64{0});
+
+    EXPECT_TRUE(state.CommitOrderedWriteback(*writeback, [&] {
+        ++commit_count;
+        return true;
+    }));
+    EXPECT_EQ(commit_count, 2u);
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+    EXPECT_EQ(state.Resolve(GuestB).value, ImportedBase + PhysicalPage);
+}
+
+TEST(PhysicalBackingPublicationState, NestedCommitIsRejectedWithoutInvokingNestedCallback) {
+    auto state = MakeState();
+    ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 1, 1));
+    const auto override =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 1);
+    ASSERT_TRUE(override.has_value());
+    const auto writeback = state.RetireGpuDirty(*override);
+    ASSERT_TRUE(writeback.has_value());
+
+    u32 outer_count = 0;
+    u32 nested_count = 0;
+    EXPECT_FALSE(state.CommitOrderedWriteback(*writeback, [&] {
+        ++outer_count;
+        EXPECT_FALSE(state.CommitOrderedWriteback(*writeback, [&] {
+            ++nested_count;
+            return true;
+        }));
+        return false;
+    }));
+    EXPECT_EQ(outer_count, 1u);
+    EXPECT_EQ(nested_count, 0u);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+
+    EXPECT_TRUE(state.CommitOrderedWriteback(*writeback, [] { return true; }));
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
+
+TEST(PhysicalBackingPublicationState, ThrowingWritebackCallbackRestoresRetryablePendingState) {
+    auto state = MakeState();
+    ASSERT_TRUE(state.MapGuestPage(GuestA, PhysicalPage, 1, 1));
+    const auto override =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 1);
+    ASSERT_TRUE(override.has_value());
+    const auto writeback = state.RetireGpuDirty(*override);
+    ASSERT_TRUE(writeback.has_value());
+
+    u32 commit_count = 0;
+    EXPECT_THROW((void)state.CommitOrderedWriteback(
+                     *writeback,
+                     [&]() -> bool {
+                         ++commit_count;
+                         EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+                         throw std::runtime_error{"synthetic writeback failure"};
+                     }),
+                 std::runtime_error);
+    EXPECT_EQ(commit_count, 1u);
+    EXPECT_EQ(state.Resolve(GuestA).value, u64{0});
+
+    EXPECT_TRUE(state.CommitOrderedWriteback(*writeback, [&] {
+        ++commit_count;
         return true;
     }));
     EXPECT_EQ(commit_count, 2u);
