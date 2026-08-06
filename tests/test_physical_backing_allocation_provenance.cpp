@@ -6,7 +6,7 @@
 #include <limits>
 #include <map>
 
-#include "core/physical_backing_provenance.h"
+#include "core/memory.h"
 
 namespace {
 
@@ -96,8 +96,8 @@ TEST(PhysicalBackingAllocationProvenance, CollectsExactMultiplePhysicalSpans) {
         {2 * PageSize, MakeArea(20 * PageSize, PageSize, 8)},
     };
 
-    const auto spans = CollectPhysicalBackingSpans(GuestBase, 3 * PageSize,
-                                                    PhysicalBackingMappingClass::Pooled, true, areas);
+    const auto spans = CollectPhysicalBackingSpans(
+        GuestBase, 3 * PageSize, PhysicalBackingMappingClass::Pooled, true, areas);
     ASSERT_TRUE(spans.has_value());
     ASSERT_EQ(spans->size(), 2u);
     EXPECT_EQ((*spans)[0].guest_base, GuestBase);
@@ -114,16 +114,37 @@ TEST(PhysicalBackingAllocationProvenance, AliasesCollectTheSameCanonicalPhysical
         {0, MakeArea(9 * PageSize, PageSize, 3)},
     };
 
-    const auto first = CollectPhysicalBackingSpans(GuestBase, PageSize,
-                                                    PhysicalBackingMappingClass::Direct, true, areas);
-    const auto second = CollectPhysicalBackingSpans(GuestBase + 8 * PageSize, PageSize,
-                                                     PhysicalBackingMappingClass::Direct, true,
-                                                     areas);
+    const auto first = CollectPhysicalBackingSpans(
+        GuestBase, PageSize, PhysicalBackingMappingClass::Direct, true, areas);
+    const auto second = CollectPhysicalBackingSpans(
+        GuestBase + 8 * PageSize, PageSize, PhysicalBackingMappingClass::Direct, true, areas);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(first->front().physical_offset, second->front().physical_offset);
     EXPECT_EQ(first->front().allocation_generation, second->front().allocation_generation);
     EXPECT_NE(first->front().guest_base, second->front().guest_base);
+}
+
+TEST(PhysicalBackingAllocationProvenance, VirtualMemoryAreaCollectsOnlyEligibleBackingClasses) {
+    Core::VirtualMemoryArea area{};
+    area.base = GuestBase;
+    area.size = PageSize;
+    area.type = Core::VMAType::Direct;
+    area.physical_backing_eligible = true;
+    area.phys_areas.emplace(0, MakeArea(6 * PageSize, PageSize, 4));
+
+    const auto direct = area.CollectPhysicalBackingSpans();
+    ASSERT_TRUE(direct.has_value());
+    ASSERT_EQ(direct->size(), 1u);
+    EXPECT_EQ(direct->front().physical_offset, 6 * PageSize);
+
+    area.physical_backing_eligible = false;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans());
+    area.physical_backing_eligible = true;
+    area.type = Core::VMAType::Flexible;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans());
+    area.type = Core::VMAType::File;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans());
 }
 
 TEST(PhysicalBackingAllocationProvenance, UnsupportedAndPrivateMappingsFailClosed) {
@@ -134,7 +155,11 @@ TEST(PhysicalBackingAllocationProvenance, UnsupportedAndPrivateMappingsFailClose
     EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase, PageSize,
                                              PhysicalBackingMappingClass::Direct, false, areas));
     EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase, PageSize,
-                                             PhysicalBackingMappingClass::Unsupported, true, areas));
+                                             PhysicalBackingMappingClass::Flexible, true, areas));
+    EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase, PageSize, PhysicalBackingMappingClass::File,
+                                             true, areas));
+    EXPECT_FALSE(CollectPhysicalBackingSpans(
+        GuestBase, PageSize, PhysicalBackingMappingClass::Unsupported, true, areas));
 }
 
 TEST(PhysicalBackingAllocationProvenance, MalformedOrIncompleteMappingsFailClosed) {
@@ -148,8 +173,18 @@ TEST(PhysicalBackingAllocationProvenance, MalformedOrIncompleteMappingsFailClose
     const std::map<uintptr_t, PhysicalMemoryArea> zero_generation{
         {0, MakeArea(0, PageSize, 0)},
     };
+    const std::map<uintptr_t, PhysicalMemoryArea> overcomplete{
+        {0, MakeArea(0, PageSize, 1)},
+        {PageSize, MakeArea(PageSize, PageSize, 1)},
+    };
+    const std::map<uintptr_t, PhysicalMemoryArea> unaligned_physical{
+        {0, MakeArea(1, PageSize, 1)},
+    };
     const std::map<uintptr_t, PhysicalMemoryArea> physical_overflow{
-        {0, MakeArea(std::numeric_limits<u64>::max() - PageSize + 1, PageSize, 1)},
+        {0, MakeArea(std::numeric_limits<u64>::max() - (PageSize - 1), 2 * PageSize, 1)},
+    };
+    const std::map<uintptr_t, PhysicalMemoryArea> two_pages{
+        {0, MakeArea(0, 2 * PageSize, 1)},
     };
 
     EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase + 1, PageSize,
@@ -158,15 +193,17 @@ TEST(PhysicalBackingAllocationProvenance, MalformedOrIncompleteMappingsFailClose
                                              PhysicalBackingMappingClass::Direct, true, valid));
     EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase, 2 * PageSize,
                                              PhysicalBackingMappingClass::Direct, true, gap));
-    EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase, PageSize,
-                                             PhysicalBackingMappingClass::Direct, true,
-                                             zero_generation));
-    EXPECT_FALSE(CollectPhysicalBackingSpans(GuestBase, PageSize,
-                                             PhysicalBackingMappingClass::Direct, true,
-                                             physical_overflow));
     EXPECT_FALSE(CollectPhysicalBackingSpans(
-        std::numeric_limits<VAddr>::max() - PageSize + 1, PageSize,
-        PhysicalBackingMappingClass::Direct, true, valid));
+        GuestBase, PageSize, PhysicalBackingMappingClass::Direct, true, zero_generation));
+    EXPECT_FALSE(CollectPhysicalBackingSpans(
+        GuestBase, PageSize, PhysicalBackingMappingClass::Direct, true, overcomplete));
+    EXPECT_FALSE(CollectPhysicalBackingSpans(
+        GuestBase, PageSize, PhysicalBackingMappingClass::Direct, true, unaligned_physical));
+    EXPECT_FALSE(CollectPhysicalBackingSpans(
+        GuestBase, 2 * PageSize, PhysicalBackingMappingClass::Direct, true, physical_overflow));
+    EXPECT_FALSE(CollectPhysicalBackingSpans(std::numeric_limits<VAddr>::max() - (PageSize - 1),
+                                             2 * PageSize, PhysicalBackingMappingClass::Direct,
+                                             true, two_pages));
 }
 
 TEST(PhysicalBackingAllocationProvenance, ExhaustionDisablesProvenanceWithoutChangingOwnership) {

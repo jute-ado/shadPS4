@@ -223,6 +223,7 @@ PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, 
 
     // Add the allocated region to the list and commit its pages.
     auto& area = CarvePhysArea(dmem_map, mapping_start, size)->second;
+    AcquirePhysicalBacking(area, physical_backing_generations);
     area.dma_type = PhysicalMemoryType::Pooled;
     area.memory_type = 3;
 
@@ -264,6 +265,7 @@ PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, u64 size, u6
 
     // Add the allocated region to the list and commit its pages.
     auto& area = CarvePhysArea(dmem_map, mapping_start, size)->second;
+    AcquirePhysicalBacking(area, physical_backing_generations);
     area.memory_type = memory_type;
     area.dma_type = PhysicalMemoryType::Allocated;
     MergeAdjacent(dmem_map, dmem_area);
@@ -353,6 +355,7 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
         // Carve a free dmem area in place of this one.
         const auto dmem_handle = CarvePhysArea(dmem_map, phys_addr, size);
         auto& new_dmem_area = dmem_handle->second;
+        (void)RetirePhysicalBacking(new_dmem_area);
         new_dmem_area.dma_type = PhysicalMemoryType::Free;
         new_dmem_area.memory_type = 0;
 
@@ -496,6 +499,7 @@ MemoryManager::VMAHandle MemoryManager::CreateArea(VAddr virtual_addr, u64 size,
     new_vma.name = name;
     new_vma.type = type;
     new_vma.phys_areas.clear();
+    new_vma.physical_backing_eligible = False(flags & MemoryMapFlags::Private);
     return new_vma_handle;
 }
 
@@ -931,6 +935,7 @@ u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma
     vma.type = VMAType::Free;
     vma.prot = MemoryProt::NoAccess;
     vma.phys_areas.clear();
+    vma.physical_backing_eligible = false;
     vma.disallow_merge = false;
     vma.name = "";
     MergeAdjacent(vma_map, new_it);
@@ -1564,13 +1569,10 @@ MemoryManager::VMAHandle MemoryManager::Split(VMAHandle vma_handle, u64 offset_i
             if (offset < offset_in_vma && offset + region.size > offset_in_vma) {
                 // Create region in old VMA
                 u64 size_in_old = offset_in_vma - offset;
-                old_vma_phys_areas[offset] = PhysicalMemoryArea{
-                    region.base, size_in_old, region.memory_type, region.dma_type};
+                auto [old_region, new_region] = SplitPhysicalBackingArea(region, size_in_old);
+                old_vma_phys_areas[offset] = old_region;
                 // Create region in new VMA
-                PAddr new_base = region.base + size_in_old;
-                u64 size_in_new = region.size - size_in_old;
-                new_vma.phys_areas[0] =
-                    PhysicalMemoryArea{new_base, size_in_new, region.memory_type, region.dma_type};
+                new_vma.phys_areas[0] = new_region;
             }
             // Fully contained in new VMA
             if (offset >= offset_in_vma) {
@@ -1590,11 +1592,8 @@ MemoryManager::PhysHandle MemoryManager::Split(PhysMap& map, PhysHandle phys_han
     auto& old_area = phys_handle->second;
     ASSERT(offset_in_area < old_area.size && offset_in_area > 0);
 
-    auto new_area = old_area;
-    old_area.size = offset_in_area;
-    new_area.memory_type = old_area.memory_type;
-    new_area.base += offset_in_area;
-    new_area.size -= offset_in_area;
+    auto [first_area, new_area] = SplitPhysicalBackingArea(old_area, offset_in_area);
+    old_area = first_area;
 
     return map.emplace_hint(std::next(phys_handle), new_area.base, new_area);
 }
