@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/logging/log.h"
 #include "core/physical_backing_provenance.h"
 #include "video_core/buffer_cache/physical_backing_publication_state.h"
 
@@ -706,9 +707,17 @@ public:
     /// Atomically transfers distinct live cache owners into replacement buffer storage.
     [[nodiscard]] std::optional<PhysicalBackingCachePageMigrationBatch>
     MigrateCachePagesForGuests(std::span<const PhysicalBackingCachePageRequest> requests) {
+        const auto reject = [this](std::string_view reason, size_t index) {
+            if (migration_diagnostic_messages++ < 32) {
+                LOG_ERROR(Render_Vulkan,
+                          "Physical replacement coordinator rejected reason={} index={}", reason,
+                          index);
+            }
+            return std::optional<PhysicalBackingCachePageMigrationBatch>{};
+        };
         if (requests.empty() ||
             requests.size() > std::numeric_limits<u64>::max() - last_owner_generation) {
-            return std::nullopt;
+            return reject("empty_or_generation", 0);
         }
 
         struct PendingMigration {
@@ -724,19 +733,25 @@ public:
         for (const auto& request : requests) {
             if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
                 !guest_pages.emplace(request.guest_page).second) {
-                return std::nullopt;
+                return reject("request", pending.size());
             }
             const auto mapping_it = mapping_tokens.find(request.guest_page);
-            if (mapping_it == mapping_tokens.end() ||
-                !physical_pages.emplace(mapping_it->second.physical_offset).second) {
-                return std::nullopt;
+            if (mapping_it == mapping_tokens.end()) {
+                return reject("mapping", pending.size());
+            }
+            if (!physical_pages.emplace(mapping_it->second.physical_offset).second) {
+                return reject("duplicate_physical", pending.size());
             }
             const u64 physical_offset = mapping_it->second.physical_offset;
             const auto owner_it = active_cache_owners.find(physical_offset);
-            if (owner_it == active_cache_owners.end() ||
-                pending_writebacks.contains(physical_offset) ||
-                texture_block_generations.contains(physical_offset)) {
-                return std::nullopt;
+            if (owner_it == active_cache_owners.end()) {
+                return reject("owner", pending.size());
+            }
+            if (pending_writebacks.contains(physical_offset)) {
+                return reject("writeback", pending.size());
+            }
+            if (texture_block_generations.contains(physical_offset)) {
+                return reject("texture", pending.size());
             }
             pending.push_back({request.guest_page, physical_offset,
                                request.override_page_address, owner_it->second.token});
@@ -760,7 +775,7 @@ public:
         for (const auto& migration : pending) {
             auto deltas = MakeAliasDeltas(migration.physical_offset);
             if (deltas.size() > std::numeric_limits<size_t>::max() - delta_count) {
-                return std::nullopt;
+                return reject("delta_overflow", migration_deltas.size());
             }
             delta_count += deltas.size();
             migration_deltas.push_back(std::move(deltas));
@@ -769,7 +784,7 @@ public:
 
         const auto migrated_overrides = state.MigrateOverrides(state_requests);
         if (!migrated_overrides) {
-            return std::nullopt;
+            return reject("state", 0);
         }
         last_owner_generation += pending.size();
 
@@ -1132,6 +1147,7 @@ private:
     u64 last_mapping_generation{};
     u64 last_owner_generation{};
     u64 last_texture_generation{};
+    u64 migration_diagnostic_messages{};
     std::unordered_map<VAddr, PhysicalBackingMapping> mapping_tokens;
     std::unordered_map<u64, std::unordered_set<VAddr>> physical_aliases;
     ActiveCacheOwners active_cache_owners;
