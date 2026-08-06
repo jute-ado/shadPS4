@@ -288,6 +288,43 @@ TEST(PhysicalBackingPublicationCoordinator, TextureOverlapRetainsExistingDirtyCa
     EXPECT_EQ((*dirty_slices)[0], (VideoCore::PhysicalBackingDirtySlice{256, 512}));
 }
 
+TEST(PhysicalBackingPublicationCoordinator, TextureTransitionReusesRetainedCacheOwner) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePage(
+        PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 256, 512));
+    const auto overlap = coordinator.BeginTextureOverlap(GuestB, PageSize);
+    ASSERT_TRUE(overlap.has_value());
+    const std::array wrong_requests{VideoCore::PhysicalBackingCachePageRequest{
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase + PageSize}}};
+    EXPECT_FALSE(coordinator.TransitionTexturePagesToDirtyCachePages(
+        std::span{&overlap->token, 1}, wrong_requests));
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
+    const std::array requests{VideoCore::PhysicalBackingCachePageRequest{
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}}};
+
+    const auto transition = coordinator.TransitionTexturePagesToDirtyCachePages(
+        std::span{&overlap->token, 1}, requests);
+
+    ASSERT_TRUE(transition.has_value());
+    ASSERT_EQ(transition->owners.size(), 1);
+    EXPECT_EQ(transition->owners[0].token, owner->token);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, OverrideBase);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, OverrideBase);
+    const auto dirty_slices = coordinator.ResolveCachePageDirtySlices(owner->token);
+    ASSERT_TRUE(dirty_slices.has_value());
+    ASSERT_EQ(dirty_slices->size(), 1);
+    EXPECT_EQ((*dirty_slices)[0],
+              (VideoCore::PhysicalBackingDirtySlice{0, static_cast<u32>(PageSize)}));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, DmaResidencyAtomicallyPublishesDirtyCacheForAliases) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
