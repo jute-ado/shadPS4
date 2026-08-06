@@ -393,3 +393,22 @@ TEST(BufferResidency, BatchesLargeOwnerRetirementsInsideStagingBudget) {
     ASSERT_TRUE(batches.has_value());
     EXPECT_EQ(*batches, (std::vector<Batch>{{0, 2048}, {2048, 2048}}));
 }
+
+TEST(BufferResidency, CoalescesContiguousPhysicalWritebackSlices) {
+    using Slice = VideoCore::PhysicalBackingGpuWritebackSlice;
+    using Copy = VideoCore::PhysicalBackingGpuWritebackCopy;
+    constexpr VAddr buffer_base = 0x100000;
+    constexpr u64 backing_size = 0x400000;
+    constexpr std::array slices{
+        Slice{buffer_base + 0x4000, 0x20000, 0, 0x4000},
+        Slice{buffer_base + 0x8000, 0x24000, 0, 0x4000},
+        Slice{buffer_base + 0xc000, 0x30000, 0x100, 0x200},
+    };
+
+    const auto copies = VideoCore::PlanPhysicalBackingGpuWritebackCopies(
+        buffer_base, 0x10000, backing_size, slices);
+
+    ASSERT_TRUE(copies.has_value());
+    EXPECT_EQ(*copies,
+              (std::vector<Copy>{{0x4000, 0x20000, 0x8000}, {0xc100, 0x30100, 0x200}}));
+}
