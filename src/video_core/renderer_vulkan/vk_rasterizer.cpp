@@ -1148,6 +1148,21 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     }
 }
 
+void Rasterizer::RetirePhysicalBacking(
+    std::vector<Core::PhysicalBackingRetirement> physical_retirements) {
+    if (!physical_backing_coordinator || physical_retirements.empty()) {
+        return;
+    }
+    liverpool->SendCommand<true>(
+        [this, physical_retirements = std::move(physical_retirements)] {
+            if (!physical_backing_coordinator->RetirePhysicalAllocations(
+                    physical_retirements)) {
+                LOG_ERROR(Render_Vulkan,
+                          "Failed to retire physical allocation publication before reuse");
+            }
+        });
+}
+
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
     UpdateViewportScissorState();
     UpdateDepthStencilState();
