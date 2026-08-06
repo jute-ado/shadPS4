@@ -111,3 +111,16 @@ TEST(BufferResidency, InvalidatesTextureOwnershipBeforeGpuBufferFill) {
     EXPECT_FALSE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(false, false));
     EXPECT_TRUE(VideoCore::ShouldInvalidateTextureCacheBeforeGpuBufferFill(false, true));
 }
+
+TEST(BufferResidency, PreservesWholeTextureBeforePartialGpuBufferWrite) {
+    const auto transition = VideoCore::PlanPhysicalBackingTextureBufferTransition(
+        0x1000'0000, 0x24'0000, 0x1003'0000, 0x870);
+
+    ASSERT_TRUE(transition.has_value());
+    EXPECT_EQ(transition->base, 0x1000'0000);
+    EXPECT_EQ(transition->size, 0x24'0000);
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingTextureBufferTransition(
+        0x1000'0000, 0x24'0000, 0x0fff'f000, 0x2000));
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingTextureBufferTransition(
+        0x1000'0000, 0x24'0000, 0x1023'f800, 0x1000));
+}
