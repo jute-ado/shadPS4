@@ -1166,6 +1166,9 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto available_label{OpLabel()};
     const auto lookup_merge_label{OpLabel()};
     const auto merge_label{OpLabel()};
+    const auto& fault_buffer{buffers[fault_buffer_index]};
+    const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
+    const auto fault_scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
 
     // Keep the page index at guest-address width until it has been proven to fit the table.
     const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
@@ -1189,14 +1192,11 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // First time access, mark as fault.
     AddLabel(fault_label);
-    const auto& fault_buffer{buffers[fault_buffer_index]};
-    const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
     const auto page_div32{OpShiftRightLogical(U32[1], page32, ConstU32(5U))};
     const auto page_mod32{OpBitwiseAnd(U32[1], page32, ConstU32(31U))};
     const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
     const auto fault_ptr{
         OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, page_div32)};
-    const auto fault_scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
     OpAtomicOr(U32[1], fault_ptr, fault_scope, u32_zero_value, page_mask);
 
     // Return null pointer
@@ -1215,6 +1215,9 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // An address outside the guest address space has no representable page or fault bit.
     AddLabel(invalid_page_label);
+    const auto invalid_fault_ptr{OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value,
+                                               u32_zero_value)};
+    OpAtomicOr(U32[1], invalid_fault_ptr, fault_scope, u32_zero_value, u32_one_value);
     OpBranch(merge_label);
 
     // Merge
