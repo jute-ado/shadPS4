@@ -47,6 +47,27 @@ TEST(GnmSubmissionGate, PendingBoundaryBlocksGpuVisibleMappingWork) {
     EXPECT_TRUE(mapping.get());
 }
 
+TEST(GnmSubmissionGate, SubmitDoneReturnWaitsForCommandProcessorBoundary) {
+    SubmissionGate gate;
+    std::promise<Common::UniqueFunction<void>> queued_completion;
+    auto completion = queued_completion.get_future();
+
+    auto submit_done = std::async(std::launch::async, [&] {
+        gate.SubmitBoundaryAndWait([&](Common::UniqueFunction<void>&& complete_boundary) {
+            queued_completion.set_value(std::move(complete_boundary));
+        });
+        return true;
+    });
+
+    auto complete_boundary = completion.get();
+    EXPECT_EQ(submit_done.wait_for(20ms), std::future_status::timeout);
+
+    complete_boundary();
+
+    EXPECT_EQ(submit_done.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(submit_done.get());
+}
+
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
     SubmissionGate gate;
     auto submission = gate.Enter();

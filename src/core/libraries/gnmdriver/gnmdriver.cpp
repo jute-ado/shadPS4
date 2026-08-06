@@ -2299,8 +2299,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 int PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    auto complete_boundary = submission_gate.BeginBoundary();
-    liverpool->SubmitDone(std::move(complete_boundary));
+    submission_gate.SubmitBoundaryAndWait([](Common::UniqueFunction<void>&& complete_boundary) {
+        liverpool->SubmitDone(std::move(complete_boundary));
+    });
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
