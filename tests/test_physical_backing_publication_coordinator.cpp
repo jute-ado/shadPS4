@@ -218,6 +218,31 @@ TEST(PhysicalBackingPublicationCoordinator, PublishesSubmittedGpuWritebackBatchA
                                                       [] { return true; }));
 }
 
+TEST(PhysicalBackingPublicationCoordinator, ResolvesZeroPublishedAliasesDuringTextureOverlap) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 64, 128));
+    const auto texture = coordinator.BeginTextureOverlap(GuestA, PageSize);
+    ASSERT_TRUE(texture.has_value());
+    const auto retirement = coordinator.RetireCachePageGpuDirty(owner->token);
+    ASSERT_TRUE(retirement.has_value());
+
+    const std::array submitted{retirement->writeback};
+    const auto restored = coordinator.PublishSubmittedCachePageGpuWritebacks(submitted);
+    ASSERT_TRUE(restored.has_value());
+    ASSERT_EQ(restored->size(), 1);
+    EXPECT_EQ(restored->front().device_address.value, 0);
+    EXPECT_EQ(coordinator.ResolvePhysicalPagesForDeltas(*restored),
+              (std::vector<u64>{PhysicalPage}));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, CpuWriteThroughAliasRetiresPhysicalGpuOwner) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
