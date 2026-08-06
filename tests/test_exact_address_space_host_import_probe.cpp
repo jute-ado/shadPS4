@@ -285,6 +285,9 @@ TEST(ExactAddressSpaceHostImportProbe, WaitsForIdleBeforeCleanupAfterFenceTimeou
     EXPECT_FALSE(RequiresExactProbeIdleBeforeResourceCleanup(true, false));
     EXPECT_TRUE(RequiresExactProbeIdleBeforeResourceCleanup(false, false));
     EXPECT_FALSE(RequiresExactProbeIdleBeforeResourceCleanup(false, true));
+    EXPECT_TRUE(CanUseOrdinaryExactProbeResourceCleanup(true, false));
+    EXPECT_TRUE(CanUseOrdinaryExactProbeResourceCleanup(false, true));
+    EXPECT_FALSE(CanUseOrdinaryExactProbeResourceCleanup(false, false));
 }
 
 } // namespace
