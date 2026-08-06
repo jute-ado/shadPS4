@@ -254,7 +254,10 @@ target_include_directories(shadps4_buffer_access_interval_provenance_test PRIVAT
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_buffer_access_interval_provenance_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_buffer_access_interval_provenance_test PRIVATE GTest::gtest_main)
+target_link_libraries(shadps4_buffer_access_interval_provenance_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
 list(APPEND TEST_TARGETS shadps4_buffer_access_interval_provenance_test)
 
 add_executable(shadps4_cpu_page_write_snapshot_test
