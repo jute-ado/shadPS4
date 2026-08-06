@@ -22,6 +22,17 @@ struct PhysicalBackingBdaDelta {
     auto operator<=>(const PhysicalBackingBdaDelta&) const = default;
 };
 
+struct PhysicalBackingCachePageToken {
+    PhysicalBackingOverride publication{};
+
+    auto operator<=>(const PhysicalBackingCachePageToken&) const = default;
+};
+
+struct PhysicalBackingCachePagePublication {
+    PhysicalBackingCachePageToken token{};
+    std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
 /// GPU-thread-owned coordinator for physical mapping provenance and BDA publications.
 /// It is deliberately unsynchronized; callers must marshal every operation to the GPU thread.
 class PhysicalBackingPublicationCoordinator {
@@ -86,6 +97,7 @@ public:
                     return std::nullopt;
                 }
                 mapping_tokens.emplace(mapping->guest_page, *mapping);
+                physical_aliases[mapping->physical_offset].emplace(mapping->guest_page);
                 mapped.push_back(*mapping);
                 deltas.push_back({mapping->guest_page, address});
             }
@@ -120,9 +132,44 @@ public:
                 return std::nullopt;
             }
             mapping_tokens.erase(mapping.guest_page);
+            ErasePhysicalAlias(mapping.physical_offset, mapping.guest_page);
             deltas.push_back({mapping.guest_page, {}});
         }
         return deltas;
+    }
+
+    /// Publishes one buffer-cache page for every guest alias of its physical page.
+    /// Texture overlap fails closed until texture ownership participates in this policy.
+    [[nodiscard]] std::optional<PhysicalBackingCachePagePublication> ActivateCachePage(
+        u64 physical_offset, PhysicalBackingDeviceAddress override_page_address,
+        bool has_texture_overlap) {
+        const auto aliases_it = physical_aliases.find(physical_offset);
+        if (has_texture_overlap || aliases_it == physical_aliases.end() ||
+            aliases_it->second.empty()) {
+            return std::nullopt;
+        }
+        const auto owner_generation = AcquireOwnerGeneration();
+        if (!owner_generation) {
+            return std::nullopt;
+        }
+        const auto publication =
+            state.ActivateOverride(physical_offset, override_page_address, *owner_generation);
+        if (!publication) {
+            return std::nullopt;
+        }
+        return PhysicalBackingCachePagePublication{
+            .token = {*publication},
+            .deltas = MakeAliasDeltas(physical_offset),
+        };
+    }
+
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> RetireCachePageClean(
+        const PhysicalBackingCachePageToken& token) {
+        if (!physical_aliases.contains(token.publication.physical_offset) ||
+            !state.RetireClean(token.publication)) {
+            return std::nullopt;
+        }
+        return MakeAliasDeltas(token.publication.physical_offset);
     }
 
 private:
@@ -146,16 +193,51 @@ private:
         return ++last_mapping_generation;
     }
 
+    [[nodiscard]] std::optional<u64> AcquireOwnerGeneration() noexcept {
+        if (last_owner_generation == std::numeric_limits<u64>::max()) {
+            return std::nullopt;
+        }
+        return ++last_owner_generation;
+    }
+
+    [[nodiscard]] std::vector<PhysicalBackingBdaDelta> MakeAliasDeltas(
+        u64 physical_offset) const {
+        std::vector<PhysicalBackingBdaDelta> deltas;
+        const auto aliases_it = physical_aliases.find(physical_offset);
+        if (aliases_it == physical_aliases.end()) {
+            return deltas;
+        }
+        deltas.reserve(aliases_it->second.size());
+        for (const VAddr guest_page : aliases_it->second) {
+            deltas.push_back({guest_page, state.Resolve(guest_page)});
+        }
+        return deltas;
+    }
+
+    void ErasePhysicalAlias(u64 physical_offset, VAddr guest_page) {
+        const auto aliases_it = physical_aliases.find(physical_offset);
+        if (aliases_it == physical_aliases.end()) {
+            return;
+        }
+        aliases_it->second.erase(guest_page);
+        if (aliases_it->second.empty()) {
+            physical_aliases.erase(aliases_it);
+        }
+    }
+
     void RollbackMappings(std::span<const PhysicalBackingMapping> mappings) {
         for (auto mapping_it = mappings.rbegin(); mapping_it != mappings.rend(); ++mapping_it) {
             static_cast<void>(state.UnmapGuestPage(*mapping_it));
             mapping_tokens.erase(mapping_it->guest_page);
+            ErasePhysicalAlias(mapping_it->physical_offset, mapping_it->guest_page);
         }
     }
 
     PhysicalBackingPublicationState state;
     u64 last_mapping_generation{};
+    u64 last_owner_generation{};
     std::unordered_map<VAddr, PhysicalBackingMapping> mapping_tokens;
+    std::unordered_map<u64, std::unordered_set<VAddr>> physical_aliases;
 };
 
 } // namespace VideoCore
