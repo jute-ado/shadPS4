@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <boost/container/small_vector.hpp>
 #include <queue>
@@ -14,6 +15,7 @@
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "shader_recompiler/resource.h"
+#include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/multi_level_page_table.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
@@ -335,6 +337,8 @@ private:
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     bool readback_linear_images;
     PageTable page_table;
+    std::unordered_map<ImageId, std::vector<PhysicalBackingTextureToken>>
+        physical_backing_texture_tokens;
     std::mutex mutex;
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;

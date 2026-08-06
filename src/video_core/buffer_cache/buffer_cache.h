@@ -98,6 +98,11 @@ public:
 
     void ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas);
 
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingTextureToken>>
+    BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size);
+    [[nodiscard]] bool EndPhysicalBackingTextureOverlap(
+        std::span<const PhysicalBackingTextureToken> tokens);
+
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
         return fault_manager.GetFaultBuffer();

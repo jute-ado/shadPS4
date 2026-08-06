@@ -812,6 +812,11 @@ void TextureCache::RegisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
+    const auto physical_tokens = buffer_cache.BeginPhysicalBackingTextureOverlap(
+        image.info.guest_address, image.info.guest_size);
+    ASSERT_MSG(physical_tokens.has_value(),
+               "Failed to establish physical backing texture ownership");
+    physical_backing_texture_tokens.emplace(image_id, std::move(*physical_tokens));
     image.flags |= ImageFlagBits::Registered;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
@@ -823,6 +828,12 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
+    const auto physical_tokens = physical_backing_texture_tokens.find(image_id);
+    ASSERT_MSG(physical_tokens != physical_backing_texture_tokens.end(),
+               "Missing physical backing texture ownership");
+    ASSERT_MSG(buffer_cache.EndPhysicalBackingTextureOverlap(physical_tokens->second),
+               "Failed to release physical backing texture ownership");
+    physical_backing_texture_tokens.erase(physical_tokens);
     image.flags &= ~ImageFlagBits::Registered;
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);

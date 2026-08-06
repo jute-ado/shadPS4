@@ -119,6 +119,53 @@ void BufferCache::MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size) {
     }
 }
 
+std::optional<std::vector<PhysicalBackingTextureToken>>
+BufferCache::BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size) {
+    std::vector<PhysicalBackingTextureToken> tokens;
+    if (!physical_backing_coordinator || size == 0) {
+        return tokens;
+    }
+    if (!RetirePhysicalBackingOwnersForCpuWrite(device_addr, size)) {
+        return std::nullopt;
+    }
+    const VAddr end = device_addr + size;
+    for (VAddr page = Common::AlignDown(device_addr, CACHING_PAGESIZE); page < end;
+         page += CACHING_PAGESIZE) {
+        if (!physical_backing_coordinator->ResolveGuestPagePublication(page)) {
+            continue;
+        }
+        const auto publication =
+            physical_backing_coordinator->BeginTextureOverlap(page, CACHING_PAGESIZE);
+        if (!publication) {
+            for (auto token_it = tokens.rbegin(); token_it != tokens.rend(); ++token_it) {
+                if (const auto deltas =
+                        physical_backing_coordinator->EndTextureOverlap(*token_it)) {
+                    ApplyPhysicalBackingBdaDeltas(*deltas);
+                }
+            }
+            return std::nullopt;
+        }
+        tokens.push_back(publication->token);
+        ApplyPhysicalBackingBdaDeltas(publication->deltas);
+    }
+    return tokens;
+}
+
+bool BufferCache::EndPhysicalBackingTextureOverlap(
+    std::span<const PhysicalBackingTextureToken> tokens) {
+    if (!physical_backing_coordinator) {
+        return tokens.empty();
+    }
+    for (auto token_it = tokens.rbegin(); token_it != tokens.rend(); ++token_it) {
+        const auto deltas = physical_backing_coordinator->EndTextureOverlap(*token_it);
+        if (!deltas) {
+            return false;
+        }
+        ApplyPhysicalBackingBdaDeltas(*deltas);
+    }
+    return true;
+}
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
     if (physical_backing_coordinator && size != 0) {
         bool retired = false;
