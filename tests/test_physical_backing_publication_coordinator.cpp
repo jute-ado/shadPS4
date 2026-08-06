@@ -257,6 +257,37 @@ TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysica
     EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, TextureOverlapRetainsExistingDirtyCacheMirror) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto owner = coordinator.ActivateCachePage(
+        PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(owner.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(owner->token, 256, 512));
+
+    const auto overlap = coordinator.BeginTextureOverlap(GuestB, PageSize);
+
+    ASSERT_TRUE(overlap.has_value());
+    ASSERT_EQ(overlap->deltas.size(), 2);
+    EXPECT_EQ(overlap->deltas[0].device_address.value, 0);
+    EXPECT_EQ(overlap->deltas[1].device_address.value, 0);
+    EXPECT_EQ(coordinator.ResolveActiveCachePageForGuest(GuestA), owner->token);
+    const auto restored_deltas = coordinator.EndTextureOverlap(overlap->token);
+    ASSERT_TRUE(restored_deltas.has_value());
+    ASSERT_EQ(restored_deltas->size(), 2);
+    EXPECT_EQ((*restored_deltas)[0].device_address.value, OverrideBase);
+    EXPECT_EQ((*restored_deltas)[1].device_address.value, OverrideBase);
+    const auto dirty_slices = coordinator.ResolveCachePageDirtySlices(owner->token);
+    ASSERT_TRUE(dirty_slices.has_value());
+    ASSERT_EQ(dirty_slices->size(), 1);
+    EXPECT_EQ((*dirty_slices)[0], (VideoCore::PhysicalBackingDirtySlice{256, 512}));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, DmaResidencyAtomicallyPublishesDirtyCacheForAliases) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
