@@ -10,8 +10,128 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <utility>
 
 namespace Vulkan {
+
+enum class ExternalHostMemoryProbeStage : std::uint8_t {
+    NotStarted,
+    Capability,
+    Backing,
+    ExternalBufferProperties,
+    BufferCreation,
+    MemoryRequirements,
+    HostPointerProperties,
+    MemoryTypeSelection,
+    MemoryAllocation,
+    MemoryBinding,
+    DeviceAddress,
+    Retained,
+};
+
+enum class ExternalHostMemoryProbeFailure : std::uint8_t {
+    None,
+    UnexpectedStage,
+    ExtensionUnavailable,
+    InvalidPointerAlignment,
+    BackingAllocationFailed,
+    BackingValidationFailed,
+    ExternalBufferQueryFailed,
+    HandleTypeNotImportable,
+    BufferCreationFailed,
+    MemoryRequirementsInvalid,
+    HostPointerQueryFailed,
+    NoCompatibleMemoryType,
+    NoCoherentMemoryType,
+    MemoryAllocationFailed,
+    MemoryBindingFailed,
+    ZeroDeviceAddress,
+};
+
+struct ExternalHostMemoryProbeResult {
+    ExternalHostMemoryProbeStage completed_stage{ExternalHostMemoryProbeStage::NotStarted};
+    ExternalHostMemoryProbeStage failure_stage{ExternalHostMemoryProbeStage::NotStarted};
+    ExternalHostMemoryProbeFailure failure{ExternalHostMemoryProbeFailure::None};
+
+    [[nodiscard]] constexpr bool Succeeded() const noexcept {
+        return failure == ExternalHostMemoryProbeFailure::None &&
+               completed_stage == ExternalHostMemoryProbeStage::Retained;
+    }
+};
+
+class ExternalHostMemoryProbeProgress {
+public:
+    [[nodiscard]] constexpr bool Complete(ExternalHostMemoryProbeStage stage) noexcept {
+        if (result.failure != ExternalHostMemoryProbeFailure::None) {
+            return false;
+        }
+        if (stage != NextStage()) {
+            SetFailure(stage, ExternalHostMemoryProbeFailure::UnexpectedStage);
+            return false;
+        }
+        result.completed_stage = stage;
+        return true;
+    }
+
+    constexpr void Fail(ExternalHostMemoryProbeStage stage,
+                        ExternalHostMemoryProbeFailure failure) noexcept {
+        if (result.failure != ExternalHostMemoryProbeFailure::None) {
+            return;
+        }
+        if (stage != NextStage() || failure == ExternalHostMemoryProbeFailure::None) {
+            SetFailure(stage, ExternalHostMemoryProbeFailure::UnexpectedStage);
+            return;
+        }
+        SetFailure(stage, failure);
+    }
+
+    [[nodiscard]] constexpr const ExternalHostMemoryProbeResult& Result() const noexcept {
+        return result;
+    }
+
+private:
+    [[nodiscard]] constexpr ExternalHostMemoryProbeStage NextStage() const noexcept {
+        return static_cast<ExternalHostMemoryProbeStage>(
+            static_cast<std::uint8_t>(result.completed_stage) + 1);
+    }
+
+    constexpr void SetFailure(ExternalHostMemoryProbeStage stage,
+                              ExternalHostMemoryProbeFailure failure) noexcept {
+        result.failure_stage = stage;
+        result.failure = failure;
+    }
+
+private:
+    ExternalHostMemoryProbeResult result{};
+};
+
+template <typename MemoryHandle, typename BufferHandle>
+class ExternalHostMemoryImportOwner {
+public:
+    ExternalHostMemoryImportOwner(MemoryHandle memory, BufferHandle buffer,
+                                  std::uint64_t device_address) noexcept
+        : memory{std::move(memory)}, buffer{std::move(buffer)}, device_address{device_address} {}
+
+    ExternalHostMemoryImportOwner(ExternalHostMemoryImportOwner&&) noexcept = default;
+    ExternalHostMemoryImportOwner& operator=(ExternalHostMemoryImportOwner&&) = delete;
+    ExternalHostMemoryImportOwner(const ExternalHostMemoryImportOwner&) = delete;
+    ExternalHostMemoryImportOwner& operator=(const ExternalHostMemoryImportOwner&) = delete;
+
+    [[nodiscard]] bool IsRetained() const noexcept {
+        return static_cast<bool>(memory) && static_cast<bool>(buffer) && device_address != 0;
+    }
+
+    [[nodiscard]] std::uint64_t DeviceAddress() const noexcept {
+        return device_address;
+    }
+
+private:
+    // Declaration order is intentional: reverse member destruction releases the buffer before
+    // the imported device memory that backs it.
+    MemoryHandle memory;
+    BufferHandle buffer;
+    std::uint64_t device_address{};
+};
 
 enum class ExternalHostMemoryProbeCapability {
     Available,
