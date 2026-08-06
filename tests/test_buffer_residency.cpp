@@ -115,7 +115,8 @@ TEST(BufferResidency, AdvancesTextureAuthorityOnlyAfterAnEncodedGpuWrite) {
     EXPECT_EQ(tracker.Get(16), 0);
     EXPECT_EQ(tracker.Get(41), 0);
 
-    EXPECT_TRUE(tracker.MarkGpuWrite(16));
+    constexpr std::array first_command{16U};
+    EXPECT_TRUE(tracker.MarkGpuWrites(first_command));
     const u64 image_16_write = tracker.Get(16);
     EXPECT_GT(image_16_write, 0);
 
@@ -123,11 +124,12 @@ TEST(BufferResidency, AdvancesTextureAuthorityOnlyAfterAnEncodedGpuWrite) {
     EXPECT_EQ(tracker.Get(41), 0);
     EXPECT_EQ(tracker.Get(16), image_16_write);
 
-    EXPECT_TRUE(tracker.MarkGpuWrite(41));
+    constexpr std::array second_command{41U};
+    EXPECT_TRUE(tracker.MarkGpuWrites(second_command));
     EXPECT_GT(tracker.Get(41), image_16_write);
 
     EXPECT_TRUE(tracker.Release(16));
-    EXPECT_FALSE(tracker.MarkGpuWrite(16));
+    EXPECT_FALSE(tracker.MarkGpuWrites(first_command));
 }
 
 TEST(BufferResidency, InvalidatesTextureOwnershipBeforeGpuBufferFill) {
@@ -227,16 +229,44 @@ TEST(BufferResidency, PlansTransitiveTextureOwnershipComponentInBindingOrder) {
 
 TEST(BufferResidency, SelectsNewestTextureAliasForEachPhysicalPage) {
     constexpr std::array candidates{
-        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00},
-        VideoCore::PhysicalBackingTexturePageSource{0xab8d'4000, 0x114b'6d40'00},
-        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00, 7},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'4000, 0x114b'6d40'00, 7},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00, 8},
     };
 
     const auto sources = VideoCore::PlanPhysicalBackingTexturePageSources(candidates);
 
     ASSERT_TRUE(sources.has_value());
     EXPECT_EQ(*sources, (std::vector<VideoCore::PhysicalBackingTexturePageSource>{
-                            {0xab8d'0000, 0x214b'7100'00},
-                            {0xab8d'4000, 0x114b'6d40'00},
+                            {0xab8d'0000, 0x214b'7100'00, 8},
+                            {0xab8d'4000, 0x114b'6d40'00, 7},
                         }));
+}
+
+TEST(BufferResidency, SelectsLastActuallyWrittenAliasInsteadOfLastBoundAlias) {
+    constexpr std::array before_second_write{
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00, 7},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00, 0},
+    };
+    const auto first_source =
+        VideoCore::PlanPhysicalBackingTexturePageSources(before_second_write);
+    ASSERT_TRUE(first_source.has_value());
+    EXPECT_EQ(first_source->front(),
+              (VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00, 7}));
+
+    constexpr std::array after_second_write{
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00, 7},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00, 8},
+    };
+    const auto second_source =
+        VideoCore::PlanPhysicalBackingTexturePageSources(after_second_write);
+    ASSERT_TRUE(second_source.has_value());
+    EXPECT_EQ(second_source->front(),
+              (VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00, 8}));
+
+    constexpr std::array ambiguous_same_command{
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x114b'6d00'00, 9},
+        VideoCore::PhysicalBackingTexturePageSource{0xab8d'0000, 0x214b'7100'00, 9},
+    };
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingTexturePageSources(ambiguous_same_command));
 }
