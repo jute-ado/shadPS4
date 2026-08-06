@@ -7,6 +7,9 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <tuple>
+#include <unordered_set>
+#include <vector>
 
 #include "common/types.h"
 
@@ -44,6 +47,20 @@ struct PhysicalBackingTextureBufferTransition {
     u32 size{};
 };
 
+struct PhysicalBackingTextureOwnershipRecord {
+    u32 image_index{};
+    VAddr guest_base{};
+    u64 guest_size{};
+    u64 write_order{};
+    std::vector<u64> physical_pages;
+};
+
+struct PhysicalBackingTextureOwnershipComponent {
+    std::vector<u32> ordered_image_indices;
+    PhysicalBackingTextureBufferTransition ownership_span{};
+    std::vector<u64> physical_pages;
+};
+
 [[nodiscard]] constexpr std::optional<PhysicalBackingTextureBufferTransition>
 PlanPhysicalBackingTextureOwnershipSpan(VAddr image_base, u64 image_size) noexcept {
     constexpr u64 PageSize = 16_KB;
@@ -66,6 +83,90 @@ PlanPhysicalBackingTextureOwnershipSpan(VAddr image_base, u64 image_size) noexce
         .base = aligned_base,
         .size = static_cast<u32>(aligned_size),
     };
+}
+
+[[nodiscard]] inline std::optional<PhysicalBackingTextureOwnershipComponent>
+PlanPhysicalBackingTextureOwnershipComponent(
+    std::span<const PhysicalBackingTextureOwnershipRecord> records,
+    std::span<const u64> seed_physical_pages) {
+    constexpr u64 PageMask = 16_KB - 1;
+    if (records.empty() || seed_physical_pages.empty()) {
+        return std::nullopt;
+    }
+
+    std::unordered_set<u64> reachable_pages;
+    reachable_pages.reserve(seed_physical_pages.size());
+    for (const u64 physical_page : seed_physical_pages) {
+        if ((physical_page & PageMask) != 0) {
+            return std::nullopt;
+        }
+        reachable_pages.emplace(physical_page);
+    }
+
+    std::vector<const PhysicalBackingTextureOwnershipRecord*> selected;
+    std::vector<bool> is_selected(records.size());
+    std::unordered_set<u32> image_indices;
+    for (const auto& record : records) {
+        if (record.image_index == 0 || !image_indices.emplace(record.image_index).second ||
+            !PlanPhysicalBackingTextureOwnershipSpan(record.guest_base, record.guest_size)) {
+            return std::nullopt;
+        }
+        for (const u64 physical_page : record.physical_pages) {
+            if ((physical_page & PageMask) != 0) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    bool grew = true;
+    while (grew) {
+        grew = false;
+        for (size_t index = 0; index < records.size(); ++index) {
+            if (is_selected[index]) {
+                continue;
+            }
+            const auto& record = records[index];
+            if (!std::ranges::any_of(record.physical_pages, [&](u64 physical_page) {
+                    return reachable_pages.contains(physical_page);
+                })) {
+                continue;
+            }
+            is_selected[index] = true;
+            selected.push_back(&record);
+            reachable_pages.insert(record.physical_pages.begin(), record.physical_pages.end());
+            grew = true;
+        }
+    }
+    if (selected.empty()) {
+        return std::nullopt;
+    }
+
+    std::ranges::sort(selected, [](const auto* left, const auto* right) {
+        return std::tie(left->write_order, left->image_index) <
+               std::tie(right->write_order, right->image_index);
+    });
+    VAddr component_base = std::numeric_limits<VAddr>::max();
+    VAddr component_end = 0;
+    PhysicalBackingTextureOwnershipComponent result;
+    result.ordered_image_indices.reserve(selected.size());
+    for (const auto* record : selected) {
+        const auto span =
+            PlanPhysicalBackingTextureOwnershipSpan(record->guest_base, record->guest_size);
+        component_base = std::min(component_base, span->base);
+        component_end = std::max(component_end, span->base + span->size);
+        result.ordered_image_indices.push_back(record->image_index);
+    }
+    const u64 component_size = component_end - component_base;
+    if (component_size == 0 || component_size > std::numeric_limits<u32>::max()) {
+        return std::nullopt;
+    }
+    result.ownership_span = {
+        .base = component_base,
+        .size = static_cast<u32>(component_size),
+    };
+    result.physical_pages.assign(reachable_pages.begin(), reachable_pages.end());
+    std::ranges::sort(result.physical_pages);
+    return result;
 }
 
 [[nodiscard]] constexpr std::optional<PhysicalBackingTextureBufferTransition>
