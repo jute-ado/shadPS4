@@ -60,3 +60,10 @@ TEST(BufferResidency, DoesNotTouchUnpublishedBufferAfterResidencyUpload) {
     VideoCore::TouchBufferAfterUploadIfRegistered(true, [&] { ++touch_count; });
     EXPECT_EQ(touch_count, 1);
 }
+
+TEST(BufferResidency, SelectsTheFirstActualTextureUploadConsumer) {
+    EXPECT_EQ(VideoCore::PhysicalBackingTextureUploadConsumer(true),
+              VideoCore::PhysicalBackingTextureConsumer::ComputeShaderRead);
+    EXPECT_EQ(VideoCore::PhysicalBackingTextureUploadConsumer(false),
+              VideoCore::PhysicalBackingTextureConsumer::TransferRead);
+}
