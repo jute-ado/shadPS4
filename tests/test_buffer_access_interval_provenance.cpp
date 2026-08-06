@@ -11,6 +11,7 @@ namespace {
 
 using Tracker = VideoCore::BasicBufferAccessIntervalProvenance<std::uint32_t>;
 using Role = VideoCore::BufferAccessRole;
+using RangeState = VideoCore::BasicBufferAccessRangeState<std::uint32_t>;
 
 TEST(BufferAccessIntervalProvenance, DisjointRolesKeepThePriorProducerAndOverlapAggregates) {
     Tracker tracker;
@@ -48,6 +49,33 @@ TEST(BufferAccessIntervalProvenance, DisjointRolesKeepThePriorProducerAndOverlap
     EXPECT_EQ(geometry.current_roles, Role::VertexRead | Role::IndexRead);
     EXPECT_EQ(geometry.current_access, 0x18);
     EXPECT_EQ(geometry.current_stages, 0xC0);
+}
+
+TEST(BufferAccessRangeState, DisjointTransitionsRetainTheirIndependentPriorAccess) {
+    RangeState state{128, 0x01, 0x10};
+
+    const auto shader = state.Transition(0, 64, 0x06, 0x20);
+    const auto geometry = state.Transition(64, 64, 0x08, 0x40);
+
+    EXPECT_TRUE(shader.requires_barrier);
+    EXPECT_EQ(shader.prior_access, 0x01);
+    EXPECT_EQ(shader.prior_stages, 0x10);
+    EXPECT_TRUE(geometry.requires_barrier);
+    EXPECT_EQ(geometry.prior_access, 0x01);
+    EXPECT_EQ(geometry.prior_stages, 0x10);
+    EXPECT_EQ(state.IntervalCount(), 2);
+}
+
+TEST(BufferAccessRangeState, OverlapUnionsOnlyTheCoveredPriorIntervals) {
+    RangeState state{192, 0x01, 0x10};
+    state.Transition(0, 64, 0x02, 0x20);
+    state.Transition(128, 64, 0x04, 0x40);
+
+    const auto overlap = state.Transition(32, 128, 0x08, 0x80);
+
+    EXPECT_TRUE(overlap.requires_barrier);
+    EXPECT_EQ(overlap.prior_access, 0x01 | 0x02 | 0x04);
+    EXPECT_EQ(overlap.prior_stages, 0x10 | 0x20 | 0x40);
 }
 
 } // namespace
