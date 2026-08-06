@@ -35,6 +35,16 @@ struct PhysicalBackingCachePagePublication {
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
+struct PhysicalBackingCachePageRequest {
+    VAddr guest_page{};
+    PhysicalBackingDeviceAddress override_page_address{};
+};
+
+struct PhysicalBackingCachePublicationBatch {
+    std::vector<PhysicalBackingCachePageToken> tokens;
+    std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
 struct PhysicalBackingDirtyCachePagePublication {
     PhysicalBackingWriteback writeback{};
     std::vector<PhysicalBackingBdaDelta> deltas;
@@ -214,6 +224,74 @@ public:
         }
         return ActivateCachePage(mapping_it->second.physical_offset, override_page_address,
                                  has_texture_overlap);
+    }
+
+    /// Atomically activates all distinct physical pages backing one synchronized cache buffer.
+    [[nodiscard]] std::optional<PhysicalBackingCachePublicationBatch>
+    ActivateCachePagesForGuests(std::span<const PhysicalBackingCachePageRequest> requests) {
+        if (requests.empty()) {
+            return std::nullopt;
+        }
+
+        struct PendingOwner {
+            u64 physical_offset{};
+            PhysicalBackingDeviceAddress override_page_address{};
+        };
+        std::vector<PendingOwner> pending;
+        pending.reserve(requests.size());
+        std::unordered_set<VAddr> guest_pages;
+        std::unordered_set<u64> physical_pages;
+        for (const auto& request : requests) {
+            if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
+                !guest_pages.emplace(request.guest_page).second) {
+                return std::nullopt;
+            }
+            const auto mapping_it = mapping_tokens.find(request.guest_page);
+            if (mapping_it == mapping_tokens.end()) {
+                return std::nullopt;
+            }
+            const u64 physical_offset = mapping_it->second.physical_offset;
+            if (!physical_pages.emplace(physical_offset).second) {
+                continue;
+            }
+            if (!physical_aliases.contains(physical_offset) ||
+                active_cache_owners.contains(physical_offset) ||
+                pending_writebacks.contains(physical_offset) ||
+                texture_block_generations.contains(physical_offset)) {
+                return std::nullopt;
+            }
+            pending.push_back({physical_offset, request.override_page_address});
+        }
+        if (pending.empty() ||
+            pending.size() > std::numeric_limits<u64>::max() - last_owner_generation) {
+            return std::nullopt;
+        }
+
+        std::vector<PhysicalBackingCachePageToken> tokens;
+        tokens.reserve(pending.size());
+        for (const auto& owner : pending) {
+            const u64 owner_generation = ++last_owner_generation;
+            const auto publication =
+                state.ActivateOverride(owner.physical_offset, owner.override_page_address,
+                                       owner_generation);
+            if (!publication) {
+                for (auto token_it = tokens.rbegin(); token_it != tokens.rend(); ++token_it) {
+                    static_cast<void>(state.RetireClean(token_it->publication));
+                }
+                return std::nullopt;
+            }
+            tokens.push_back({*publication});
+        }
+
+        PhysicalBackingCachePublicationBatch result{.tokens = std::move(tokens)};
+        for (const auto& token : result.tokens) {
+            active_cache_owners.emplace(token.publication.physical_offset,
+                                        ActiveCacheOwner{.token = token});
+            auto deltas = MakeAliasDeltas(token.publication.physical_offset);
+            result.deltas.insert(result.deltas.end(), deltas.begin(), deltas.end());
+        }
+        std::ranges::sort(result.deltas, {}, &PhysicalBackingBdaDelta::guest_page);
+        return result;
     }
 
     [[nodiscard]] std::optional<PhysicalBackingDeviceAddress> ResolveGuestPagePublication(
