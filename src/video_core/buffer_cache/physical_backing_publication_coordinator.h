@@ -8,6 +8,7 @@
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/physical_backing_provenance.h"
@@ -30,6 +31,11 @@ struct PhysicalBackingCachePageToken {
 
 struct PhysicalBackingCachePagePublication {
     PhysicalBackingCachePageToken token{};
+    std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
+struct PhysicalBackingDirtyCachePagePublication {
+    PhysicalBackingWriteback writeback{};
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
@@ -170,6 +176,31 @@ public:
             return std::nullopt;
         }
         return MakeAliasDeltas(token.publication.physical_offset);
+    }
+
+    [[nodiscard]] std::optional<PhysicalBackingDirtyCachePagePublication>
+    RetireCachePageGpuDirty(const PhysicalBackingCachePageToken& token) {
+        if (!physical_aliases.contains(token.publication.physical_offset)) {
+            return std::nullopt;
+        }
+        const auto writeback = state.RetireGpuDirty(token.publication);
+        if (!writeback) {
+            return std::nullopt;
+        }
+        return PhysicalBackingDirtyCachePagePublication{
+            .writeback = *writeback,
+            .deltas = MakeAliasDeltas(token.publication.physical_offset),
+        };
+    }
+
+    template <typename Commit>
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>>
+    CommitCachePageWriteback(const PhysicalBackingWriteback& writeback, Commit&& commit) {
+        if (!physical_aliases.contains(writeback.physical_offset) ||
+            !state.CommitOrderedWriteback(writeback, std::forward<Commit>(commit))) {
+            return std::nullopt;
+        }
+        return MakeAliasDeltas(writeback.physical_offset);
     }
 
 private:
