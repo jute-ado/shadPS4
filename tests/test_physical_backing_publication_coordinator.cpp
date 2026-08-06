@@ -257,6 +257,60 @@ TEST(PhysicalBackingPublicationCoordinator, TextureOverlapSuppressesEveryPhysica
     EXPECT_EQ((*restored_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, DmaResidencyAtomicallyPublishesDirtyCacheForAliases) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto overlap = coordinator.BeginTextureOverlap(GuestA, PageSize);
+    ASSERT_TRUE(overlap.has_value());
+    const std::array requests{VideoCore::PhysicalBackingCachePageRequest{
+        GuestB, PhysicalBackingDeviceAddress{OverrideBase}}};
+
+    const auto transition =
+        coordinator.TransitionTexturePagesToDirtyCachePages(
+            std::span{&overlap->token, 1}, requests);
+
+    ASSERT_TRUE(transition.has_value());
+    ASSERT_EQ(transition->owners.size(), 1);
+    ASSERT_EQ(transition->deltas.size(), 2);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, OverrideBase);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, OverrideBase);
+    EXPECT_FALSE(coordinator.EndTextureOverlap(overlap->token));
+    const auto retired = coordinator.RetireCachePageGpuDirty(transition->owners[0].token);
+    ASSERT_TRUE(retired.has_value());
+    ASSERT_EQ(retired->dirty_slices.size(), 1);
+    EXPECT_EQ(retired->dirty_slices[0],
+              (VideoCore::PhysicalBackingDirtySlice{0, static_cast<u32>(PageSize)}));
+}
+
+TEST(PhysicalBackingPublicationCoordinator, IncompleteTextureTransitionLeavesOwnershipBlocked) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto first = coordinator.BeginTextureOverlap(GuestA, PageSize);
+    const auto second = coordinator.BeginTextureOverlap(GuestB, PageSize);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    const std::array requests{VideoCore::PhysicalBackingCachePageRequest{
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}}};
+
+    EXPECT_FALSE(coordinator.TransitionTexturePagesToDirtyCachePages(
+        std::span{&first->token, 1}, requests));
+
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestA)->value, 0);
+    EXPECT_EQ(coordinator.ResolveGuestPagePublication(GuestB)->value, 0);
+    EXPECT_TRUE(coordinator.EndTextureOverlap(first->token));
+    EXPECT_TRUE(coordinator.EndTextureOverlap(second->token));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, GuestPageRegistrationUsesMonotonicOwnerTokens) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};
