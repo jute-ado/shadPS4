@@ -212,6 +212,7 @@ enum class ExactHostImportStage : std::uint8_t {
     MemoryAllocation,
     MemoryBinding,
     DeviceAddress,
+    DataVerification,
     Retained,
 };
 
