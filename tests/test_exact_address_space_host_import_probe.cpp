@@ -64,6 +64,9 @@ struct FakeWindowsBackingAdapter {
         map_recipe = recipe;
         return map_succeeds ? reinterpret_cast<void*>(0x10000) : nullptr;
     }
+    bool ViewMatchesReservation(Reservation, void* pointer) {
+        return pointer == reinterpret_cast<void*>(0x10000);
+    }
     bool UnmapPreservingPlaceholder(void*) {
         calls.push_back("unmap_preserve_placeholder");
         return unmap_succeeds;

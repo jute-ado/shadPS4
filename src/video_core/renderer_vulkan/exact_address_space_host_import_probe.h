@@ -123,11 +123,14 @@ template <typename Adapter>
     }
     backing.pointer = adapter.MapReplacingPlaceholder(backing.mapping, backing.reservation, size,
                                                       ExactMapViewRecipe);
-    if (backing.pointer == nullptr) {
+    if (backing.pointer == nullptr ||
+        !adapter.ViewMatchesReservation(backing.reservation, backing.pointer)) {
         result.failure = ExactWindowsBackingFailure::ViewMappingFailed;
+        const bool unmapped = backing.pointer == nullptr ||
+                              adapter.UnmapPreservingPlaceholder(backing.pointer);
         const bool released = adapter.ReleasePlaceholder(backing.reservation);
         const bool closed = adapter.CloseMapping(backing.mapping);
-        result.rollback_complete = released && closed;
+        result.rollback_complete = unmapped && released && closed;
         backing.reservation = {};
         backing.mapping = {};
         return result;

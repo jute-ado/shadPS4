@@ -23,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "video_core/renderer_vulkan/exact_address_space_host_import_probe.h"
 #include "video_core/renderer_vulkan/external_host_memory_probe.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -39,6 +40,7 @@ struct Arguments {
     std::uint32_t vendor_id{};
     std::uint32_t device_id{};
     std::uint64_t backing_size{};
+    std::uint64_t extra_dmem_mbytes{};
 };
 
 [[nodiscard]] constexpr std::string_view StageName(Vulkan::ExternalHostMemoryProbeStage stage) {
@@ -167,6 +169,7 @@ struct Arguments {
     std::optional<std::uint64_t> vendor;
     std::optional<std::uint64_t> device;
     std::optional<std::uint64_t> size;
+    std::uint64_t extra_dmem_mbytes{};
     for (int index = 1; index < argc; index += 2) {
         if (index + 1 >= argc) {
             error = "every option requires a value";
@@ -183,12 +186,40 @@ struct Arguments {
         } else if (option == "--device-id") {
             device = value;
         } else if (option == "--size-bytes") {
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            error = "--size-bytes is not valid for the exact backing probe";
+            return std::nullopt;
+#else
             size = value;
+#endif
+        } else if (option == "--extra-dmem-mb") {
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            extra_dmem_mbytes = *value;
+#else
+            error = "--extra-dmem-mb is only valid for the exact backing probe";
+            return std::nullopt;
+#endif
         } else {
             error = "unknown option";
             return std::nullopt;
         }
     }
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+    const auto exact_size = Vulkan::CalculateExactAddressSpaceBackingSize(extra_dmem_mbytes);
+    if (!vendor || !device || !exact_size ||
+        *vendor > std::numeric_limits<std::uint32_t>::max() ||
+        *device > std::numeric_limits<std::uint32_t>::max() ||
+        Vulkan::ValidateExactBackingSizeForSizeT(
+            *exact_size, static_cast<std::uint64_t>(std::numeric_limits<SIZE_T>::max())) !=
+            Vulkan::ExactBackingSizeValidation::Valid) {
+        error = "vendor, device, and an optional 0..20000 MiB extra dmem are required";
+        return std::nullopt;
+    }
+    return Arguments{.vendor_id = static_cast<std::uint32_t>(*vendor),
+                     .device_id = static_cast<std::uint32_t>(*device),
+                     .backing_size = *exact_size,
+                     .extra_dmem_mbytes = extra_dmem_mbytes};
+#else
     if (!vendor || !device || !size || *vendor > std::numeric_limits<std::uint32_t>::max() ||
         *device > std::numeric_limits<std::uint32_t>::max() || *size == 0 ||
         *size > MaxBackingSize) {
@@ -198,12 +229,17 @@ struct Arguments {
     return Arguments{.vendor_id = static_cast<std::uint32_t>(*vendor),
                      .device_id = static_cast<std::uint32_t>(*device),
                      .backing_size = *size};
+#endif
 }
 
 [[nodiscard]] Json BaseReport() {
     return Json{
         {"schema", "shadps4.external-host-memory-import-probe.v1"},
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+        {"backingScope", "exact_windows_address_space_backing"},
+#else
         {"backingScope", "bounded_synthetic"},
+#endif
         {"backingSizeBytes", 0},
         {"mechanismEvidenceOnly", true},
         {"publicationAttempted", false},
@@ -635,6 +671,362 @@ struct HandleProbeOutput {
     return {.report = std::move(attempt), .disposition = disposition};
 }
 
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+struct ExactWindowsBackingAdapter {
+    using Mapping = HANDLE;
+    using Reservation = void*;
+
+    HANDLE process{GetCurrentProcess()};
+    DWORD last_error{};
+
+    Mapping CreatePageFileMapping(std::uint64_t size,
+                                  Vulkan::ExactWindowsBackingRecipe recipe) noexcept {
+        if (!(recipe.create_file_mapping2 && recipe.invalid_page_file &&
+              recipe.file_map_all_access && recipe.page_execute_readwrite && recipe.sec_commit)) {
+            return nullptr;
+        }
+        auto mapping = CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_ALL_ACCESS,
+                                          PAGE_EXECUTE_READWRITE, SEC_COMMIT, size, nullptr, nullptr,
+                                          0);
+        if (mapping == nullptr) {
+            last_error = GetLastError();
+        }
+        return mapping;
+    }
+
+    Reservation ReservePlaceholder(std::uint64_t size,
+                                   Vulkan::ExactWindowsBackingRecipe recipe) noexcept {
+        if (!(recipe.virtual_alloc2 && recipe.mem_reserve && recipe.mem_reserve_placeholder &&
+              recipe.page_noaccess)) {
+            return nullptr;
+        }
+        auto reservation = VirtualAlloc2(process, nullptr, static_cast<SIZE_T>(size),
+                                         MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                                         nullptr, 0);
+        if (reservation == nullptr) {
+            last_error = GetLastError();
+        }
+        return reservation;
+    }
+
+    void* MapReplacingPlaceholder(Mapping mapping, Reservation reservation, std::uint64_t size,
+                                  Vulkan::ExactWindowsBackingRecipe recipe) noexcept {
+        if (!(recipe.map_view_of_file3 && recipe.file_map_all_access &&
+              recipe.mem_replace_placeholder && recipe.page_execute_readwrite)) {
+            return nullptr;
+        }
+        auto pointer = MapViewOfFile3(mapping, process, reservation, 0, static_cast<SIZE_T>(size),
+                                      MEM_REPLACE_PLACEHOLDER, PAGE_EXECUTE_READWRITE, nullptr, 0);
+        if (pointer == nullptr) {
+            last_error = GetLastError();
+        }
+        return pointer;
+    }
+
+    bool ViewMatchesReservation(Reservation reservation, void* pointer) const noexcept {
+        return pointer == reservation;
+    }
+
+    bool UnmapPreservingPlaceholder(void* pointer) noexcept {
+        const bool succeeded =
+            UnmapViewOfFile2(process, pointer, MEM_PRESERVE_PLACEHOLDER) != FALSE;
+        if (!succeeded) {
+            last_error = GetLastError();
+        }
+        return succeeded;
+    }
+
+    bool ReleasePlaceholder(Reservation reservation) noexcept {
+        const bool succeeded = VirtualFreeEx(process, reservation, 0, MEM_RELEASE) != FALSE;
+        if (!succeeded) {
+            last_error = GetLastError();
+        }
+        return succeeded;
+    }
+
+    bool CloseMapping(Mapping mapping) noexcept {
+        const bool succeeded = CloseHandle(mapping) != FALSE;
+        if (!succeeded) {
+            last_error = GetLastError();
+        }
+        return succeeded;
+    }
+};
+
+[[nodiscard]] constexpr std::string_view ExactDispositionName(
+    Vulkan::ExactHostImportDisposition disposition) {
+    using enum Vulkan::ExactHostImportDisposition;
+    switch (disposition) {
+    case Pass:
+        return "pass";
+    case Unsupported:
+        return "unsupported";
+    case ResourceLimited:
+        return "resource_limited";
+    case ExactDesignIncompatible:
+        return "exact_design_incompatible";
+    case Error:
+        return "error";
+    }
+    return "error";
+}
+
+struct ExactProbeOutput {
+    Json report;
+    Vulkan::ExactHostImportDisposition disposition;
+};
+
+[[nodiscard]] ExactProbeOutput ProbeExactAddressSpaceHostAllocation(
+    vk::PhysicalDevice physical_device, vk::Device device, std::uint64_t backing_size,
+    std::size_t min_pointer_alignment) {
+    using namespace Vulkan;
+    constexpr auto handle_type = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
+    constexpr vk::BufferUsageFlags usage =
+        vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress;
+
+    Json attempt = InitialAttempt("host_allocation_ext");
+    attempt["backingProvenance"] = "windows_page_file_mapping_exact_address_space_recipe";
+    attempt["backingSizeBytes"] = backing_size;
+    attempt["windowsBackingRecipe"] = {
+        {"createFileMapping2",
+         "INVALID_HANDLE_VALUE,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT"},
+        {"virtualAlloc2", "MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS"},
+        {"mapViewOfFile3", "offset=0,MEM_REPLACE_PLACEHOLDER,PAGE_EXECUTE_READWRITE"},
+        {"cleanup",
+         "destroy_buffer,destroy_memory,UnmapViewOfFile2(MEM_PRESERVE_PLACEHOLDER),"
+         "VirtualFreeEx(MEM_RELEASE),CloseHandle"},
+    };
+    ExactHostImportFailure failure = ExactHostImportFailure::ProtocolViolation;
+    ExactHostImportProtocol protocol;
+    vk::UniqueBuffer buffer;
+    vk::UniqueDeviceMemory memory;
+    ExactWindowsBackingAdapter adapter;
+    ExactWindowsBackingAcquisition<ExactWindowsBackingAdapter> acquisition;
+    bool backing_acquired{};
+    std::uint64_t address{};
+
+    const auto fail = [&](ExactHostImportFailure value, std::string_view reason) {
+        failure = value;
+        attempt["failure"] = reason;
+    };
+    [&] {
+        if (!protocol.Complete(ExactHostImportStage::Capability)) {
+            return;
+        }
+
+        const auto property_chain =
+            physical_device.getProperties2<vk::PhysicalDeviceProperties2,
+                                           vk::PhysicalDeviceMaintenance3Properties,
+                                           vk::PhysicalDeviceMaintenance4Properties>();
+        const auto& properties = property_chain.get().properties;
+        const auto max_allocation =
+            property_chain.get<vk::PhysicalDeviceMaintenance3Properties>().maxMemoryAllocationSize;
+        const auto max_buffer =
+            property_chain.get<vk::PhysicalDeviceMaintenance4Properties>().maxBufferSize;
+        attempt["maxBufferSize"] = max_buffer;
+        attempt["maxMemoryAllocationSize"] = max_allocation;
+        attempt["maxStorageBufferRange"] = properties.limits.maxStorageBufferRange;
+        if (backing_size > max_buffer || backing_size > max_allocation) {
+            fail(ExactHostImportFailure::DeviceLimitExceeded, "exact_backing_exceeds_device_limit");
+            return;
+        }
+        if (!protocol.Complete(ExactHostImportStage::DeviceLimits)) {
+            return;
+        }
+
+        const vk::PhysicalDeviceExternalBufferInfo external_info{
+            .usage = usage,
+            .handleType = handle_type,
+        };
+        const auto external = physical_device.getExternalBufferProperties(external_info)
+                                  .externalMemoryProperties;
+        attempt["compatibleHandleTypes"] =
+            static_cast<std::uint32_t>(external.compatibleHandleTypes);
+        attempt["importable"] = static_cast<bool>(
+            external.externalMemoryFeatures & vk::ExternalMemoryFeatureFlagBits::eImportable);
+        if (!attempt["importable"].get<bool>() ||
+            !(external.compatibleHandleTypes & handle_type)) {
+            fail(ExactHostImportFailure::HandleNotImportable, "handle_type_not_importable");
+            return;
+        }
+        if (!protocol.Complete(ExactHostImportStage::ExternalBufferProperties)) {
+            return;
+        }
+
+        const vk::ExternalMemoryBufferCreateInfo external_buffer{.handleTypes = handle_type};
+        const vk::BufferCreateInfo buffer_info{
+            .pNext = &external_buffer,
+            .size = backing_size,
+            .usage = usage,
+            .sharingMode = vk::SharingMode::eExclusive,
+        };
+        auto [buffer_result, created_buffer] = device.createBufferUnique(buffer_info);
+        attempt["bufferCreateVkResult"] = vk::to_string(buffer_result);
+        if (buffer_result != vk::Result::eSuccess) {
+            fail(buffer_result == vk::Result::eErrorOutOfHostMemory ||
+                         buffer_result == vk::Result::eErrorOutOfDeviceMemory
+                     ? ExactHostImportFailure::VulkanOutOfMemory
+                     : ExactHostImportFailure::VulkanCallFailed,
+                 "buffer_creation_failed");
+            return;
+        }
+        buffer = std::move(created_buffer);
+        if (!protocol.Complete(ExactHostImportStage::BufferCreation)) {
+            return;
+        }
+
+        const auto requirements = device.getBufferMemoryRequirements(*buffer);
+        attempt["memoryRequirementBytes"] = requirements.size;
+        attempt["memoryRequirementAlignment"] = requirements.alignment;
+        attempt["bufferMemoryTypeBits"] = requirements.memoryTypeBits;
+        if (requirements.size > backing_size) {
+            fail(ExactHostImportFailure::RequirementExceedsBacking,
+                 "memory_requirement_exceeds_exact_backing");
+            return;
+        }
+        if (requirements.alignment == 0 || backing_size % requirements.alignment != 0 ||
+            !std::has_single_bit(min_pointer_alignment) ||
+            backing_size % min_pointer_alignment != 0) {
+            fail(ExactHostImportFailure::RequirementAlignmentMismatch,
+                 "exact_backing_alignment_mismatch");
+            return;
+        }
+        if (!protocol.Complete(ExactHostImportStage::MemoryRequirements) ||
+            !protocol.CanAllocateLargeBacking()) {
+            return;
+        }
+
+        acquisition = AcquireExactWindowsAddressSpaceBacking(adapter, backing_size);
+        attempt["win32Error"] = adapter.last_error;
+        attempt["rollbackComplete"] = acquisition.rollback_complete;
+        if (acquisition.failure != ExactWindowsBackingFailure::None) {
+            fail(ExactHostImportFailure::BackingCommitFailed, "exact_backing_allocation_failed");
+            return;
+        }
+        backing_acquired = true;
+        attempt["pointerModuloAlignment"] =
+            reinterpret_cast<std::uintptr_t>(acquisition.backing.pointer) % min_pointer_alignment;
+        if (!protocol.Complete(ExactHostImportStage::Backing)) {
+            return;
+        }
+
+        auto [host_result, host_properties] =
+            device.getMemoryHostPointerPropertiesEXT(handle_type, acquisition.backing.pointer);
+        attempt["hostPointerQueryVkResult"] = vk::to_string(host_result);
+        if (host_result != vk::Result::eSuccess) {
+            fail(host_result == vk::Result::eErrorInvalidExternalHandle
+                     ? ExactHostImportFailure::HandleNotImportable
+                     : ExactHostImportFailure::VulkanCallFailed,
+                 "host_pointer_query_failed");
+            return;
+        }
+        attempt["hostPointerMemoryTypeBits"] = host_properties.memoryTypeBits;
+        if (!protocol.Complete(ExactHostImportStage::HostPointerProperties)) {
+            return;
+        }
+
+        const auto physical_memory = physical_device.getMemoryProperties();
+        std::vector<ImportedHostMemoryTypeProperties> memory_properties;
+        for (std::uint32_t index = 0; index < physical_memory.memoryTypeCount; ++index) {
+            memory_properties.push_back({.host_coherent = static_cast<bool>(
+                                             physical_memory.memoryTypes[index].propertyFlags &
+                                             vk::MemoryPropertyFlagBits::eHostCoherent)});
+        }
+        const auto selection = SelectImportedHostMemoryType(
+            requirements.memoryTypeBits, host_properties.memoryTypeBits, memory_properties, true);
+        attempt["compatibleMemoryTypeBits"] = selection.compatible_bits;
+        if (!selection.index) {
+            fail(selection.failure == ImportedHostMemoryTypeSelectionFailure::NoCoherentMemoryType
+                     ? ExactHostImportFailure::NoCoherentMemoryType
+                     : ExactHostImportFailure::NoCompatibleMemoryType,
+                 "no_compatible_coherent_memory_type");
+            return;
+        }
+        attempt["selectedMemoryTypeIndex"] = *selection.index;
+        if (!protocol.Complete(ExactHostImportStage::MemoryTypeSelection)) {
+            return;
+        }
+
+        const vk::MemoryAllocateFlagsInfo allocation_flags{
+            .flags = vk::MemoryAllocateFlagBits::eDeviceAddress};
+        const vk::ImportMemoryHostPointerInfoEXT import_info{
+            .pNext = &allocation_flags,
+            .handleType = handle_type,
+            .pHostPointer = acquisition.backing.pointer,
+        };
+        const vk::MemoryAllocateInfo allocation_info{
+            .pNext = &import_info,
+            .allocationSize = requirements.size,
+            .memoryTypeIndex = *selection.index,
+        };
+        auto [memory_result, allocated_memory] = device.allocateMemoryUnique(allocation_info);
+        attempt["memoryAllocateVkResult"] = vk::to_string(memory_result);
+        if (memory_result != vk::Result::eSuccess) {
+            fail(memory_result == vk::Result::eErrorOutOfHostMemory ||
+                         memory_result == vk::Result::eErrorOutOfDeviceMemory
+                     ? ExactHostImportFailure::VulkanOutOfMemory
+                     : ExactHostImportFailure::VulkanCallFailed,
+                 "memory_allocation_failed");
+            return;
+        }
+        memory = std::move(allocated_memory);
+        if (!protocol.Complete(ExactHostImportStage::MemoryAllocation)) {
+            return;
+        }
+
+        const auto bind_result = device.bindBufferMemory(*buffer, *memory, 0);
+        attempt["bindVkResult"] = vk::to_string(bind_result);
+        if (bind_result != vk::Result::eSuccess) {
+            fail(ExactHostImportFailure::VulkanCallFailed, "memory_binding_failed");
+            return;
+        }
+        if (!protocol.Complete(ExactHostImportStage::MemoryBinding)) {
+            return;
+        }
+        address = device.getBufferAddress(vk::BufferDeviceAddressInfo{.buffer = *buffer});
+        attempt["deviceAddressNonzero"] = address != 0;
+        attempt["deviceAddressModuloAlignment"] =
+            requirements.alignment == 0 ? 0 : address % requirements.alignment;
+        if (address == 0) {
+            fail(ExactHostImportFailure::ZeroDeviceAddress, "zero_device_address");
+            return;
+        }
+        if (!protocol.Complete(ExactHostImportStage::DeviceAddress) ||
+            !protocol.Complete(ExactHostImportStage::Retained)) {
+            return;
+        }
+        failure = ExactHostImportFailure::None;
+    }();
+
+    // Vulkan objects must stop referring to the host pointer before its mapped view is released.
+    buffer.reset();
+    memory.reset();
+    if (backing_acquired) {
+        const auto cleanup =
+            ReleaseExactWindowsAddressSpaceBacking(adapter, acquisition.backing, true);
+        attempt["cleanupAttempted"] = true;
+        attempt["unmapAttempted"] = true;
+        attempt["unmapSucceeded"] = cleanup.unmap_succeeded;
+        attempt["closeAttempted"] = true;
+        attempt["closeSucceeded"] = cleanup.close_succeeded;
+        attempt["placeholderReleaseSucceeded"] = cleanup.release_succeeded;
+        attempt["cleanupComplete"] = cleanup.failure == ExactWindowsBackingFailure::None;
+        attempt["win32CleanupError"] = adapter.last_error;
+        if (cleanup.failure != ExactWindowsBackingFailure::None) {
+            failure = ExactHostImportFailure::CleanupFailed;
+            attempt["failure"] = "cleanup_failed";
+        }
+    } else {
+        attempt["cleanupComplete"] = acquisition.rollback_complete;
+    }
+    const auto disposition = ClassifyExactHostImportFailure(failure);
+    attempt["disposition"] = ExactDispositionName(disposition);
+    attempt["succeeded"] = disposition == ExactHostImportDisposition::Pass;
+    attempt["completedStage"] = static_cast<std::uint32_t>(protocol.CompletedStage());
+    return {.report = std::move(attempt), .disposition = disposition};
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -648,12 +1040,21 @@ int main(int argc, char** argv) {
             const auto arguments = ParseArguments(argc, argv, argument_error);
             if (!arguments) {
                 report["reason"] = argument_error;
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+                std::cerr << "Usage: exact-address-space-host-import-probe --vendor-id ID "
+                             "--device-id ID [--extra-dmem-mb 0..20000]\n";
+#else
                 std::cerr
                     << "Usage: external-host-memory-import-probe --vendor-id ID --device-id ID "
                        "--size-bytes 1..67108864\n";
+#endif
                 return 64;
             }
             report["backingSizeBytes"] = arguments->backing_size;
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            report["extraDmemMbytes"] = arguments->extra_dmem_mbytes;
+            report["exactProductionBackingRecipe"] = true;
+#endif
             report["requestedVendorId"] = arguments->vendor_id;
             report["requestedDeviceId"] = arguments->device_id;
 
@@ -794,6 +1195,18 @@ int main(int argc, char** argv) {
             report["externalHostEnabled"] = true;
             report["bufferDeviceAddressEnabled"] = true;
 
+#ifdef SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+            auto host_allocation = ProbeExactAddressSpaceHostAllocation(
+                physical_device, *device, arguments->backing_size, min_alignment);
+            report["attempts"].push_back(std::move(host_allocation.report));
+            report["status"] = ExactDispositionName(host_allocation.disposition);
+            if (host_allocation.disposition == Vulkan::ExactHostImportDisposition::Pass) {
+                report["reason"] = "exact_address_space_host_allocation_retained";
+                return 0;
+            }
+            report["reason"] = "exact_address_space_host_allocation_not_retained";
+            return 2;
+#else
             auto host_allocation = ProbeHostAllocation(physical_device, *device,
                                                        arguments->backing_size, min_alignment);
             report["attempts"].push_back(std::move(host_allocation.report));
@@ -808,6 +1221,7 @@ int main(int argc, char** argv) {
                                    ? "host_allocation_incompatible"
                                    : "host_allocation_probe_error";
             return 2;
+#endif
         }();
         normal_scope_exit = true;
     } catch (const std::exception& exception) {

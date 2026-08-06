@@ -301,6 +301,29 @@ if (WIN32)
         _WIN32_WINNT=0x0A00
         WINVER=0x0A00
     )
+
+    # Exact production AddressSpace-backing feasibility probe. The executable is never part of the
+    # emulator app and publishes no guest pages.
+    add_executable(shadps4_exact_address_space_host_import_probe
+        ${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/external_host_memory_import_probe_main.cpp
+    )
+    target_include_directories(shadps4_exact_address_space_host_import_probe PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_compile_features(shadps4_exact_address_space_host_import_probe PRIVATE cxx_std_23)
+    target_compile_definitions(shadps4_exact_address_space_host_import_probe PRIVATE
+        SHADPS4_EXACT_ADDRESS_SPACE_PROBE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        NTDDI_VERSION=0x0A000006
+        _WIN32_WINNT=0x0A00
+        WINVER=0x0A00
+    )
+    target_link_libraries(shadps4_exact_address_space_host_import_probe PRIVATE
+        Vulkan::Headers
+        nlohmann_json::nlohmann_json
+        onecore
+    )
 endif()
 
 add_executable(shadps4_cpu_page_write_snapshot_test
