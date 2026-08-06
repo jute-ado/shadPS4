@@ -428,6 +428,66 @@ PlanPhysicalBackingRetirementBatches(size_t owner_count, u64 staging_budget,
     return batches;
 }
 
+struct PhysicalBackingGpuWritebackSlice {
+    VAddr guest_page{};
+    u64 physical_offset{};
+    u32 offset{};
+    u32 size{};
+};
+
+struct PhysicalBackingGpuWritebackCopy {
+    u64 source_offset{};
+    u64 destination_offset{};
+    u64 size{};
+
+    auto operator<=>(const PhysicalBackingGpuWritebackCopy&) const = default;
+};
+
+[[nodiscard]] inline std::optional<std::vector<PhysicalBackingGpuWritebackCopy>>
+PlanPhysicalBackingGpuWritebackCopies(VAddr buffer_base, u64 buffer_size, u64 backing_size,
+                                      std::span<const PhysicalBackingGpuWritebackSlice> slices) {
+    std::vector<PhysicalBackingGpuWritebackCopy> copies;
+    copies.reserve(slices.size());
+    for (const auto& slice : slices) {
+        if (slice.size == 0 || slice.guest_page < buffer_base ||
+            slice.guest_page - buffer_base > buffer_size ||
+            slice.offset > buffer_size - (slice.guest_page - buffer_base) ||
+            slice.size > buffer_size - (slice.guest_page - buffer_base) - slice.offset ||
+            slice.physical_offset > backing_size ||
+            slice.offset > backing_size - slice.physical_offset ||
+            slice.size > backing_size - slice.physical_offset - slice.offset) {
+            return std::nullopt;
+        }
+        copies.push_back({
+            .source_offset = slice.guest_page - buffer_base + slice.offset,
+            .destination_offset = slice.physical_offset + slice.offset,
+            .size = slice.size,
+        });
+    }
+    std::ranges::sort(copies, [](const auto& lhs, const auto& rhs) {
+        return std::tie(lhs.source_offset, lhs.destination_offset) <
+               std::tie(rhs.source_offset, rhs.destination_offset);
+    });
+    std::vector<PhysicalBackingGpuWritebackCopy> coalesced;
+    coalesced.reserve(copies.size());
+    for (const auto& copy : copies) {
+        if (!coalesced.empty()) {
+            auto& previous = coalesced.back();
+            if (previous.source_offset <= std::numeric_limits<u64>::max() - previous.size &&
+                previous.destination_offset <=
+                    std::numeric_limits<u64>::max() - previous.size &&
+                previous.source_offset + previous.size == copy.source_offset &&
+                previous.destination_offset + previous.size == copy.destination_offset &&
+                copy.size <= std::numeric_limits<u64>::max() - previous.size) {
+                previous.size += copy.size;
+                continue;
+            }
+        }
+        coalesced.push_back(copy);
+    }
+    return coalesced;
+}
+
 [[nodiscard]] inline std::optional<PhysicalBackingCommandAliasPlan>
 PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAccess> accesses) {
     constexpr u64 PageMask = 16_KB - 1;
