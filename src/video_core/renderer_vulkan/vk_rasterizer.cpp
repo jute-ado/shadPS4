@@ -464,6 +464,9 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
     static std::atomic<u64> profile_duplicate_accesses{};
     static std::atomic<u64> profile_pages{};
     static std::atomic<u64> profile_resolve_time_us{};
+    static std::atomic<u64> profile_collect_time_us{};
+    static std::atomic<u64> profile_plan_time_us{};
+    static std::atomic<u64> profile_transition_time_us{};
     static std::array<std::atomic<u64>, static_cast<size_t>(ProfileOutcome::Count)>
         profile_outcomes{};
 
@@ -471,6 +474,9 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
     const auto profile_start = std::chrono::steady_clock::now();
     u64 profile_resolved_pages{};
     u64 profile_resolve_us{};
+    u64 profile_collect_us{};
+    u64 profile_plan_us{};
+    u64 profile_transition_us{};
     u64 profile_duplicate_count{};
     const auto finish_profile = [&](bool result, ProfileOutcome outcome, size_t resource_count,
                                     size_t access_count) {
@@ -484,12 +490,15 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         profile_duplicate_accesses.fetch_add(profile_duplicate_count, std::memory_order_relaxed);
         profile_pages.fetch_add(profile_resolved_pages, std::memory_order_relaxed);
         profile_resolve_time_us.fetch_add(profile_resolve_us, std::memory_order_relaxed);
+        profile_collect_time_us.fetch_add(profile_collect_us, std::memory_order_relaxed);
+        profile_plan_time_us.fetch_add(profile_plan_us, std::memory_order_relaxed);
+        profile_transition_time_us.fetch_add(profile_transition_us, std::memory_order_relaxed);
         profile_outcomes[static_cast<size_t>(outcome)].fetch_add(1, std::memory_order_relaxed);
         if (profile_call >= 128 && (profile_call & (profile_call - 1)) == 0) {
             LOG_INFO(Render_Vulkan,
                      "Physical command profile calls={} success={} access_fail={} plan_fail={} "
-                     "transition_fail={} total_us={} resolve_us={} last_us={} resources={} "
-                     "accesses={} duplicates={} pages={}",
+                     "transition_fail={} total_us={} collect_us={} resolve_us={} plan_us={} "
+                     "transition_us={} last_us={} resources={} accesses={} duplicates={} pages={}",
                      profile_call,
                      profile_outcomes[static_cast<size_t>(ProfileOutcome::Success)].load(
                          std::memory_order_relaxed),
@@ -500,7 +509,10 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
                      profile_outcomes[static_cast<size_t>(ProfileOutcome::TransitionFailure)].load(
                          std::memory_order_relaxed),
                      profile_time_us.load(std::memory_order_relaxed),
-                     profile_resolve_time_us.load(std::memory_order_relaxed), elapsed_us,
+                     profile_collect_time_us.load(std::memory_order_relaxed),
+                     profile_resolve_time_us.load(std::memory_order_relaxed),
+                     profile_plan_time_us.load(std::memory_order_relaxed),
+                     profile_transition_time_us.load(std::memory_order_relaxed), elapsed_us,
                      profile_resources.load(std::memory_order_relaxed),
                      profile_accesses.load(std::memory_order_relaxed),
                      profile_duplicate_accesses.load(std::memory_order_relaxed),
@@ -622,12 +634,22 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         }
     }
 
+    profile_collect_us =
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - profile_start)
+                             .count());
+    const auto plan_start = std::chrono::steady_clock::now();
     const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
+    profile_plan_us =
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - plan_start)
+                             .count());
     if (!plan) {
         LOG_ERROR(Render_Vulkan, "Rejected GPU command with invalid physical-backing aliases");
         return finish_profile(false, ProfileOutcome::PlanFailure, resources.size(),
                               accesses.size());
     }
+    const auto transition_start = std::chrono::steady_clock::now();
     for (const Resource resource : plan->read_snapshot_order) {
         bool found = false;
         for (const auto& range : resources) {
@@ -642,6 +664,10 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         }
         ASSERT(found);
     }
+    profile_transition_us =
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - transition_start)
+                             .count());
     return finish_profile(true, ProfileOutcome::Success, resources.size(), accesses.size());
 }
 
