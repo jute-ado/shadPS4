@@ -16,6 +16,7 @@ using VideoCore::PhysicalBackingPublicationCoordinator;
 
 constexpr u64 PageSize = 16_KB;
 constexpr u64 ImportedBase = 0x2'0000'0000ULL;
+constexpr u64 OverrideBase = 0x4'0000'0000ULL;
 constexpr VAddr GuestA = 0x1000'0000ULL;
 constexpr VAddr GuestB = 0x2000'0000ULL;
 constexpr u64 PhysicalPage = 3 * PageSize;
@@ -81,6 +82,30 @@ TEST(PhysicalBackingPublicationCoordinator, UnmapsOneAliasAndReturnsZeroBdaDelta
     const auto remap_deltas = coordinator.MapSpans(remap_span);
     ASSERT_TRUE(remap_deltas.has_value());
     EXPECT_EQ(remap_deltas->front().device_address.value, ImportedBase + OtherPhysicalPage);
+}
+
+TEST(PhysicalBackingPublicationCoordinator, CleanCacheOwnerUpdatesAndRestoresEveryAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+
+    const auto owner = coordinator.ActivateCachePage(
+        PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, false);
+
+    ASSERT_TRUE(owner.has_value());
+    ASSERT_EQ(owner->deltas.size(), 2);
+    EXPECT_EQ(owner->deltas[0].device_address.value, OverrideBase);
+    EXPECT_EQ(owner->deltas[1].device_address.value, OverrideBase);
+
+    const auto retired_deltas = coordinator.RetireCachePageClean(owner->token);
+    ASSERT_TRUE(retired_deltas.has_value());
+    ASSERT_EQ(retired_deltas->size(), 2);
+    EXPECT_EQ((*retired_deltas)[0].device_address.value, ImportedBase + PhysicalPage);
+    EXPECT_EQ((*retired_deltas)[1].device_address.value, ImportedBase + PhysicalPage);
 }
 
 } // namespace
