@@ -284,19 +284,29 @@ public:
     /// Forgets every publication token for a physical allocation before its
     /// backing can be reused. Pending writebacks are deliberately invalidated;
     /// a writeback already inside its synchronous commit cannot be retired.
-    [[nodiscard]] bool RetirePhysicalPage(u64 physical_offset, u64 allocation_generation) {
+    [[nodiscard]] bool HasPhysicalPage(u64 physical_offset) const noexcept {
+        return physical_pages.contains(physical_offset);
+    }
+
+    [[nodiscard]] bool CanRetirePhysicalPage(u64 physical_offset,
+                                             u64 allocation_generation) const noexcept {
         const auto physical_it = physical_pages.find(physical_offset);
         if (physical_it == physical_pages.end()) {
             return false;
         }
         const PhysicalPageState& physical = physical_it->second;
-        if (physical.publication == Publication::CommittingWriteback || physical.alias_count != 0 ||
-            physical.allocation_generation != allocation_generation) {
+        return physical.publication != Publication::CommittingWriteback &&
+               physical.alias_count == 0 &&
+               physical.allocation_generation == allocation_generation;
+    }
+
+    [[nodiscard]] bool RetirePhysicalPage(u64 physical_offset, u64 allocation_generation) {
+        if (!CanRetirePhysicalPage(physical_offset, allocation_generation)) {
             return false;
         }
 
         retired_allocation_generations.insert_or_assign(physical_offset, allocation_generation);
-        physical_pages.erase(physical_it);
+        physical_pages.erase(physical_offset);
         return true;
     }
 

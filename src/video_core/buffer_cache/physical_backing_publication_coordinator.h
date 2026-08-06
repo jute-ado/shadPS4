@@ -189,6 +189,45 @@ public:
         return deltas;
     }
 
+    [[nodiscard]] bool RetirePhysicalAllocations(
+        std::span<const Core::PhysicalBackingRetirement> retirements) {
+        std::vector<std::pair<u64, u64>> tracked_pages;
+        std::unordered_set<u64> batch_pages;
+        for (const auto& retirement : retirements) {
+            if (retirement.size == 0 || retirement.allocation_generation == 0 ||
+                !IsPageAligned(retirement.physical_offset) ||
+                !IsPageAligned(retirement.size) ||
+                retirement.physical_offset >
+                    std::numeric_limits<u64>::max() - (retirement.size - 1)) {
+                return false;
+            }
+            for (u64 offset = 0; offset < retirement.size; offset += PageSize) {
+                const u64 physical_offset = retirement.physical_offset + offset;
+                if (!batch_pages.emplace(physical_offset).second) {
+                    return false;
+                }
+                if (!state.HasPhysicalPage(physical_offset)) {
+                    continue;
+                }
+                if (physical_aliases.contains(physical_offset) ||
+                    active_cache_owners.contains(physical_offset) ||
+                    texture_block_generations.contains(physical_offset) ||
+                    !state.CanRetirePhysicalPage(physical_offset,
+                                                 retirement.allocation_generation)) {
+                    return false;
+                }
+                tracked_pages.emplace_back(physical_offset, retirement.allocation_generation);
+            }
+        }
+        for (const auto& [physical_offset, allocation_generation] : tracked_pages) {
+            if (!state.RetirePhysicalPage(physical_offset, allocation_generation)) {
+                return false;
+            }
+            pending_writebacks.erase(physical_offset);
+        }
+        return true;
+    }
+
     /// Publishes one buffer-cache page for every guest alias of its physical page.
     /// Texture overlap fails closed until texture ownership participates in this policy.
     [[nodiscard]] std::optional<PhysicalBackingCachePagePublication> ActivateCachePage(
