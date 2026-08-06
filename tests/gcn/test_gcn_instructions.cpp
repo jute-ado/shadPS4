@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <span>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <sirit/sirit.h>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +27,22 @@ struct F32x2 {
     float a;
     float b;
 };
+
+static size_t CountSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
+    constexpr size_t SpirvHeaderWords = 5;
+    size_t count = 0;
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        EXPECT_NE(word_count, 0U);
+        if (word_count == 0) {
+            break;
+        }
+        count += (instruction & 0xffffU) == static_cast<u32>(opcode);
+        offset += word_count;
+    }
+    return count;
+}
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
@@ -47,6 +65,16 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
+}
+
+TEST_F(GcnTest, direct_memory_fault_bits_are_recorded_atomically) {
+    // A direct-memory load emits get_bda_pointer, whose fault marker is shared by every
+    // concurrently executing invocation. Setting a page bit must not lose another page bit.
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto result = TranslateToSpirvWithInfo(addr64_load, true);
+
+    EXPECT_EQ(CountSpirvOpcode(result.spirv, spv::Op::OpAtomicOr), 1U);
 }
 
 // Example
