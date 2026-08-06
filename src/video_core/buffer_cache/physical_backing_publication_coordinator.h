@@ -53,6 +53,18 @@ struct PhysicalBackingOwnerRetirement {
     std::vector<PhysicalBackingDirtySlice> dirty_slices;
 };
 
+struct PhysicalBackingTextureToken {
+    u64 generation{};
+    std::vector<u64> physical_pages;
+
+    auto operator<=>(const PhysicalBackingTextureToken&) const = default;
+};
+
+struct PhysicalBackingTexturePublication {
+    PhysicalBackingTextureToken token{};
+    std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
 /// GPU-thread-owned coordinator for physical mapping provenance and BDA publications.
 /// It is deliberately unsynchronized; callers must marshal every operation to the GPU thread.
 class PhysicalBackingPublicationCoordinator {
@@ -110,7 +122,7 @@ public:
                     RollbackMappings(mapped);
                     return std::nullopt;
                 }
-                const auto address = state.Resolve(mapping->guest_page);
+                const auto address = PublishedAddress(mapping->guest_page, mapping->physical_offset);
                 if (address.value == 0) {
                     static_cast<void>(state.UnmapGuestPage(*mapping));
                     RollbackMappings(mapped);
@@ -141,6 +153,7 @@ public:
             if (mapping_it == mapping_tokens.end() ||
                 active_cache_owners.contains(mapping_it->second.physical_offset) ||
                 pending_writebacks.contains(mapping_it->second.physical_offset) ||
+                texture_block_generations.contains(mapping_it->second.physical_offset) ||
                 !state.CanUnmapGuestPage(mapping_it->second)) {
                 return std::nullopt;
             }
@@ -168,7 +181,8 @@ public:
         const auto aliases_it = physical_aliases.find(physical_offset);
         if (has_texture_overlap || aliases_it == physical_aliases.end() ||
             aliases_it->second.empty() || active_cache_owners.contains(physical_offset) ||
-            pending_writebacks.contains(physical_offset)) {
+            pending_writebacks.contains(physical_offset) ||
+            texture_block_generations.contains(physical_offset)) {
             return std::nullopt;
         }
         const auto owner_generation = AcquireOwnerGeneration();
@@ -277,6 +291,78 @@ public:
         return MakeAliasDeltas(writeback.physical_offset);
     }
 
+    /// Suppresses buffer BDA publication for every physical alias while a texture may own it.
+    [[nodiscard]] std::optional<PhysicalBackingTexturePublication> BeginTextureOverlap(
+        VAddr guest_base, u64 size) {
+        if (size == 0 || !IsPageAligned(guest_base) || !IsPageAligned(size) ||
+            guest_base >= AddressSpaceSize || size > AddressSpaceSize - guest_base) {
+            return std::nullopt;
+        }
+
+        std::vector<u64> physical_pages;
+        physical_pages.reserve(static_cast<size_t>(size / PageSize));
+        for (u64 offset = 0; offset < size; offset += PageSize) {
+            const auto mapping_it = mapping_tokens.find(guest_base + offset);
+            if (mapping_it == mapping_tokens.end()) {
+                return std::nullopt;
+            }
+            const u64 physical_offset = mapping_it->second.physical_offset;
+            if (active_cache_owners.contains(physical_offset) ||
+                pending_writebacks.contains(physical_offset)) {
+                return std::nullopt;
+            }
+            physical_pages.push_back(physical_offset);
+        }
+        std::ranges::sort(physical_pages);
+        physical_pages.erase(std::unique(physical_pages.begin(), physical_pages.end()),
+                             physical_pages.end());
+
+        const auto generation = AcquireTextureGeneration();
+        if (!generation) {
+            return std::nullopt;
+        }
+        for (const u64 physical_offset : physical_pages) {
+            texture_block_generations[physical_offset].emplace(*generation);
+        }
+        PhysicalBackingTextureToken token{
+            .generation = *generation,
+            .physical_pages = std::move(physical_pages),
+        };
+        return PhysicalBackingTexturePublication{
+            .token = token,
+            .deltas = MakePhysicalDeltas(token.physical_pages),
+        };
+    }
+
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> EndTextureOverlap(
+        const PhysicalBackingTextureToken& token) {
+        if (token.generation == 0 || token.physical_pages.empty()) {
+            return std::nullopt;
+        }
+        for (size_t index = 0; index < token.physical_pages.size(); ++index) {
+            const u64 physical_offset = token.physical_pages[index];
+            if ((index != 0 && physical_offset <= token.physical_pages[index - 1]) ||
+                !IsPageAligned(physical_offset)) {
+                return std::nullopt;
+            }
+            const auto block_it = texture_block_generations.find(physical_offset);
+            if (block_it == texture_block_generations.end() ||
+                !block_it->second.contains(token.generation) ||
+                active_cache_owners.contains(physical_offset) ||
+                pending_writebacks.contains(physical_offset)) {
+                return std::nullopt;
+            }
+        }
+        for (const u64 physical_offset : token.physical_pages) {
+            auto block_it = texture_block_generations.find(physical_offset);
+            block_it->second.erase(token.generation);
+            if (block_it->second.empty()) {
+                texture_block_generations.erase(block_it);
+            }
+        }
+        return MakePhysicalDeltas(token.physical_pages);
+    }
+
 private:
     struct ActiveCacheOwner {
         PhysicalBackingCachePageToken token{};
@@ -312,6 +398,21 @@ private:
         return ++last_owner_generation;
     }
 
+    [[nodiscard]] std::optional<u64> AcquireTextureGeneration() noexcept {
+        if (last_texture_generation == std::numeric_limits<u64>::max()) {
+            return std::nullopt;
+        }
+        return ++last_texture_generation;
+    }
+
+    [[nodiscard]] PhysicalBackingDeviceAddress PublishedAddress(VAddr guest_page,
+                                                                u64 physical_offset) const {
+        if (texture_block_generations.contains(physical_offset)) {
+            return {};
+        }
+        return state.Resolve(guest_page);
+    }
+
     [[nodiscard]] std::vector<PhysicalBackingBdaDelta> MakeAliasDeltas(
         u64 physical_offset) const {
         std::vector<PhysicalBackingBdaDelta> deltas;
@@ -321,8 +422,20 @@ private:
         }
         deltas.reserve(aliases_it->second.size());
         for (const VAddr guest_page : aliases_it->second) {
-            deltas.push_back({guest_page, state.Resolve(guest_page)});
+            deltas.push_back({guest_page, PublishedAddress(guest_page, physical_offset)});
         }
+        std::ranges::sort(deltas, {}, &PhysicalBackingBdaDelta::guest_page);
+        return deltas;
+    }
+
+    [[nodiscard]] std::vector<PhysicalBackingBdaDelta> MakePhysicalDeltas(
+        std::span<const u64> physical_pages) const {
+        std::vector<PhysicalBackingBdaDelta> deltas;
+        for (const u64 physical_offset : physical_pages) {
+            auto physical_deltas = MakeAliasDeltas(physical_offset);
+            deltas.insert(deltas.end(), physical_deltas.begin(), physical_deltas.end());
+        }
+        std::ranges::sort(deltas, {}, &PhysicalBackingBdaDelta::guest_page);
         return deltas;
     }
 
@@ -375,10 +488,12 @@ private:
     PhysicalBackingPublicationState state;
     u64 last_mapping_generation{};
     u64 last_owner_generation{};
+    u64 last_texture_generation{};
     std::unordered_map<VAddr, PhysicalBackingMapping> mapping_tokens;
     std::unordered_map<u64, std::unordered_set<VAddr>> physical_aliases;
     ActiveCacheOwners active_cache_owners;
     std::unordered_map<u64, PhysicalBackingWriteback> pending_writebacks;
+    std::unordered_map<u64, std::unordered_set<u64>> texture_block_generations;
 };
 
 } // namespace VideoCore
