@@ -281,3 +281,10 @@ TEST(BufferResidency, SelectsLastActuallyWrittenAliasInsteadOfLastBoundAlias) {
     };
     EXPECT_FALSE(VideoCore::PlanPhysicalBackingTexturePageSources(ambiguous_same_guest_page));
 }
+
+TEST(BufferResidency, SelectsTheFirstActualTextureUploadConsumer) {
+    EXPECT_EQ(VideoCore::PhysicalBackingTextureUploadConsumer(true),
+              VideoCore::PhysicalBackingTextureConsumer::ComputeShaderRead);
+    EXPECT_EQ(VideoCore::PhysicalBackingTextureUploadConsumer(false),
+              VideoCore::PhysicalBackingTextureConsumer::TransferRead);
+}
