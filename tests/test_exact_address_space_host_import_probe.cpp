@@ -259,5 +259,12 @@ TEST(ExactAddressSpaceHostImportProbe, RecordsTheSelectedCoherentMemoryTypeTruth
     EXPECT_FALSE(noncoherent.host_coherent);
 }
 
+TEST(ExactAddressSpaceHostImportProbe, RequiresCanonicalAndGuestAliasVisibilityEvidence) {
+    EXPECT_FALSE(HasRequiredExactHostVisibilityEvidence(false, false));
+    EXPECT_FALSE(HasRequiredExactHostVisibilityEvidence(true, false));
+    EXPECT_FALSE(HasRequiredExactHostVisibilityEvidence(false, true));
+    EXPECT_TRUE(HasRequiredExactHostVisibilityEvidence(true, true));
+}
+
 } // namespace
 } // namespace Vulkan
