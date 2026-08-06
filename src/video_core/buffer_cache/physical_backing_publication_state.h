@@ -126,28 +126,30 @@ public:
     }
 
     [[nodiscard]] bool UnmapGuestPage(const PhysicalBackingMapping& mapping) {
+        if (!CanUnmapGuestPage(mapping)) {
+            return false;
+        }
         const auto guest_it = guest_mappings.find(mapping.guest_page);
-        if (guest_it == guest_mappings.end() || guest_it->second != mapping) {
-            return false;
-        }
-
         const auto physical_it = physical_pages.find(mapping.physical_offset);
-        if (physical_it == physical_pages.end() || physical_it->second.alias_count == 0) {
-            return false;
-        }
         PhysicalPageState& physical = physical_it->second;
-        if (physical.publication == Publication::CommittingWriteback) {
-            return false;
-        }
         const auto next_epoch = NextGeneration(physical.mapping_epoch);
-        if (!next_epoch) {
-            return false;
-        }
 
         physical.mapping_epoch = *next_epoch;
         --physical.alias_count;
         guest_mappings.erase(guest_it);
         return true;
+    }
+
+    /// Read-only preflight for a later externally serialized unmap.
+    [[nodiscard]] bool CanUnmapGuestPage(const PhysicalBackingMapping& mapping) const {
+        const auto guest_it = guest_mappings.find(mapping.guest_page);
+        if (guest_it == guest_mappings.end() || guest_it->second != mapping) {
+            return false;
+        }
+        const auto physical_it = physical_pages.find(mapping.physical_offset);
+        return physical_it != physical_pages.end() && physical_it->second.alias_count != 0 &&
+               physical_it->second.publication != Publication::CommittingWriteback &&
+               NextGeneration(physical_it->second.mapping_epoch).has_value();
     }
 
     [[nodiscard]] PhysicalBackingDeviceAddress Resolve(VAddr guest_page) const noexcept {
