@@ -375,6 +375,30 @@ TEST(BufferResidency, LeavesUncontendedReadOnlyPagesOutOfCommandSnapshots) {
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{writer}));
 }
 
+TEST(BufferResidency, ScopesCommandAliasSnapshotsToWrittenPhysicalPages) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    constexpr u64 first_reader_page = 0xab8d'0000;
+    constexpr u64 written_page = first_reader_page + 16_KB;
+    constexpr u64 last_reader_page = written_page + 16_KB;
+    constexpr u64 unrelated_read_only_page = last_reader_page + 16_KB;
+    const Resource wide_reader{Kind::Texture, 16};
+    const Resource narrow_writer{Kind::Buffer, 41};
+    const Resource unrelated_reader{Kind::Texture, 73};
+    const std::array accesses{
+        Access{wide_reader, false, {first_reader_page, written_page, last_reader_page}},
+        Access{narrow_writer, true, {written_page}},
+        Access{unrelated_reader, false, {unrelated_read_only_page}},
+    };
+
+    const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(accesses);
+
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->read_snapshot_order, (std::vector<Resource>{wide_reader, narrow_writer}));
+    EXPECT_EQ(plan->ownership_transition_pages, (std::vector<u64>{written_page}));
+}
+
 TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
     using Owner = VideoCore::PhysicalBackingCachePageOwnerLocation;
     constexpr u64 requested_page = 0xab8d'0000;
