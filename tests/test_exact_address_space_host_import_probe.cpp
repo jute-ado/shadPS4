@@ -267,8 +267,18 @@ TEST(ExactAddressSpaceHostImportProbe, RequiresCanonicalAndGuestAliasVisibilityE
 }
 
 TEST(ExactAddressSpaceHostImportProbe, RequiresTheGuestPageTableLookupPath) {
-    EXPECT_FALSE(HasRequiredExactGuestPublicationEvidence(true, true, false));
-    EXPECT_TRUE(HasRequiredExactGuestPublicationEvidence(true, true, true));
+    EXPECT_FALSE(
+        HasRequiredExactGuestPublicationEvidence(true, true, false, true, true, true, true));
+    EXPECT_FALSE(
+        HasRequiredExactGuestPublicationEvidence(true, true, true, false, true, true, true));
+    EXPECT_FALSE(
+        HasRequiredExactGuestPublicationEvidence(true, true, true, true, false, true, true));
+    EXPECT_FALSE(
+        HasRequiredExactGuestPublicationEvidence(true, true, true, true, true, false, true));
+    EXPECT_FALSE(
+        HasRequiredExactGuestPublicationEvidence(true, true, true, true, true, true, false));
+    EXPECT_TRUE(
+        HasRequiredExactGuestPublicationEvidence(true, true, true, true, true, true, true));
 }
 
 } // namespace
