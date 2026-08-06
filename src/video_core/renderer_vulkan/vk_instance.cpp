@@ -95,8 +95,8 @@ Instance::Instance(bool enable_validation, bool enable_crash_diagnostic)
 
 Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                    bool enable_validation /*= false*/, bool enable_crash_diagnostic /*= false*/)
-    : instance{CreateInstance(window.GetWindowInfo().type, enable_validation,
-                              enable_crash_diagnostic)},
+    : instance{
+          CreateInstance(window.GetWindowInfo().type, enable_validation, enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
@@ -221,7 +221,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 40> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -258,6 +258,7 @@ bool Instance::CreateDevice() {
 
     // Optional
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    external_memory_host = add_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -621,9 +622,22 @@ void Instance::CreateAllocator() {
 void Instance::CollectDeviceParameters() {
     const vk::StructureChain property_chain =
         physical_device
-            .getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties>();
+            .getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties,
+                            vk::PhysicalDeviceMaintenance3Properties>();
     const vk::PhysicalDeviceDriverProperties driver =
         property_chain.get<vk::PhysicalDeviceDriverProperties>();
+    maintenance_3_props = property_chain.get<vk::PhysicalDeviceMaintenance3Properties>();
+
+    const bool external_memory_host_available =
+        std::find(available_extensions.begin(), available_extensions.end(),
+                  VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) != available_extensions.end();
+    if (external_memory_host_available) {
+        const auto host_property_chain =
+            physical_device.getProperties2<vk::PhysicalDeviceProperties2,
+                                           vk::PhysicalDeviceExternalMemoryHostPropertiesEXT>();
+        external_memory_host_props =
+            host_property_chain.get<vk::PhysicalDeviceExternalMemoryHostPropertiesEXT>();
+    }
 
     driver_id = driver.driverID;
     vendor_name = driver.driverName.data();

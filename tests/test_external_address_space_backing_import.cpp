@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -146,9 +148,8 @@ TEST(ExternalAddressSpaceBackingImport, RejectsOverflowAndIncompleteMemoryProper
               ExternalAddressSpaceImportFailure::MemoryTypeOutOfRange);
 
     request = ValidRequest();
-    request.lease_pointer = std::numeric_limits<std::uintptr_t>::max() - 0x100;
+    request.lease_pointer = std::numeric_limits<std::uintptr_t>::max() - 0xfff;
     request.import_pointer = request.lease_pointer;
-    request.minimum_imported_pointer_alignment = 1;
     EXPECT_EQ(PlanExternalAddressSpaceBackingImport(request, properties).failure,
               ExternalAddressSpaceImportFailure::BackingRangeOverflow);
 }
@@ -169,6 +170,35 @@ TEST(ExternalAddressSpaceBackingImport, RetainsResourcesInDependencyOrderWithout
     EXPECT_TRUE(ownership.ReleaseLease());
     EXPECT_TRUE(ownership.IsEmpty());
     EXPECT_EQ(ownership.GuestPagePublicationCount(), 0u);
+}
+
+struct LoggedResource {
+    std::vector<std::string_view>* log{};
+    std::string_view name;
+
+    LoggedResource(std::vector<std::string_view>& log_, std::string_view name_)
+        : log{&log_}, name{name_} {}
+    LoggedResource(const LoggedResource&) = delete;
+    LoggedResource& operator=(const LoggedResource&) = delete;
+    LoggedResource(LoggedResource&& other) noexcept : log{other.log}, name{other.name} {
+        other.log = nullptr;
+    }
+    ~LoggedResource() {
+        if (log != nullptr) {
+            log->push_back(name);
+        }
+    }
+};
+
+TEST(ExternalAddressSpaceBackingImport, ResourceOwnerDestroysBufferThenMemoryThenLease) {
+    std::vector<std::string_view> log;
+    {
+        ExternalAddressSpaceImportResources<LoggedResource, LoggedResource, LoggedResource> owner{
+            LoggedResource{log, "lease"}, LoggedResource{log, "memory"},
+            LoggedResource{log, "buffer"}};
+        EXPECT_TRUE(log.empty());
+    }
+    EXPECT_EQ(log, (std::vector<std::string_view>{"buffer", "memory", "lease"}));
 }
 
 TEST(ExternalAddressSpaceBackingImport, FailsClosedOnZeroDeviceAddressAndNeverPublishes) {
