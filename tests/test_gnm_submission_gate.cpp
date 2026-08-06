@@ -15,7 +15,7 @@ using namespace std::chrono_literals;
 namespace Libraries::GnmDriver {
 namespace {
 
-TEST(GnmSubmissionGate, PendingBoundaryBlocksTheNextSubmissionUntilGpuAcknowledgement) {
+TEST(GnmSubmissionGate, PendingBoundaryBlocksTheNextSubmissionUntilCommandProcessorConsumption) {
     SubmissionGate gate;
     auto complete_boundary = gate.BeginBoundary();
 
@@ -66,6 +66,28 @@ TEST(GnmSubmissionGate, SubmitDoneReturnWaitsForCommandProcessorBoundary) {
 
     EXPECT_EQ(submit_done.wait_for(1s), std::future_status::ready);
     EXPECT_TRUE(submit_done.get());
+}
+
+TEST(GnmSubmissionGate, CompletedSubmitDoneDoesNotWaitForANewerBoundary) {
+    SubmissionGate gate;
+    std::promise<Common::UniqueFunction<void>> queued_completion;
+    auto completion = queued_completion.get_future();
+
+    auto first_submit_done = std::async(std::launch::async, [&] {
+        gate.SubmitBoundaryAndWait([&](Common::UniqueFunction<void>&& complete_boundary) {
+            queued_completion.set_value(std::move(complete_boundary));
+        });
+        return true;
+    });
+
+    auto complete_first = completion.get();
+    complete_first();
+    auto complete_second = gate.BeginBoundary();
+
+    EXPECT_EQ(first_submit_done.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(first_submit_done.get());
+
+    complete_second();
 }
 
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {

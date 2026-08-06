@@ -26,6 +26,12 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
+namespace Libraries::GnmDriver {
+// Construct the gate before Liverpool so callbacks retained by Liverpool remain valid through its
+// shutdown. Global objects are destroyed in reverse construction order.
+static SubmissionGate submission_gate{};
+} // namespace Libraries::GnmDriver
+
 extern Frontend::WindowSDL* g_window;
 std::unique_ptr<Vulkan::Presenter> presenter;
 std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -67,7 +73,6 @@ static constexpr bool UseNeoCompatSequences = false;
 
 // Keep host submissions and GPU-visible address-space changes out until the command processor
 // acknowledges the matching SubmitDone boundary.
-static SubmissionGate submission_gate{};
 static u64 frames_submitted{};      // frame counter
 static bool send_init_packet{true}; // initialize HW state before first game's submit in a frame
 static s32 sdk_version{0};
