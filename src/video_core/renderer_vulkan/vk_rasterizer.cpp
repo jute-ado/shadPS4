@@ -44,6 +44,8 @@ static VideoCore::DmaWorkTraits GetDmaWorkTraits(const Pipeline* pipeline) {
             switch (stage->l_stage) {
             case Shader::LogicalStage::Vertex:
                 traits.vertex_dma_reads = true;
+                traits.vertex_dynamic_dma_reads |=
+                    True(stage->readconst_types & Shader::Info::ReadConstType::Dynamic);
                 break;
             case Shader::LogicalStage::Fragment:
                 traits.fragment_dma_reads = true;
