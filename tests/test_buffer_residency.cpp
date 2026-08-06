@@ -584,3 +584,46 @@ TEST(BufferResidency, PhysicalWritebackSynchronizationUsesExactTickWithoutGlobal
     EXPECT_EQ(waited_ticks, (std::vector<u64>{41, 47}));
     EXPECT_EQ(tracker.PendingPageCount(), 0);
 }
+
+TEST(BufferResidency, EmptyPhysicalWritebackTrackerSkipsGuestRangeResolution) {
+    VideoCore::PhysicalBackingWritebackTracker tracker;
+    bool resolved{};
+    bool synchronized{};
+
+    EXPECT_TRUE(VideoCore::SynchronizePhysicalBackingHostAccessIfPending(
+        tracker,
+        [&]() -> std::optional<std::vector<u64>> {
+            resolved = true;
+            return std::vector<u64>{0x20000};
+        },
+        [&](std::span<const u64>) {
+            synchronized = true;
+            return true;
+        }));
+
+    EXPECT_FALSE(resolved);
+    EXPECT_FALSE(synchronized);
+}
+
+TEST(BufferResidency, PendingPhysicalWritebackResolvesAndSynchronizesGuestRange) {
+    VideoCore::PhysicalBackingWritebackTracker tracker;
+    constexpr std::array page{u64{0x20000}};
+    ASSERT_TRUE(tracker.Record(page, 41));
+    bool resolved{};
+    bool synchronized{};
+
+    EXPECT_TRUE(VideoCore::SynchronizePhysicalBackingHostAccessIfPending(
+        tracker,
+        [&]() -> std::optional<std::vector<u64>> {
+            resolved = true;
+            return std::vector<u64>{page.begin(), page.end()};
+        },
+        [&](std::span<const u64> resolved_pages) {
+            synchronized = true;
+            EXPECT_TRUE(std::ranges::equal(resolved_pages, page));
+            return true;
+        }));
+
+    EXPECT_TRUE(resolved);
+    EXPECT_TRUE(synchronized);
+}
