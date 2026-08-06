@@ -124,6 +124,10 @@ TEST(ExactAddressSpaceHostImportProbe, RollsBackEveryPartiallyAcquiredWindowsRes
     EXPECT_EQ(reserve_failure.calls, (std::vector<std::string_view>{
                                          "create_mapping", "reserve_placeholder",
                                          "close_mapping"}));
+    EXPECT_FALSE(reserve.rollback.unmap_attempted);
+    EXPECT_FALSE(reserve.rollback.release_attempted);
+    EXPECT_TRUE(reserve.rollback.close_attempted);
+    EXPECT_TRUE(reserve.rollback.close_succeeded);
 
     FakeWindowsBackingAdapter map_failure;
     map_failure.map_succeeds = false;
@@ -133,6 +137,11 @@ TEST(ExactAddressSpaceHostImportProbe, RollsBackEveryPartiallyAcquiredWindowsRes
                                      "create_mapping", "reserve_placeholder",
                                      "map_replace_placeholder", "release_placeholder",
                                      "close_mapping"}));
+    EXPECT_FALSE(map.rollback.unmap_attempted);
+    EXPECT_TRUE(map.rollback.release_attempted);
+    EXPECT_TRUE(map.rollback.release_succeeded);
+    EXPECT_TRUE(map.rollback.close_attempted);
+    EXPECT_TRUE(map.rollback.close_succeeded);
 }
 
 TEST(ExactAddressSpaceHostImportProbe, RequiresImmutableChecksAndRequirementsBeforeBacking) {
@@ -177,6 +186,9 @@ TEST(ExactAddressSpaceHostImportProbe, RejectsTheActualImportedPointerWhenItIsMi
     EXPECT_FALSE(IsExactImportedPointerAligned(0x10001, 4096));
     EXPECT_FALSE(IsExactImportedPointerAligned(0x10000, 0));
     EXPECT_FALSE(IsExactImportedPointerAligned(0x10000, 3072));
+    EXPECT_TRUE(IsExactHostImportAlignmentValid(0x2000, 0x10000, 0x1000));
+    EXPECT_FALSE(IsExactHostImportAlignmentValid(0x2001, 0x10000, 0x1000));
+    EXPECT_FALSE(IsExactHostImportAlignmentValid(0x2000, 0x10001, 0x1000));
 }
 
 TEST(ExactAddressSpaceHostImportProbe, DistinguishesResourceLimitsFromWin32LifecycleErrors) {
@@ -197,6 +209,16 @@ TEST(ExactAddressSpaceHostImportProbe, TreatsInvalidExternalHandleAsImmutableInc
               ExactHostImportFailure::VulkanOutOfMemory);
     EXPECT_EQ(ClassifyExactVulkanFailure(ExactVulkanFailureClass::Other),
               ExactHostImportFailure::VulkanCallFailed);
+}
+
+TEST(ExactAddressSpaceHostImportProbe, RecordsTheSelectedCoherentMemoryTypeTruthfully) {
+    const auto evidence = MakeExactSelectedMemoryTypeEvidence(0x6, 0x4);
+    EXPECT_EQ(evidence.property_flags, 0x6u);
+    EXPECT_TRUE(evidence.host_coherent);
+
+    const auto noncoherent = MakeExactSelectedMemoryTypeEvidence(0x2, 0x4);
+    EXPECT_EQ(noncoherent.property_flags, 0x2u);
+    EXPECT_FALSE(noncoherent.host_coherent);
 }
 
 } // namespace
