@@ -346,7 +346,6 @@ struct PhysicalBackingCommandAliasPlan {
     std::vector<PhysicalBackingCommandResource> read_snapshot_order;
     std::vector<PhysicalBackingCommandResource> writer_prepare_order;
     std::vector<PhysicalBackingCommandResource> writer_finalize_order;
-    std::vector<u64> ownership_transition_pages;
     std::vector<PhysicalBackingCommandPagePlan> pages;
 };
 
@@ -608,7 +607,6 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
         }
         if (!page_plan.writers.empty()) {
             written_pages.insert(physical_page);
-            plan.ownership_transition_pages.push_back(physical_page);
         }
         plan.pages.push_back(std::move(page_plan));
     }

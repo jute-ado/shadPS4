@@ -450,7 +450,13 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
     using Kind = VideoCore::PhysicalBackingCommandResourceKind;
     using Resource = VideoCore::PhysicalBackingCommandResource;
     using Access = VideoCore::PhysicalBackingCommandAccess;
+    struct ResourceRange {
+        Resource resource{};
+        VAddr address{};
+        u32 size{};
+    };
 
+    std::vector<ResourceRange> resources;
     std::vector<Access> accesses;
     const auto add_access = [&](Kind kind, VAddr address, u64 size, bool is_written,
                                 std::optional<u32> resource_index) {
@@ -459,6 +465,12 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
             return false;
         }
         const Resource resource{kind, *resource_index};
+        const bool range_registered = std::ranges::any_of(resources, [&](const auto& range) {
+            return range.resource == resource && range.address == address && range.size == size;
+        });
+        if (!range_registered) {
+            resources.push_back({resource, address, static_cast<u32>(size)});
+        }
         const auto physical_pages = buffer_cache.ResolvePhysicalBackingPages(address, size);
         if (!physical_pages) {
             return false;
@@ -541,8 +553,20 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         LOG_ERROR(Render_Vulkan, "Rejected GPU command with invalid physical-backing aliases");
         return false;
     }
-    return buffer_cache.TransitionAuthoritativeTexturesForGpuCommand(
-        plan->ownership_transition_pages);
+    for (const Resource resource : plan->read_snapshot_order) {
+        bool found = false;
+        for (const auto& range : resources) {
+            if (range.resource != resource) {
+                continue;
+            }
+            found = true;
+            if (!buffer_cache.TransitionAuthoritativeTextureForDmaRead(range.address, range.size)) {
+                return false;
+            }
+        }
+        ASSERT(found);
+    }
+    return true;
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

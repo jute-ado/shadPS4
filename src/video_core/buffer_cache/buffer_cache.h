@@ -106,8 +106,6 @@ public:
     [[nodiscard]] bool EndPhysicalBackingTextureOverlap(
         std::span<const PhysicalBackingTextureToken> tokens);
     [[nodiscard]] bool TransitionAuthoritativeTextureForDmaRead(VAddr device_addr, u32 size);
-    [[nodiscard]] bool TransitionAuthoritativeTexturesForGpuCommand(
-        std::span<const u64> physical_pages);
     [[nodiscard]] std::optional<std::vector<u64>> ResolvePhysicalBackingPages(
         VAddr device_addr, u64 size) const;
     [[nodiscard]] bool SynchronizePhysicalBackingHostAccess(VAddr device_addr, u64 size);
@@ -222,8 +220,6 @@ private:
     [[nodiscard]] bool InitializePhysicalBackingOwnerPage(Buffer& buffer, VAddr guest_page);
     [[nodiscard]] bool TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_addr,
                                                                         u64 size);
-    [[nodiscard]] bool TransitionPhysicalBackingTexturesForBufferAccess(
-        std::span<const u64> physical_pages);
     [[nodiscard]] bool AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                                Buffer& target_buffer,
                                                                VAddr device_addr, u64 size);

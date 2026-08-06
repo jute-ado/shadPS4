@@ -179,23 +179,25 @@ bool BufferCache::InitializePhysicalBackingOwnerPage(Buffer& buffer, VAddr guest
 }
 
 bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_addr, u64 size) {
-    const auto physical_pages = ResolvePhysicalBackingPages(device_addr, size);
-    return physical_pages && TransitionPhysicalBackingTexturesForBufferAccess(*physical_pages);
-}
-
-bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(
-    std::span<const u64> requested_physical_pages) {
-    if (!physical_backing_coordinator || requested_physical_pages.empty()) {
+    if (!physical_backing_coordinator || size == 0) {
         return true;
     }
-    std::vector<u64> physical_pages{requested_physical_pages.begin(),
-                                    requested_physical_pages.end()};
+    if (device_addr > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+    const VAddr end = device_addr + size;
+    std::vector<u64> physical_pages;
+    for (VAddr guest_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); guest_page < end;
+         guest_page += CACHING_PAGESIZE) {
+        if (const auto physical =
+                physical_backing_coordinator->ResolvePhysicalPageForGuest(guest_page)) {
+            physical_pages.push_back(*physical);
+        }
+    }
     std::ranges::sort(physical_pages);
     physical_pages.erase(std::ranges::unique(physical_pages).begin(), physical_pages.end());
-    if (std::ranges::any_of(physical_pages, [](u64 physical_page) {
-            return (physical_page & (CACHING_PAGESIZE - 1)) != 0;
-        })) {
-        return false;
+    if (physical_pages.empty()) {
+        return true;
     }
 
     const auto images = texture_cache.FindPhysicalBackingImagesForPages(physical_pages);
@@ -366,11 +368,6 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(
 
 bool BufferCache::TransitionAuthoritativeTextureForDmaRead(VAddr device_addr, u32 size) {
     return TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size);
-}
-
-bool BufferCache::TransitionAuthoritativeTexturesForGpuCommand(
-    std::span<const u64> physical_pages) {
-    return TransitionPhysicalBackingTexturesForBufferAccess(physical_pages);
 }
 
 std::optional<std::vector<u64>> BufferCache::ResolvePhysicalBackingPages(VAddr device_addr,
