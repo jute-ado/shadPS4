@@ -35,6 +35,21 @@ struct PhysicalBackingCachePagePublication {
     std::vector<PhysicalBackingBdaDelta> deltas;
 };
 
+struct PhysicalBackingCachePageRequest {
+    VAddr guest_page{};
+    PhysicalBackingDeviceAddress override_page_address{};
+};
+
+struct PhysicalBackingCachePageActivation {
+    VAddr guest_page{};
+    PhysicalBackingCachePageToken token{};
+};
+
+struct PhysicalBackingCachePublicationBatch {
+    std::vector<PhysicalBackingCachePageActivation> owners;
+    std::vector<PhysicalBackingBdaDelta> deltas;
+};
+
 struct PhysicalBackingDirtyCachePagePublication {
     PhysicalBackingWriteback writeback{};
     std::vector<PhysicalBackingBdaDelta> deltas;
@@ -300,6 +315,77 @@ public:
         }
         return ActivateCachePage(mapping_it->second.physical_offset, override_page_address,
                                  has_texture_overlap);
+    }
+
+    /// Atomically publishes every distinct physical page in one synchronized GPU buffer.
+    [[nodiscard]] std::optional<PhysicalBackingCachePublicationBatch>
+    ActivateCachePagesForGuests(std::span<const PhysicalBackingCachePageRequest> requests) {
+        if (requests.empty()) {
+            return std::nullopt;
+        }
+
+        struct PendingOwner {
+            VAddr guest_page{};
+            u64 physical_offset{};
+            PhysicalBackingDeviceAddress override_page_address{};
+            u64 owner_generation{};
+        };
+        std::vector<PendingOwner> pending;
+        pending.reserve(requests.size());
+        std::unordered_set<VAddr> guest_pages;
+        std::unordered_set<u64> physical_pages;
+        u64 next_owner_generation = last_owner_generation;
+        for (const auto& request : requests) {
+            if (!IsPageAligned(request.guest_page) || request.override_page_address.value == 0 ||
+                !guest_pages.emplace(request.guest_page).second) {
+                return std::nullopt;
+            }
+            const auto mapping_it = mapping_tokens.find(request.guest_page);
+            if (mapping_it == mapping_tokens.end()) {
+                return std::nullopt;
+            }
+            const u64 physical_offset = mapping_it->second.physical_offset;
+            if (!physical_pages.emplace(physical_offset).second) {
+                continue;
+            }
+            if (!physical_aliases.contains(physical_offset) ||
+                active_cache_owners.contains(physical_offset) ||
+                pending_writebacks.contains(physical_offset) ||
+                texture_block_generations.contains(physical_offset) ||
+                next_owner_generation == std::numeric_limits<u64>::max()) {
+                return std::nullopt;
+            }
+            ++next_owner_generation;
+            if (!state.CanActivateOverride(physical_offset, request.override_page_address,
+                                           next_owner_generation)) {
+                return std::nullopt;
+            }
+            pending.push_back({request.guest_page, physical_offset,
+                               request.override_page_address, next_owner_generation});
+        }
+        if (pending.empty()) {
+            return std::nullopt;
+        }
+
+        PhysicalBackingCachePublicationBatch result;
+        result.owners.reserve(pending.size());
+        for (const auto& owner : pending) {
+            const auto publication = state.ActivateOverride(
+                owner.physical_offset, owner.override_page_address, owner.owner_generation);
+            if (!publication) {
+                return std::nullopt;
+            }
+            const PhysicalBackingCachePageToken token{*publication};
+            result.owners.push_back({owner.guest_page, token});
+            active_cache_owners.emplace(owner.physical_offset, ActiveCacheOwner{.token = token});
+        }
+        last_owner_generation = next_owner_generation;
+        for (const auto& owner : pending) {
+            auto deltas = MakeAliasDeltas(owner.physical_offset);
+            result.deltas.insert(result.deltas.end(), deltas.begin(), deltas.end());
+        }
+        std::ranges::sort(result.deltas, {}, &PhysicalBackingBdaDelta::guest_page);
+        return result;
     }
 
     [[nodiscard]] std::optional<PhysicalBackingDeviceAddress> ResolveGuestPagePublication(

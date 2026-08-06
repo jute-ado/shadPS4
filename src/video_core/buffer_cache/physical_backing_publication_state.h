@@ -213,33 +213,38 @@ public:
                physical_it->second.publication == Publication::GpuWriteSuppressed;
     }
 
-    [[nodiscard]] std::optional<PhysicalBackingOverride> ActivateOverride(
+    [[nodiscard]] bool CanActivateOverride(
         u64 physical_offset, PhysicalBackingDeviceAddress override_page_address,
-        u64 owner_generation) {
+        u64 owner_generation) const {
         if (!eligible || owner_generation == 0 || override_page_address.value == 0 ||
             !HasCompletePage(override_page_address.value) ||
             !IsPhysicalPageEligible(physical_offset)) {
-            return std::nullopt;
+            return false;
         }
         const auto physical_it = physical_pages.find(physical_offset);
         if (physical_it == physical_pages.end() || physical_it->second.alias_count == 0) {
-            return std::nullopt;
+            return false;
         }
-
-        PhysicalPageState& physical = physical_it->second;
+        const PhysicalPageState& physical = physical_it->second;
         const bool replaces_suppressed_writer =
             physical.publication == Publication::GpuWriteSuppressed;
         const bool replaces_stale_writeback =
             physical.publication == Publication::AwaitingWriteback &&
             owner_generation > physical.owner_generation;
-        if (physical.publication != Publication::ImportedBacking &&
-            !replaces_suppressed_writer && !replaces_stale_writeback) {
+        return (physical.publication == Publication::ImportedBacking ||
+                replaces_suppressed_writer || replaces_stale_writeback) &&
+               NextGeneration(physical.state_generation).has_value();
+    }
+
+    [[nodiscard]] std::optional<PhysicalBackingOverride> ActivateOverride(
+        u64 physical_offset, PhysicalBackingDeviceAddress override_page_address,
+        u64 owner_generation) {
+        if (!CanActivateOverride(physical_offset, override_page_address, owner_generation)) {
             return std::nullopt;
         }
+        const auto physical_it = physical_pages.find(physical_offset);
+        PhysicalPageState& physical = physical_it->second;
         const auto next_state = NextGeneration(physical.state_generation);
-        if (!next_state) {
-            return std::nullopt;
-        }
 
         physical.publication = Publication::CacheOverride;
         physical.owner_generation = owner_generation;
