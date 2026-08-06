@@ -924,7 +924,42 @@ void TextureCache::RegisterImage(ImageId image_id) {
 }
 
 bool TextureCache::AcquirePhysicalBackingTextureOwnership(ImageId image_id, const Image& image) {
+    static u64 profile_calls{};
+    static u64 profile_already_owned{};
+    static u64 profile_complete{};
+    static u64 profile_partial{};
+    static u64 profile_missing_pages{};
+    static u64 profile_resolve_failures{};
+    ++profile_calls;
     const bool already_owned = physical_backing_texture_tokens.contains(image_id);
+    if (already_owned) {
+        ++profile_already_owned;
+        const auto expected_pages = buffer_cache.ResolvePhysicalBackingPages(
+            image.info.guest_address, image.info.guest_size);
+        if (!expected_pages || expected_pages->empty()) {
+            ++profile_resolve_failures;
+        } else {
+            const auto& tokens = physical_backing_texture_tokens.at(image_id);
+            const auto missing_pages = std::ranges::count_if(*expected_pages, [&](u64 page) {
+                return std::ranges::none_of(tokens, [&](const auto& token) {
+                    return std::ranges::contains(token.physical_pages, page);
+                });
+            });
+            if (missing_pages == 0) {
+                ++profile_complete;
+            } else {
+                ++profile_partial;
+                profile_missing_pages += static_cast<u64>(missing_pages);
+            }
+        }
+    }
+    if ((profile_calls & (profile_calls - 1)) == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "[PhysicalTextureOwnershipProfile] calls={} already={} complete={} partial={} "
+                 "missing_pages={} resolve_failures={}",
+                 profile_calls, profile_already_owned, profile_complete, profile_partial,
+                 profile_missing_pages, profile_resolve_failures);
+    }
     if (!ShouldAcquirePhysicalBackingTextureOwnership(already_owned, true)) {
         return false;
     }
