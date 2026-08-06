@@ -13,6 +13,7 @@
 #include "common/types.h"
 #include "core/address_space.h"
 #include "core/libraries/kernel/memory.h"
+#include "core/physical_backing_provenance.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -62,39 +63,6 @@ enum class MemoryMapFlags : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(MemoryMapFlags)
 
-enum class PhysicalMemoryType : u32 {
-    Free = 0,
-    Allocated = 1,
-    Mapped = 2,
-    Pooled = 3,
-    Committed = 4,
-    Flexible = 5,
-};
-
-struct PhysicalMemoryArea {
-    PAddr base = 0;
-    u64 size = 0;
-    s32 memory_type = 0;
-    PhysicalMemoryType dma_type = PhysicalMemoryType::Free;
-
-    PAddr GetEnd() const {
-        return base + size;
-    }
-
-    bool CanMergeWith(const PhysicalMemoryArea& next) const {
-        if (base + size != next.base) {
-            return false;
-        }
-        if (memory_type != next.memory_type) {
-            return false;
-        }
-        if (dma_type != next.dma_type) {
-            return false;
-        }
-        return true;
-    }
-};
-
 enum class VMAType : u32 {
     Free = 0,
     Reserved = 1,
@@ -117,6 +85,7 @@ struct VirtualMemoryArea {
     std::string name = "";
     s32 fd = 0;
     bool disallow_merge = false;
+    bool physical_backing_eligible = false;
 
     bool Contains(VAddr addr, u64 size) const {
         return addr >= base && (addr + size) <= (base + this->size);
@@ -153,7 +122,8 @@ struct VirtualMemoryArea {
                 return false;
             }
         }
-        if (prot != next.prot || type != next.type) {
+        if (prot != next.prot || type != next.type ||
+            physical_backing_eligible != next.physical_backing_eligible) {
             return false;
         }
         if (name.compare(next.name) != 0) {
@@ -161,6 +131,18 @@ struct VirtualMemoryArea {
         }
 
         return true;
+    }
+
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingSpan>> CollectPhysicalBackingSpans()
+        const {
+        const auto mapping_class =
+            type == VMAType::Direct     ? PhysicalBackingMappingClass::Direct
+            : type == VMAType::Pooled   ? PhysicalBackingMappingClass::Pooled
+            : type == VMAType::Flexible ? PhysicalBackingMappingClass::Flexible
+            : type == VMAType::File     ? PhysicalBackingMappingClass::File
+                                        : PhysicalBackingMappingClass::Unsupported;
+        return Core::CollectPhysicalBackingSpans(base, size, mapping_class,
+                                                 physical_backing_eligible, phys_areas);
     }
 };
 
@@ -352,6 +334,7 @@ private:
     u64 total_flexible_size{};
     u64 flexible_usage{};
     u64 pool_budget{};
+    PhysicalBackingGenerationSource physical_backing_generations{};
     s32 sdk_version{};
     Vulkan::Rasterizer* rasterizer{};
 
