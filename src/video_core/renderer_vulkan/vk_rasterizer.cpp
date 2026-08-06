@@ -397,10 +397,6 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     ResetBindings();
 }
 
-u64 Rasterizer::FlushWithGpuCompletion(Common::UniqueFunction<void>&& completion) {
-    return scheduler.FlushWithGpuCompletion(std::move(completion));
-}
-
 u64 Rasterizer::Flush() {
     const u64 current_tick = scheduler.CurrentTick();
     SubmitInfo info{};
