@@ -435,6 +435,35 @@ struct PhysicalBackingGpuWritebackSlice {
     u32 size{};
 };
 
+struct PhysicalBackingOwnerInitializationCopy {
+    VAddr source_guest_address{};
+    u64 destination_offset{};
+    u64 size{};
+
+    auto operator<=>(const PhysicalBackingOwnerInitializationCopy&) const = default;
+};
+
+[[nodiscard]] constexpr bool ShouldHashPhysicalBackingHostMemory(
+    bool buffer_gpu_modified) noexcept {
+    return !buffer_gpu_modified;
+}
+
+[[nodiscard]] inline std::optional<PhysicalBackingOwnerInitializationCopy>
+PlanPhysicalBackingOwnerInitializationCopy(VAddr buffer_base, u64 buffer_size,
+                                           VAddr guest_page) noexcept {
+    constexpr u64 PageSize = 16_KB;
+    if ((guest_page & (PageSize - 1)) != 0 || guest_page < buffer_base ||
+        guest_page - buffer_base > buffer_size ||
+        PageSize > buffer_size - (guest_page - buffer_base)) {
+        return std::nullopt;
+    }
+    return PhysicalBackingOwnerInitializationCopy{
+        .source_guest_address = guest_page,
+        .destination_offset = guest_page - buffer_base,
+        .size = PageSize,
+    };
+}
+
 struct PhysicalBackingGpuWritebackCopy {
     u64 source_offset{};
     u64 destination_offset{};
@@ -449,19 +478,24 @@ PlanPhysicalBackingGpuWritebackCopies(VAddr buffer_base, u64 buffer_size, u64 ba
     std::vector<PhysicalBackingGpuWritebackCopy> copies;
     copies.reserve(slices.size());
     for (const auto& slice : slices) {
+        const u64 aligned_offset = slice.offset & ~u64{3};
+        const u64 slice_end = static_cast<u64>(slice.offset) + slice.size;
+        const u64 aligned_end = (slice_end + 3) & ~u64{3};
+        const u64 aligned_size = aligned_end - aligned_offset;
         if (slice.size == 0 || slice.guest_page < buffer_base ||
             slice.guest_page - buffer_base > buffer_size ||
-            slice.offset > buffer_size - (slice.guest_page - buffer_base) ||
-            slice.size > buffer_size - (slice.guest_page - buffer_base) - slice.offset ||
+            aligned_offset > buffer_size - (slice.guest_page - buffer_base) ||
+            aligned_size >
+                buffer_size - (slice.guest_page - buffer_base) - aligned_offset ||
             slice.physical_offset > backing_size ||
-            slice.offset > backing_size - slice.physical_offset ||
-            slice.size > backing_size - slice.physical_offset - slice.offset) {
+            aligned_offset > backing_size - slice.physical_offset ||
+            aligned_size > backing_size - slice.physical_offset - aligned_offset) {
             return std::nullopt;
         }
         copies.push_back({
-            .source_offset = slice.guest_page - buffer_base + slice.offset,
-            .destination_offset = slice.physical_offset + slice.offset,
-            .size = slice.size,
+            .source_offset = slice.guest_page - buffer_base + aligned_offset,
+            .destination_offset = slice.physical_offset + aligned_offset,
+            .size = aligned_size,
         });
     }
     std::ranges::sort(copies, [](const auto& lhs, const auto& rhs) {
@@ -475,10 +509,16 @@ PlanPhysicalBackingGpuWritebackCopies(VAddr buffer_base, u64 buffer_size, u64 ba
             auto& previous = coalesced.back();
             if (previous.source_offset <= std::numeric_limits<u64>::max() - previous.size &&
                 previous.destination_offset <= std::numeric_limits<u64>::max() - previous.size &&
-                previous.source_offset + previous.size == copy.source_offset &&
-                previous.destination_offset + previous.size == copy.destination_offset &&
-                copy.size <= std::numeric_limits<u64>::max() - previous.size) {
-                previous.size += copy.size;
+                copy.source_offset >= previous.source_offset &&
+                copy.destination_offset >= previous.destination_offset &&
+                copy.source_offset - previous.source_offset ==
+                    copy.destination_offset - previous.destination_offset &&
+                copy.source_offset <= previous.source_offset + previous.size) {
+                const u64 copy_end = copy.source_offset + copy.size;
+                const u64 previous_end = previous.source_offset + previous.size;
+                if (copy_end > previous_end) {
+                    previous.size = copy_end - previous.source_offset;
+                }
                 continue;
             }
         }

@@ -38,6 +38,13 @@ public:
         return resources ? resources->lease.Size() : 0;
     }
 
+    [[nodiscard]] vk::Buffer Handle() const noexcept {
+        if (!resources) {
+            return {};
+        }
+        return *resources->buffer;
+    }
+
     [[nodiscard]] bool TryWritePhysical(u64 physical_offset,
                                         std::span<const u8> bytes) noexcept;
 

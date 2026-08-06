@@ -15,7 +15,8 @@ namespace {
 
 constexpr auto HostAllocationHandle = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
 constexpr auto ImportedBufferUsage =
-    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress;
+    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress |
+    vk::BufferUsageFlagBits::eTransferDst;
 
 const char* FailureName(ExternalAddressSpaceImportFailure failure) noexcept {
     switch (failure) {

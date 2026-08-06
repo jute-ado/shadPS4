@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <numeric>
 #include "common/alignment.h"
 #include "common/debug.h"
 #include "common/logging/log.h"
@@ -67,7 +69,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                       DEFAULT_CRITICAL_GC_MEMORY));
 }
 
-BufferCache::~BufferCache() = default;
+BufferCache::~BufferCache() {
+    if (const auto required_tick = physical_backing_writeback_tracker.RequiredTickForAll()) {
+        scheduler.Wait(*required_tick);
+        static_cast<void>(physical_backing_writeback_tracker.CompleteThrough(*required_tick));
+        std::atomic_thread_fence(std::memory_order_acquire);
+    }
+}
 
 void BufferCache::ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas) {
     if (deltas.empty()) {
@@ -111,10 +119,63 @@ void BufferCache::MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size) {
     while (device_addr < end) {
         const VAddr page = Common::AlignDown(device_addr, CACHING_PAGESIZE);
         const VAddr slice_end = std::min(end, page + CACHING_PAGESIZE);
-        static_cast<void>(physical_backing_coordinator->MarkCachePageGpuDirtyForGuest(
-            page, static_cast<u32>(device_addr - page), static_cast<u32>(slice_end - device_addr)));
+        if (physical_backing_coordinator->ResolveGuestPagePublication(page)) {
+            ASSERT_MSG(physical_backing_coordinator->MarkCachePageGpuDirtyForGuest(
+                           page, static_cast<u32>(device_addr - page),
+                           static_cast<u32>(slice_end - device_addr)),
+                       "Mapped physical GPU write did not have an active cache owner");
+        }
         device_addr = slice_end;
     }
+}
+
+void BufferCache::ProtectPhysicalBackingAliases(
+    std::span<const PhysicalBackingBdaDelta> deltas) {
+    for (const auto& delta : deltas) {
+        gpu_modified_ranges.Add(delta.guest_page, CACHING_PAGESIZE);
+        memory_tracker->MarkRegionAsGpuModified(delta.guest_page, CACHING_PAGESIZE);
+        cpu_page_write_tracker.Discard(delta.guest_page, CACHING_PAGESIZE);
+    }
+}
+
+bool BufferCache::InitializePhysicalBackingOwnerPage(Buffer& buffer, VAddr guest_page) {
+    const auto copy = PlanPhysicalBackingOwnerInitializationCopy(
+        buffer.CpuAddr(), buffer.SizeBytes(), guest_page);
+    if (!copy) {
+        return false;
+    }
+    boost::container::small_vector<vk::BufferCopy, 1> copies{
+        vk::BufferCopy{
+            .srcOffset = 0,
+            .dstOffset = copy->destination_offset,
+            .size = copy->size,
+        },
+    };
+    const vk::Buffer source = UploadCopies(buffer, copies, copy->size);
+    ASSERT_MSG(source, "Whole-page physical owner upload did not produce a source buffer");
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    if (const auto barrier = buffer.GetBarrier(vk::AccessFlagBits2::eTransferWrite,
+                                               vk::PipelineStageFlagBits2::eTransfer,
+                                               copy->destination_offset)) {
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &*barrier,
+        });
+    }
+    cmdbuf.copyBuffer(source, buffer.Handle(), copies);
+    if (const auto barrier = buffer.GetBarrier(
+            vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            vk::PipelineStageFlagBits2::eAllCommands, copy->destination_offset)) {
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &*barrier,
+        });
+    }
+    return true;
 }
 
 bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_addr, u64 size) {
@@ -300,6 +361,7 @@ bool BufferCache::TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_
         gpu_modified_ranges.Add(image_span.base, image_span.size);
         memory_tracker->MarkRegionAsGpuModified(image_span.base, image_span.size);
     }
+    ProtectPhysicalBackingAliases(publication_deltas);
     ApplyPhysicalBackingBdaDeltas(publication_deltas);
     return true;
 }
@@ -330,6 +392,49 @@ std::optional<std::vector<u64>> BufferCache::ResolvePhysicalBackingPages(VAddr d
     return physical_pages;
 }
 
+bool BufferCache::SynchronizePhysicalBackingPages(std::span<const u64> physical_pages) {
+    std::vector<u64> ordered_pages{physical_pages.begin(), physical_pages.end()};
+    std::ranges::sort(ordered_pages);
+    ordered_pages.erase(std::ranges::unique(ordered_pages).begin(), ordered_pages.end());
+    if (std::ranges::any_of(ordered_pages, [](u64 physical_page) {
+            return (physical_page & (CACHING_PAGESIZE - 1)) != 0;
+        })) {
+        return false;
+    }
+    const auto required_tick = physical_backing_writeback_tracker.RequiredTick(ordered_pages);
+    if (!required_tick) {
+        return true;
+    }
+    scheduler.Wait(*required_tick);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const auto completed_pages =
+        physical_backing_writeback_tracker.PagesCompletingThrough(*required_tick);
+    for (const u64 physical_page : completed_pages) {
+        if (!pending_physical_backing_host_aliases.contains(physical_page)) {
+            return false;
+        }
+    }
+    if (!physical_backing_writeback_tracker.CompletePages(completed_pages, *required_tick)) {
+        UNREACHABLE_MSG("Preflighted physical writeback completion changed unexpectedly");
+    }
+    for (const u64 physical_page : completed_pages) {
+        const auto aliases = pending_physical_backing_host_aliases.find(physical_page);
+        ASSERT(aliases != pending_physical_backing_host_aliases.end());
+        for (const VAddr guest_page : aliases->second) {
+            gpu_modified_ranges.Subtract(guest_page, CACHING_PAGESIZE);
+            memory_tracker->UnmarkRegionAsGpuModified(guest_page, CACHING_PAGESIZE);
+            cpu_page_write_tracker.Discard(guest_page, CACHING_PAGESIZE);
+        }
+        pending_physical_backing_host_aliases.erase(aliases);
+    }
+    return true;
+}
+
+bool BufferCache::SynchronizePhysicalBackingHostAccess(VAddr device_addr, u64 size) {
+    const auto physical_pages = ResolvePhysicalBackingPages(device_addr, size);
+    return physical_pages && SynchronizePhysicalBackingPages(*physical_pages);
+}
+
 bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
                                                           Buffer& target_buffer, VAddr device_addr,
                                                           u64 size) {
@@ -356,6 +461,19 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
     if (requests.empty()) {
         return true;
     }
+    for (const auto& request : requests) {
+        if (physical_backing_coordinator->ResolveActiveCachePageForGuest(request.guest_page)) {
+            continue;
+        }
+        if (!SynchronizePhysicalBackingHostAccess(request.guest_page, CACHING_PAGESIZE)) {
+            return false;
+        }
+        static_cast<void>(SynchronizeBuffer(target_buffer, request.guest_page,
+                                            static_cast<u32>(CACHING_PAGESIZE), false, false));
+        if (!InitializePhysicalBackingOwnerPage(target_buffer, request.guest_page)) {
+            return false;
+        }
+    }
     const auto publication = physical_backing_coordinator->AcquireCachePagesForGuests(requests);
     if (!publication) {
         return false;
@@ -364,12 +482,15 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
     target_owners.reserve(target_owners.size() + publication->owners.size());
     for (const auto& owner : publication->owners) {
         target_owners.push_back({.guest_page = owner.guest_page, .token = owner.token});
-        const auto [owner_it, inserted] = physical_backing_owner_buffers.emplace(
-            owner.token.publication.physical_offset, target_buffer_id);
-        if (!inserted && owner_it->second != target_buffer_id) {
-            return false;
+        const bool inserted = physical_backing_owner_buffers
+                                  .emplace(owner.token.publication.physical_offset,
+                                           target_buffer_id)
+                                  .second;
+        if (!inserted) {
+            UNREACHABLE_MSG("Acquired physical owner conflicted with its prevalidated mirror");
         }
     }
+    ProtectPhysicalBackingAliases(publication->deltas);
     ApplyPhysicalBackingBdaDeltas(publication->deltas);
 
     for (VAddr target_page = Common::AlignDown(device_addr, CACHING_PAGESIZE); target_page < end;
@@ -382,7 +503,7 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
         const u64 physical_offset = active->publication.physical_offset;
         const auto source_id_it = physical_backing_owner_buffers.find(physical_offset);
         if (source_id_it == physical_backing_owner_buffers.end()) {
-            return false;
+            UNREACHABLE_MSG("Active physical owner was absent from its buffer mirror");
         }
         const BufferId source_buffer_id = source_id_it->second;
         const PhysicalBackingDeviceAddress target_address{target_buffer.BufferDeviceAddress() +
@@ -393,17 +514,17 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
             continue;
         }
         if (IsBufferInvalid(source_buffer_id)) {
-            return false;
+            UNREACHABLE_MSG("Active physical owner referenced an invalid buffer");
         }
         auto source_owners_it = physical_backing_cache_pages.find(source_buffer_id);
         if (source_owners_it == physical_backing_cache_pages.end()) {
-            return false;
+            UNREACHABLE_MSG("Active physical owner buffer had no owner collection");
         }
         auto& source_owners = source_owners_it->second;
         const auto source_owner_it =
             std::ranges::find(source_owners, *active, &PhysicalBackingCachePageOwner::token);
         if (source_owner_it == source_owners.end()) {
-            return false;
+            UNREACHABLE_MSG("Active physical owner token was absent from its buffer mirror");
         }
 
         Buffer& source_buffer = slot_buffers[source_buffer_id];
@@ -411,7 +532,7 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
             source_buffer.CpuAddr(), source_buffer.SizeBytes(), source_owner_it->guest_page,
             target_buffer.CpuAddr(), target_buffer.SizeBytes(), target_page);
         if (!copy) {
-            return false;
+            UNREACHABLE_MSG("Active physical owner could not form a full-page migration copy");
         }
 
         scheduler.EndRendering();
@@ -457,8 +578,11 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
 
         const auto migration =
             physical_backing_coordinator->MigrateCachePageForGuest(target_page, target_address);
-        if (!migration || migration->previous_token != *active) {
-            return false;
+        if (!migration) {
+            UNREACHABLE_MSG("Preflighted physical owner migration changed unexpectedly");
+        }
+        if (migration->previous_token != *active) {
+            UNREACHABLE_MSG("Migrated physical owner did not match its prevalidated token");
         }
         source_owners.erase(source_owner_it);
         if (source_owners.empty()) {
@@ -467,6 +591,7 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
         physical_backing_cache_pages[target_buffer_id].push_back(
             {.guest_page = target_page, .token = migration->token});
         source_id_it->second = target_buffer_id;
+        ProtectPhysicalBackingAliases(migration->deltas);
         ApplyPhysicalBackingBdaDeltas(migration->deltas);
     }
     return true;
@@ -475,6 +600,7 @@ bool BufferCache::AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer
 std::optional<std::vector<PhysicalBackingTextureToken>>
 BufferCache::BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size) {
     std::vector<PhysicalBackingTextureToken> tokens;
+    std::vector<PhysicalBackingBdaDelta> publication_deltas;
     if (!physical_backing_coordinator || size == 0) {
         return tokens;
     }
@@ -499,8 +625,11 @@ BufferCache::BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size) {
             return std::nullopt;
         }
         tokens.push_back(publication->token);
-        ApplyPhysicalBackingBdaDeltas(publication->deltas);
+        publication_deltas.insert(publication_deltas.end(), publication->deltas.begin(),
+                                  publication->deltas.end());
     }
+    ProtectPhysicalBackingAliases(publication_deltas);
+    ApplyPhysicalBackingBdaDeltas(publication_deltas);
     return tokens;
 }
 
@@ -512,28 +641,29 @@ bool BufferCache::EndPhysicalBackingTextureOverlap(
     for (auto token_it = tokens.rbegin(); token_it != tokens.rend(); ++token_it) {
         const auto deltas = physical_backing_coordinator->EndTextureOverlap(*token_it);
         if (!deltas) {
-            return false;
+            UNREACHABLE_MSG("Tracked physical texture token could not be retired");
         }
         ApplyPhysicalBackingBdaDeltas(*deltas);
     }
     return true;
 }
 
-void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
+bool BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
     if (physical_backing_coordinator && size != 0) {
         bool retired = false;
         liverpool->SendCommand<true>([this, device_addr, size, &retired] {
             retired = TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size) &&
-                      RetirePhysicalBackingOwnersForCpuWrite(device_addr, size);
+                      RetirePhysicalBackingOwnersForCpuWrite(device_addr, size) &&
+                      SynchronizePhysicalBackingHostAccess(device_addr, size);
         });
         if (!retired) {
             LOG_ERROR(Render_Vulkan,
                       "Physical backing owner retirement failed before CPU invalidation");
-            return;
+            return false;
         }
     }
     if (!IsRegionRegistered(device_addr, size)) {
-        return;
+        return true;
     }
     memory_tracker->InvalidateRegion(
         device_addr, size,
@@ -547,6 +677,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
             return cpu_page_write_tracker.Capture(page_addr, page, write_offset, write_size);
         });
     dma_dirty_ranges.Mark(device_addr, size);
+    return true;
 }
 
 bool BufferCache::RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 size) {
@@ -603,7 +734,7 @@ bool BufferCache::RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 
         const auto batches = PlanPhysicalBackingRetirementBatches(
             end_index - begin, download_buffer.SizeBytes() / 2, CACHING_PAGESIZE);
         if (!batches) {
-            return false;
+            UNREACHABLE_MSG("Planned physical owner set could not be batched for retirement");
         }
         for (auto batch = batches->rbegin(); batch != batches->rend(); ++batch) {
             std::vector<u32> owner_indices;
@@ -614,7 +745,7 @@ bool BufferCache::RetirePhysicalBackingOwnersForCpuWrite(VAddr device_addr, u64 
             }
             if (!RetirePhysicalBackingCachePagesForCpuWrite(BufferId{buffer_index},
                                                              owner_indices)) {
-                return false;
+                UNREACHABLE_MSG("Planned physical owner batch could not be retired");
             }
         }
         begin = end_index;
@@ -626,7 +757,7 @@ bool BufferCache::RetirePhysicalBackingCachePagesForCpuWrite(
     BufferId buffer_id, std::span<const u32> owner_indices) {
     const auto owners_it = physical_backing_cache_pages.find(buffer_id);
     if (owners_it == physical_backing_cache_pages.end() || owner_indices.empty()) {
-        return false;
+        UNREACHABLE_MSG("Planned physical owner batch was absent from its buffer mirror");
     }
     auto& owners = owners_it->second;
     struct SelectedOwner {
@@ -641,141 +772,149 @@ bool BufferCache::RetirePhysicalBackingCachePagesForCpuWrite(
         const u32 owner_index = owner_indices[index];
         if (owner_index >= owners.size() ||
             (index != 0 && owner_index <= owner_indices[index - 1])) {
-            return false;
+            UNREACHABLE_MSG("Planned physical owner batch indices changed unexpectedly");
         }
         const auto& owner = owners[owner_index];
         const auto dirty_slices =
             physical_backing_coordinator->ResolveCachePageDirtySlices(owner.token);
         if (!dirty_slices || (!dirty_slices->empty() && !external_address_space_backing)) {
-            return false;
+            UNREACHABLE_MSG("Planned physical owner lost its writeback state");
+        }
+        if (dirty_slices->empty()) {
+            UNREACHABLE_MSG("Buffer-backed physical owner retired without a GPU write");
         }
         selected_owners.push_back({owner_index, owner.guest_page, owner.token, *dirty_slices});
     }
-
-    struct PendingCopy {
-        size_t selected_owner_index{};
-        size_t destination_offset{};
-        u32 size{};
-    };
-    Buffer& buffer = slot_buffers[buffer_id];
-    std::vector<vk::BufferCopy> copies;
-    std::vector<PendingCopy> pending_copies;
-    u64 total_size_bytes = 0;
-    for (size_t selected_index = 0; selected_index < selected_owners.size(); ++selected_index) {
-        const auto& selected = selected_owners[selected_index];
-        for (const auto& slice : selected.dirty_slices) {
-            if (selected.guest_page < buffer.CpuAddr() ||
-                selected.guest_page - buffer.CpuAddr() > buffer.SizeBytes() ||
-                slice.size > buffer.SizeBytes() - (selected.guest_page - buffer.CpuAddr()) ||
-                slice.offset > buffer.SizeBytes() -
-                                   (selected.guest_page - buffer.CpuAddr()) - slice.size ||
-                total_size_bytes > std::numeric_limits<u64>::max() - slice.size - 63) {
-                return false;
-            }
-            copies.push_back({
-                .srcOffset = selected.guest_page - buffer.CpuAddr() + slice.offset,
-                .dstOffset = total_size_bytes,
-                .size = slice.size,
-            });
-            pending_copies.push_back(
-                {selected_index, static_cast<size_t>(total_size_bytes), slice.size});
-            total_size_bytes = Common::AlignUp(total_size_bytes + slice.size, 64ULL);
+    for (const auto& selected : selected_owners) {
+        const auto owner_buffer =
+            physical_backing_owner_buffers.find(selected.token.publication.physical_offset);
+        if (owner_buffer == physical_backing_owner_buffers.end() ||
+            owner_buffer->second != buffer_id) {
+            UNREACHABLE_MSG("Planned physical owner lost its buffer mirror");
         }
     }
 
-    u8* download{};
-    if (total_size_bytes != 0) {
-        u64 download_offset{};
-        std::tie(download, download_offset) = download_buffer.Map(total_size_bytes);
-        for (auto& copy : copies) {
-            copy.dstOffset += download_offset;
+    Buffer& buffer = slot_buffers[buffer_id];
+    std::vector<PhysicalBackingGpuWritebackSlice> writeback_slices;
+    for (const auto& selected : selected_owners) {
+        for (const auto& slice : selected.dirty_slices) {
+            writeback_slices.push_back({
+                .guest_page = selected.guest_page,
+                .physical_offset = selected.token.publication.physical_offset,
+                .offset = slice.offset,
+                .size = slice.size,
+            });
         }
-        download_buffer.Commit();
+    }
+    const auto planned_copies = PlanPhysicalBackingGpuWritebackCopies(
+        buffer.CpuAddr(), buffer.SizeBytes(),
+        external_address_space_backing ? external_address_space_backing->BackingSize() : 0,
+        writeback_slices);
+    if (!planned_copies) {
+        UNREACHABLE_MSG("Planned physical owner writeback exceeded its buffer bounds");
+    }
+    std::vector<vk::BufferCopy> copies;
+    copies.reserve(planned_copies->size());
+    for (const auto& copy : *planned_copies) {
+        copies.push_back({copy.source_offset, copy.destination_offset, copy.size});
+    }
+    if (!copies.empty()) {
         scheduler.EndRendering();
         const auto cmdbuf = scheduler.CommandBuffer();
-        if (const auto barrier = buffer.GetBarrier(vk::AccessFlagBits2::eTransferRead,
-                                                   vk::PipelineStageFlagBits2::eTransfer)) {
+        if (const auto source_barrier = buffer.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                                                          vk::PipelineStageFlagBits2::eTransfer)) {
             cmdbuf.pipelineBarrier2(vk::DependencyInfo{
                 .dependencyFlags = vk::DependencyFlagBits::eByRegion,
                 .bufferMemoryBarrierCount = 1,
-                .pBufferMemoryBarriers = &*barrier,
+                .pBufferMemoryBarriers = &*source_barrier,
             });
         }
-        cmdbuf.copyBuffer(buffer.Handle(), download_buffer.Handle(), copies);
-        scheduler.Finish();
+        const vk::BufferMemoryBarrier2 destination_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask =
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = external_address_space_backing->Handle(),
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &destination_barrier,
+        });
+        cmdbuf.copyBuffer(buffer.Handle(), external_address_space_backing->Handle(), copies);
+        const vk::BufferMemoryBarrier2 completion_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask =
+                vk::PipelineStageFlagBits2::eAllCommands | vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead |
+                             vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eHostRead |
+                             vk::AccessFlagBits2::eHostWrite,
+            .buffer = external_address_space_backing->Handle(),
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &completion_barrier,
+        });
     }
 
-    bool wrote_back = false;
+    std::vector<PhysicalBackingWriteback> submitted_writebacks;
+    std::vector<u64> submitted_physical_pages;
     std::vector<PhysicalBackingBdaDelta> restored_deltas;
-    for (size_t selected_index = 0; selected_index < selected_owners.size(); ++selected_index) {
-        const auto& selected = selected_owners[selected_index];
-        if (selected.dirty_slices.empty()) {
-            const auto deltas =
-                physical_backing_coordinator->RetireCachePageClean(selected.token);
-            if (!deltas) {
-                return false;
-            }
-            ApplyPhysicalBackingBdaDeltas(*deltas);
-        } else {
-            const auto retirement =
-                physical_backing_coordinator->RetireCachePageGpuDirty(selected.token);
-            if (!retirement || retirement->dirty_slices != selected.dirty_slices) {
-                return false;
-            }
-            ApplyPhysicalBackingBdaDeltas(retirement->deltas);
-            const auto restored = physical_backing_coordinator->CommitCachePageWriteback(
-                retirement->writeback, [&] {
-                    if (!download) {
-                        return false;
-                    }
-                    size_t slice_index = 0;
-                    for (const auto& copy : pending_copies) {
-                        if (copy.selected_owner_index != selected_index) {
-                            continue;
-                        }
-                        const auto& slice = selected.dirty_slices[slice_index++];
-                        if (!external_address_space_backing->TryWritePhysical(
-                                retirement->writeback.physical_offset + slice.offset,
-                                std::span<const u8>{download + copy.destination_offset,
-                                                    copy.size})) {
-                            return false;
-                        }
-                    }
-                    return slice_index == selected.dirty_slices.size();
-                });
-            if (!restored) {
-                return false;
-            }
-            wrote_back = true;
-            for (const auto& delta : *restored) {
-                gpu_modified_ranges.Subtract(delta.guest_page, CACHING_PAGESIZE);
-                memory_tracker->UnmarkRegionAsGpuModified(delta.guest_page, CACHING_PAGESIZE);
-                cpu_page_write_tracker.Discard(delta.guest_page, CACHING_PAGESIZE);
-            }
-            restored_deltas.insert(restored_deltas.end(), restored->begin(), restored->end());
+    for (const auto& selected : selected_owners) {
+        const auto retirement =
+            physical_backing_coordinator->RetireCachePageGpuDirty(selected.token);
+        if (!retirement || retirement->dirty_slices != selected.dirty_slices) {
+            UNREACHABLE_MSG("Preflighted physical owner retirement changed unexpectedly");
         }
+        submitted_writebacks.push_back(retirement->writeback);
+        submitted_physical_pages.push_back(retirement->writeback.physical_offset);
+    }
+    if (!submitted_writebacks.empty()) {
+        std::ranges::sort(submitted_writebacks, {}, &PhysicalBackingWriteback::physical_offset);
+        std::ranges::sort(submitted_physical_pages);
+        if (!physical_backing_writeback_tracker.Record(submitted_physical_pages,
+                                                       scheduler.CurrentTick())) {
+            UNREACHABLE_MSG("Preflighted physical writeback tracker record changed unexpectedly");
+        }
+        const auto restored =
+            physical_backing_coordinator->PublishSubmittedCachePageGpuWritebacks(
+                submitted_writebacks);
+        if (!restored) {
+            UNREACHABLE_MSG(
+                "Preflighted submitted physical writeback publication changed unexpectedly");
+        }
+        for (const u64 physical_page : submitted_physical_pages) {
+            pending_physical_backing_host_aliases[physical_page].clear();
+        }
+        for (const auto& delta : *restored) {
+            if (delta.device_address.value < external_address_space_backing->DeviceAddress()) {
+                UNREACHABLE_MSG(
+                    "Restored physical alias did not resolve into imported backing");
+            }
+            const u64 physical_page =
+                delta.device_address.value - external_address_space_backing->DeviceAddress();
+            pending_physical_backing_host_aliases[physical_page].push_back(delta.guest_page);
+        }
+        restored_deltas.insert(restored_deltas.end(), restored->begin(), restored->end());
+    }
+    for (const auto& selected : selected_owners) {
         if (physical_backing_owner_buffers.erase(
                 selected.token.publication.physical_offset) != 1) {
-            return false;
+            UNREACHABLE_MSG("Preflighted physical owner mirror changed unexpectedly");
         }
     }
-    if (wrote_back) {
-        const vk::MemoryBarrier2 barrier{
-            .srcStageMask = vk::PipelineStageFlagBits2::eHost,
-            .srcAccessMask = vk::AccessFlagBits2::eHostWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        };
-        scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
-            .memoryBarrierCount = 1,
-            .pMemoryBarriers = &barrier,
-        });
-        ApplyPhysicalBackingBdaDeltas(restored_deltas);
-    }
+    ApplyPhysicalBackingBdaDeltas(restored_deltas);
 
     const auto remaining_it = physical_backing_cache_pages.find(buffer_id);
     if (remaining_it == physical_backing_cache_pages.end()) {
-        return false;
+        UNREACHABLE_MSG("Preflighted physical owner collection disappeared");
     }
     auto& remaining_owners = remaining_it->second;
     for (const auto& selected : selected_owners) {
@@ -783,7 +922,7 @@ bool BufferCache::RetirePhysicalBackingCachePagesForCpuWrite(
             std::ranges::find(remaining_owners, selected.token,
                               &PhysicalBackingCachePageOwner::token);
         if (owner == remaining_owners.end()) {
-            return false;
+            UNREACHABLE_MSG("Preflighted physical owner vector changed unexpectedly");
         }
         remaining_owners.erase(owner);
     }
@@ -795,6 +934,10 @@ bool BufferCache::RetirePhysicalBackingCachePagesForCpuWrite(
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
     liverpool->SendCommand<true>([this, device_addr, size, is_write] {
+        if (!SynchronizePhysicalBackingHostAccess(device_addr, size)) {
+            UNREACHABLE_MSG(
+                "Physical backing writeback synchronization failed before host read");
+        }
         Buffer& buffer = slot_buffers[FindBuffer(device_addr, size)];
         DownloadBufferMemory<false>(buffer, device_addr, size, is_write);
     });
@@ -991,6 +1134,8 @@ void BufferCache::BindIndexBuffer(
 void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
     ASSERT_MSG(address % 4 == 0, "GDS offset must be dword aligned");
     if (!is_gds) {
+        ASSERT_MSG(SynchronizePhysicalBackingHostAccess(address, num_bytes),
+                   "Failed to synchronize physical backing before buffer fill");
         texture_cache.ClearMeta(address);
         if (!IsRegionGpuModified(address, num_bytes)) {
             u32* buffer = std::bit_cast<u32*>(address);
@@ -1012,6 +1157,14 @@ void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gd
 }
 
 void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    if (!src_gds) {
+        ASSERT_MSG(SynchronizePhysicalBackingHostAccess(src, num_bytes),
+                   "Failed to synchronize physical backing copy source");
+    }
+    if (!dst_gds) {
+        ASSERT_MSG(SynchronizePhysicalBackingHostAccess(dst, num_bytes),
+                   "Failed to synchronize physical backing copy destination");
+    }
     if (!dst_gds && !IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
@@ -1109,7 +1262,9 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
-                                                  bool is_texel_buffer, BufferId buffer_id) {
+                                                   bool is_texel_buffer, BufferId buffer_id) {
+    ASSERT_MSG(SynchronizePhysicalBackingHostAccess(device_addr, size),
+               "Failed to synchronize physical backing before buffer access");
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
@@ -1134,6 +1289,8 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBufferForImage(VAddr gpu_addr, u32 size) {
+    ASSERT_MSG(SynchronizePhysicalBackingHostAccess(gpu_addr, size),
+               "Failed to synchronize physical backing before image staging");
     // Check if any buffer contains the full requested range.
     const BufferId buffer_id = page_table[gpu_addr >> CACHING_PAGEBITS].buffer_id;
     if (buffer_id) {
@@ -1355,11 +1512,9 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
     const u64 page_begin = device_addr_begin / CACHING_PAGESIZE;
     const u64 page_end = Common::DivCeil(device_addr_end, CACHING_PAGESIZE);
     const u64 size_pages = page_end - page_begin;
-    for (u64 page = page_begin; page != page_end; ++page) {
-        if constexpr (insert) {
+    if constexpr (insert) {
+        for (u64 page = page_begin; page != page_end; ++page) {
             page_table[page].buffer_id = buffer_id;
-        } else {
-            page_table[page].buffer_id = BufferId{};
         }
     }
     if constexpr (insert) {
@@ -1383,131 +1538,17 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
     } else {
         const auto physical_it = physical_backing_cache_pages.find(buffer_id);
         if (physical_it != physical_backing_cache_pages.end()) {
-            auto& owners = physical_it->second;
-            for (auto& owner : owners) {
-                if (owner.pending_writeback) {
-                    continue;
-                }
-                const auto retirement =
-                    physical_backing_coordinator->RetireOwnerForCpuWrite(owner.guest_page);
-                if (!retirement) {
-                    return false;
-                }
-                physical_backing_owner_buffers.erase(owner.token.publication.physical_offset);
-                ApplyPhysicalBackingBdaDeltas(retirement->deltas);
-                if (retirement->writeback) {
-                    owner.pending_writeback = retirement->writeback;
-                    owner.dirty_slices = retirement->dirty_slices;
-                }
-            }
-
-            struct PendingCopy {
-                size_t owner_index{};
-                size_t destination_offset{};
-                u32 size{};
-            };
-            std::vector<vk::BufferCopy> copies;
-            std::vector<PendingCopy> pending_copies;
-            u64 total_size_bytes = 0;
-            for (size_t owner_index = 0; owner_index < owners.size(); ++owner_index) {
-                const auto& owner = owners[owner_index];
-                if (!owner.pending_writeback) {
-                    continue;
-                }
-                for (const auto& slice : owner.dirty_slices) {
-                    copies.push_back({
-                        .srcOffset = owner.guest_page - buffer.CpuAddr() + slice.offset,
-                        .dstOffset = total_size_bytes,
-                        .size = slice.size,
-                    });
-                    pending_copies.push_back(
-                        {owner_index, static_cast<size_t>(total_size_bytes), slice.size});
-                    total_size_bytes = Common::AlignUp(total_size_bytes + slice.size, 64ULL);
-                }
-            }
-
-            u8* download{};
-            if (total_size_bytes != 0) {
-                u64 download_offset{};
-                std::tie(download, download_offset) = download_buffer.Map(total_size_bytes);
-                for (auto& copy : copies) {
-                    copy.dstOffset += download_offset;
-                }
-                download_buffer.Commit();
-                scheduler.EndRendering();
-                const auto cmdbuf = scheduler.CommandBuffer();
-                if (const auto barrier = buffer.GetBarrier(vk::AccessFlagBits2::eTransferRead,
-                                                           vk::PipelineStageFlagBits2::eTransfer)) {
-                    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-                        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-                        .bufferMemoryBarrierCount = 1,
-                        .pBufferMemoryBarriers = &*barrier,
-                    });
-                }
-                cmdbuf.copyBuffer(buffer.Handle(), download_buffer.Handle(), copies);
-                scheduler.Finish();
-            }
-
-            bool all_committed = true;
-            bool wrote_back = false;
-            std::vector<PhysicalBackingBdaDelta> restored_deltas;
-            for (size_t owner_index = 0; owner_index < owners.size(); ++owner_index) {
-                auto& owner = owners[owner_index];
-                if (!owner.pending_writeback) {
-                    continue;
-                }
-                const auto restored = physical_backing_coordinator->CommitCachePageWriteback(
-                    *owner.pending_writeback, [&] {
-                        if (!external_address_space_backing || !download) {
-                            return false;
-                        }
-                        size_t slice_index = 0;
-                        for (const auto& copy : pending_copies) {
-                            if (copy.owner_index != owner_index) {
-                                continue;
-                            }
-                            const auto& slice = owner.dirty_slices[slice_index++];
-                            if (!external_address_space_backing->TryWritePhysical(
-                                    owner.pending_writeback->physical_offset + slice.offset,
-                                    std::span<const u8>{download + copy.destination_offset,
-                                                        copy.size})) {
-                                return false;
-                            }
-                        }
-                        return slice_index == owner.dirty_slices.size();
-                    });
-                if (!restored) {
-                    all_committed = false;
-                    continue;
-                }
-                wrote_back = true;
-                for (const auto& delta : *restored) {
-                    gpu_modified_ranges.Subtract(delta.guest_page, CACHING_PAGESIZE);
-                    memory_tracker->UnmarkRegionAsGpuModified(delta.guest_page, CACHING_PAGESIZE);
-                    cpu_page_write_tracker.Discard(delta.guest_page, CACHING_PAGESIZE);
-                }
-                restored_deltas.insert(restored_deltas.end(), restored->begin(), restored->end());
-                owner.pending_writeback.reset();
-                owner.dirty_slices.clear();
-            }
-            if (!all_committed) {
+            if (physical_it->second.size() > std::numeric_limits<u32>::max()) {
                 return false;
             }
-            if (wrote_back) {
-                const vk::MemoryBarrier2 barrier{
-                    .srcStageMask = vk::PipelineStageFlagBits2::eHost,
-                    .srcAccessMask = vk::AccessFlagBits2::eHostWrite,
-                    .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                    .dstAccessMask =
-                        vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-                };
-                scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
-                    .memoryBarrierCount = 1,
-                    .pMemoryBarriers = &barrier,
-                });
-                ApplyPhysicalBackingBdaDeltas(restored_deltas);
+            std::vector<u32> owner_indices(physical_it->second.size());
+            std::iota(owner_indices.begin(), owner_indices.end(), u32{0});
+            if (!RetirePhysicalBackingCachePagesForCpuWrite(buffer_id, owner_indices)) {
+                return false;
             }
-            physical_backing_cache_pages.erase(physical_it);
+        }
+        for (u64 page = page_begin; page != page_end; ++page) {
+            page_table[page].buffer_id = BufferId{};
         }
         total_used_memory -= Common::AlignUp(size, CACHING_PAGESIZE);
         lru_cache.Free(buffer.LRUId());
@@ -1530,6 +1571,9 @@ bool BufferCache::ChangeRegister(BufferId buffer_id) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                                     bool is_texel_buffer, bool is_registered) {
+    if (!SynchronizePhysicalBackingHostAccess(device_addr, size)) {
+        UNREACHABLE_MSG("Failed to synchronize physical backing before buffer upload");
+    }
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     boost::container::small_vector<std::pair<VAddr, u64>, 16> uploaded_cpu_ranges;
     size_t total_size_bytes = 0;

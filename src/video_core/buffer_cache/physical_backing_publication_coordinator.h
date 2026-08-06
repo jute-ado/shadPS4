@@ -173,11 +173,28 @@ public:
         }
 
         const size_t page_count = static_cast<size_t>(size / PageSize);
-        std::vector<PhysicalBackingMapping> mappings;
-        mappings.reserve(page_count);
+        std::vector<VAddr> guest_pages;
+        guest_pages.reserve(page_count);
         for (u64 offset = 0; offset < size; offset += PageSize) {
-            const auto mapping_it = mapping_tokens.find(guest_base + offset);
-            if (mapping_it == mapping_tokens.end() ||
+            guest_pages.push_back(guest_base + offset);
+        }
+        return UnmapPages(guest_pages);
+    }
+
+    /// Atomically removes an ordered subset of mapped guest pages.
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingBdaDelta>> UnmapPages(
+        std::span<const VAddr> guest_pages) {
+        if (guest_pages.empty()) {
+            return std::nullopt;
+        }
+        std::vector<PhysicalBackingMapping> mappings;
+        mappings.reserve(guest_pages.size());
+        VAddr previous_guest_page = 0;
+        bool first = true;
+        for (const VAddr guest_page : guest_pages) {
+            const auto mapping_it = mapping_tokens.find(guest_page);
+            if (!IsPageAligned(guest_page) || (!first && guest_page <= previous_guest_page) ||
+                mapping_it == mapping_tokens.end() ||
                 active_cache_owners.contains(mapping_it->second.physical_offset) ||
                 pending_writebacks.contains(mapping_it->second.physical_offset) ||
                 texture_block_generations.contains(mapping_it->second.physical_offset) ||
@@ -185,10 +202,12 @@ public:
                 return std::nullopt;
             }
             mappings.push_back(mapping_it->second);
+            previous_guest_page = guest_page;
+            first = false;
         }
 
         std::vector<PhysicalBackingBdaDelta> deltas;
-        deltas.reserve(page_count);
+        deltas.reserve(guest_pages.size());
         for (const PhysicalBackingMapping& mapping : mappings) {
             if (!state.UnmapGuestPage(mapping)) {
                 return std::nullopt;
@@ -618,6 +637,18 @@ public:
             return std::nullopt;
         }
         return owner_it->second.token;
+    }
+
+    [[nodiscard]] std::vector<PhysicalBackingBdaDelta> SelectActiveCacheOwnerDeltas(
+        std::span<const PhysicalBackingBdaDelta> deltas) const {
+        std::vector<PhysicalBackingBdaDelta> owned_deltas;
+        owned_deltas.reserve(deltas.size());
+        for (const auto& delta : deltas) {
+            if (ResolveActiveCachePageForGuest(delta.guest_page)) {
+                owned_deltas.push_back(delta);
+            }
+        }
+        return owned_deltas;
     }
 
     [[nodiscard]] std::optional<PhysicalBackingCachePageMigration> MigrateCachePageForGuest(

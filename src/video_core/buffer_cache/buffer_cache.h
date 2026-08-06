@@ -17,6 +17,7 @@
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
+#include "video_core/buffer_cache/physical_backing_writeback_tracker.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
 #include "video_core/texture_cache/types.h"
@@ -98,6 +99,7 @@ public:
     }
 
     void ApplyPhysicalBackingBdaDeltas(std::span<const PhysicalBackingBdaDelta> deltas);
+    void ProtectPhysicalBackingAliases(std::span<const PhysicalBackingBdaDelta> deltas);
 
     [[nodiscard]] std::optional<std::vector<PhysicalBackingTextureToken>>
     BeginPhysicalBackingTextureOverlap(VAddr device_addr, u64 size);
@@ -106,6 +108,8 @@ public:
     [[nodiscard]] bool TransitionAuthoritativeTextureForDmaRead(VAddr device_addr, u32 size);
     [[nodiscard]] std::optional<std::vector<u64>> ResolvePhysicalBackingPages(
         VAddr device_addr, u64 size) const;
+    [[nodiscard]] bool SynchronizePhysicalBackingHostAccess(VAddr device_addr, u64 size);
+    [[nodiscard]] bool SynchronizePhysicalBackingPages(std::span<const u64> physical_pages);
 
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
@@ -131,7 +135,7 @@ public:
     }
 
     /// Invalidates any buffer in the logical page range.
-    void InvalidateMemory(VAddr device_addr, u64 size);
+    [[nodiscard]] bool InvalidateMemory(VAddr device_addr, u64 size);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
@@ -213,6 +217,7 @@ private:
     [[nodiscard]] bool ChangeRegister(BufferId buffer_id);
 
     void MarkPhysicalBackingGpuDirty(VAddr device_addr, u64 size);
+    [[nodiscard]] bool InitializePhysicalBackingOwnerPage(Buffer& buffer, VAddr guest_page);
     [[nodiscard]] bool TransitionPhysicalBackingTexturesForBufferAccess(VAddr device_addr,
                                                                         u64 size);
     [[nodiscard]] bool AcquirePhysicalBackingOwnersForGpuWrite(BufferId target_buffer_id,
@@ -273,6 +278,8 @@ private:
     std::unordered_map<BufferId, std::vector<PhysicalBackingCachePageOwner>>
         physical_backing_cache_pages;
     std::unordered_map<u64, BufferId> physical_backing_owner_buffers;
+    PhysicalBackingWritebackTracker physical_backing_writeback_tracker;
+    std::unordered_map<u64, std::vector<VAddr>> pending_physical_backing_host_aliases;
 };
 
 } // namespace VideoCore

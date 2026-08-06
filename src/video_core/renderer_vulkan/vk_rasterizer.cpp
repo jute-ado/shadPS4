@@ -1303,7 +1303,9 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
-    buffer_cache.InvalidateMemory(addr, size);
+    if (!buffer_cache.InvalidateMemory(addr, size)) {
+        return false;
+    }
     texture_cache.InvalidateMemory(addr, size);
     return true;
 }
@@ -1340,9 +1342,39 @@ void Rasterizer::MapMemory(VAddr addr, u64 size,
                            std::vector<Core::PhysicalBackingSpan> physical_spans) {
     auto map = [this, addr, size, physical_spans = std::move(physical_spans)]() mutable {
         if (physical_backing_coordinator && !physical_spans.empty()) {
-            if (const auto deltas = physical_backing_coordinator->MapSpans(physical_spans)) {
-                buffer_cache.ApplyPhysicalBackingBdaDeltas(*deltas);
+            std::vector<u64> physical_pages;
+            for (const auto& span : physical_spans) {
+                if (span.size == 0 ||
+                    (span.physical_offset &
+                     (VideoCore::PhysicalBackingPublicationCoordinator::PageSize - 1)) != 0 ||
+                    (span.size &
+                     (VideoCore::PhysicalBackingPublicationCoordinator::PageSize - 1)) != 0 ||
+                    span.physical_offset > std::numeric_limits<u64>::max() - span.size) {
+                    physical_pages.clear();
+                    break;
+                }
+                for (u64 offset = 0; offset < span.size;
+                     offset += VideoCore::PhysicalBackingPublicationCoordinator::PageSize) {
+                    physical_pages.push_back(span.physical_offset + offset);
+                }
             }
+            std::ranges::sort(physical_pages);
+            physical_pages.erase(std::ranges::unique(physical_pages).begin(),
+                                 physical_pages.end());
+            const bool ready = !physical_pages.empty() &&
+                               buffer_cache.SynchronizePhysicalBackingPages(physical_pages);
+            if (!ready) {
+                UNREACHABLE_MSG(
+                    "Failed to synchronize pending physical backing before GPU map");
+            }
+            const auto deltas = physical_backing_coordinator->MapSpans(physical_spans);
+            if (!deltas) {
+                UNREACHABLE_MSG("Failed to publish physical backing GPU map");
+            }
+            const auto owned_deltas =
+                physical_backing_coordinator->SelectActiveCacheOwnerDeltas(*deltas);
+            buffer_cache.ProtectPhysicalBackingAliases(owned_deltas);
+            buffer_cache.ApplyPhysicalBackingBdaDeltas(*deltas);
         }
         {
             std::scoped_lock lock{mapped_ranges_mutex};
@@ -1359,20 +1391,25 @@ void Rasterizer::MapMemory(VAddr addr, u64 size,
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     auto unmap = [this, addr, size] {
-        buffer_cache.InvalidateMemory(addr, size);
+        if (!buffer_cache.InvalidateMemory(addr, size)) {
+            UNREACHABLE_MSG("Failed to retire physical backing before GPU unmap");
+        }
         texture_cache.UnmapMemory(addr, size);
         if (physical_backing_coordinator) {
+            std::vector<VAddr> mapped_physical_pages;
             for (VAddr page = addr; page < addr + size;
                  page += VideoCore::PhysicalBackingPublicationCoordinator::PageSize) {
                 if (!physical_backing_coordinator->ResolveGuestPagePublication(page)) {
                     continue;
                 }
-                const auto deltas = physical_backing_coordinator->UnmapRange(
-                    page, VideoCore::PhysicalBackingPublicationCoordinator::PageSize);
+                mapped_physical_pages.push_back(page);
+            }
+            if (!mapped_physical_pages.empty()) {
+                const auto deltas =
+                    physical_backing_coordinator->UnmapPages(mapped_physical_pages);
                 if (!deltas) {
-                    LOG_ERROR(Render_Vulkan,
-                              "Failed to retire physical backing publication for GPU unmap");
-                    return;
+                    UNREACHABLE_MSG(
+                        "Failed to retire physical backing publication for GPU unmap");
                 }
                 buffer_cache.ApplyPhysicalBackingBdaDeltas(*deltas);
             }
@@ -1396,9 +1433,31 @@ void Rasterizer::RetirePhysicalBacking(
         return;
     }
     liverpool->SendCommand<true>([this, physical_retirements = std::move(physical_retirements)] {
+        std::vector<u64> physical_pages;
+        for (const auto& retirement : physical_retirements) {
+            if (retirement.size == 0 ||
+                (retirement.physical_offset &
+                 (VideoCore::PhysicalBackingPublicationCoordinator::PageSize - 1)) != 0 ||
+                (retirement.size &
+                 (VideoCore::PhysicalBackingPublicationCoordinator::PageSize - 1)) != 0 ||
+                    retirement.physical_offset >
+                        std::numeric_limits<u64>::max() - retirement.size) {
+                UNREACHABLE_MSG("Invalid physical backing retirement range");
+            }
+            for (u64 offset = 0; offset < retirement.size;
+                 offset += VideoCore::PhysicalBackingPublicationCoordinator::PageSize) {
+                physical_pages.push_back(retirement.physical_offset + offset);
+            }
+        }
+        std::ranges::sort(physical_pages);
+        physical_pages.erase(std::ranges::unique(physical_pages).begin(), physical_pages.end());
+        if (!buffer_cache.SynchronizePhysicalBackingPages(physical_pages)) {
+            UNREACHABLE_MSG(
+                "Failed to synchronize pending physical backing before allocation reuse");
+        }
         if (!physical_backing_coordinator->RetirePhysicalAllocations(physical_retirements)) {
-            LOG_ERROR(Render_Vulkan,
-                      "Failed to retire physical allocation publication before reuse");
+            UNREACHABLE_MSG(
+                "Failed to retire physical allocation publication before reuse");
         }
     });
 }

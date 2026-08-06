@@ -115,7 +115,9 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
 }
 
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
-    if (image.hash == 0) {
+    const bool buffer_gpu_modified =
+        buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
+    if (image.hash == 0 && ShouldHashPhysicalBackingHostMemory(buffer_gpu_modified)) {
         // Initialize hash
         const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
         image.hash = XXH3_64bits(addr, image.info.guest_size);
@@ -792,7 +794,16 @@ void TextureCache::RefreshImage(Image& image) {
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
 
-    if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
+    const bool buffer_gpu_modified = buffer_cache.IsRegionGpuModified(
+        image.info.guest_address, image.info.guest_size);
+    if (ShouldHashPhysicalBackingHostMemory(buffer_gpu_modified)) {
+        ASSERT_MSG(buffer_cache.SynchronizePhysicalBackingHostAccess(
+                       image.info.guest_address, image.info.guest_size),
+                   "Failed to synchronize physical backing before texture host read");
+    }
+
+    if (ShouldHashPhysicalBackingHostMemory(buffer_gpu_modified) &&
+        True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
         False(image.flags & ImageFlagBits::CpuDirty)) {
         // The image size should be less than page size to be considered MaybeCpuDirty
         // So this calculation should be very uncommon and reasonably fast
@@ -826,7 +837,8 @@ void TextureCache::RefreshImage(Image& image) {
         const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[m];
 
         // Protect GPU modified resources from accidental CPU reuploads.
-        if (is_gpu_modified && !is_gpu_dirty) {
+        if (ShouldHashPhysicalBackingHostMemory(buffer_gpu_modified) && is_gpu_modified &&
+            !is_gpu_dirty) {
             const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
             const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
             if (image.mip_hashes[m] == hash) {

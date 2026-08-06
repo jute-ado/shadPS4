@@ -4,10 +4,12 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <utility>
 
 #include "common/types.h"
 
@@ -63,9 +65,37 @@ public:
         return highest;
     }
 
-    void CompleteThrough(u64 tick) {
-        std::erase_if(pending_ticks,
-                      [tick](const auto& pending) { return pending.second <= tick; });
+    [[nodiscard]] std::vector<u64> CompleteThrough(u64 tick) {
+        auto completed_pages = PagesCompletingThrough(tick);
+        for (const u64 physical_page : completed_pages) {
+            pending_ticks.erase(physical_page);
+        }
+        return completed_pages;
+    }
+
+    [[nodiscard]] std::vector<u64> PagesCompletingThrough(u64 tick) const {
+        std::vector<u64> completed_pages;
+        completed_pages.reserve(pending_ticks.size());
+        for (const auto& [physical_page, pending_tick] : pending_ticks) {
+            if (pending_tick <= tick) {
+                completed_pages.push_back(physical_page);
+            }
+        }
+        std::ranges::sort(completed_pages);
+        return completed_pages;
+    }
+
+    [[nodiscard]] bool CompletePages(std::span<const u64> physical_pages, u64 tick) {
+        for (const u64 physical_page : physical_pages) {
+            const auto pending = pending_ticks.find(physical_page);
+            if (pending == pending_ticks.end() || pending->second > tick) {
+                return false;
+            }
+        }
+        for (const u64 physical_page : physical_pages) {
+            pending_ticks.erase(physical_page);
+        }
+        return true;
     }
 
     [[nodiscard]] size_t PendingPageCount() const noexcept {
@@ -91,5 +121,16 @@ private:
 
     std::unordered_map<u64, u64> pending_ticks;
 };
+
+template <typename Wait>
+[[nodiscard]] std::vector<u64> SynchronizePhysicalBackingWritebacks(
+    PhysicalBackingWritebackTracker& tracker, std::span<const u64> physical_pages, Wait&& wait) {
+    const auto required_tick = tracker.RequiredTick(physical_pages);
+    if (!required_tick) {
+        return {};
+    }
+    std::invoke(std::forward<Wait>(wait), *required_tick);
+    return tracker.CompleteThrough(*required_tick);
+}
 
 } // namespace VideoCore
