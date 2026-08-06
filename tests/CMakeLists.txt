@@ -247,6 +247,16 @@ target_compile_features(shadps4_buffer_access_range_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_buffer_access_range_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_access_range_test)
 
+add_executable(shadps4_external_host_memory_probe_test
+    test_external_host_memory_probe.cpp
+)
+target_include_directories(shadps4_external_host_memory_probe_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_external_host_memory_probe_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_external_host_memory_probe_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_external_host_memory_probe_test)
+
 add_executable(shadps4_cpu_page_write_snapshot_test
     test_cpu_page_write_snapshot.cpp
 )
