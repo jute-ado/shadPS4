@@ -652,13 +652,27 @@ bool BufferCache::EndPhysicalBackingTextureOverlap(
     return true;
 }
 
+bool BufferCache::PreparePhysicalBackingHostWrite(VAddr device_addr, u64 size) {
+    if (!physical_backing_coordinator || size == 0) {
+        return true;
+    }
+    return VideoCore::PreparePhysicalBackingHostWrite(
+        [this, device_addr, size] {
+            return TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size);
+        },
+        [this, device_addr, size] {
+            return RetirePhysicalBackingOwnersForCpuWrite(device_addr, size);
+        },
+        [this, device_addr, size] {
+            return SynchronizePhysicalBackingHostAccess(device_addr, size);
+        });
+}
+
 bool BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
     if (physical_backing_coordinator && size != 0) {
         bool retired = false;
         liverpool->SendCommand<true>([this, device_addr, size, &retired] {
-            retired = TransitionPhysicalBackingTexturesForBufferAccess(device_addr, size) &&
-                      RetirePhysicalBackingOwnersForCpuWrite(device_addr, size) &&
-                      SynchronizePhysicalBackingHostAccess(device_addr, size);
+            retired = PreparePhysicalBackingHostWrite(device_addr, size);
         });
         if (!retired) {
             LOG_ERROR(Render_Vulkan,
