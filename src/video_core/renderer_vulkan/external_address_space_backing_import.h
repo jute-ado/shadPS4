@@ -60,6 +60,13 @@ struct ExternalAddressSpaceImportPlan {
     return value != 0 && (value & (value - 1)) == 0;
 }
 
+[[nodiscard]] constexpr bool IsExternalAddressSpacePhysicalWriteRangeValid(
+    std::uint64_t backing_size, std::uint64_t physical_offset,
+    std::uint64_t write_size) noexcept {
+    return backing_size != 0 && write_size != 0 && physical_offset < backing_size &&
+           write_size <= backing_size - physical_offset;
+}
+
 [[nodiscard]] constexpr ExternalAddressSpaceImportPlan PlanExternalAddressSpaceBackingImport(
     const ExternalAddressSpaceImportRequest& request,
     std::span<const std::uint32_t> memory_property_flags) noexcept {
