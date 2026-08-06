@@ -9,20 +9,16 @@ namespace VideoCore {
 namespace {
 
 TEST(FaultDownload, ReservesSlotZeroForTheReportedCount) {
-    constexpr size_t DownloadSlotCount = 1024;
+    const auto count = BoundFaultDownloadCount(FaultDownloadSlotCount - 1, FaultDownloadSlotCount);
 
-    const auto count = BoundFaultDownloadCount(DownloadSlotCount - 1, DownloadSlotCount);
-
-    EXPECT_EQ(count.address_count, DownloadSlotCount - 1);
+    EXPECT_EQ(count.address_count, FaultDownloadSlotCount - 1);
     EXPECT_FALSE(count.overflowed);
 }
 
 TEST(FaultDownload, CapsUntrustedCountAtTheDownloadedAddressSlots) {
-    constexpr size_t DownloadSlotCount = 1024;
+    const auto count = BoundFaultDownloadCount(FaultDownloadSlotCount + 37, FaultDownloadSlotCount);
 
-    const auto count = BoundFaultDownloadCount(DownloadSlotCount + 37, DownloadSlotCount);
-
-    EXPECT_EQ(count.address_count, DownloadSlotCount - 1);
+    EXPECT_EQ(count.address_count, FaultDownloadSlotCount - 1);
     EXPECT_TRUE(count.overflowed);
 }
 
@@ -34,7 +30,7 @@ TEST(FaultDownload, ReportsOverflowWhenThereAreNoAddressSlots) {
 }
 
 TEST(FaultDownload, KeepsAnEmptyDownloadClean) {
-    const auto count = BoundFaultDownloadCount(0, 1024);
+    const auto count = BoundFaultDownloadCount(0, FaultDownloadSlotCount);
 
     EXPECT_EQ(count.address_count, 0);
     EXPECT_FALSE(count.overflowed);
