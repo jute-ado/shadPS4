@@ -72,7 +72,13 @@ TEST(DmaPublicationGate, InvalidOverflowAndRetryExhaustionNeverPublish) {
 }
 
 TEST(DmaPublicationGate, EligibilityExcludesWorkWithUnreplayableSideEffects) {
-    const DmaWorkTraits eligible{.vertex_dma_reads = true};
+    const DmaWorkTraits immediate_only{.vertex_dma_reads = true};
+    EXPECT_FALSE(VideoCore::IsDmaDiscoveryEligible(immediate_only));
+
+    const DmaWorkTraits eligible{
+        .vertex_dma_reads = true,
+        .vertex_dynamic_dma_reads = true,
+    };
     EXPECT_TRUE(VideoCore::IsDmaDiscoveryEligible(eligible));
 
     auto traits = eligible;
