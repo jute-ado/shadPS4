@@ -344,6 +344,35 @@ TEST(PhysicalBackingPublicationCoordinator, AcquiresExistingAliasOwnerAndNewPage
     EXPECT_EQ(acquired->deltas[2].device_address.value, OverrideBase + 2 * PageSize);
 }
 
+TEST(PhysicalBackingPublicationCoordinator, MigratesDirtyOwnerToWritablePhysicalAlias) {
+    PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
+                                                      16 * PageSize};
+    constexpr std::array spans{
+        PhysicalBackingSpan{GuestA, PhysicalPage, PageSize, 7},
+        PhysicalBackingSpan{GuestB, PhysicalPage, PageSize, 7},
+    };
+    ASSERT_TRUE(coordinator.MapSpans(spans));
+    const auto first = coordinator.ActivateCachePageForGuest(
+        GuestA, PhysicalBackingDeviceAddress{OverrideBase}, false);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(coordinator.MarkCachePageGpuDirty(first->token, 64, 128));
+
+    const auto migrated = coordinator.MigrateCachePageForGuest(
+        GuestB, PhysicalBackingDeviceAddress{OverrideBase + PageSize});
+
+    ASSERT_TRUE(migrated.has_value());
+    EXPECT_EQ(migrated->previous_token, first->token);
+    EXPECT_NE(migrated->token, first->token);
+    ASSERT_EQ(migrated->deltas.size(), 2);
+    EXPECT_EQ(migrated->deltas[0].device_address.value, OverrideBase + PageSize);
+    EXPECT_EQ(migrated->deltas[1].device_address.value, OverrideBase + PageSize);
+    EXPECT_FALSE(coordinator.RetireCachePageClean(first->token));
+    const auto dirty = coordinator.RetireCachePageGpuDirty(migrated->token);
+    ASSERT_TRUE(dirty.has_value());
+    ASSERT_EQ(dirty->dirty_slices.size(), 1);
+    EXPECT_EQ(dirty->dirty_slices[0], (VideoCore::PhysicalBackingDirtySlice{64, 128}));
+}
+
 TEST(PhysicalBackingPublicationCoordinator, BatchReturnsOneOwnerForPhysicalAliases) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},
                                                       16 * PageSize};

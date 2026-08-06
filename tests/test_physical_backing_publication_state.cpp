@@ -459,6 +459,25 @@ TEST(PhysicalBackingPublicationState, ReallocatedPhysicalPageRejectsOldWriteback
     EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
 }
 
+TEST(PhysicalBackingPublicationState, MigratesActiveOverrideWithoutPublishingStaleBacking) {
+    PhysicalBackingPublicationState state{PhysicalBackingDeviceAddress{ImportedBase},
+                                          16 * PageSize};
+    const auto mapping = state.MapGuestPage(GuestA, PhysicalPage, 1, 7);
+    ASSERT_TRUE(mapping.has_value());
+    const auto first =
+        state.ActivateOverride(PhysicalPage, PhysicalBackingDeviceAddress{OverrideBase}, 2);
+    ASSERT_TRUE(first.has_value());
+
+    const auto migrated = state.MigrateOverride(
+        *first, PhysicalBackingDeviceAddress{OverrideBase + PageSize}, 3);
+
+    ASSERT_TRUE(migrated.has_value());
+    EXPECT_EQ(state.Resolve(GuestA).value, OverrideBase + PageSize);
+    EXPECT_FALSE(state.RetireClean(*first));
+    EXPECT_TRUE(state.RetireClean(*migrated));
+    EXPECT_EQ(state.Resolve(GuestA).value, ImportedBase + PhysicalPage);
+}
+
 TEST(PhysicalBackingPublicationState, RetiredPhysicalPageRejectsOldWritebackAndFreshlyPublishes) {
     auto state = MakeState();
     const auto old_mapping = state.MapGuestPage(GuestA, PhysicalPage, 1, 40);
