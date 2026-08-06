@@ -1319,13 +1319,6 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size) {
     return true;
 }
 
-bool Rasterizer::PrepareGpuEventMemoryWrite(VAddr addr, u64 size) {
-    if (!physical_backing_coordinator || !IsMapped(addr, size)) {
-        return true;
-    }
-    return InvalidateMemory(addr, size);
-}
-
 void Rasterizer::ProcessDownloadImages() {
     texture_cache.ProcessDownloadImages();
 }

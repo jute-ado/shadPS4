@@ -711,11 +711,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
-                event_eos->SignalFence([this](void* address, u64 data, u32 num_bytes) {
-                    if (rasterizer && !rasterizer->PrepareGpuEventMemoryWrite(
-                                          std::bit_cast<VAddr>(address), num_bytes)) {
-                        UNREACHABLE_MSG("Failed to prepare GPU EOS event memory write");
-                    }
+                event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
                     auto* memory = Core::Memory::Instance();
                     if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                         memcpy(address, &data, num_bytes);
@@ -739,11 +735,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 PublishEop(
                     *event_eop,
-                    [this](void* address, u64 data, u32 num_bytes) {
-                        if (rasterizer && !rasterizer->PrepareGpuEventMemoryWrite(
-                                              std::bit_cast<VAddr>(address), num_bytes)) {
-                            UNREACHABLE_MSG("Failed to prepare GPU EOP event memory write");
-                        }
+                    [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
                         if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                             memcpy(address, &data, num_bytes);

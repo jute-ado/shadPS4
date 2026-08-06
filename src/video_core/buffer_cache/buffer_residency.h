@@ -4,7 +4,6 @@
 #pragma once
 
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
@@ -16,15 +15,6 @@
 #include "common/types.h"
 
 namespace VideoCore {
-
-template <typename TransitionTextures, typename RetireBufferOwners, typename SynchronizeWritebacks>
-[[nodiscard]] bool PreparePhysicalBackingHostWrite(
-    TransitionTextures&& transition_textures, RetireBufferOwners&& retire_buffer_owners,
-    SynchronizeWritebacks&& synchronize_writebacks) {
-    return std::invoke(std::forward<TransitionTextures>(transition_textures)) &&
-           std::invoke(std::forward<RetireBufferOwners>(retire_buffer_owners)) &&
-           std::invoke(std::forward<SynchronizeWritebacks>(synchronize_writebacks));
-}
 
 enum class PhysicalBackingTextureProducer {
     Copy,

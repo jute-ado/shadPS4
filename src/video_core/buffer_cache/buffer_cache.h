@@ -110,7 +110,6 @@ public:
         VAddr device_addr, u64 size) const;
     [[nodiscard]] bool SynchronizePhysicalBackingHostAccess(VAddr device_addr, u64 size);
     [[nodiscard]] bool SynchronizePhysicalBackingPages(std::span<const u64> physical_pages);
-    [[nodiscard]] bool PreparePhysicalBackingHostWrite(VAddr device_addr, u64 size);
 
     /// Retrieves the fault buffer.
     [[nodiscard]] Buffer* GetFaultBuffer() noexcept {
