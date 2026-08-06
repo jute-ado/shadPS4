@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cmath>
 #include <span>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
@@ -44,6 +47,34 @@ static size_t CountSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
     return count;
 }
 
+namespace {
+
+struct SpirvInstruction {
+    spv::Op opcode;
+    std::span<const u32> words;
+};
+
+std::vector<SpirvInstruction> DecodeSpirv(std::span<const u32> module) {
+    std::vector<SpirvInstruction> instructions;
+    for (size_t offset = 5; offset < module.size();) {
+        const u32 word_count = module[offset] >> 16;
+        if (word_count == 0 || offset + word_count > module.size()) {
+            return {};
+        }
+        instructions.push_back({static_cast<spv::Op>(module[offset] & 0xffffU),
+                                module.subspan(offset, word_count)});
+        offset += word_count;
+    }
+    return instructions;
+}
+
+std::string SpirvLiteralString(std::span<const u32> words, size_t first_word) {
+    const char* const begin = reinterpret_cast<const char*>(words.data() + first_word);
+    const char* const end = begin + (words.size() - first_word) * sizeof(u32);
+    return {begin, std::find(begin, end, '\0')};
+}
+
+} // namespace
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
     constexpr u64 addr64_load = 0x80010000e030800cULL;
@@ -75,6 +106,131 @@ TEST_F(GcnTest, direct_memory_fault_bits_are_recorded_atomically) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(CountSpirvOpcode(result.spirv, spv::Op::OpAtomicOr), 1U);
+}
+
+TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_access) {
+    // This ADDR64 load enables the shader-side direct-memory lookup helper.
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+    const auto module = TranslateToSpirvWithInfo(addr64_load, true).spirv;
+    const auto instructions = DecodeSpirv(module);
+    ASSERT_FALSE(instructions.empty());
+
+    u32 get_bda_pointer_id = 0;
+    u32 u64_type = 0;
+    u32 page_limit = 0;
+    u32 u64_zero = 0;
+    for (const auto& inst : instructions) {
+        if (inst.opcode == spv::OpName && inst.words.size() >= 3 &&
+            SpirvLiteralString(inst.words, 2) == "get_bda_pointer") {
+            get_bda_pointer_id = inst.words[1];
+        } else if (inst.opcode == spv::OpTypeInt && inst.words.size() == 4 &&
+                   inst.words[2] == 64U && inst.words[3] == 0U) {
+            u64_type = inst.words[1];
+        }
+    }
+    ASSERT_NE(get_bda_pointer_id, 0U);
+    ASSERT_NE(u64_type, 0U);
+
+    // The DMA page table covers the 40-bit guest address space with 16 KiB pages.
+    constexpr u64 expected_page_limit = u64{1} << (40U - 14U);
+    for (const auto& inst : instructions) {
+        if (inst.opcode != spv::OpConstant || inst.words.size() < 4 ||
+            inst.words[1] != u64_type) {
+            continue;
+        }
+        const u64 value = inst.words.size() >= 5
+                              ? static_cast<u64>(inst.words[3]) |
+                                    (static_cast<u64>(inst.words[4]) << 32U)
+                              : inst.words[3];
+        if (value == expected_page_limit) {
+            page_limit = inst.words[2];
+        } else if (value == 0U) {
+            u64_zero = inst.words[2];
+        }
+    }
+    ASSERT_NE(page_limit, 0U);
+    ASSERT_NE(u64_zero, 0U);
+
+    size_t function_begin = instructions.size();
+    size_t function_end = instructions.size();
+    for (size_t i = 0; i < instructions.size(); ++i) {
+        const auto& inst = instructions[i];
+        if (inst.opcode == spv::OpFunction && inst.words.size() >= 3 &&
+            inst.words[2] == get_bda_pointer_id) {
+            function_begin = i;
+        } else if (function_begin != instructions.size() &&
+                   inst.opcode == spv::OpFunctionEnd) {
+            function_end = i;
+            break;
+        }
+    }
+    ASSERT_LT(function_begin, function_end);
+
+    u32 page_id = 0;
+    u32 range_check_id = 0;
+    u32 valid_label = 0;
+    u32 invalid_label = 0;
+    size_t range_check_index = function_end;
+    size_t page_convert_index = function_end;
+    size_t page_access_index = function_end;
+    bool valid_path_loads_bda = false;
+    bool valid_path_adds_offset = false;
+    for (size_t i = function_begin; i < function_end; ++i) {
+        const auto& inst = instructions[i];
+        if (inst.opcode == spv::OpShiftRightLogical && inst.words.size() == 5 &&
+            inst.words[1] == u64_type && page_id == 0U) {
+            page_id = inst.words[2];
+        } else if (inst.opcode == spv::OpULessThan && inst.words.size() == 5 &&
+                   inst.words[3] == page_id && inst.words[4] == page_limit) {
+            range_check_id = inst.words[2];
+            range_check_index = i;
+        } else if (inst.opcode == spv::OpUConvert && inst.words.size() == 4 &&
+                   inst.words[3] == page_id) {
+            page_convert_index = i;
+        } else if (inst.opcode == spv::OpAccessChain && page_access_index == function_end) {
+            page_access_index = i;
+        } else if (inst.opcode == spv::OpLoad && inst.words.size() >= 4 &&
+                   inst.words[1] == u64_type) {
+            valid_path_loads_bda = true;
+        } else if (inst.opcode == spv::OpIAdd && inst.words.size() == 5 &&
+                   inst.words[1] == u64_type) {
+            valid_path_adds_offset = true;
+        }
+        if (inst.opcode == spv::OpBranchConditional && inst.words.size() == 4 &&
+            inst.words[1] == range_check_id) {
+            valid_label = inst.words[2];
+            invalid_label = inst.words[3];
+        }
+    }
+
+    ASSERT_NE(page_id, 0U);
+    ASSERT_NE(range_check_id, 0U);
+    ASSERT_NE(valid_label, 0U);
+    ASSERT_NE(invalid_label, 0U);
+    EXPECT_LT(range_check_index, page_convert_index);
+    EXPECT_LT(page_convert_index, page_access_index);
+    EXPECT_TRUE(valid_path_loads_bda);
+    EXPECT_TRUE(valid_path_adds_offset);
+
+    bool in_invalid_block = false;
+    bool invalid_block_accesses_descriptor = false;
+    bool invalid_path_returns_zero = false;
+    for (size_t i = function_begin; i < function_end; ++i) {
+        const auto& inst = instructions[i];
+        if (inst.opcode == spv::OpLabel) {
+            in_invalid_block = inst.words[1] == invalid_label;
+        } else if (in_invalid_block && inst.opcode == spv::OpAccessChain) {
+            invalid_block_accesses_descriptor = true;
+        }
+        if (inst.opcode == spv::OpPhi) {
+            for (size_t operand = 3; operand + 1 < inst.words.size(); operand += 2) {
+                invalid_path_returns_zero |= inst.words[operand] == u64_zero &&
+                                             inst.words[operand + 1] == invalid_label;
+            }
+        }
+    }
+    EXPECT_FALSE(invalid_block_accesses_descriptor);
+    EXPECT_TRUE(invalid_path_returns_zero);
 }
 
 // Example
