@@ -74,21 +74,6 @@ Liverpool::Liverpool() {
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
-
-    // A SubmitDone caller may be waiting for the command processor boundary while shutdown stops
-    // this thread before it consumes that boundary. Release the retained callback after the
-    // processor has joined so teardown cannot leave the guest thread blocked.
-    Common::UniqueFunction<void> pending_submit_done{};
-    {
-        std::scoped_lock lk{submit_mutex};
-        if (submit_done) {
-            submit_done = false;
-            pending_submit_done = std::move(submit_done_completion);
-        }
-    }
-    if (pending_submit_done) {
-        pending_submit_done();
-    }
 }
 
 void Liverpool::ProcessCommands() {
