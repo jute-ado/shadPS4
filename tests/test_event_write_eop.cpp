@@ -14,6 +14,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/eop_submission_batch.h"
 #include "video_core/renderer_vulkan/gpu_completion_submission.h"
 
 namespace {
@@ -74,6 +75,35 @@ TEST(EventWriteEop, RetainsEveryFlipAssociatedWithTheSameEop) {
     EXPECT_TRUE(flips.empty());
     complete_eop();
     EXPECT_EQ(flips, (std::vector<int>{1, 2}));
+}
+
+TEST(EventWriteEop, BatchesConsecutiveEopsIntoOneSubmissionBoundary) {
+    std::vector<std::string> operations;
+    AmdGpu::EopSubmissionBatch batch;
+
+    batch.MarkEopPending();
+    batch.MarkEopPending();
+    EXPECT_TRUE(operations.empty());
+
+    batch.SubmitBoundary([&] { operations.emplace_back("prepare"); },
+                         [&] { operations.emplace_back("submit"); });
+    batch.FlushIfPending([&] { operations.emplace_back("unexpected-prepare"); },
+                         [&] { operations.emplace_back("unexpected-submit"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
+}
+
+TEST(EventWriteEop, FlushesPendingEopBeforeGuestMemoryWait) {
+    std::vector<std::string> operations;
+    AmdGpu::EopSubmissionBatch batch;
+
+    batch.MarkEopPending();
+    batch.FlushIfPending([&] { operations.emplace_back("prepare"); },
+                         [&] { operations.emplace_back("submit"); });
+    batch.FlushIfPending([&] { operations.emplace_back("unexpected-prepare"); },
+                         [&] { operations.emplace_back("unexpected-submit"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
 }
 
 TEST(EventWriteEop, PublishesFenceInterruptAndFlipOnlyAfterExactGpuCompletion) {
