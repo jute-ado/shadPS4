@@ -25,6 +25,7 @@
 #include "core/libraries/system/msgdialog.h"
 #include "core/libraries/system/msgdialog_ui.h"
 #include "save_backup.h"
+#include "savedata_filesystem_boundary.h"
 #include "save_instance.h"
 #include "save_memory.h"
 
@@ -499,7 +500,14 @@ static Error Umount(const OrbisSaveDataMountPoint* mountPoint, bool call_backup 
             const auto& slot_name = instance->GetMountPoint();
             if (slot_name == mount_point_str) {
                 // TODO: check if is busy
-                instance->Umount();
+                const auto result = RunFilesystemOperation(
+                    [&] { instance->Umount(); },
+                    [&](const fs::filesystem_error& error) {
+                        LOG_ERROR(Lib_SaveData, "Failed to unmount save data: {}", error.what());
+                    });
+                if (result != Error::OK) {
+                    return result;
+                }
                 if (call_backup) {
                     Backup::StartThread();
                     Backup::NewRequest(instance->GetUserId(), instance->GetTitleId(),
