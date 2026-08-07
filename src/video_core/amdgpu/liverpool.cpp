@@ -692,6 +692,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWrite: {
                 const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+                if (occlusion_query_reuse_diagnostic_enabled &&
+                    event->event_type.Value() == EventType::PixelPipeStatControl) {
+                    occlusion_query_reuse_diagnostic.ObserveControl(
+                        PixelPipeStatControl::Decode(event->address[0], event->address[1]));
+                }
                 LOG_DEBUG(Render, "Encountered EventWrite: event_type = {}, event_index = {}",
                           magic_enum::enum_name(event->event_type.Value()),
                           magic_enum::enum_name(event->event_index.Value()));
@@ -714,14 +719,29 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                          "reused={} unknown={} no_prior_valid={} "
                                          "partial_prior_valid={} all_prior_valid={} "
                                          "distinct_targets={} counter_pairs_min={} "
-                                         "counter_pairs_max={}",
+                                         "counter_pairs_max={} controls={} control_changes={} "
+                                         "dumps_without_control={} layout_mismatches={} "
+                                         "counter_id_min={} counter_id_max={} stride_min={} "
+                                         "stride_max={} enabled_min={} enabled_max={} "
+                                         "instance_mask_and=0x{:016x} "
+                                         "instance_mask_or=0x{:016x}",
                                          snapshot->sequence, snapshot->dumps,
                                          snapshot->fresh_targets, snapshot->reused_targets,
                                          snapshot->unknown_targets, snapshot->no_prior_valid,
                                          snapshot->partial_prior_valid,
                                          snapshot->all_prior_valid, snapshot->distinct_targets,
                                          snapshot->min_counter_pairs,
-                                         snapshot->max_counter_pairs);
+                                         snapshot->max_counter_pairs, snapshot->controls,
+                                         snapshot->control_changes,
+                                         snapshot->dumps_without_control,
+                                         snapshot->hardcoded_layout_mismatches,
+                                         snapshot->counter_id_min, snapshot->counter_id_max,
+                                         snapshot->stride_bytes_min,
+                                         snapshot->stride_bytes_max,
+                                         snapshot->enabled_instances_min,
+                                         snapshot->enabled_instances_max,
+                                         snapshot->instance_mask_and,
+                                         snapshot->instance_mask_or);
                             }
                         }
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
