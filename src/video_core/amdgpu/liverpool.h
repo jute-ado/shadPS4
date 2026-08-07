@@ -211,6 +211,8 @@ private:
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
     bool draw_resource_fingerprint_diagnostic_enabled{};
+    u64 draw_resource_fingerprint_report_start{1};
+    u64 draw_resource_fingerprint_report_count{10000};
     DrawResourceFingerprintDiagnostic draw_resource_fingerprint_diagnostic{/*report_limit=*/10000};
 
     struct ConstantEngine {

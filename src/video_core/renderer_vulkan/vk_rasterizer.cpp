@@ -449,13 +449,17 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
         }
         for (const auto& desc : stage->buffers) {
             const auto sharp = desc.GetSharp(*stage);
+            auto shape = sharp;
+            shape.base_address = 0;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Buffer, &sharp,
-                                         sizeof(sharp));
+                                         sizeof(sharp), &shape, sizeof(shape));
         }
         for (const auto& desc : stage->images) {
             const auto sharp = desc.GetSharp(*stage);
+            auto shape = sharp;
+            shape.base_address = 0;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Image, &sharp,
-                                         sizeof(sharp));
+                                         sizeof(sharp), &shape, sizeof(shape));
         }
         for (const auto& desc : stage->samplers) {
             const auto sharp = desc.GetSharp(*stage);
@@ -464,8 +468,10 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
         }
         for (const auto& desc : stage->fmasks) {
             const auto sharp = desc.GetSharp(*stage);
+            auto shape = sharp;
+            shape.base_address = 0;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::FMask, &sharp,
-                                         sizeof(sharp));
+                                         sizeof(sharp), &shape, sizeof(shape));
         }
     }
 
@@ -473,8 +479,10 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
         const auto& vertex_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
         for (const auto& attribute : fetch_shader->attributes) {
             const auto sharp = attribute.GetSharp(vertex_info);
+            auto shape = sharp;
+            shape.base_address = 0;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Vertex, &sharp,
-                                         sizeof(sharp));
+                                         sizeof(sharp), &shape, sizeof(shape));
         }
     }
     diagnostic->EndDraw();

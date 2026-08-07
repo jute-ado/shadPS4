@@ -76,6 +76,14 @@ Liverpool::Liverpool() {
         std::getenv("SHADPS4_DRAW_RESOURCE_FINGERPRINT_DIAGNOSTIC");
     draw_resource_fingerprint_diagnostic_enabled =
         draw_resource_diagnostic != nullptr && std::string_view{draw_resource_diagnostic} == "1";
+    if (const char* report_start =
+            std::getenv("SHADPS4_DRAW_RESOURCE_FINGERPRINT_REPORT_START")) {
+        draw_resource_fingerprint_report_start = std::strtoull(report_start, nullptr, 10);
+    }
+    if (const char* report_count =
+            std::getenv("SHADPS4_DRAW_RESOURCE_FINGERPRINT_REPORT_COUNT")) {
+        draw_resource_fingerprint_report_count = std::strtoull(report_count, nullptr, 10);
+    }
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -290,7 +298,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
                                                    [this, draw_resources, queued_time_us] {
-                                                       if (draw_resources.should_report) {
+                                                       const bool in_report_window =
+                                                           draw_resources.sequence >=
+                                                               draw_resource_fingerprint_report_start &&
+                                                           draw_resources.sequence -
+                                                                   draw_resource_fingerprint_report_start <
+                                                               draw_resource_fingerprint_report_count;
+                                                       if (draw_resources.should_report &&
+                                                           in_report_window) {
                                                            std::string changed_ordinals;
                                                            for (u32 i = 0;
                                                                 i < draw_resources
@@ -310,6 +325,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                "draws={} descriptors={} bytes_hashed={} "
                                                                "matches_previous={} changed_draws={} "
                                                                "changed_ordinals={} combined_hash={:#x} "
+                                                               "shape_matches_previous={} "
+                                                               "changed_shape_draws={} "
+                                                               "changed_shape_ordinals={} "
+                                                               "shape_combined_hash={:#x} "
                                                                "truncated_draws={} "
                                                                "truncated_descriptors={} "
                                                                "truncated_bytes={}",
@@ -325,6 +344,25 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                draw_resources.changed_draws,
                                                                changed_ordinals,
                                                                draw_resources.combined_hash,
+                                                               draw_resources
+                                                                   .shape_matches_previous_frame,
+                                                               draw_resources.changed_shape_draws,
+                                                               [&] {
+                                                                   std::string ordinals;
+                                                                   for (u32 i = 0;
+                                                                        i < draw_resources
+                                                                                .reported_changed_shape_draws;
+                                                                        ++i) {
+                                                                       if (!ordinals.empty()) {
+                                                                           ordinals += ',';
+                                                                       }
+                                                                       ordinals += std::to_string(
+                                                                           draw_resources
+                                                                               .first_changed_shape_draw_ordinals[i]);
+                                                                   }
+                                                                   return ordinals;
+                                                               }(),
+                                                               draw_resources.shape_combined_hash,
                                                                draw_resources.truncated_draws,
                                                                draw_resources
                                                                    .truncated_descriptors,
