@@ -8,12 +8,27 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
+#include <cstdlib>
+#include <string_view>
+
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, master_semaphore{instance}, command_pool{instance, &master_semaphore} {
+    const char* diagnostic = std::getenv("SHADPS4_ATTACHMENT_PUBLICATION_DIAGNOSTIC");
+    if (diagnostic != nullptr && std::string_view{diagnostic} == "1") {
+        attachment_publication_diagnostic = std::make_unique<AttachmentPublicationDiagnostic>();
+        if (const char* report_start =
+                std::getenv("SHADPS4_ATTACHMENT_PUBLICATION_REPORT_START")) {
+            attachment_publication_report_start = std::strtoull(report_start, nullptr, 10);
+        }
+        if (const char* report_count =
+                std::getenv("SHADPS4_ATTACHMENT_PUBLICATION_REPORT_COUNT")) {
+            attachment_publication_report_count = std::strtoull(report_count, nullptr, 10);
+        }
+    }
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
@@ -28,13 +43,17 @@ Scheduler::~Scheduler() {
 #endif
 }
 
-void Scheduler::BeginRendering(const RenderState& new_state) {
+void Scheduler::BeginRendering(const RenderState& new_state,
+                               std::span<const AttachmentTarget> diagnostic_targets) {
     if (is_rendering && render_state == new_state) {
         return;
     }
     EndRendering();
     is_rendering = true;
     render_state = new_state;
+    if (attachment_publication_diagnostic) {
+        attachment_publication_diagnostic->BeginScope(diagnostic_targets);
+    }
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
     for (u32 i = 0; i < render_state.num_color_attachments; ++i) {
@@ -88,7 +107,50 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
+    if (attachment_publication_diagnostic) {
+        attachment_publication_diagnostic->EndScope();
+    }
     current_cmdbuf.endRendering();
+}
+
+void Scheduler::RecordAttachmentDrawIssued() {
+    if (attachment_publication_diagnostic) {
+        attachment_publication_diagnostic->RecordDrawIssued();
+    }
+}
+
+void Scheduler::RecordAttachmentBarrier(u64 image_uid, AttachmentSubresource subresource) {
+    if (attachment_publication_diagnostic) {
+        attachment_publication_diagnostic->RecordBarrier(image_uid, subresource);
+    }
+}
+
+void Scheduler::RecordAttachmentDestructiveWrite(u64 image_uid,
+                                                 AttachmentSubresource subresource) {
+    if (attachment_publication_diagnostic) {
+        attachment_publication_diagnostic->RecordDestructiveWrite(image_uid, subresource);
+    }
+}
+
+void Scheduler::RecordAttachmentSample(u64 image_uid, AttachmentSubresource subresource) {
+    if (attachment_publication_diagnostic) {
+        attachment_publication_diagnostic->RecordSample(image_uid, subresource);
+    }
+}
+
+AttachmentPublicationReport Scheduler::TakeAttachmentPublicationReport() {
+    if (!attachment_publication_diagnostic) {
+        return {};
+    }
+    const u64 sequence = ++attachment_publication_report_sequence;
+    const bool in_report_window =
+        sequence >= attachment_publication_report_start &&
+        sequence - attachment_publication_report_start < attachment_publication_report_count;
+    return {
+        .should_report = in_report_window,
+        .sequence = sequence,
+        .snapshot = attachment_publication_diagnostic->TakeSnapshot(),
+    };
 }
 
 void Scheduler::Flush(SubmitInfo& info) {

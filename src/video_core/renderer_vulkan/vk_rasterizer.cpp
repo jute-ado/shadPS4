@@ -21,6 +21,15 @@
 
 namespace Vulkan {
 
+static AttachmentSubresource ToAttachmentSubresource(const VideoCore::SubresourceRange& range) {
+    return {
+        .base_level = range.base.level,
+        .levels = range.extent.levels,
+        .base_layer = range.base.layer,
+        .layers = range.extent.layers,
+    };
+}
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -214,7 +223,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
-    scheduler.BeginRendering(state);
+    scheduler.BeginRendering(
+        state, std::span{attachment_diagnostic_targets}.first(attachment_diagnostic_target_count));
 
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
@@ -230,6 +240,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
                     instance_offset);
     }
+    scheduler.RecordAttachmentDrawIssued();
 
     ResetBindings();
 }
@@ -282,7 +293,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
-    scheduler.BeginRendering(state);
+    scheduler.BeginRendering(
+        state, std::span{attachment_diagnostic_targets}.first(attachment_diagnostic_target_count));
 
     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
@@ -309,6 +321,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
             cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
         }
     }
+    scheduler.RecordAttachmentDrawIssued();
 
     ResetBindings();
 }
@@ -779,6 +792,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                                   desc.view_info.range);
                 }
             }
+            if (!is_storage && !image.binding.is_target) {
+                scheduler.RecordAttachmentSample(image.image_uid,
+                                                 ToAttachmentSubresource(desc.view_info.range));
+            }
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
 
@@ -828,6 +845,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     attachment_feedback_loop = false;
+    attachment_diagnostic_target_count = 0;
     const auto& regs = liverpool->regs;
     const auto& key = pipeline->GetGraphicsKey();
     RenderState state;
@@ -884,6 +902,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         attachment.is_clear = is_clear;
 
         image->usage.render_target = 1u;
+        if (scheduler.IsAttachmentPublicationDiagnosticEnabled()) {
+            attachment_diagnostic_targets[attachment_diagnostic_target_count++] = {
+                image->image_uid,
+                ToAttachmentSubresource(desc.view_info.range),
+            };
+        }
     }
     for (u32 cb = state.num_color_attachments; cb < state.color_attachments.size(); ++cb) {
         state.color_attachments[cb] = {};
@@ -939,6 +963,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         }
 
         image.usage.depth_target = true;
+        if (scheduler.IsAttachmentPublicationDiagnosticEnabled()) {
+            attachment_diagnostic_targets[attachment_diagnostic_target_count++] = {
+                image.image_uid,
+                ToAttachmentSubresource(desc.view_info.range),
+            };
+        }
     } else {
         state.depth_stencil_attachment = {};
     }

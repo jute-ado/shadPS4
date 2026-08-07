@@ -749,6 +749,29 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Continue with host-side passes that draw the displayed (scaled) frame.
     image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, {},
                   cmdbuf);
+    draw_scheduler.RecordAttachmentSample(
+        image.image_uid,
+        AttachmentSubresource{
+            .base_level = 0,
+            .levels = 1,
+            .base_layer = 0,
+            .layers = image.info.resources.layers,
+        });
+    const auto publication = draw_scheduler.TakeAttachmentPublicationReport();
+    if (publication.should_report) {
+        const auto& snapshot = publication.snapshot;
+        LOG_INFO(Render,
+                 "AttachmentPublication sequence={} scopes={} draws={} barriers={} "
+                 "destructive_writes={} samples={} attachment_samples={} "
+                 "without_issued_producer={} before_scope_end={} "
+                 "without_covering_barrier={} after_destructive_write={} "
+                 "truncated_images={} truncated_scope_targets={}",
+                 publication.sequence, snapshot.scopes, snapshot.draws_issued, snapshot.barriers,
+                 snapshot.destructive_writes, snapshot.samples, snapshot.attachment_samples,
+                 snapshot.without_issued_producer, snapshot.before_scope_end,
+                 snapshot.without_covering_barrier, snapshot.after_destructive_write,
+                 snapshot.truncated_images, snapshot.truncated_scope_targets);
+    }
 
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);

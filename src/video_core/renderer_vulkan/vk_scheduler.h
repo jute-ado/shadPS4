@@ -4,13 +4,16 @@
 #pragma once
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
-#include <thread>
 #include <queue>
+#include <span>
+#include <thread>
 
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/attachment_publication_diagnostic.h"
 #include "video_core/renderer_vulkan/pipeline_bind_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -75,6 +78,12 @@ struct SubmitInfo {
     void AddSignal(vk::Fence fence) {
         this->fence = fence;
     }
+};
+
+struct AttachmentPublicationReport {
+    bool should_report{};
+    u64 sequence{};
+    AttachmentPublicationSnapshot snapshot{};
 };
 
 using Viewports = boost::container::static_vector<vk::Viewport, AmdGpu::NUM_VIEWPORTS>;
@@ -369,10 +378,21 @@ public:
     void PopPendingOperations();
 
     /// Starts a new rendering scope with provided state.
-    void BeginRendering(const RenderState& new_state);
+    void BeginRendering(const RenderState& new_state,
+                        std::span<const AttachmentTarget> diagnostic_targets = {});
 
     /// Ends current rendering scope.
     void EndRendering();
+
+    [[nodiscard]] bool IsAttachmentPublicationDiagnosticEnabled() const {
+        return attachment_publication_diagnostic != nullptr;
+    }
+
+    void RecordAttachmentDrawIssued();
+    void RecordAttachmentBarrier(u64 image_uid, AttachmentSubresource subresource);
+    void RecordAttachmentDestructiveWrite(u64 image_uid, AttachmentSubresource subresource);
+    void RecordAttachmentSample(u64 image_uid, AttachmentSubresource subresource);
+    [[nodiscard]] AttachmentPublicationReport TakeAttachmentPublicationReport();
 
     /// Returns the current render state.
     const RenderState& GetRenderState() const {
@@ -460,6 +480,10 @@ private:
     std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
+    std::unique_ptr<AttachmentPublicationDiagnostic> attachment_publication_diagnostic;
+    u64 attachment_publication_report_start{};
+    u64 attachment_publication_report_count{2048};
+    u64 attachment_publication_report_sequence{};
     RenderState render_state;
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};

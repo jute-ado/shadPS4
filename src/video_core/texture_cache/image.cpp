@@ -17,6 +17,33 @@ using namespace Vulkan;
 
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
 
+static AttachmentSubresource ToAttachmentSubresource(const SubresourceRange& range) {
+    return {
+        .base_level = range.base.level,
+        .levels = range.extent.levels,
+        .base_layer = range.base.layer,
+        .layers = range.extent.layers,
+    };
+}
+
+static AttachmentSubresource ToAttachmentSubresource(const vk::ImageSubresourceRange& range) {
+    return {
+        .base_level = range.baseMipLevel,
+        .levels = range.levelCount,
+        .base_layer = range.baseArrayLayer,
+        .layers = range.layerCount,
+    };
+}
+
+static AttachmentSubresource FullAttachmentSubresource(const ImageInfo& info) {
+    return {
+        .base_level = 0,
+        .levels = info.resources.levels,
+        .base_layer = 0,
+        .layers = info.resources.layers,
+    };
+}
+
 static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
                                            const ImageInfo& info) {
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferSrc |
@@ -346,6 +373,12 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
         scheduler->EndRendering();
         cmdbuf = scheduler->CommandBuffer();
     }
+    if (static_cast<bool>(dst_mask & vk::AccessFlagBits2::eShaderRead)) {
+        for (const auto& barrier : barriers) {
+            scheduler->RecordAttachmentBarrier(
+                image_uid, ToAttachmentSubresource(barrier.subresourceRange));
+        }
+    }
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .imageMemoryBarrierCount = static_cast<u32>(barriers.size()),
         .pImageMemoryBarriers = barriers.data(),
@@ -388,6 +421,16 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
     });
     cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
                              upload_copies);
+    for (const auto& copy : upload_copies) {
+        scheduler->RecordAttachmentDestructiveWrite(
+            image_uid,
+            AttachmentSubresource{
+                .base_level = copy.imageSubresource.mipLevel,
+                .levels = 1,
+                .base_layer = copy.imageSubresource.baseArrayLayer,
+                .layers = copy.imageSubresource.layerCount,
+            });
+    }
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 1,
@@ -584,6 +627,7 @@ void Image::CopyImage(Image& src_image) {
     if (!regions.empty()) {
         cmdbuf.copyImage(src_image.GetImage(), src_image.backing->state.layout, GetImage(),
                          backing->state.layout, regions);
+        scheduler->RecordAttachmentDestructiveWrite(image_uid, FullAttachmentSubresource(info));
     }
 
     Transit(vk::ImageLayout::eGeneral,
@@ -665,6 +709,7 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
 
     cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
                              buffer_copies);
+    scheduler->RecordAttachmentDestructiveWrite(image_uid, FullAttachmentSubresource(info));
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
 }
@@ -710,6 +755,14 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     const auto cmdbuf = scheduler->CommandBuffer();
     cmdbuf.copyImage(src_image.GetImage(), src_image.backing->state.layout, GetImage(),
                      backing->state.layout, image_copy);
+    scheduler->RecordAttachmentDestructiveWrite(
+        image_uid,
+        AttachmentSubresource{
+            .base_level = mip,
+            .levels = 1,
+            .base_layer = slice,
+            .layers = dst_layers,
+        });
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
 }
@@ -770,6 +823,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
 
     flags |= VideoCore::ImageFlagBits::GpuModified;
     flags &= ~VideoCore::ImageFlagBits::Dirty;
+    scheduler->RecordAttachmentDestructiveWrite(image_uid, ToAttachmentSubresource(mrt1_range));
 }
 
 void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range) {
@@ -785,6 +839,7 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
     const auto cmdbuf = scheduler->CommandBuffer();
     cmdbuf.clearColorImage(GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
+    scheduler->RecordAttachmentDestructiveWrite(image_uid, ToAttachmentSubresource(range));
 }
 
 void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
@@ -854,6 +909,7 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
         blit_helper->CopyBetweenMsImages(
             info.size.width, info.size.height, new_backing->num_samples, info.pixel_format,
             backing->num_samples > 1, backing->image, new_backing->image);
+        scheduler->RecordAttachmentDestructiveWrite(image_uid, FullAttachmentSubresource(info));
 
         // Update current layout in tracker to new backings layout
         new_backing->state.layout = dst_layout;
