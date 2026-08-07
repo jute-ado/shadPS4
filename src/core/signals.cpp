@@ -9,6 +9,7 @@
 #include "core/signals.h"
 #include "core/windows_exception_policy.h"
 #include "emulator.h"
+#include "video_core/amdgpu/eop_boundary_diagnostic.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -68,6 +69,19 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (WindowsException::ShouldShutdownForUnclaimedException(code)) {
+        if (AmdGpu::EopBoundaryDiagnostic::Enabled()) {
+            const auto snapshot = AmdGpu::EopBoundaryDiagnostic::Read();
+            LOG_CRITICAL(
+                Debug,
+                "EOP boundary diagnostic: sequence {}..{}, submit enqueued {}@{}, consumed {}@{}, "
+                "completed {}@{}, EOP decoded {}@{}, IRQ delivered {}@{}",
+                snapshot.sequence_before, snapshot.sequence_after, snapshot.submit_done_enqueued,
+                snapshot.submit_done_enqueued_sequence, snapshot.submit_done_consumed,
+                snapshot.submit_done_consumed_sequence, snapshot.submit_done_boundary_completed,
+                snapshot.submit_done_boundary_completed_sequence, snapshot.eop_decoded,
+                snapshot.eop_decoded_sequence, snapshot.eop_irq_delivered,
+                snapshot.eop_irq_delivered_sequence);
+        }
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }

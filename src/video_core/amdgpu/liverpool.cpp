@@ -15,6 +15,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/amdgpu/eop_boundary_diagnostic.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -146,6 +147,7 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
         if (has_submit_done) {
+            EopBoundaryDiagnostic::RecordSubmitDoneConsumed();
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
@@ -153,6 +155,7 @@ void Liverpool::Process(std::stop_token stoken) {
             if (submit_done_callback) {
                 submit_done_callback();
             }
+            EopBoundaryDiagnostic::RecordSubmitDoneBoundaryCompleted();
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
@@ -732,6 +735,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
+                EopBoundaryDiagnostic::RecordEopDecoded();
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 PublishEop(
                     *event_eop,
@@ -741,7 +745,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             memcpy(address, &data, num_bytes);
                         }
                     },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
+                    [] {
+                        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                        EopBoundaryDiagnostic::RecordEopIrqDelivered();
+                    },
                     [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
                         complete_eop_flip();
                     });
