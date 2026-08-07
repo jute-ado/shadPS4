@@ -11,6 +11,11 @@
 
 namespace AmdGpu {
 
+enum class DrawResourceContentProbeMode : u8 {
+    FullProvenance,
+    StagedOnly,
+};
+
 enum class DrawResourceUploadProvenance : u8 {
     Coherent,
     ConcurrentWriterStagedBefore,
@@ -90,6 +95,14 @@ public:
     void ConfigureCaptureWindow(u64 start, u64 count) noexcept {
         capture_start = start;
         capture_count = count;
+    }
+
+    void ConfigureProbeMode(DrawResourceContentProbeMode mode) noexcept {
+        probe_mode = mode;
+    }
+
+    [[nodiscard]] DrawResourceContentProbeMode GetProbeMode() const noexcept {
+        return probe_mode;
     }
 
     void BeginDraw() noexcept {
@@ -396,6 +409,7 @@ private:
     u32 draw_observation_begin{};
     u32 overflow_resources{};
     bool draw_active{};
+    DrawResourceContentProbeMode probe_mode{DrawResourceContentProbeMode::FullProvenance};
 };
 
 } // namespace AmdGpu
