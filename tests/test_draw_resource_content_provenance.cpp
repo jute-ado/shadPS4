@@ -148,12 +148,35 @@ TEST(DrawResourceContentProvenanceDiagnostic, ReportsStagedOnlyContentAba) {
     EXPECT_EQ(returned.first_staged_content_aba_resources[0].resource_ordinal, 0);
 }
 
+TEST(DrawResourceContentProvenanceDiagnostic, ReportsSourceSnapshotContentAba) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/3};
+
+    const auto record = [&](u64 token) {
+        diagnostic.BeginDraw();
+        diagnostic.RecordSourceSnapshot(token, 64);
+        diagnostic.EndDraw();
+        return diagnostic.TakeSnapshot();
+    };
+
+    EXPECT_EQ(record(1).source_content_aba_resources, 0);
+    EXPECT_EQ(record(2).source_changed_resources, 1);
+    const auto returned = record(1);
+    EXPECT_EQ(returned.source_changed_resources, 1);
+    EXPECT_EQ(returned.source_content_aba_resources, 1);
+    ASSERT_EQ(returned.reported_source_content_aba_resources, 1);
+    EXPECT_EQ(returned.first_source_content_aba_resources[0].draw_ordinal, 0);
+    EXPECT_EQ(returned.first_source_content_aba_resources[0].resource_ordinal, 0);
+}
+
 TEST(DrawResourceContentProvenanceDiagnostic, SelectsExplicitStagedOnlyProbeMode) {
     DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/1};
     EXPECT_EQ(diagnostic.GetProbeMode(), DrawResourceContentProbeMode::FullProvenance);
 
     diagnostic.ConfigureProbeMode(DrawResourceContentProbeMode::StagedOnly);
     EXPECT_EQ(diagnostic.GetProbeMode(), DrawResourceContentProbeMode::StagedOnly);
+
+    diagnostic.ConfigureProbeMode(DrawResourceContentProbeMode::SourceSnapshot);
+    EXPECT_EQ(diagnostic.GetProbeMode(), DrawResourceContentProbeMode::SourceSnapshot);
 }
 
 TEST(DrawResourceContentProvenanceDiagnostic, EnforcesConfiguredPerFrameProbeBudget) {
