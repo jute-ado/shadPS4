@@ -432,6 +432,70 @@ TEST(BufferResidency, CollectsFixedFunctionBufferReadsBeforeOwnershipPlanning) {
     EXPECT_EQ(reads, valid_reads);
 }
 
+TEST(BufferResidency, NormalizesTheExactFixedFunctionRangesConsumedByTheCommand) {
+    using Role = VideoCore::PhysicalBackingCommandBufferReadRole;
+    using Read = VideoCore::PhysicalBackingCommandBufferRead;
+    const std::array vertex_reads{
+        Read{Role::Vertex, 0x1000'0000, 0x100},
+        Read{Role::Vertex, 0x1000'0100, 0x80},
+        Read{Role::Vertex, 0x2000'0000, 0x40},
+    };
+
+    const auto normalized = VideoCore::NormalizePhysicalBackingVertexBufferReads(vertex_reads);
+
+    ASSERT_TRUE(normalized.has_value());
+    EXPECT_EQ(*normalized, (std::vector<Read>{
+                               {Role::Vertex, 0x1000'0000, 0x180},
+                               {Role::Vertex, 0x2000'0000, 0x40},
+                           }));
+
+    const auto large_offset = VideoCore::PlanPhysicalBackingIndexBufferRead(
+        0x8000'0000, 0x4000'0000, 16, sizeof(u32));
+    ASSERT_TRUE(large_offset.has_value());
+    EXPECT_EQ(*large_offset, (Read{Role::Index, 0x1'8000'0000, 64}));
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingIndexBufferRead(
+                     std::numeric_limits<VAddr>::max() - 3, 1, 16, sizeof(u32))
+                     .has_value());
+    EXPECT_FALSE(VideoCore::PlanPhysicalBackingIndexBufferRead(
+                     0x8000'0000, 0, std::numeric_limits<u32>::max(), sizeof(u32))
+                     .has_value());
+}
+
+TEST(BufferResidency, RoutesEveryFixedFunctionReadThroughPhysicalOwnershipPlanning) {
+    using Role = VideoCore::PhysicalBackingCommandBufferReadRole;
+    using Read = VideoCore::PhysicalBackingCommandBufferRead;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    const std::array reads{
+        Read{Role::Vertex, 0x1000'0000, 0x100},
+        Read{Role::Index, 0x2000'0000, 0x80},
+        Read{Role::IndirectArgs, 0x3000'0000, 0x40},
+        Read{Role::IndirectCount, 0x4000'0000, 4},
+    };
+
+    const auto accesses = VideoCore::ResolvePhysicalBackingCommandBufferReads(
+        reads, [](const Read& read)
+                   -> std::optional<VideoCore::PhysicalBackingCommandBufferReadResolution> {
+            const u32 role_index = static_cast<u32>(read.role);
+            return VideoCore::PhysicalBackingCommandBufferReadResolution{
+                .buffer_index = role_index + 1,
+                .physical_pages = {0xab8d'0000 + static_cast<u64>(role_index) * 16_KB},
+            };
+        });
+
+    ASSERT_TRUE(accesses.has_value());
+    ASSERT_EQ(accesses->size(), reads.size());
+    const auto plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(*accesses);
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->read_snapshot_order,
+              (std::vector<Resource>{
+                  {Kind::Buffer, 1},
+                  {Kind::Buffer, 2},
+                  {Kind::Buffer, 3},
+                  {Kind::Buffer, 4},
+              }));
+}
+
 TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
     using Owner = VideoCore::PhysicalBackingCachePageOwnerLocation;
     constexpr u64 requested_page = 0xab8d'0000;
