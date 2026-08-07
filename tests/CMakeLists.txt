@@ -72,6 +72,16 @@ target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
 
+add_executable(shadps4_nested_ce_diagnostic_test
+    test_nested_ce_diagnostic.cpp
+)
+target_include_directories(shadps4_nested_ce_diagnostic_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_nested_ce_diagnostic_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_nested_ce_diagnostic_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_nested_ce_diagnostic_test)
+
 add_executable(shadps4_screenshot_request_queue_test
     test_screenshot_request_queue.cpp
 )
