@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/draw_generation_diagnostic.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -95,6 +96,10 @@ public:
 
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
+    }
+
+    [[nodiscard]] DrawGenerationDiagnostic* GetDrawGenerationDiagnostic() noexcept {
+        return draw_generation_diagnostic_enabled ? &draw_generation_diagnostic : nullptr;
     }
 
     template <bool wait_done = false>
@@ -180,7 +185,8 @@ private:
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb);
+    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                         u64 submitted_dcb_signature, u64 submitted_ccb_signature);
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
@@ -204,6 +210,10 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    bool draw_generation_diagnostic_enabled{};
+    u64 draw_generation_report_start{1};
+    u64 draw_generation_report_count{10000};
+    DrawGenerationDiagnostic draw_generation_diagnostic;
 
     struct ConstantEngine {
         void Reset() {

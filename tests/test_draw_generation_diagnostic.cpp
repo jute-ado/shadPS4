@@ -48,7 +48,8 @@ TEST(DrawGenerationDiagnostic, DetectsSameCountOrdinalSubstitutionAndExactAbaRet
     DrawGenerationDiagnostic diagnostic;
 
     RecordFrame(diagnostic, {10, 20, 30});
-    diagnostic.TakeSnapshot();
+    const auto baseline = diagnostic.TakeSnapshot();
+    EXPECT_EQ(baseline.sequence, 1);
     RecordFrame(diagnostic, {10, 99, 30});
     const auto changed = diagnostic.TakeSnapshot();
     EXPECT_FALSE(changed.count_changed);

@@ -3,6 +3,10 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,6 +72,17 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    if (const char* enabled = std::getenv("SHADPS4_DRAW_GENERATION_DIAGNOSTIC")) {
+        draw_generation_diagnostic_enabled = std::string_view{enabled} == "1";
+    }
+    if (const char* report_start =
+            std::getenv("SHADPS4_DRAW_GENERATION_REPORT_START")) {
+        draw_generation_report_start = std::strtoull(report_start, nullptr, 10);
+    }
+    if (const char* report_count =
+            std::getenv("SHADPS4_DRAW_GENERATION_REPORT_COUNT")) {
+        draw_generation_report_count = std::strtoull(report_count, nullptr, 10);
+    }
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -225,8 +240,16 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_EXIT;
 }
 
-Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                                           u64 submitted_dcb_signature,
+                                           u64 submitted_ccb_signature) {
     FIBER_ENTER(dcb_task_name);
+
+    if (draw_generation_diagnostic_enabled) {
+        draw_generation_diagnostic.ObserveSubmission(
+            submitted_dcb_signature, HashCommandWords(dcb), submitted_ccb_signature,
+            HashCommandWords(ccb));
+    }
 
     cblock.Reset();
 
@@ -274,6 +297,47 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    if (draw_generation_diagnostic_enabled) {
+                        const auto snapshot = draw_generation_diagnostic.TakeSnapshot();
+                        const bool in_report_window =
+                            snapshot.sequence >= draw_generation_report_start &&
+                            snapshot.sequence - draw_generation_report_start <
+                                draw_generation_report_count;
+                        if (in_report_window) {
+                            const auto format_ordinals = [](const auto& ordinals, u32 count) {
+                                std::string result;
+                                for (u32 i = 0; i < count; ++i) {
+                                    if (!result.empty()) {
+                                        result += ',';
+                                    }
+                                    result += std::to_string(ordinals[i]);
+                                }
+                                return result;
+                            };
+                            LOG_INFO(
+                                Render,
+                                "DrawGeneration sequence={} process_time_us={} draws={} "
+                                "direct={} indirect={} has_previous={} count_changed={} "
+                                "changed_from_previous={} changed_ordinals={} "
+                                "aba_middle_sequence={} exact_aba_return_draws={} "
+                                "aba_ordinals={} submissions={} mutated_submissions={} "
+                                "truncated_draws={} truncated_submissions={}",
+                                snapshot.sequence,
+                                Libraries::Kernel::sceKernelGetProcessTime(), snapshot.draws,
+                                snapshot.direct_draws, snapshot.indirect_draws,
+                                snapshot.has_previous, snapshot.count_changed,
+                                snapshot.changed_from_previous,
+                                format_ordinals(
+                                    snapshot.first_changed_from_previous_ordinals,
+                                    snapshot.reported_changed_from_previous),
+                                snapshot.aba_middle_sequence,
+                                snapshot.exact_aba_return_draws,
+                                format_ordinals(snapshot.first_exact_aba_return_ordinals,
+                                                snapshot.reported_exact_aba_return_draws),
+                                snapshot.submissions, snapshot.mutated_submissions,
+                                snapshot.truncated_draws, snapshot.truncated_submissions);
+                        }
+                    }
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
                                                    [this] {
@@ -851,8 +915,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-                auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                const std::span indirect_dcb{indirect_buffer->Address<const u32>(),
+                                             indirect_buffer->ib_size};
+                const std::span<const u32> indirect_ccb{};
+                const u64 submitted_dcb_signature =
+                    draw_generation_diagnostic_enabled ? HashCommandWords(indirect_dcb) : 0;
+                const u64 submitted_ccb_signature =
+                    draw_generation_diagnostic_enabled ? HashCommandWords(indirect_ccb) : 0;
+                auto task = ProcessGraphics(indirect_dcb, indirect_ccb,
+                                            submitted_dcb_signature,
+                                            submitted_ccb_signature);
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
@@ -1237,7 +1309,11 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
         std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);
     }
 
-    auto task = ProcessGraphics(dcb, ccb);
+    const u64 submitted_dcb_signature =
+        draw_generation_diagnostic_enabled ? HashCommandWords(dcb) : 0;
+    const u64 submitted_ccb_signature =
+        draw_generation_diagnostic_enabled ? HashCommandWords(ccb) : 0;
+    auto task = ProcessGraphics(dcb, ccb, submitted_dcb_signature, submitted_ccb_signature);
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);

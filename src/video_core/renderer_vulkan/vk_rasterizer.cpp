@@ -214,11 +214,17 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
-    scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
+    RecordDrawGeneration(
+        pipeline, state,
+        is_indexed ? AmdGpu::DrawIssueKind::DirectIndexed
+                   : AmdGpu::DrawIssueKind::DirectNonIndexed,
+        index_offset, regs.num_indices, /*stride=*/0, regs.num_instances.NumInstances(),
+        s32(vertex_offset), instance_offset);
+    scheduler.BeginRendering(state);
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Graphics, pipeline->Handle());
@@ -282,6 +288,12 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
+    RecordDrawGeneration(
+        pipeline, state,
+        is_indexed ? AmdGpu::DrawIssueKind::IndirectIndexed
+                   : AmdGpu::DrawIssueKind::IndirectNonIndexed,
+        offset, count_address != 0, stride, max_count, /*vertex_offset=*/0,
+        /*instance_offset=*/0);
     scheduler.BeginRendering(state);
 
     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
@@ -1106,6 +1118,94 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
 
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.Commit(instance, scheduler.CommandBuffer());
+}
+
+void Rasterizer::RecordDrawGeneration(const GraphicsPipeline* pipeline,
+                                      const RenderState& render_state,
+                                      AmdGpu::DrawIssueKind kind, u32 first, u32 count,
+                                      u32 stride, u32 instance_or_max_count, s32 vertex_offset,
+                                      u32 instance_offset) const {
+    auto* diagnostic = liverpool->GetDrawGenerationDiagnostic();
+    if (diagnostic == nullptr) {
+        return;
+    }
+
+    AmdGpu::DrawGenerationSignature signature;
+    signature.Add(kind);
+    signature.Add(std::hash<GraphicsPipelineKey>{}(pipeline->GetGraphicsKey()));
+    signature.Add(first);
+    signature.Add(count);
+    signature.Add(stride);
+    signature.Add(instance_or_max_count);
+    signature.Add(vertex_offset);
+    signature.Add(instance_offset);
+
+    signature.Add(render_state.width);
+    signature.Add(render_state.height);
+    signature.Add(render_state.num_layers);
+    signature.Add(render_state.num_color_attachments);
+    signature.Add(render_state.depth_stencil_attachment.has_depth);
+    signature.Add(render_state.depth_stencil_attachment.depth_clear);
+    signature.Add(render_state.depth_stencil_attachment.has_stencil);
+    signature.Add(render_state.depth_stencil_attachment.stencil_clear);
+
+    const auto& dynamic = scheduler.GetDynamicState();
+    signature.Add(dynamic.viewports.size());
+    for (const auto& viewport : dynamic.viewports) {
+        signature.AddFloat(viewport.x);
+        signature.AddFloat(viewport.y);
+        signature.AddFloat(viewport.width);
+        signature.AddFloat(viewport.height);
+        signature.AddFloat(viewport.minDepth);
+        signature.AddFloat(viewport.maxDepth);
+    }
+    signature.Add(dynamic.scissors.size());
+    for (const auto& scissor : dynamic.scissors) {
+        signature.Add(scissor.offset.x);
+        signature.Add(scissor.offset.y);
+        signature.Add(scissor.extent.width);
+        signature.Add(scissor.extent.height);
+    }
+
+    signature.Add(dynamic.depth_test_enabled);
+    signature.Add(dynamic.depth_write_enabled);
+    signature.Add(dynamic.depth_compare_op);
+    signature.Add(dynamic.depth_bounds_test_enabled);
+    signature.AddFloat(dynamic.depth_bounds_min);
+    signature.AddFloat(dynamic.depth_bounds_max);
+    signature.Add(dynamic.depth_bias_enabled);
+    signature.AddFloat(dynamic.depth_bias_constant);
+    signature.AddFloat(dynamic.depth_bias_clamp);
+    signature.AddFloat(dynamic.depth_bias_slope);
+    signature.Add(dynamic.stencil_test_enabled);
+    const auto add_stencil_ops = [&signature](const StencilOps& ops) {
+        signature.Add(ops.fail_op);
+        signature.Add(ops.pass_op);
+        signature.Add(ops.depth_fail_op);
+        signature.Add(ops.compare_op);
+    };
+    add_stencil_ops(dynamic.stencil_front_ops);
+    signature.Add(dynamic.stencil_front_reference);
+    signature.Add(dynamic.stencil_front_write_mask);
+    signature.Add(dynamic.stencil_front_compare_mask);
+    add_stencil_ops(dynamic.stencil_back_ops);
+    signature.Add(dynamic.stencil_back_reference);
+    signature.Add(dynamic.stencil_back_write_mask);
+    signature.Add(dynamic.stencil_back_compare_mask);
+    signature.Add(dynamic.primitive_restart_enable);
+    signature.Add(dynamic.rasterizer_discard_enable);
+    signature.Add(static_cast<VkCullModeFlags>(dynamic.cull_mode));
+    signature.Add(dynamic.front_face);
+    for (const float blend : dynamic.blend_constants) {
+        signature.AddFloat(blend);
+    }
+    for (const auto mask : dynamic.color_write_masks) {
+        signature.Add(static_cast<VkColorComponentFlags>(mask));
+    }
+    signature.AddFloat(dynamic.line_width);
+    signature.Add(dynamic.feedback_loop_enabled);
+
+    diagnostic->ObserveDraw(kind, signature.Value());
 }
 
 void Rasterizer::UpdateViewportScissorState() const {

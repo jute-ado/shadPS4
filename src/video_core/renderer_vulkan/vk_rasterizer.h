@@ -11,6 +11,7 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace AmdGpu {
+enum class DrawIssueKind : u8;
 struct Liverpool;
 }
 
@@ -96,6 +97,10 @@ private:
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
+    void RecordDrawGeneration(const GraphicsPipeline* pipeline, const RenderState& render_state,
+                              AmdGpu::DrawIssueKind kind, u32 first, u32 count, u32 stride,
+                              u32 instance_or_max_count, s32 vertex_offset,
+                              u32 instance_offset) const;
 
     bool FilterDraw();
 
