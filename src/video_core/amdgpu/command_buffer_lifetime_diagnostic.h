@@ -13,6 +13,7 @@
 #include <span>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "common/types.h"
 
@@ -30,6 +31,7 @@ enum class CommandBufferMutationPhase : u32 {
     Initial,
     LaterResume,
     Final,
+    PreFetch,
 };
 
 struct CommandBufferLifetimeSnapshot {
@@ -58,6 +60,20 @@ struct CommandBufferLifetimeSnapshot {
     u64 initial_budget_exhaustions{};
     u64 later_resume_budget_exhaustions{};
     u64 final_budget_exhaustions{};
+    u64 baseline_byte_budget{};
+    u64 baseline_bytes{};
+    u64 baseline_buffers{};
+    u64 baseline_budget_exhaustions{};
+    u64 baseline_allocation_failures{};
+    u64 prefetch_checks{};
+    u64 prefetch_check_capacity_loss{};
+    u64 prefetch_invalid_ranges{};
+    u64 prefetch_mutations{};
+    u64 last_prefetch_buffer_ordinal{};
+    CommandBufferKind last_prefetch_buffer_kind{};
+    u32 last_prefetch_packet_index{};
+    u32 last_prefetch_word_offset{};
+    u32 last_prefetch_word_count{};
     u64 initial_mutations{};
     u64 later_resume_mutations{};
     u64 final_mutations{};
@@ -76,15 +92,20 @@ struct CommandBufferLifetimeSnapshot {
 
 /**
  * Fixed-memory diagnostic for command words retained by the asynchronous command processor.
- * Signatures remain internal. Snapshots expose only counters and semantic ordinals.
+ * Signatures and selected submit-time command baselines remain internal. Baseline copying is
+ * cumulatively byte-capped for the route; snapshots expose only counters and semantic ordinals.
  *
  * A probe can observe only mutations that persist across one of its sampling boundaries. An exact
- * A-B-A rewrite entirely between two samples is intentionally outside its coverage.
+ * A-B-A rewrite entirely between two samples is intentionally outside its coverage. An indirect
+ * buffer's baseline begins when its parent packet supplies the child span, so mutations before that
+ * fetch remain outside indirect-buffer coverage.
  */
 class CommandBufferLifetimeDiagnostic {
 public:
     static constexpr u32 HardMaxSelectedBuffers = 64;
     static constexpr u64 HardMaxHashByteBudget = 256ULL * 1024 * 1024;
+    static constexpr u64 HardMaxBaselineByteBudget = 256ULL * 1024 * 1024;
+    static constexpr u32 HardMaxPrefetchChecks = 4096;
 
     struct Config {
         bool enabled{};
@@ -92,8 +113,10 @@ public:
         u64 minimum_buffer_ordinal{1};
         u32 selected_buffer_count{16};
         u64 total_hash_byte_budget{64ULL * 1024 * 1024};
+        u64 baseline_byte_budget{64ULL * 1024 * 1024};
         u32 max_words_per_signature{1u << 20};
         u32 max_resume_checks{64};
+        u32 max_prefetch_checks{2048};
     };
 
 private:
@@ -126,6 +149,19 @@ private:
         std::atomic<u64> initial_budget_exhaustions{};
         std::atomic<u64> later_resume_budget_exhaustions{};
         std::atomic<u64> final_budget_exhaustions{};
+        std::atomic<u64> baseline_bytes{};
+        std::atomic<u64> baseline_buffers{};
+        std::atomic<u64> baseline_budget_exhaustions{};
+        std::atomic<u64> baseline_allocation_failures{};
+        std::atomic<u64> prefetch_checks{};
+        std::atomic<u64> prefetch_check_capacity_loss{};
+        std::atomic<u64> prefetch_invalid_ranges{};
+        std::atomic<u64> prefetch_mutations{};
+        std::atomic<u64> last_prefetch_buffer_ordinal{};
+        std::atomic<u32> last_prefetch_buffer_kind{};
+        std::atomic<u32> last_prefetch_packet_index{};
+        std::atomic<u32> last_prefetch_word_offset{};
+        std::atomic<u32> last_prefetch_word_count{};
         std::atomic<u64> initial_mutations{};
         std::atomic<u64> later_resume_mutations{};
         std::atomic<u64> final_mutations{};
@@ -209,6 +245,63 @@ public:
             }
         }
 
+        void ObservePacketHeader(std::span<const u32> remaining, u32 packet_index) noexcept {
+            prefetch_packet_armed = false;
+            if (!Active() || baseline.empty()) {
+                return;
+            }
+            OperationGuard guard{diagnostic};
+            if (!guard) {
+                return;
+            }
+            if (prefetch_checks_started >= diagnostic->config.max_prefetch_checks) {
+                if (!prefetch_capacity_recorded) {
+                    prefetch_capacity_recorded = true;
+                    diagnostic->state.prefetch_check_capacity_loss.fetch_add(1);
+                }
+                return;
+            }
+
+            u32 logical_offset{};
+            if (!LocatePacketRange(remaining, 1, logical_offset)) {
+                diagnostic->state.prefetch_invalid_ranges.fetch_add(1);
+                return;
+            }
+
+            ++prefetch_checks_started;
+            diagnostic->state.prefetch_checks.fetch_add(1);
+            prefetch_packet_armed = true;
+            prefetch_packet_mutation_recorded = false;
+            prefetch_packet_index = packet_index;
+            prefetch_packet_offset = logical_offset;
+            if (!MatchesBaseline(remaining.first(1), logical_offset)) {
+                RecordPreFetchMutation(packet_index, logical_offset, 1);
+            }
+        }
+
+        void ObservePacketBody(std::span<const u32> remaining, u32 packet_index,
+                               u32 packet_words) noexcept {
+            if (!Active() || baseline.empty() || !prefetch_packet_armed) {
+                return;
+            }
+            OperationGuard guard{diagnostic};
+            if (!guard) {
+                return;
+            }
+            prefetch_packet_armed = false;
+            u32 logical_offset{};
+            if (packet_index != prefetch_packet_index || packet_words == 0 ||
+                !LocatePacketRange(remaining, packet_words, logical_offset) ||
+                logical_offset != prefetch_packet_offset) {
+                diagnostic->state.prefetch_invalid_ranges.fetch_add(1);
+                return;
+            }
+            if (!prefetch_packet_mutation_recorded &&
+                !MatchesBaseline(remaining.first(packet_words), logical_offset)) {
+                RecordPreFetchMutation(packet_index, logical_offset, packet_words);
+            }
+        }
+
         void Suspend(std::span<const u32> remaining) noexcept {
             resume_armed = false;
             if (!Active()) {
@@ -289,9 +382,10 @@ public:
         friend class CommandBufferLifetimeDiagnostic;
 
         Probe(CommandBufferLifetimeDiagnostic& diagnostic_, CommandBufferKind kind_, u64 ordinal_,
-              std::span<const u32> original_, u64 submitted_signature_) noexcept
+              std::span<const u32> original_, u64 submitted_signature_,
+              std::vector<u32> baseline_) noexcept
             : diagnostic{&diagnostic_}, kind{kind_}, ordinal{ordinal_}, original{original_},
-              submitted_signature{submitted_signature_} {}
+              submitted_signature{submitted_signature_}, baseline{std::move(baseline_)} {}
 
         [[nodiscard]] static u64 HashWords(std::span<const u32> words) noexcept {
             u64 hash = 14695981039346656037ULL;
@@ -325,16 +419,54 @@ public:
             return true;
         }
 
+        [[nodiscard]] bool LocatePacketRange(std::span<const u32> remaining, u32 words,
+                                             u32& logical_offset) const noexcept {
+            if (remaining.size() < words || !LocateRemaining(remaining, logical_offset)) {
+                return false;
+            }
+            return static_cast<u64>(logical_offset) + words <= baseline.size();
+        }
+
+        [[nodiscard]] bool MatchesBaseline(std::span<const u32> current,
+                                           u32 logical_offset) const noexcept {
+            return std::equal(current.begin(), current.end(), baseline.begin() + logical_offset);
+        }
+
+        void RecordPreFetchMutation(u32 packet_index, u32 logical_offset, u32 words) noexcept {
+            prefetch_packet_mutation_recorded = true;
+            diagnostic->state.prefetch_mutations.fetch_add(1);
+            diagnostic->state.last_prefetch_buffer_ordinal.store(ordinal);
+            diagnostic->state.last_prefetch_buffer_kind.store(static_cast<u32>(kind));
+            diagnostic->state.last_prefetch_packet_index.store(packet_index);
+            diagnostic->state.last_prefetch_word_offset.store(logical_offset);
+            diagnostic->state.last_prefetch_word_count.store(words);
+            diagnostic->state.last_buffer_ordinal.store(ordinal);
+            diagnostic->state.last_buffer_kind.store(static_cast<u32>(kind));
+            diagnostic->state.last_mutation_phase.store(
+                static_cast<u32>(CommandBufferMutationPhase::PreFetch));
+            diagnostic->state.last_resume_ordinal.store(0);
+            diagnostic->state.last_logical_word_offset.store(logical_offset);
+            diagnostic->state.last_remaining_words.store(words);
+            diagnostic->state.sequence.fetch_add(1);
+        }
+
         CommandBufferLifetimeDiagnostic* diagnostic{};
         CommandBufferKind kind{};
         u64 ordinal{};
         std::span<const u32> original{};
         u64 submitted_signature{};
+        std::vector<u32> baseline;
         u32 suspended_logical_offset{};
         u32 suspended_words{};
         u32 resume_checks_started{};
+        u32 prefetch_checks_started{};
+        u32 prefetch_packet_index{};
+        u32 prefetch_packet_offset{};
         bool initial_observed{};
         bool final_observed{};
+        bool prefetch_packet_armed{};
+        bool prefetch_packet_mutation_recorded{};
+        bool prefetch_capacity_recorded{};
         bool resume_armed{};
         bool resume_capacity_recorded{};
         bool initial_mutation_recorded{};
@@ -380,11 +512,27 @@ public:
             state.oversized_buffers.fetch_add(1);
             return {};
         }
-        const auto signature = TryHash(words, HashPhase::Submit);
+        std::vector<u32> baseline;
+        const u64 baseline_bytes = words.size_bytes();
+        if (TryReserveBaseline(baseline_bytes)) {
+            try {
+                baseline.assign(words.begin(), words.end());
+                state.baseline_buffers.fetch_add(1);
+            } catch (...) {
+                state.baseline_bytes.fetch_sub(baseline_bytes);
+                state.baseline_allocation_failures.fetch_add(1);
+            }
+        }
+        const std::span<const u32> submit_words = baseline.empty() ? words : std::span{baseline};
+        const auto signature = TryHash(submit_words, HashPhase::Submit);
         if (!signature.has_value()) {
+            if (!baseline.empty()) {
+                state.baseline_bytes.fetch_sub(baseline_bytes);
+                state.baseline_buffers.fetch_sub(1);
+            }
             return {};
         }
-        return Probe{*this, kind, ordinal, words, *signature};
+        return Probe{*this, kind, ordinal, words, *signature, std::move(baseline)};
     }
 
     [[nodiscard]] CommandBufferLifetimeSnapshot Read() const noexcept {
@@ -431,6 +579,21 @@ private:
         snapshot.initial_budget_exhaustions = state.initial_budget_exhaustions.load();
         snapshot.later_resume_budget_exhaustions = state.later_resume_budget_exhaustions.load();
         snapshot.final_budget_exhaustions = state.final_budget_exhaustions.load();
+        snapshot.baseline_byte_budget = config.baseline_byte_budget;
+        snapshot.baseline_bytes = state.baseline_bytes.load();
+        snapshot.baseline_buffers = state.baseline_buffers.load();
+        snapshot.baseline_budget_exhaustions = state.baseline_budget_exhaustions.load();
+        snapshot.baseline_allocation_failures = state.baseline_allocation_failures.load();
+        snapshot.prefetch_checks = state.prefetch_checks.load();
+        snapshot.prefetch_check_capacity_loss = state.prefetch_check_capacity_loss.load();
+        snapshot.prefetch_invalid_ranges = state.prefetch_invalid_ranges.load();
+        snapshot.prefetch_mutations = state.prefetch_mutations.load();
+        snapshot.last_prefetch_buffer_ordinal = state.last_prefetch_buffer_ordinal.load();
+        snapshot.last_prefetch_buffer_kind =
+            static_cast<CommandBufferKind>(state.last_prefetch_buffer_kind.load());
+        snapshot.last_prefetch_packet_index = state.last_prefetch_packet_index.load();
+        snapshot.last_prefetch_word_offset = state.last_prefetch_word_offset.load();
+        snapshot.last_prefetch_word_count = state.last_prefetch_word_count.load();
         snapshot.initial_mutations = state.initial_mutations.load();
         snapshot.later_resume_mutations = state.later_resume_mutations.load();
         snapshot.final_mutations = state.final_mutations.load();
@@ -455,7 +618,23 @@ private:
             std::min(source.selected_buffer_count, HardMaxSelectedBuffers);
         source.total_hash_byte_budget =
             std::min(source.total_hash_byte_budget, HardMaxHashByteBudget);
+        source.baseline_byte_budget =
+            std::min(source.baseline_byte_budget, HardMaxBaselineByteBudget);
+        source.max_prefetch_checks = std::min(source.max_prefetch_checks, HardMaxPrefetchChecks);
         return source;
+    }
+
+    [[nodiscard]] bool TryReserveBaseline(u64 bytes) noexcept {
+        u64 consumed = state.baseline_bytes.load(std::memory_order_relaxed);
+        while (bytes <= config.baseline_byte_budget &&
+               consumed <= config.baseline_byte_budget - bytes) {
+            if (state.baseline_bytes.compare_exchange_weak(consumed, consumed + bytes,
+                                                           std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        state.baseline_budget_exhaustions.fetch_add(1);
+        return false;
     }
 
     [[nodiscard]] std::optional<u64> TryHash(std::span<const u32> words, HashPhase phase) noexcept {
@@ -514,6 +693,8 @@ private:
         case CommandBufferMutationPhase::Final:
             state.final_mutations.fetch_add(1);
             break;
+        case CommandBufferMutationPhase::PreFetch:
+            return;
         case CommandBufferMutationPhase::None:
             return;
         }
@@ -577,6 +758,12 @@ GetCommandBufferLifetimeDiagnostic() noexcept {
         .total_hash_byte_budget = CommandBufferLifetimeUnsignedEnvironment(
             "SHADPS4_DIAGNOSTIC_COMMAND_BUFFER_LIFETIME_HASH_BYTE_BUDGET", 64ULL * 1024 * 1024,
             CommandBufferLifetimeDiagnostic::HardMaxHashByteBudget),
+        .baseline_byte_budget = CommandBufferLifetimeUnsignedEnvironment(
+            "SHADPS4_DIAGNOSTIC_COMMAND_BUFFER_LIFETIME_BASELINE_BYTE_BUDGET", 64ULL * 1024 * 1024,
+            CommandBufferLifetimeDiagnostic::HardMaxBaselineByteBudget),
+        .max_prefetch_checks = static_cast<u32>(CommandBufferLifetimeUnsignedEnvironment(
+            "SHADPS4_DIAGNOSTIC_COMMAND_BUFFER_LIFETIME_PREFETCH_CHECK_COUNT", 2048,
+            CommandBufferLifetimeDiagnostic::HardMaxPrefetchChecks)),
     }};
     return diagnostic;
 }

@@ -110,6 +110,19 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                 snapshot.final_budget_exhaustions);
             LOG_CRITICAL(
                 Debug,
+                "Command buffer lifetime diagnostic pre-fetch: baseline bytes {}/{} buffers {}, "
+                "budget loss {} allocation loss {}, checks {} capacity loss {} invalid ranges {}, "
+                "mutations {}, last buffer {} kind {} packet {} offset {} words {}",
+                snapshot.baseline_bytes, snapshot.baseline_byte_budget, snapshot.baseline_buffers,
+                snapshot.baseline_budget_exhaustions, snapshot.baseline_allocation_failures,
+                snapshot.prefetch_checks, snapshot.prefetch_check_capacity_loss,
+                snapshot.prefetch_invalid_ranges, snapshot.prefetch_mutations,
+                snapshot.last_prefetch_buffer_ordinal,
+                static_cast<u32>(snapshot.last_prefetch_buffer_kind),
+                snapshot.last_prefetch_packet_index, snapshot.last_prefetch_word_offset,
+                snapshot.last_prefetch_word_count);
+            LOG_CRITICAL(
+                Debug,
                 "Command buffer lifetime diagnostic: sequence {}..{}, observed {}, mutations "
                 "initial/later/final {}/{}/{}, resume checks {} capacity loss {}, oversized {}, "
                 "invalid spans {}, last buffer {} kind {} phase {} resume {} offset {} words {}",

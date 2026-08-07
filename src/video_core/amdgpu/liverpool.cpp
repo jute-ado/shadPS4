@@ -168,9 +168,11 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb,
 
     ccb_lifetime.ObserveInitial(ccb);
 
+    u32 packet_index{};
     while (!ccb.empty()) {
         ProcessCommands();
 
+        ccb_lifetime.ObservePacketHeader(ccb, packet_index);
         const auto* header = reinterpret_cast<const PM4Header*>(ccb.data());
         const u32 type = header->type;
         if (type != 3) {
@@ -179,6 +181,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb,
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        const u32 packet_words = header->type3.NumWords() + 1;
+        ccb_lifetime.ObservePacketBody(ccb, packet_index, packet_words);
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
         case PM4ItOpcode::Nop: {
@@ -235,6 +239,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb,
                             static_cast<u32>(opcode), count);
         }
         ccb = NextPacket(ccb, header->type3.NumWords() + 1);
+        ++packet_index;
     }
 
     ccb_lifetime.ObserveFinal();
@@ -264,9 +269,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     const bool guest_markers_enabled = rasterizer && EmulatorSettings.IsVkGuestMarkersEnabled();
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
+    u32 packet_index{};
     while (!dcb.empty()) {
         ProcessCommands();
 
+        dcb_lifetime.ObservePacketHeader(dcb, packet_index);
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
 
@@ -275,15 +282,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
             break;
         case 0:
+            dcb_lifetime.ObservePacketBody(dcb, packet_index, header->type0.NumWords() + 1);
             UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
                             header->type0.base.Value(), header->type0.NumWords());
             break;
         case 2:
             // Type-2 packet are used for padding purposes
+            dcb_lifetime.ObservePacketBody(dcb, packet_index, 1);
             dcb = NextPacket(dcb, 1);
+            ++packet_index;
             continue;
         case 3:
             const u32 count = header->type3.NumWords();
+            dcb_lifetime.ObservePacketBody(dcb, packet_index, count + 1);
             const PM4ItOpcode opcode = header->type3.opcode;
             switch (opcode) {
             case PM4ItOpcode::Nop: {
@@ -948,6 +959,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 static_cast<u32>(opcode), count);
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
+            ++packet_index;
             break;
         }
     }
