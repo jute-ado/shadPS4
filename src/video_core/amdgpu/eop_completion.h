@@ -33,4 +33,19 @@ void SubmitEopAtGpuCompletion(Packet packet, SubmitWithCompletion&& submit_with_
         Common::UniqueFunction<void>{std::move(completion)});
 }
 
+template <typename Packet, typename DeferCompletion, typename WriteMemory, typename SignalInterrupt,
+          typename NotifyCompletion>
+void DeferEopUntilGpuCompletion(Packet packet, DeferCompletion&& defer_completion,
+                                WriteMemory&& write_memory, SignalInterrupt&& signal_interrupt,
+                                NotifyCompletion&& notify_completion) {
+    auto completion =
+        [packet = std::move(packet), write_memory = std::forward<WriteMemory>(write_memory),
+         signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+         notify_completion = std::forward<NotifyCompletion>(notify_completion)]() mutable {
+            PublishEop(std::move(packet), write_memory, signal_interrupt, notify_completion);
+        };
+    std::forward<DeferCompletion>(defer_completion)(
+        Common::UniqueFunction<void>{std::move(completion)});
+}
+
 } // namespace AmdGpu

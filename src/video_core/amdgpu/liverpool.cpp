@@ -16,6 +16,7 @@
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -90,6 +91,19 @@ void Liverpool::ProcessCommands() {
     }
 }
 
+void Liverpool::FlushPendingEops() {
+    eop_submission_batch.FlushIfPending(
+        [this] { rasterizer->ProcessDownloadImages(); },
+        [this] {
+            auto completions = std::exchange(pending_eop_completions, {});
+            rasterizer->FlushWithGpuCompletion([completions = std::move(completions)]() mutable {
+                for (auto& completion : completions) {
+                    completion();
+                }
+            });
+        });
+}
+
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
@@ -146,11 +160,17 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
         if (has_submit_done) {
-            if (rasterizer) {
+            if (rasterizer && submit_done_callback) {
+                SubmitSubmissionBoundary(
+                    std::move(submit_done_callback),
+                    [this](Common::UniqueFunction<void>&& completion) {
+                        rasterizer->FlushWithGpuCompletion(std::move(completion));
+                    },
+                    [this] { rasterizer->OnSubmit(); });
+            } else if (rasterizer) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
-            }
-            if (submit_done_callback) {
+            } else if (submit_done_callback) {
                 submit_done_callback();
             }
         }
@@ -244,10 +264,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
-        ProcessCommands();
-
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
+        const bool is_eop = type == 3 && header->type3.opcode == PM4ItOpcode::EventWriteEop;
+        const bool continues_eop_batch = is_eop && eop_submission_batch.HasPending();
+        if (!is_eop && rasterizer) {
+            FlushPendingEops();
+        }
+        if (!continues_eop_batch) {
+            ProcessCommands();
+        }
 
         switch (type) {
         default:
@@ -729,9 +755,6 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                if (rasterizer) {
-                    rasterizer->ProcessDownloadImages();
-                }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 auto write_memory = [](void* address, u64 data, u32 num_bytes) {
                     auto* memory = Core::Memory::Instance();
@@ -747,13 +770,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     complete_eop_flip();
                 };
                 if (rasterizer) {
-                    SubmitEopAtGpuCompletion(
+                    DeferEopUntilGpuCompletion(
                         *event_eop,
                         [this](Common::UniqueFunction<void>&& completion) {
-                            rasterizer->FlushWithGpuCompletion(std::move(completion));
+                            pending_eop_completions.emplace_back(std::move(completion));
                         },
                         std::move(write_memory), std::move(signal_interrupt),
                         std::move(notify_completion));
+                    eop_submission_batch.MarkEopPending();
                 } else {
                     PublishEop(*event_eop, std::move(write_memory), std::move(signal_interrupt),
                                std::move(notify_completion));
@@ -924,6 +948,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
+    }
+
+    if (rasterizer) {
+        FlushPendingEops();
     }
 
     if (ce_task.handle) {
