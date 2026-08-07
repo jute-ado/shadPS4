@@ -31,6 +31,7 @@ TEST(CondExecPacket, RejectsNonGfx7BodyAndBoundsDiagnosticRecords) {
     EXPECT_FALSE(DecodeGfx7CondExec(ShortBody).has_value());
 
     CondExecDiagnostic diagnostic;
+    diagnostic.ObserveRejectedPacket(ShortBody.size());
     constexpr std::array<u32, 4> Body{0, 0, 0, 7};
     for (u32 i = 0; i < CondExecDiagnostic::MaxRecords + 3; ++i) {
         const auto packet = DecodeGfx7CondExec(Body);
@@ -39,7 +40,9 @@ TEST(CondExecPacket, RejectsNonGfx7BodyAndBoundsDiagnosticRecords) {
     }
 
     const auto report = diagnostic.Report();
-    EXPECT_EQ(report.total_packets, CondExecDiagnostic::MaxRecords + 3);
+    EXPECT_EQ(report.total_packets, CondExecDiagnostic::MaxRecords + 4);
+    EXPECT_EQ(report.gfx7_packets, CondExecDiagnostic::MaxRecords + 3);
+    EXPECT_EQ(report.decode_rejections, 1U);
     EXPECT_EQ(report.retained_records, CondExecDiagnostic::MaxRecords);
     EXPECT_EQ(report.truncated_records, 3U);
     EXPECT_EQ(report.false_conditions, (CondExecDiagnostic::MaxRecords + 4) / 2);
@@ -69,6 +72,20 @@ TEST(CondExecPacket, CorrelatesFullWordConditionsWithQueryAndPredicationState) {
     EXPECT_EQ(report.set_predication_packets, 1U);
 
     EXPECT_EQ(diagnostic.TakeFrameReport().total_packets, 0U);
+
+    constexpr std::array<u32, 4> PaddingBody{0x100c, 0, 0, 7};
+    constexpr std::array<u32, 4> NextLaneBody{0x1014, 0, 0, 7};
+    const auto padding_packet = DecodeGfx7CondExec(PaddingBody);
+    const auto next_lane_packet = DecodeGfx7CondExec(NextLaneBody);
+    ASSERT_TRUE(padding_packet.has_value());
+    ASSERT_TRUE(next_lane_packet.has_value());
+    diagnostic.Observe(*padding_packet, 1, false);
+    diagnostic.Observe(*next_lane_packet, 1, false);
+
+    const auto next_frame = diagnostic.TakeFrameReport();
+    EXPECT_EQ(next_frame.total_packets, 2U);
+    EXPECT_EQ(next_frame.query_dumps, 0U);
+    EXPECT_EQ(next_frame.query_condition_overlaps, 1U);
 }
 
 } // namespace
