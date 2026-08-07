@@ -79,3 +79,35 @@ TEST(DrawResourceFingerprintDiagnostic, BoundsDrawsDescriptorsAndBytes) {
     EXPECT_GT(bounded.truncated_bytes, 0);
     EXPECT_FALSE(diagnostic.TakeSnapshot().should_report);
 }
+
+TEST(DrawResourceFingerprintDiagnostic, SeparatesDescriptorLocationFromShapeChanges) {
+    DrawResourceFingerprintDiagnostic diagnostic{/*report_limit=*/3};
+    std::array<u32, 4> descriptor{0x1000, 16, 3, 4};
+    std::array<u32, 4> shape = descriptor;
+    shape[0] = 0;
+
+    const auto record = [&] {
+        diagnostic.BeginDraw();
+        diagnostic.RecordDescriptor(DrawResourceDescriptorKind::Buffer, descriptor.data(),
+                                    sizeof(descriptor), shape.data(), sizeof(shape));
+        diagnostic.EndDraw();
+        return diagnostic.TakeSnapshot();
+    };
+
+    const auto baseline = record();
+    EXPECT_EQ(baseline.changed_draws, 1);
+    EXPECT_EQ(baseline.changed_shape_draws, 1);
+
+    descriptor[0] = 0x2000;
+    const auto location_only = record();
+    EXPECT_EQ(location_only.changed_draws, 1);
+    EXPECT_EQ(location_only.changed_shape_draws, 0);
+    EXPECT_TRUE(location_only.shape_matches_previous_frame);
+
+    shape[1] = 32;
+    const auto shape_changed = record();
+    EXPECT_EQ(shape_changed.changed_draws, 0);
+    EXPECT_EQ(shape_changed.changed_shape_draws, 1);
+    ASSERT_EQ(shape_changed.reported_changed_shape_draws, 1);
+    EXPECT_EQ(shape_changed.first_changed_shape_draw_ordinals[0], 0);
+}
