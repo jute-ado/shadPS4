@@ -128,7 +128,8 @@ public:
     /// Obtains a buffer for the specified region.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
-                                                       BufferId buffer_id = {});
+                                                       BufferId buffer_id = {},
+                                                       BufferId* resolved_id = nullptr);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBufferForImage(VAddr gpu_addr, u32 size);
@@ -144,6 +145,10 @@ public:
 
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
+
+    bool PinBufferForDiagnostic(BufferId buffer_id);
+    void ReleaseBufferDiagnosticPin(BufferId buffer_id);
+    [[nodiscard]] bool IsDiagnosticBufferUsable(BufferId buffer_id) const;
 
     /// Processes the fault buffer.
     void ProcessFaultBuffer();

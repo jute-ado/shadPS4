@@ -125,6 +125,7 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 }
 
 void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
+    MarkDiagnosticWrite();
     scheduler->EndRendering();
     ASSERT_MSG(offset % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer size must be a multiple of 4 bytes");
@@ -160,6 +161,12 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
     });
 }
 
+void Buffer::InvalidateMappedRange(u64 offset, u64 size) {
+    if (!is_coherent) {
+        vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset, size);
+    }
+}
+
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x1000;
 
@@ -174,7 +181,7 @@ StreamBuffer::StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& 
 }
 
 std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) {
-    if (!is_coherent && usage == MemoryUsage::Stream) {
+    if (!is_coherent && (usage == MemoryUsage::Stream || usage == MemoryUsage::Download)) {
         size = Common::AlignUp(size, instance->NonCoherentAtomSize());
     }
 

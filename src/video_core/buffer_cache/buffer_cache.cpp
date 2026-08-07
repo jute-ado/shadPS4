@@ -328,6 +328,9 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         const auto buffer_id = FindBuffer(dst, num_bytes);
         auto& buffer = slot_buffers[buffer_id];
         SynchronizeBuffer(buffer, dst, num_bytes, true, true);
+        if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+            buffer.MarkDiagnosticWrite();
+        }
         gpu_modified_ranges.Add(dst, num_bytes);
         return buffer;
     }();
@@ -392,7 +395,11 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
-                                                  bool is_texel_buffer, BufferId buffer_id) {
+                                                  bool is_texel_buffer, BufferId buffer_id,
+                                                  BufferId* resolved_id) {
+    if (resolved_id != nullptr) {
+        *resolved_id = {};
+    }
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
@@ -403,7 +410,13 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     }
     Buffer& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
+    if (resolved_id != nullptr) {
+        *resolved_id = buffer_id;
+    }
     if (is_written) {
+        if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+            buffer.MarkDiagnosticWrite();
+        }
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {&buffer, buffer.Offset(device_addr)};
@@ -454,6 +467,27 @@ BufferId BufferCache::FindBuffer(VAddr device_addr, u32 size) {
         return buffer_id;
     }
     return CreateBuffer(device_addr, size);
+}
+
+bool BufferCache::PinBufferForDiagnostic(BufferId buffer_id) {
+    if (IsBufferInvalid(buffer_id)) {
+        return false;
+    }
+    slot_buffers[buffer_id].diagnostic_readback_pin.Acquire();
+    return true;
+}
+
+void BufferCache::ReleaseBufferDiagnosticPin(BufferId buffer_id) {
+    if (!buffer_id || !slot_buffers.is_allocated(buffer_id)) {
+        return;
+    }
+    if (slot_buffers[buffer_id].diagnostic_readback_pin.Release()) {
+        scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
+    }
+}
+
+bool BufferCache::IsDiagnosticBufferUsable(BufferId buffer_id) const {
+    return buffer_id && slot_buffers.is_allocated(buffer_id) && !slot_buffers[buffer_id].is_deleted;
 }
 
 BufferCache::OverlapResult BufferCache::ResolveOverlaps(VAddr device_addr, u32 wanted_size) {
@@ -536,6 +570,9 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
                               bool accumulate_stream_score) {
     Buffer& new_buffer = slot_buffers[new_buffer_id];
     Buffer& overlap = slot_buffers[overlap_id];
+    if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+        new_buffer.MarkDiagnosticWrite();
+    }
     if (accumulate_stream_score) {
         new_buffer.IncreaseStreamScore(overlap.StreamScore() + 1);
     }
@@ -713,6 +750,9 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
     }
 
     if (src_buffer) {
+        if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+            buffer.MarkDiagnosticWrite();
+        }
         scheduler.EndRendering();
         const auto cmdbuf = scheduler.CommandBuffer();
         const vk::BufferMemoryBarrier2 pre_barrier = {
@@ -826,6 +866,9 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         return false;
     }
     auto& tile_manager = texture_cache.GetTileManager();
+    if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+        buffer.MarkDiagnosticWrite();
+    }
     tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
     return true;
 }
@@ -848,6 +891,9 @@ void BufferCache::SynchronizeDmaBuffers() {
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {
+    if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+        buffer.MarkDiagnosticWrite();
+    }
     vk::BufferCopy copy = {
         .srcOffset = 0,
         .dstOffset = buffer.Offset(address),
@@ -933,10 +979,19 @@ void BufferCache::TouchBuffer(const Buffer& buffer) {
 }
 
 void BufferCache::DeleteBuffer(BufferId buffer_id) {
+    if (!buffer_id || !slot_buffers.is_allocated(buffer_id)) {
+        return;
+    }
     Buffer& buffer = slot_buffers[buffer_id];
+    const auto decision = buffer.diagnostic_readback_pin.RequestDelete();
+    if (!decision.logical_delete) {
+        return;
+    }
     Unregister(buffer_id);
-    scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
     buffer.is_deleted = true;
+    if (decision.erase_now) {
+        scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
+    }
 }
 
 } // namespace VideoCore

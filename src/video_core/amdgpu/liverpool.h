@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/device_resident_read_fingerprint.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -96,6 +97,19 @@ public:
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
     }
+
+    [[nodiscard]] bool IsDeviceResidentReadDiagnosticEnabled() const noexcept {
+        return device_resident_read_diagnostic_enabled;
+    }
+
+    [[nodiscard]] bool IsDeviceResidentReadDiagnosticCollecting() const noexcept {
+        return device_resident_read_diagnostic_enabled &&
+               DeviceResidentReadFingerprintPlanner::ShouldCollect(
+                   device_resident_read_frame_sequence, device_resident_read_report_start,
+                   device_resident_read_report_end);
+    }
+
+    void ReportDeviceResidentReadFrame();
 
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
@@ -203,6 +217,10 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    u64 device_resident_read_frame_sequence{};
+    u64 device_resident_read_report_start{};
+    u64 device_resident_read_report_end{};
+    bool device_resident_read_diagnostic_enabled{};
     EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {

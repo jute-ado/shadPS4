@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
+#include <string>
+
 #include "common/debug.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -39,6 +42,12 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
+    if (liverpool->IsDeviceResidentReadDiagnosticEnabled()) {
+        device_read_download_buffer.emplace(
+            instance, scheduler, VideoCore::MemoryUsage::Download,
+            AmdGpu::DeviceResidentReadFingerprintPlanner::RequiredWindowBytes(
+                instance.NonCoherentAtomSize()));
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -201,11 +210,33 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    if (liverpool->IsDeviceResidentReadDiagnosticCollecting()) {
+        device_read_planner.BeginDraw();
+    }
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        device_read_planner.AbortDraw();
         return;
     }
     const auto state = BeginRendering(pipeline);
+    if (liverpool->IsDeviceResidentReadDiagnosticCollecting()) {
+        const auto committed =
+            device_read_planner.CommitDraw(state.depth_stencil_attachment.has_depth);
+        for (u32 i = 0; i < committed.source_count; ++i) {
+            const VideoCore::BufferId source_id{committed.source_buffer_ids[i]};
+            if (std::ranges::find(device_read_pins, source_id) != device_read_pins.end()) {
+                continue;
+            }
+            if (device_read_pins.size() == device_read_pins.capacity() ||
+                !buffer_cache.PinBufferForDiagnostic(source_id)) {
+                device_read_planner.RecordPinFailure(source_id.index);
+                continue;
+            }
+            device_read_pins.push_back(source_id);
+        }
+        ++device_read_draw_ordinal;
+    }
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -249,11 +280,33 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    if (liverpool->IsDeviceResidentReadDiagnosticCollecting()) {
+        device_read_planner.BeginDraw();
+    }
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        device_read_planner.AbortDraw();
         return;
     }
     const auto state = BeginRendering(pipeline);
+    if (liverpool->IsDeviceResidentReadDiagnosticCollecting()) {
+        const auto committed =
+            device_read_planner.CommitDraw(state.depth_stencil_attachment.has_depth);
+        for (u32 i = 0; i < committed.source_count; ++i) {
+            const VideoCore::BufferId source_id{committed.source_buffer_ids[i]};
+            if (std::ranges::find(device_read_pins, source_id) != device_read_pins.end()) {
+                continue;
+            }
+            if (device_read_pins.size() == device_read_pins.capacity() ||
+                !buffer_cache.PinBufferForDiagnostic(source_id)) {
+                device_read_planner.RecordPinFailure(source_id.index);
+                continue;
+            }
+            device_read_pins.push_back(source_id);
+        }
+        ++device_read_draw_ordinal;
+    }
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -311,6 +364,238 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     ResetBindings();
+}
+
+void Rasterizer::ScheduleDeviceResidentReadFingerprint(u64 sequence, bool capture) {
+    const auto plan = device_read_planner.TakeFramePlan();
+    device_read_draw_ordinal = 0;
+    const auto release_pins = [this] {
+        for (const auto buffer_id : device_read_pins) {
+            buffer_cache.ReleaseBufferDiagnosticPin(buffer_id);
+        }
+        device_read_pins.clear();
+    };
+    if (!capture || !device_read_download_buffer.has_value()) {
+        release_pins();
+        return;
+    }
+    if (plan.range_count == 0 || plan.sample_bytes == 0) {
+        LOG_INFO(Render,
+                 "DeviceResidentReadFingerprint sequence={} depth_draws={} excluded_non_depth={} "
+                 "observations={} ranges={} copied_samples=0 planned_sample_bytes={} first=0 "
+                 "unchanged=0 changed=0 changed_ordinals= exact_aba=0 aba_ordinals= "
+                 "multi_version=0 serial_advanced=0 source_unavailable=0 busy=0 "
+                 "rejected_not_gpu_modified={} rejected_writable={} rejected_write_alias={} "
+                 "rejected_oob={} truncated_observations={} truncated_ranges={} "
+                 "truncated_history={} pin_failures={}",
+                 sequence, plan.depth_draws, plan.excluded_non_depth_draws, plan.observations,
+                 plan.range_count, plan.sample_bytes, plan.rejected_not_gpu_modified,
+                 plan.rejected_writable, plan.rejected_write_alias, plan.rejected_out_of_bounds,
+                 plan.truncated_observations, plan.truncated_ranges, plan.truncated_history,
+                 plan.pin_failures);
+        release_pins();
+        return;
+    }
+
+    auto& download_buffer = *device_read_download_buffer;
+    const auto [download, download_offset] =
+        download_buffer.Map(plan.sample_bytes, instance.NonCoherentAtomSize(), false);
+    if (download == nullptr) {
+        LOG_INFO(Render,
+                 "DeviceResidentReadFingerprint sequence={} depth_draws={} excluded_non_depth={} "
+                 "observations={} ranges={} planned_sample_bytes={} busy=1 "
+                 "rejected_not_gpu_modified={} "
+                 "rejected_writable={} rejected_write_alias={} rejected_oob={} "
+                 "truncated_observations={} truncated_ranges={} truncated_history={} "
+                 "pin_failures={}",
+                 sequence, plan.depth_draws, plan.excluded_non_depth_draws, plan.observations,
+                 plan.range_count, plan.sample_bytes, plan.rejected_not_gpu_modified,
+                 plan.rejected_writable, plan.rejected_write_alias, plan.rejected_out_of_bounds,
+                 plan.truncated_observations, plan.truncated_ranges, plan.truncated_history,
+                 plan.pin_failures);
+        release_pins();
+        return;
+    }
+    download_buffer.Commit();
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+
+    enum class RangeStatus : u8 {
+        Stable,
+        MultiVersion,
+        SerialAdvanced,
+        SourceUnavailable,
+    };
+    std::array<RangeStatus, AmdGpu::DeviceResidentReadFingerprintPlanner::MaxRangesPerFrame>
+        range_status{};
+    boost::container::static_vector<VideoCore::BufferId,
+                                    AmdGpu::DeviceResidentReadFingerprintPlanner::MaxRangesPerFrame>
+        sources;
+    boost::container::static_vector<
+        vk::BufferMemoryBarrier2,
+        AmdGpu::DeviceResidentReadFingerprintPlanner::MaxRangesPerFrame + 1>
+        pre_barriers;
+    for (u32 i = 0; i < plan.range_count; ++i) {
+        const auto& range = plan.ranges[i];
+        const VideoCore::BufferId source_id{range.source_buffer_id};
+        if (range.multi_version) {
+            range_status[i] = RangeStatus::MultiVersion;
+            continue;
+        }
+        if (range.source_unavailable || !buffer_cache.IsDiagnosticBufferUsable(source_id)) {
+            range_status[i] = RangeStatus::SourceUnavailable;
+            continue;
+        }
+        auto& source = buffer_cache.GetBuffer(source_id);
+        if (source.DiagnosticWriteSerial() != range.write_serial) {
+            range_status[i] = RangeStatus::SerialAdvanced;
+            continue;
+        }
+        range_status[i] = RangeStatus::Stable;
+        if (std::ranges::find(sources, source_id) != sources.end()) {
+            continue;
+        }
+        sources.push_back(source_id);
+        if (auto barrier = source.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                                             vk::PipelineStageFlagBits2::eTransfer)) {
+            pre_barriers.push_back(*barrier);
+        }
+    }
+    pre_barriers.push_back(vk::BufferMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+        .srcAccessMask = vk::AccessFlagBits2::eHostRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .buffer = download_buffer.Handle(),
+        .offset = download_offset,
+        .size = plan.sample_bytes,
+    });
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+        .pBufferMemoryBarriers = pre_barriers.data(),
+    });
+
+    for (const auto source_id : sources) {
+        auto& source = buffer_cache.GetBuffer(source_id);
+        boost::container::static_vector<
+            vk::BufferCopy, AmdGpu::DeviceResidentReadFingerprintPlanner::MaxRangesPerFrame * 3>
+            copies;
+        for (u32 i = 0; i < plan.range_count; ++i) {
+            const auto& range = plan.ranges[i];
+            if (range_status[i] != RangeStatus::Stable ||
+                range.source_buffer_id != source_id.index) {
+                continue;
+            }
+            for (u32 sample_index = 0; sample_index < range.sample_count; ++sample_index) {
+                const auto& sample = range.samples[sample_index];
+                copies.push_back(vk::BufferCopy{
+                    .srcOffset = sample.source_offset,
+                    .dstOffset = download_offset + sample.destination_offset,
+                    .size = sample.size,
+                });
+            }
+        }
+        if (!copies.empty()) {
+            cmdbuf.copyBuffer(source.Handle(), download_buffer.Handle(), copies);
+        }
+    }
+
+    const vk::BufferMemoryBarrier2 post_barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        .buffer = download_buffer.Handle(),
+        .offset = download_offset,
+        .size = plan.sample_bytes,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &post_barrier,
+    });
+
+    scheduler.DeferOperation([this, sequence, download, download_offset, plan, range_status] {
+        device_read_download_buffer->InvalidateMappedRange(download_offset, plan.sample_bytes);
+        u32 first{};
+        u32 unchanged{};
+        u32 changed{};
+        u32 exact_aba{};
+        u32 multi_version{};
+        u32 serial_advanced{};
+        u32 source_unavailable{};
+        u32 copied_samples{};
+        std::string changed_ordinals;
+        std::string aba_ordinals;
+        const auto append_ordinal = [](std::string& text,
+                                       const AmdGpu::DeviceResidentReadRange& range) {
+            if (text.size() >= 160) {
+                return;
+            }
+            const auto semantic =
+                AmdGpu::DeviceResidentReadFingerprintPlanner::DecodeSemanticIdentity(
+                    range.semantic_identity);
+            if (!text.empty()) {
+                text += ',';
+            }
+            text += std::to_string(range.stable_identity) + '@' + std::to_string(semantic.draw) +
+                    ':' + std::to_string(semantic.stage) + ':' + std::to_string(semantic.binding);
+        };
+        for (u32 i = 0; i < plan.range_count; ++i) {
+            const auto& range = plan.ranges[i];
+            if (range_status[i] == RangeStatus::MultiVersion) {
+                ++multi_version;
+                continue;
+            }
+            if (range_status[i] == RangeStatus::SerialAdvanced) {
+                ++serial_advanced;
+                continue;
+            }
+            if (range_status[i] == RangeStatus::SourceUnavailable) {
+                ++source_unavailable;
+                continue;
+            }
+            copied_samples += range.sample_count;
+            u64 fingerprint = 14695981039346656037ULL;
+            for (u32 sample_index = 0; sample_index < range.sample_count; ++sample_index) {
+                const auto& sample = range.samples[sample_index];
+                const auto* bytes = download + sample.destination_offset;
+                for (u32 byte = 0; byte < sample.size; ++byte) {
+                    fingerprint = (fingerprint ^ bytes[byte]) * 1099511628211ULL;
+                }
+            }
+            const auto result =
+                device_read_reducer.Observe(range.stable_identity, fingerprint, sequence);
+            first += result.first_observation;
+            unchanged += result.unchanged;
+            changed += result.changed;
+            exact_aba += result.exact_aba_return;
+            if (result.changed) {
+                append_ordinal(changed_ordinals, range);
+            }
+            if (result.exact_aba_return) {
+                append_ordinal(aba_ordinals, range);
+            }
+        }
+        LOG_INFO(Render,
+                 "DeviceResidentReadFingerprint sequence={} depth_draws={} excluded_non_depth={} "
+                 "observations={} ranges={} copied_samples={} planned_sample_bytes={} first={} "
+                 "unchanged={} "
+                 "changed={} changed_ordinals={} exact_aba={} aba_ordinals={} multi_version={} "
+                 "serial_advanced={} source_unavailable={} busy=0 "
+                 "rejected_not_gpu_modified={} rejected_writable={} rejected_write_alias={} "
+                 "rejected_oob={} truncated_observations={} truncated_ranges={} "
+                 "truncated_history={} pin_failures={}",
+                 sequence, plan.depth_draws, plan.excluded_non_depth_draws, plan.observations,
+                 plan.range_count, copied_samples, plan.sample_bytes, first, unchanged, changed,
+                 changed_ordinals, exact_aba, aba_ordinals, multi_version, serial_advanced,
+                 source_unavailable, plan.rejected_not_gpu_modified, plan.rejected_writable,
+                 plan.rejected_write_alias, plan.rejected_out_of_bounds,
+                 plan.truncated_observations, plan.truncated_ranges, plan.truncated_history,
+                 plan.pin_failures);
+    });
+    release_pins();
 }
 
 void Rasterizer::DispatchDirect() {
@@ -644,13 +929,33 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             }
         } else {
-            const auto [vk_buffer, offset] = buffer_cache.ObtainBuffer(
-                vsharp.base_address, size, desc.is_written, desc.is_formatted, buffer_id);
+            const bool gpu_modified_before =
+                buffer_cache.IsRegionGpuModified(vsharp.base_address, size);
+            VideoCore::BufferId resolved_buffer_id{};
+            const auto [vk_buffer, offset] =
+                buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                          desc.is_formatted, buffer_id, &resolved_buffer_id);
             const u32 offset_aligned = Common::AlignDown(offset, alignment);
             const u32 adjust = offset - offset_aligned;
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
+            if (liverpool->IsDeviceResidentReadDiagnosticCollecting() && resolved_buffer_id &&
+                vk_buffer->usage == VideoCore::MemoryUsage::DeviceLocal) {
+                const u64 semantic_identity = (static_cast<u64>(device_read_draw_ordinal) << 32) |
+                                              (static_cast<u64>(stage.l_stage) << 24) | i;
+                device_read_planner.Observe({
+                    .source_buffer_id = resolved_buffer_id.index,
+                    .semantic_identity = semantic_identity,
+                    .source_offset = offset,
+                    .source_buffer_size = vk_buffer->SizeBytes(),
+                    .bound_size = size,
+                    .write_serial = vk_buffer->DiagnosticWriteSerial(),
+                    .device_local = true,
+                    .gpu_modified = gpu_modified_before,
+                    .shader_read_only = !desc.is_written,
+                });
+            }
             if (auto barrier =
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,

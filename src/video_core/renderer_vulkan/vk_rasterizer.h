@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <optional>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "video_core/amdgpu/device_resident_read_fingerprint.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -45,6 +48,7 @@ public:
     void Draw(bool is_indexed, u32 index_offset = 0);
     void DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 size, u32 max_count,
                       VAddr count_address);
+    void ScheduleDeviceResidentReadFingerprint(u64 sequence, bool capture);
 
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
@@ -147,6 +151,13 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+    AmdGpu::DeviceResidentReadFingerprintPlanner device_read_planner{};
+    AmdGpu::DeviceResidentReadReducer device_read_reducer{};
+    std::optional<VideoCore::StreamBuffer> device_read_download_buffer{};
+    boost::container::static_vector<VideoCore::BufferId,
+                                    AmdGpu::DeviceResidentReadFingerprintPlanner::MaxRangesPerFrame>
+        device_read_pins{};
+    u32 device_read_draw_ordinal{};
 };
 
 } // namespace Vulkan

@@ -3,6 +3,11 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <charconv>
+#include <cstdlib>
+#include <limits>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,12 +73,42 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    device_resident_read_diagnostic_enabled =
+        std::getenv("SHADPS4_DEVICE_RESIDENT_READ_DIAGNOSTIC") != nullptr;
+    const auto parse_bound = [](const char* name, u64 fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        u64 parsed{};
+        const std::string_view text{value};
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+        return result.ec == std::errc{} ? parsed : fallback;
+    };
+    device_resident_read_report_start = parse_bound("SHADPS4_DEVICE_RESIDENT_READ_REPORT_START", 0);
+    const u64 report_count =
+        std::min<u64>(parse_bound("SHADPS4_DEVICE_RESIDENT_READ_REPORT_COUNT", 512),
+                      DeviceResidentReadFingerprintPlanner::MaxReportFrames);
+    device_resident_read_report_end =
+        device_resident_read_report_start > std::numeric_limits<u64>::max() - report_count
+            ? std::numeric_limits<u64>::max()
+            : device_resident_read_report_start + report_count;
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+}
+
+void Liverpool::ReportDeviceResidentReadFrame() {
+    if (!device_resident_read_diagnostic_enabled || rasterizer == nullptr) {
+        return;
+    }
+    const u64 sequence = device_resident_read_frame_sequence++;
+    const bool selected = DeviceResidentReadFingerprintPlanner::ShouldCollect(
+        sequence, device_resident_read_report_start, device_resident_read_report_end);
+    rasterizer->ScheduleDeviceResidentReadFingerprint(sequence, selected);
 }
 
 void Liverpool::ProcessCommands() {
