@@ -131,12 +131,21 @@ TEST(IndirectArgumentReadbackPlan, DefersDeletionOnlyUntilRecordedCopyReleasesPi
     DiagnosticReadbackPin pin;
 
     pin.Acquire();
-    EXPECT_FALSE(pin.RequestDelete());
+    const auto first_delete = pin.RequestDelete();
+    EXPECT_TRUE(first_delete.logical_delete);
+    EXPECT_FALSE(first_delete.erase_now);
     EXPECT_TRUE(pin.IsDeletePending());
+
+    const auto duplicate_delete = pin.RequestDelete();
+    EXPECT_FALSE(duplicate_delete.logical_delete);
+    EXPECT_FALSE(duplicate_delete.erase_now);
+
     EXPECT_TRUE(pin.Release());
     EXPECT_FALSE(pin.IsPinned());
 
-    EXPECT_TRUE(pin.RequestDelete());
+    const auto delete_after_release = pin.RequestDelete();
+    EXPECT_FALSE(delete_after_release.logical_delete);
+    EXPECT_FALSE(delete_after_release.erase_now);
 }
 
 } // namespace
