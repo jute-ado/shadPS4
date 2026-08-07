@@ -213,8 +213,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
         return;
     }
-    RecordDrawResourceFingerprint(pipeline);
     const auto state = BeginRendering(pipeline);
+    RecordDrawResourceFingerprint(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -273,8 +273,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
         return;
     }
-    RecordDrawResourceFingerprint(pipeline);
     const auto state = BeginRendering(pipeline);
+    RecordDrawResourceFingerprint(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -516,6 +516,22 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
                                          sizeof(sharp), &shape, sizeof(shape), &location,
                                          sizeof(location));
         }
+    }
+    for (u32 cb = 0; cb < cb_descs.size(); ++cb) {
+        const auto image_id = cb_descs[cb].first;
+        if (!image_id) {
+            continue;
+        }
+        const auto& image = texture_cache.GetImage(image_id);
+        diagnostic->RecordHostIdentity(
+            cb, image_id.index, image.image_uid,
+            static_cast<u64>(reinterpret_cast<uintptr_t>(image.backing)));
+    }
+    if (const auto image_id = db_desc.first; image_id) {
+        const auto& image = texture_cache.GetImage(image_id);
+        diagnostic->RecordHostIdentity(
+            static_cast<u32>(cb_descs.size()), image_id.index, image.image_uid,
+            static_cast<u64>(reinterpret_cast<uintptr_t>(image.backing)));
     }
     diagnostic->EndDraw();
 }

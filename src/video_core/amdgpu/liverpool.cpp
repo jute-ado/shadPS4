@@ -392,6 +392,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                "location_aba_return_draws={} "
                                                                "location_aba_return_ordinals={} "
                                                                "location_combined_hash={:#x} "
+                                                               "changed_host_identity_draws={} "
+                                                               "changed_host_identity_ordinals={} "
+                                                               "host_identity_aba_return_draws={} "
+                                                               "host_identity_aba_return_ordinals={} "
                                                                "truncated_draws={} "
                                                                "truncated_descriptors={} "
                                                                "truncated_bytes={}",
@@ -449,6 +453,40 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                }(),
                                                                draw_resources
                                                                    .location_combined_hash,
+                                                               draw_resources
+                                                                   .changed_host_identity_draws,
+                                                               [&] {
+                                                                   std::string ordinals;
+                                                                   for (u32 i = 0;
+                                                                        i < draw_resources
+                                                                                .reported_changed_host_identity_draws;
+                                                                        ++i) {
+                                                                       if (!ordinals.empty()) {
+                                                                           ordinals += ',';
+                                                                       }
+                                                                       ordinals += std::to_string(
+                                                                           draw_resources
+                                                                               .first_changed_host_identity_draw_ordinals[i]);
+                                                                   }
+                                                                   return ordinals;
+                                                               }(),
+                                                               draw_resources
+                                                                   .host_identity_aba_return_draws,
+                                                               [&] {
+                                                                   std::string ordinals;
+                                                                   for (u32 i = 0;
+                                                                        i < draw_resources
+                                                                                .reported_host_identity_aba_return_draws;
+                                                                        ++i) {
+                                                                       if (!ordinals.empty()) {
+                                                                           ordinals += ',';
+                                                                       }
+                                                                       ordinals += std::to_string(
+                                                                           draw_resources
+                                                                               .first_host_identity_aba_return_draw_ordinals[i]);
+                                                                   }
+                                                                   return ordinals;
+                                                               }(),
                                                                draw_resources.truncated_draws,
                                                                draw_resources
                                                                    .truncated_descriptors,
