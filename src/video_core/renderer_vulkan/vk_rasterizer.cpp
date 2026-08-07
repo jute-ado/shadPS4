@@ -205,6 +205,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!BindResources(pipeline)) {
         return;
     }
+    RecordDrawResourceFingerprint(pipeline);
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
@@ -253,6 +254,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!BindResources(pipeline)) {
         return;
     }
+    RecordDrawResourceFingerprint(pipeline);
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
@@ -432,6 +434,50 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     return true;
+}
+
+void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline) {
+    auto* diagnostic = liverpool->GetDrawResourceFingerprintDiagnostic();
+    if (diagnostic == nullptr) {
+        return;
+    }
+
+    diagnostic->BeginDraw();
+    for (const auto* stage : pipeline->GetStages()) {
+        if (stage == nullptr) {
+            continue;
+        }
+        for (const auto& desc : stage->buffers) {
+            const auto sharp = desc.GetSharp(*stage);
+            diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Buffer, &sharp,
+                                         sizeof(sharp));
+        }
+        for (const auto& desc : stage->images) {
+            const auto sharp = desc.GetSharp(*stage);
+            diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Image, &sharp,
+                                         sizeof(sharp));
+        }
+        for (const auto& desc : stage->samplers) {
+            const auto sharp = desc.GetSharp(*stage);
+            diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Sampler, &sharp,
+                                         sizeof(sharp));
+        }
+        for (const auto& desc : stage->fmasks) {
+            const auto sharp = desc.GetSharp(*stage);
+            diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::FMask, &sharp,
+                                         sizeof(sharp));
+        }
+    }
+
+    if (const auto& fetch_shader = pipeline->GetFetchShader(); fetch_shader) {
+        const auto& vertex_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        for (const auto& attribute : fetch_shader->attributes) {
+            const auto sharp = attribute.GetSharp(vertex_info);
+            diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Vertex, &sharp,
+                                         sizeof(sharp));
+        }
+    }
+    diagnostic->EndDraw();
 }
 
 bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {

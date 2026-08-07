@@ -3,6 +3,10 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,6 +72,10 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    const char* draw_resource_diagnostic =
+        std::getenv("SHADPS4_DRAW_RESOURCE_FINGERPRINT_DIAGNOSTIC");
+    draw_resource_fingerprint_diagnostic_enabled =
+        draw_resource_diagnostic != nullptr && std::string_view{draw_resource_diagnostic} == "1";
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -274,9 +282,54 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    const auto draw_resources = draw_resource_fingerprint_diagnostic_enabled
+                                                    ? draw_resource_fingerprint_diagnostic
+                                                          .TakeSnapshot()
+                                                    : DrawResourceFingerprintSnapshot{};
+                    const u64 queued_time_us = Libraries::Kernel::sceKernelGetProcessTime();
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
-                                                   [this] {
+                                                   [this, draw_resources, queued_time_us] {
+                                                       if (draw_resources.should_report) {
+                                                           std::string changed_ordinals;
+                                                           for (u32 i = 0;
+                                                                i < draw_resources
+                                                                        .reported_changed_draws;
+                                                                ++i) {
+                                                               if (!changed_ordinals.empty()) {
+                                                                   changed_ordinals += ',';
+                                                               }
+                                                               changed_ordinals += std::to_string(
+                                                                   draw_resources
+                                                                       .first_changed_draw_ordinals[i]);
+                                                           }
+                                                           LOG_INFO(
+                                                               Render,
+                                                               "DrawResourceFingerprint sequence={} "
+                                                               "queued_time_us={} completed_time_us={} "
+                                                               "draws={} descriptors={} bytes_hashed={} "
+                                                               "matches_previous={} changed_draws={} "
+                                                               "changed_ordinals={} combined_hash={:#x} "
+                                                               "truncated_draws={} "
+                                                               "truncated_descriptors={} "
+                                                               "truncated_bytes={}",
+                                                               draw_resources.sequence,
+                                                               queued_time_us,
+                                                               Libraries::Kernel::
+                                                                   sceKernelGetProcessTime(),
+                                                               draw_resources.draws,
+                                                               draw_resources.descriptors,
+                                                               draw_resources.bytes_hashed,
+                                                               draw_resources
+                                                                   .matches_previous_frame,
+                                                               draw_resources.changed_draws,
+                                                               changed_ordinals,
+                                                               draw_resources.combined_hash,
+                                                               draw_resources.truncated_draws,
+                                                               draw_resources
+                                                                   .truncated_descriptors,
+                                                               draw_resources.truncated_bytes);
+                                                       }
                                                        SendCommand([] {
                                                            Platform::IrqC::Instance()->Signal(
                                                                Platform::InterruptId::GfxFlip);
