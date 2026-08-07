@@ -127,5 +127,17 @@ TEST(IndirectArgumentReadbackPlan, ReducesChangesAndZeroCountsWithoutExposingVal
     EXPECT_TRUE(report.zero_instance_count);
 }
 
+TEST(IndirectArgumentReadbackPlan, DefersDeletionOnlyUntilRecordedCopyReleasesPin) {
+    DiagnosticReadbackPin pin;
+
+    pin.Acquire();
+    EXPECT_FALSE(pin.RequestDelete());
+    EXPECT_TRUE(pin.IsDeletePending());
+    EXPECT_TRUE(pin.Release());
+    EXPECT_FALSE(pin.IsPinned());
+
+    EXPECT_TRUE(pin.RequestDelete());
+}
+
 } // namespace
 } // namespace AmdGpu
