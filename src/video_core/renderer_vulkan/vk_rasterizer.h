@@ -146,6 +146,13 @@ private:
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+    struct DrawHostImageIdentity {
+        u32 slot{};
+        u64 uid{};
+        u64 backing{};
+    };
+    boost::container::small_vector<DrawHostImageIdentity, Shader::NUM_IMAGES>
+        draw_host_image_identities;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
 };

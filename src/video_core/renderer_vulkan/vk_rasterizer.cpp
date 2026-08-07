@@ -207,6 +207,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     PrepareRenderState(pipeline);
+    draw_host_image_identities.clear();
     if (!BindResources(pipeline)) {
         if (content_diagnostic != nullptr) {
             content_diagnostic->AbortDraw();
@@ -267,6 +268,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     PrepareRenderState(pipeline);
+    draw_host_image_identities.clear();
     if (!BindResources(pipeline)) {
         if (content_diagnostic != nullptr) {
             content_diagnostic->AbortDraw();
@@ -517,6 +519,10 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
                                          sizeof(location));
         }
     }
+    for (u32 binding = 0; binding < draw_host_image_identities.size(); ++binding) {
+        const auto& identity = draw_host_image_identities[binding];
+        diagnostic->RecordHostIdentity(binding, identity.slot, identity.uid, identity.backing);
+    }
     for (u32 cb = 0; cb < cb_descs.size(); ++cb) {
         const auto image_id = cb_descs[cb].first;
         if (!image_id) {
@@ -524,13 +530,15 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
         }
         const auto& image = texture_cache.GetImage(image_id);
         diagnostic->RecordHostIdentity(
-            cb, image_id.index, image.image_uid,
+            static_cast<u32>(draw_host_image_identities.size()) + cb, image_id.index,
+            image.image_uid,
             static_cast<u64>(reinterpret_cast<uintptr_t>(image.backing)));
     }
     if (const auto image_id = db_desc.first; image_id) {
         const auto& image = texture_cache.GetImage(image_id);
         diagnostic->RecordHostIdentity(
-            static_cast<u32>(cb_descs.size()), image_id.index, image.image_uid,
+            static_cast<u32>(draw_host_image_identities.size() + cb_descs.size()),
+            image_id.index, image.image_uid,
             static_cast<u64>(reinterpret_cast<uintptr_t>(image.backing)));
     }
     diagnostic->EndDraw();
@@ -840,6 +848,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
+            draw_host_image_identities.emplace_back(Common::SlotId::INVALID_INDEX, 0, 0);
         } else {
             if (auto& old_image = texture_cache.GetImage(image_id);
                 old_image.binding.needs_rebind) {
@@ -886,6 +895,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
+            draw_host_image_identities.emplace_back(
+                image_id.index, image.image_uid,
+                static_cast<u64>(reinterpret_cast<uintptr_t>(image.backing)));
         }
     }
 
