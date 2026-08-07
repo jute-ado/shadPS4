@@ -21,7 +21,11 @@ TEST(FrameDrawTopologyDiagnostic, SnapshotsAndClearsBoundedFrameCounters) {
     tracker.ObserveDraw(DrawTopologyKind::Indirect);
     tracker.ObserveDraw(DrawTopologyKind::IndirectIndexed);
     tracker.ObserveDrawResult(DrawTopologyResult::Submitted);
-    tracker.ObserveDrawResult(DrawTopologyResult::Filtered);
+    tracker.ObserveDrawResult(DrawTopologyResult::FilterFastClear);
+    tracker.ObserveDrawResult(DrawTopologyResult::FilterFmaskDecompress);
+    tracker.ObserveDrawResult(DrawTopologyResult::FilterResolve);
+    tracker.ObserveDrawResult(DrawTopologyResult::FilterPrimitiveNone);
+    tracker.ObserveDrawResult(DrawTopologyResult::FilterDepthStencilCopy);
     tracker.ObserveDrawResult(DrawTopologyResult::MissingPipeline);
     tracker.ObserveDrawResult(DrawTopologyResult::BindingFailed);
     tracker.ObserveOcclusion(OcclusionEventKind::Control);
@@ -36,7 +40,12 @@ TEST(FrameDrawTopologyDiagnostic, SnapshotsAndClearsBoundedFrameCounters) {
     EXPECT_EQ(first.indirect, 1);
     EXPECT_EQ(first.indirect_indexed, 1);
     EXPECT_EQ(first.submitted, 1);
-    EXPECT_EQ(first.filtered, 1);
+    EXPECT_EQ(first.filtered, 5);
+    EXPECT_EQ(first.filter_fast_clear, 1);
+    EXPECT_EQ(first.filter_fmask_decompress, 1);
+    EXPECT_EQ(first.filter_resolve, 1);
+    EXPECT_EQ(first.filter_primitive_none, 1);
+    EXPECT_EQ(first.filter_depth_stencil_copy, 1);
     EXPECT_EQ(first.missing_pipeline, 1);
     EXPECT_EQ(first.binding_failed, 1);
     EXPECT_EQ(first.occlusion_control, 1);
