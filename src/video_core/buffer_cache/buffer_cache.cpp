@@ -1006,7 +1006,8 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 
 void BufferCache::BindVertexBuffers(
     const Vulkan::GraphicsPipeline& pipeline,
-    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    std::span<const PhysicalBackingCommandBufferRead> planned_reads) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -1037,34 +1038,17 @@ void BufferCache::BindVertexBuffers(
         }
     };
 
-    // Build list of ranges covering the requested buffers
+    // Use the exact normalized ranges materialized by command ownership planning.
     Vulkan::VertexInputs<BufferRange> ranges{};
-    for (const auto& buffer : guest_buffers) {
-        if (buffer.base_address != 0 && buffer.GetSize() > 0) {
-            ranges.emplace_back(buffer.base_address, buffer.base_address + buffer.GetSize());
-        }
+    for (const auto& read : planned_reads) {
+        ASSERT(read.role == PhysicalBackingCommandBufferReadRole::Vertex && read.address != 0 &&
+               read.size != 0);
+        ranges.emplace_back(read.address, read.address + read.size);
     }
 
-    // Merge connecting ranges together
-    Vulkan::VertexInputs<BufferRange> ranges_merged{};
-    if (!ranges.empty()) {
-        std::ranges::sort(ranges, [](const BufferRange& lhv, const BufferRange& rhv) {
-            return lhv.base_address < rhv.base_address;
-        });
-        ranges_merged.emplace_back(ranges[0]);
-        for (auto range : ranges) {
-            auto& prev_range = ranges_merged.back();
-            if (prev_range.end_address < range.base_address) {
-                ranges_merged.emplace_back(range);
-            } else {
-                prev_range.end_address = std::max(prev_range.end_address, range.end_address);
-            }
-        }
-    }
-
-    // Map buffers for merged ranges
-    for (auto& range : ranges_merged) {
-        const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+    // Map buffers for the ranges that were prepared before writer ownership changed.
+    for (auto& range : ranges) {
+        const u64 size = range.GetSize();
         const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
@@ -1085,11 +1069,11 @@ void BufferCache::BindVertexBuffers(
     for (const auto& buffer : guest_buffers) {
         if (buffer.base_address != 0 && buffer.GetSize() > 0) {
             const auto host_buffer_info =
-                std::ranges::find_if(ranges_merged, [&](const BufferRange& range) {
+                std::ranges::find_if(ranges, [&](const BufferRange& range) {
                     return buffer.base_address >= range.base_address &&
                            buffer.base_address < range.end_address;
                 });
-            ASSERT(host_buffer_info != ranges_merged.cend());
+            ASSERT(host_buffer_info != ranges.cend());
             host_buffers.emplace_back(host_buffer_info->vk_buffer);
             host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
                                    host_buffer_info->base_address);
@@ -1112,20 +1096,18 @@ void BufferCache::BindVertexBuffers(
 }
 
 void BufferCache::BindIndexBuffer(
-    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    const PhysicalBackingCommandBufferRead& planned_read,
+    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
+    ASSERT(planned_read.role == PhysicalBackingCommandBufferReadRole::Index &&
+           planned_read.address != 0 && planned_read.size != 0);
 
     // Figure out index type and size.
     const bool is_index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
     const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
-    const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
-    const VAddr index_address =
-        regs.index_base_address.Address<VAddr>() + index_offset * index_size;
-
     // Bind index buffer.
-    const u32 index_buffer_size = regs.num_indices * index_size;
-    const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
-    if (IsRegionGpuModified(index_address, index_buffer_size)) {
+    const auto [vk_buffer, offset] = ObtainBuffer(planned_read.address, planned_read.size, false);
+    if (IsRegionGpuModified(planned_read.address, planned_read.size)) {
         if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
                                                  vk::PipelineStageFlagBits2::eIndexInput)) {
             barriers.emplace_back(*barrier);

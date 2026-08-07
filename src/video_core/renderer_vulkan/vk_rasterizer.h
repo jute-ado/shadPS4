@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <span>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -116,9 +117,16 @@ private:
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
-    [[nodiscard]] bool PreparePhysicalBackingGpuCommand(const Pipeline* pipeline);
+    [[nodiscard]] bool PreparePhysicalBackingGpuCommand(
+        const Pipeline* pipeline,
+        std::span<const VideoCore::PhysicalBackingCommandBufferRead> fixed_buffer_reads);
+    [[nodiscard]] bool CollectPhysicalBackingVertexBufferReads(
+        const GraphicsPipeline* pipeline,
+        std::vector<VideoCore::PhysicalBackingCommandBufferRead>& reads) const;
     [[nodiscard]] bool DepthStencilAttachmentWillWrite() const;
-    bool BindResources(const Pipeline* pipeline);
+    bool BindResources(
+        const Pipeline* pipeline,
+        std::span<const VideoCore::PhysicalBackingCommandBufferRead> fixed_buffer_reads = {});
     void TrackPhysicalBackingTextureGpuWriteOutput(VideoCore::ImageId image_id);
     void RecordPhysicalBackingTextureGpuWrites(const RenderState* render_state);
 

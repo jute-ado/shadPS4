@@ -323,6 +323,89 @@ enum class PhysicalBackingCommandResourceKind {
     Texture,
 };
 
+enum class PhysicalBackingCommandBufferReadRole {
+    Vertex,
+    Index,
+    IndirectArgs,
+    IndirectCount,
+};
+
+struct PhysicalBackingCommandBufferRead {
+    PhysicalBackingCommandBufferReadRole role{};
+    VAddr address{};
+    u32 size{};
+
+    auto operator<=>(const PhysicalBackingCommandBufferRead&) const = default;
+};
+
+[[nodiscard]] inline bool AppendPhysicalBackingCommandBufferRead(
+    std::vector<PhysicalBackingCommandBufferRead>& reads,
+    PhysicalBackingCommandBufferReadRole role, VAddr address, u64 size) {
+    if (address == 0 || size == 0) {
+        return true;
+    }
+    if (size > std::numeric_limits<u32>::max() ||
+        address > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+    reads.push_back({role, address, static_cast<u32>(size)});
+    return true;
+}
+
+[[nodiscard]] inline std::optional<std::vector<PhysicalBackingCommandBufferRead>>
+NormalizePhysicalBackingVertexBufferReads(
+    std::span<const PhysicalBackingCommandBufferRead> reads) {
+    std::vector<PhysicalBackingCommandBufferRead> normalized;
+    normalized.reserve(reads.size());
+    for (const auto& read : reads) {
+        if (read.role != PhysicalBackingCommandBufferReadRole::Vertex || read.address == 0 ||
+            read.size == 0 || read.address > std::numeric_limits<VAddr>::max() - read.size) {
+            return std::nullopt;
+        }
+        normalized.push_back(read);
+    }
+    std::ranges::sort(normalized, {}, &PhysicalBackingCommandBufferRead::address);
+    std::vector<PhysicalBackingCommandBufferRead> merged;
+    merged.reserve(normalized.size());
+    for (const auto& read : normalized) {
+        if (merged.empty()) {
+            merged.push_back(read);
+            continue;
+        }
+        auto& previous = merged.back();
+        const VAddr previous_end = previous.address + previous.size;
+        if (read.address > previous_end) {
+            merged.push_back(read);
+            continue;
+        }
+        const VAddr read_end = read.address + read.size;
+        const u64 merged_size = std::max(previous_end, read_end) - previous.address;
+        if (merged_size > std::numeric_limits<u32>::max()) {
+            return std::nullopt;
+        }
+        previous.size = static_cast<u32>(merged_size);
+    }
+    return merged;
+}
+
+[[nodiscard]] inline std::optional<PhysicalBackingCommandBufferRead>
+PlanPhysicalBackingIndexBufferRead(VAddr index_base, u32 index_offset, u32 num_indices,
+                                   u32 index_size) {
+    const u64 byte_offset = static_cast<u64>(index_offset) * index_size;
+    const u64 size = static_cast<u64>(num_indices) * index_size;
+    if (index_base == 0 || index_size == 0 || size == 0 ||
+        size > std::numeric_limits<u32>::max() ||
+        index_base > std::numeric_limits<VAddr>::max() - byte_offset) {
+        return std::nullopt;
+    }
+    const VAddr address = index_base + byte_offset;
+    if (address > std::numeric_limits<VAddr>::max() - size) {
+        return std::nullopt;
+    }
+    return PhysicalBackingCommandBufferRead{PhysicalBackingCommandBufferReadRole::Index, address,
+                                            static_cast<u32>(size)};
+}
+
 struct PhysicalBackingCommandResource {
     PhysicalBackingCommandResourceKind kind{};
     u32 index{};
@@ -335,6 +418,31 @@ struct PhysicalBackingCommandAccess {
     bool is_written{};
     std::vector<u64> physical_pages;
 };
+
+struct PhysicalBackingCommandBufferReadResolution {
+    u32 buffer_index{};
+    std::vector<u64> physical_pages;
+};
+
+template <typename Resolve>
+[[nodiscard]] std::optional<std::vector<PhysicalBackingCommandAccess>>
+ResolvePhysicalBackingCommandBufferReads(std::span<const PhysicalBackingCommandBufferRead> reads,
+                                         Resolve&& resolve) {
+    std::vector<PhysicalBackingCommandAccess> accesses;
+    accesses.reserve(reads.size());
+    for (const auto& read : reads) {
+        const auto resolution = resolve(read);
+        if (!resolution || resolution->buffer_index == std::numeric_limits<u32>::max()) {
+            return std::nullopt;
+        }
+        accesses.push_back({
+            .resource = {PhysicalBackingCommandResourceKind::Buffer, resolution->buffer_index},
+            .is_written = false,
+            .physical_pages = resolution->physical_pages,
+        });
+    }
+    return accesses;
+}
 
 struct PhysicalBackingCommandPagePlan {
     u64 physical_page{};

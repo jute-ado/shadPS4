@@ -38,6 +38,7 @@ class GraphicsPipeline;
 namespace VideoCore {
 
 using BufferId = Common::SlotId;
+struct PhysicalBackingCommandBufferRead;
 
 class TextureCache;
 class MemoryTracker;
@@ -142,10 +143,11 @@ public:
 
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
-                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+                           std::span<const PhysicalBackingCommandBufferRead> planned_reads);
 
     /// Bind host index buffer for the current draw.
-    void BindIndexBuffer(u32 index_offset,
+    void BindIndexBuffer(const PhysicalBackingCommandBufferRead& planned_read,
                          boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)

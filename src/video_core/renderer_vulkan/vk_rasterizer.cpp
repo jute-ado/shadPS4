@@ -219,15 +219,34 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    std::vector<VideoCore::PhysicalBackingCommandBufferRead> vertex_buffer_reads;
+    if (!CollectPhysicalBackingVertexBufferReads(pipeline, vertex_buffer_reads)) {
+        return;
+    }
+    auto fixed_buffer_reads = vertex_buffer_reads;
+    std::optional<VideoCore::PhysicalBackingCommandBufferRead> index_buffer_read;
+    if (is_indexed) {
+        const auto& regs = liverpool->regs;
+        const u32 index_size = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16
+                                   ? sizeof(u16)
+                                   : sizeof(u32);
+        index_buffer_read = VideoCore::PlanPhysicalBackingIndexBufferRead(
+            regs.index_base_address.Address<VAddr>(), index_offset, regs.num_indices, index_size);
+        if (!index_buffer_read) {
+            return;
+        }
+        fixed_buffer_reads.push_back(*index_buffer_read);
+    }
+
     PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    if (!BindResources(pipeline, fixed_buffer_reads)) {
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, vertex_buffer_reads);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+        buffer_cache.BindIndexBuffer(*index_buffer_read, buffer_barriers);
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
@@ -268,24 +287,65 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    using ReadRole = VideoCore::PhysicalBackingCommandBufferReadRole;
+    using Read = VideoCore::PhysicalBackingCommandBufferRead;
+    std::vector<Read> vertex_buffer_reads;
+    if (!CollectPhysicalBackingVertexBufferReads(pipeline, vertex_buffer_reads)) {
+        return;
+    }
+    auto fixed_buffer_reads = vertex_buffer_reads;
+    std::optional<Read> index_buffer_read;
+    if (is_indexed) {
+        const auto& regs = liverpool->regs;
+        const u32 index_size = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16
+                                   ? sizeof(u16)
+                                   : sizeof(u32);
+        index_buffer_read = VideoCore::PlanPhysicalBackingIndexBufferRead(
+            regs.index_base_address.Address<VAddr>(), 0, regs.num_indices, index_size);
+        if (!index_buffer_read) {
+            return;
+        }
+        fixed_buffer_reads.push_back(*index_buffer_read);
+    }
+    if (arg_address == 0 || arg_address > std::numeric_limits<VAddr>::max() - offset) {
+        return;
+    }
+    const size_t args_index = fixed_buffer_reads.size();
+    if (!VideoCore::AppendPhysicalBackingCommandBufferRead(
+            fixed_buffer_reads, ReadRole::IndirectArgs, arg_address + offset,
+            static_cast<u64>(stride) * max_count) ||
+        fixed_buffer_reads.size() != args_index + 1) {
+        return;
+    }
+    const Read indirect_args_read = fixed_buffer_reads.back();
+    std::optional<Read> indirect_count_read;
+    if (count_address != 0) {
+        if (!VideoCore::AppendPhysicalBackingCommandBufferRead(
+                fixed_buffer_reads, ReadRole::IndirectCount, count_address, sizeof(u32))) {
+            return;
+        }
+        indirect_count_read = fixed_buffer_reads.back();
+    }
+
     PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    if (!BindResources(pipeline, fixed_buffer_reads)) {
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, vertex_buffer_reads);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
+        buffer_cache.BindIndexBuffer(*index_buffer_read, buffer_barriers);
     }
 
     const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+        buffer_cache.ObtainBuffer(indirect_args_read.address, indirect_args_read.size, false);
 
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};
-    if (count_address != 0) {
-        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
+    if (indirect_count_read) {
+        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(
+            indirect_count_read->address, indirect_count_read->size, false);
     }
 
     if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
@@ -375,11 +435,18 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
-    if (!BindResources(pipeline)) {
+    std::vector<VideoCore::PhysicalBackingCommandBufferRead> fixed_buffer_reads;
+    if (address == 0 || address > std::numeric_limits<VAddr>::max() - offset ||
+        !VideoCore::AppendPhysicalBackingCommandBufferRead(
+            fixed_buffer_reads, VideoCore::PhysicalBackingCommandBufferReadRole::IndirectArgs,
+            address + offset, size) ||
+        fixed_buffer_reads.size() != 1 || !BindResources(pipeline, fixed_buffer_reads)) {
         return;
     }
+    const auto& indirect_args_read = fixed_buffer_reads.front();
 
-    const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
+    const auto [buffer, base] =
+        buffer_cache.ObtainBuffer(indirect_args_read.address, indirect_args_read.size, false);
 
     if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
                                           vk::PipelineStageFlagBits2::eDrawIndirect)) {
@@ -446,7 +513,40 @@ bool Rasterizer::DepthStencilAttachmentWillWrite() const {
     return depth_write || stencil_write || depth_clear || stencil_clear;
 }
 
-bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
+bool Rasterizer::CollectPhysicalBackingVertexBufferReads(
+    const GraphicsPipeline* pipeline,
+    std::vector<VideoCore::PhysicalBackingCommandBufferRead>& reads) const {
+    Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
+    Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
+    Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
+    Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
+    pipeline->GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+                              liverpool->regs.vgt_instance_step_rate_0,
+                              liverpool->regs.vgt_instance_step_rate_1);
+    std::vector<VideoCore::PhysicalBackingCommandBufferRead> raw_reads;
+    raw_reads.reserve(guest_buffers.size());
+    for (const auto& buffer : guest_buffers) {
+        if (buffer.base_address == 0 || buffer.GetSize() == 0) {
+            continue;
+        }
+        const u64 size = memory->ClampRangeSize(buffer.base_address, buffer.GetSize());
+        if (size == 0 || !VideoCore::AppendPhysicalBackingCommandBufferRead(
+                raw_reads, VideoCore::PhysicalBackingCommandBufferReadRole::Vertex,
+                buffer.base_address, size)) {
+            return false;
+        }
+    }
+    auto normalized = VideoCore::NormalizePhysicalBackingVertexBufferReads(raw_reads);
+    if (!normalized) {
+        return false;
+    }
+    reads = std::move(*normalized);
+    return true;
+}
+
+bool Rasterizer::PreparePhysicalBackingGpuCommand(
+    const Pipeline* pipeline,
+    std::span<const VideoCore::PhysicalBackingCommandBufferRead> fixed_buffer_reads) {
     using Kind = VideoCore::PhysicalBackingCommandResourceKind;
     using Resource = VideoCore::PhysicalBackingCommandResource;
     using Access = VideoCore::PhysicalBackingCommandAccess;
@@ -478,6 +578,37 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
         accesses.push_back({resource, is_written, *physical_pages});
         return true;
     };
+
+    auto buffer_accesses = VideoCore::ResolvePhysicalBackingCommandBufferReads(
+        fixed_buffer_reads, [&](const VideoCore::PhysicalBackingCommandBufferRead& read)
+                                -> std::optional<
+                                    VideoCore::PhysicalBackingCommandBufferReadResolution> {
+            const auto buffer_id = buffer_cache.FindBuffer(read.address, read.size);
+            auto physical_pages =
+                buffer_cache.ResolvePhysicalBackingPages(read.address, read.size);
+            if (!physical_pages) {
+                return std::nullopt;
+            }
+            return VideoCore::PhysicalBackingCommandBufferReadResolution{
+                .buffer_index = buffer_id.index,
+                .physical_pages = std::move(*physical_pages),
+            };
+        });
+    if (!buffer_accesses) {
+        return false;
+    }
+    for (size_t i = 0; i < fixed_buffer_reads.size(); ++i) {
+        const auto& read = fixed_buffer_reads[i];
+        const auto resource = (*buffer_accesses)[i].resource;
+        const bool range_registered = std::ranges::any_of(resources, [&](const auto& range) {
+            return range.resource == resource && range.address == read.address &&
+                   range.size == read.size;
+        });
+        if (!range_registered) {
+            resources.push_back({resource, read.address, read.size});
+        }
+        accesses.push_back(std::move((*buffer_accesses)[i]));
+    }
 
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
@@ -569,13 +700,15 @@ bool Rasterizer::PreparePhysicalBackingGpuCommand(const Pipeline* pipeline) {
     return true;
 }
 
-bool Rasterizer::BindResources(const Pipeline* pipeline) {
+bool Rasterizer::BindResources(
+    const Pipeline* pipeline,
+    std::span<const VideoCore::PhysicalBackingCommandBufferRead> fixed_buffer_reads) {
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
         return false;
     }
 
-    if (!PreparePhysicalBackingGpuCommand(pipeline)) {
+    if (!PreparePhysicalBackingGpuCommand(pipeline, fixed_buffer_reads)) {
         ResetBindings();
         return false;
     }
