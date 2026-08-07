@@ -10,10 +10,12 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include <array>
 #include <functional>
 #include <mutex>
-#include <unordered_map>
 #include <queue>
+#include <unordered_map>
+#include <vector>
 
 namespace Platform {
 
@@ -38,26 +40,26 @@ struct IrqController {
     void RegisterOnce(InterruptId irq, IrqHandler handler) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<size_t>(irq)];
         std::unique_lock lock{ctx.m_lock};
-        ctx.one_time_subscribers.emplace(handler);
+        ctx.one_time_subscribers.emplace(std::move(handler));
     }
 
     void Register(InterruptId irq, IrqHandler handler, void* uid) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<size_t>(irq)];
 
         std::unique_lock lock{ctx.m_lock};
         ASSERT_MSG(ctx.persistent_handlers.find(uid) == ctx.persistent_handlers.cend(),
                    "The handler is already registered!");
-        ctx.persistent_handlers.emplace(uid, handler);
+        ctx.persistent_handlers.emplace(uid, std::move(handler));
     }
 
     void Unregister(InterruptId irq, void* uid) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<size_t>(irq)];
         std::unique_lock lock{ctx.m_lock};
         ctx.persistent_handlers.erase(uid);
     }
@@ -65,20 +67,29 @@ struct IrqController {
     void Signal(InterruptId irq) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Unexpected IRQ signaled");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
-        std::unique_lock lock{ctx.m_lock};
+        auto& ctx = irq_contexts[static_cast<size_t>(irq)];
+        std::unique_lock signal_lock{ctx.m_signal_lock};
+        std::vector<IrqHandler> persistent_handlers;
+        IrqHandler one_time_handler;
+        {
+            std::unique_lock lock{ctx.m_lock};
+            persistent_handlers.reserve(ctx.persistent_handlers.size());
+            for (const auto& [uid, handler] : ctx.persistent_handlers) {
+                persistent_handlers.emplace_back(handler);
+            }
+            if (!ctx.one_time_subscribers.empty()) {
+                one_time_handler = std::move(ctx.one_time_subscribers.front());
+                ctx.one_time_subscribers.pop();
+            }
+        }
 
         LOG_TRACE(Core, "IRQ signaled: {}", magic_enum::enum_name(irq));
 
-        for (auto& [uid, h] : ctx.persistent_handlers) {
-            h(irq);
+        for (auto& handler : persistent_handlers) {
+            handler(irq);
         }
-
-        if (!ctx.one_time_subscribers.empty()) {
-            const auto& h = ctx.one_time_subscribers.front();
-            h(irq);
-
-            ctx.one_time_subscribers.pop();
+        if (one_time_handler) {
+            one_time_handler(irq);
         }
     }
 
@@ -87,8 +98,10 @@ private:
         std::unordered_map<void*, IrqHandler> persistent_handlers{};
         std::queue<IrqHandler> one_time_subscribers{};
         std::mutex m_lock{};
+        std::mutex m_signal_lock{};
     };
-    std::unordered_map<InterruptId, IrqContext> irq_contexts{};
+    static constexpr size_t NumInterrupts = static_cast<size_t>(InterruptId::InterruptIdMax) + 1;
+    std::array<IrqContext, NumInterrupts> irq_contexts{};
 };
 
 using IrqC = Common::Singleton<IrqController>;
