@@ -127,8 +127,8 @@ public:
 
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
                                                        vk::PipelineStageFlagBits2 dst_stage,
-                                                       u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
+                                                       u32 offset = 0, bool force = false) {
+        if (!force && dst_acess_mask == access_mask && stage == dst_stage) {
             return {};
         }
 

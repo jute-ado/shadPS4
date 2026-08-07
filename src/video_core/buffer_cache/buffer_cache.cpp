@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/tiled_buffer_publication.h"
 
 namespace VideoCore {
 
@@ -825,8 +826,33 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     if (copy_size == 0) {
         return false;
     }
+    const auto publication = GetTiledBufferPublicationPlan(
+        {.stage = buffer.stage, .access = buffer.access_mask}, image.info.props.is_tiled);
+    if (publication.required) {
+        scheduler.EndRendering();
+        const auto barrier = buffer.GetBarrier(publication.before_write.dst.access,
+                                               publication.before_write.dst.stage, 0,
+                                               publication.before_write.required);
+        ASSERT(barrier.has_value());
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &*barrier,
+        });
+    }
     auto& tile_manager = texture_cache.GetTileManager();
     tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
+    if (publication.required) {
+        const auto barrier =
+            buffer.GetBarrier(publication.before_read.dst.access, publication.before_read.dst.stage,
+                              0, publication.before_read.required);
+        ASSERT(barrier.has_value());
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &*barrier,
+        });
+    }
     return true;
 }
 
