@@ -619,7 +619,9 @@ PlanPhysicalBackingGpuCommandAliases(std::span<const PhysicalBackingCommandAcces
             std::ranges::any_of(access.physical_pages, [&](u64 physical_page) {
                 return written_pages.contains(physical_page);
             });
-        if (access.is_read && touches_written_page) {
+        if (access.is_read &&
+            (access.resource.kind == PhysicalBackingCommandResourceKind::Buffer ||
+             touches_written_page)) {
             plan.read_snapshot_order.push_back(access.resource);
         }
         if (access.is_written) {
