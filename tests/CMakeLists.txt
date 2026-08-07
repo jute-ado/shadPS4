@@ -330,6 +330,16 @@ target_compile_features(shadps4_legacy_user_data_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_legacy_user_data_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_legacy_user_data_test)
 
+add_executable(shadps4_shader_resource_snapshot_generation_test
+    test_shader_resource_snapshot_generation.cpp
+)
+target_include_directories(shadps4_shader_resource_snapshot_generation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_shader_resource_snapshot_generation_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_shader_resource_snapshot_generation_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_shader_resource_snapshot_generation_test)
+
 set(SETTINGS_TEST_SOURCES
     # Under test
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
