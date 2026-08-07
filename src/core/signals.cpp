@@ -74,12 +74,13 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
             LOG_CRITICAL(
                 Debug,
                 "EOP boundary diagnostic: sequence {}..{}, submit enqueued {}@{}, consumed {}@{}, "
-                "completed {}@{}, EOP decoded {}@{}, IRQ delivered {}@{}",
+                "completed {}@{}, EOP decoded {}@{}, IRQ requested {}@{}, delivered {}@{}",
                 snapshot.sequence_before, snapshot.sequence_after, snapshot.submit_done_enqueued,
                 snapshot.submit_done_enqueued_sequence, snapshot.submit_done_consumed,
                 snapshot.submit_done_consumed_sequence, snapshot.submit_done_boundary_completed,
                 snapshot.submit_done_boundary_completed_sequence, snapshot.eop_decoded,
-                snapshot.eop_decoded_sequence, snapshot.eop_irq_delivered,
+                snapshot.eop_decoded_sequence, snapshot.eop_irq_requested,
+                snapshot.eop_irq_requested_sequence, snapshot.eop_irq_delivered,
                 snapshot.eop_irq_delivered_sequence);
         }
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);

@@ -21,6 +21,8 @@ struct Snapshot {
     u64 submit_done_boundary_completed_sequence{};
     u64 eop_decoded{};
     u64 eop_decoded_sequence{};
+    u64 eop_irq_requested{};
+    u64 eop_irq_requested_sequence{};
     u64 eop_irq_delivered{};
     u64 eop_irq_delivered_sequence{};
     u64 sequence_after{};
@@ -36,6 +38,8 @@ struct State {
     std::atomic<u64> submit_done_boundary_completed_sequence{};
     std::atomic<u64> eop_decoded{};
     std::atomic<u64> eop_decoded_sequence{};
+    std::atomic<u64> eop_irq_requested{};
+    std::atomic<u64> eop_irq_requested_sequence{};
     std::atomic<u64> eop_irq_delivered{};
     std::atomic<u64> eop_irq_delivered_sequence{};
 };
@@ -88,6 +92,11 @@ inline void RecordEopIrqDelivered() noexcept {
     Record(state.eop_irq_delivered, state.eop_irq_delivered_sequence);
 }
 
+inline void RecordEopIrqRequested() noexcept {
+    auto& state = GetState();
+    Record(state.eop_irq_requested, state.eop_irq_requested_sequence);
+}
+
 [[nodiscard]] inline Snapshot Read() noexcept {
     const auto& state = GetState();
     Snapshot snapshot{};
@@ -101,6 +110,8 @@ inline void RecordEopIrqDelivered() noexcept {
         state.submit_done_boundary_completed_sequence.load();
     snapshot.eop_decoded = state.eop_decoded.load();
     snapshot.eop_decoded_sequence = state.eop_decoded_sequence.load();
+    snapshot.eop_irq_requested = state.eop_irq_requested.load();
+    snapshot.eop_irq_requested_sequence = state.eop_irq_requested_sequence.load();
     snapshot.eop_irq_delivered = state.eop_irq_delivered.load();
     snapshot.eop_irq_delivered_sequence = state.eop_irq_delivered_sequence.load();
     snapshot.sequence_after = state.sequence.load();

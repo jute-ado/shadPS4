@@ -746,6 +746,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         }
                     },
                     [] {
+                        EopBoundaryDiagnostic::RecordEopIrqRequested();
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
                         EopBoundaryDiagnostic::RecordEopIrqDelivered();
                     },
