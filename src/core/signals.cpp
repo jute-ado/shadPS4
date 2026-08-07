@@ -9,6 +9,7 @@
 #include "core/signals.h"
 #include "core/windows_exception_policy.h"
 #include "emulator.h"
+#include "shader_recompiler/resource_snapshot_generation_report.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -68,6 +69,7 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (WindowsException::ShouldShutdownForUnclaimedException(code)) {
+        Shader::ReportResourceSnapshotGenerationDiagnosticOnce(true);
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }

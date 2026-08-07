@@ -19,8 +19,7 @@ constexpr std::array<u32, 4> UserDataB{0xb0, 0xb1, 0xb2, 0xb3};
 constexpr std::array<u32, 4> ResourcesA{0xaa10, 0xaa11, 0xaa12, 0xaa13};
 constexpr std::array<u32, 4> ResourcesB{0xbb10, 0xbb11, 0xbb12, 0xbb13};
 
-Snapshot MakeSnapshot(const std::array<u32, 4>& user_data,
-                      const std::array<u32, 4>& resources) {
+Snapshot MakeSnapshot(const std::array<u32, 4>& user_data, const std::array<u32, 4>& resources) {
     Snapshot result;
     result.insert(result.end(), user_data.begin(), user_data.end());
     result.insert(result.end(), resources.begin(), resources.end());
@@ -32,8 +31,7 @@ TEST(ShaderResourceSnapshotGeneration, AcceptsStableFirstGeneration) {
     u32 captures{};
 
     const auto observation = ObserveResourceSnapshotGeneration(
-        generation_a, UserDataA.size(), true, 2, 64,
-        [&]() -> std::optional<Snapshot> {
+        generation_a, UserDataA.size(), true, 2, 64, [&]() -> std::optional<Snapshot> {
             ++captures;
             return generation_a;
         });
@@ -76,7 +74,7 @@ TEST(ShaderResourceSnapshotGeneration, RejectsHybridMutationEvenWhenLaterGenerat
 
 TEST(ShaderResourceSnapshotGeneration, RejectsNestedParentChildMutation) {
     // The first two resource words represent a parent table entry and the latter two its child.
-    const Snapshot nested_hybrid{UserDataA[0], UserDataA[1], UserDataA[2], UserDataA[3],
+    const Snapshot nested_hybrid{UserDataA[0],  UserDataA[1],  UserDataA[2],  UserDataA[3],
                                  ResourcesA[0], ResourcesA[1], ResourcesB[2], ResourcesB[3]};
     const Snapshot nested_b = MakeSnapshot(UserDataA, ResourcesB);
     std::array snapshots{nested_b, nested_b};
@@ -111,9 +109,9 @@ TEST(ShaderResourceSnapshotGeneration, ReportsBoundedRetryExhaustionAsUnavailabl
 TEST(ShaderResourceSnapshotGeneration, ReportsCaptureFailureAsUnavailable) {
     const Snapshot generation_a = MakeSnapshot(UserDataA, ResourcesA);
 
-    const auto observation = ObserveResourceSnapshotGeneration(
-        generation_a, UserDataA.size(), true, 2, 64,
-        []() -> std::optional<Snapshot> { return std::nullopt; });
+    const auto observation =
+        ObserveResourceSnapshotGeneration(generation_a, UserDataA.size(), true, 2, 64,
+                                          []() -> std::optional<Snapshot> { return std::nullopt; });
 
     EXPECT_EQ(observation.status, ResourceSnapshotGenerationStatus::CaptureUnavailable);
     EXPECT_FALSE(observation.available);
@@ -128,23 +126,81 @@ TEST(ShaderResourceSnapshotGeneration, DisabledAndCapacityPathsPerformNoValidati
         return generation_a;
     };
 
-    const auto disabled = ObserveResourceSnapshotGeneration(
-        generation_a, UserDataA.size(), false, 2, 64, capture);
+    const auto disabled =
+        ObserveResourceSnapshotGeneration(generation_a, UserDataA.size(), false, 2, 64, capture);
     EXPECT_EQ(disabled.status, ResourceSnapshotGenerationStatus::Disabled);
     EXPECT_EQ(captures, 0);
 
-    const auto oversized = ObserveResourceSnapshotGeneration(
-        generation_a, UserDataA.size(), true, 2, generation_a.size() - 1, capture);
+    const auto oversized = ObserveResourceSnapshotGeneration(generation_a, UserDataA.size(), true,
+                                                             2, generation_a.size() - 1, capture);
     EXPECT_EQ(oversized.status, ResourceSnapshotGenerationStatus::CapacityExceeded);
     EXPECT_FALSE(oversized.available);
     EXPECT_EQ(captures, 0);
 
-    const auto excessive_retries = ObserveResourceSnapshotGeneration(
-        generation_a, UserDataA.size(), true, MaxResourceSnapshotValidationCaptures + 1, 64,
-        capture);
+    const auto excessive_retries =
+        ObserveResourceSnapshotGeneration(generation_a, UserDataA.size(), true,
+                                          MaxResourceSnapshotValidationCaptures + 1, 64, capture);
     EXPECT_EQ(excessive_retries.status, ResourceSnapshotGenerationStatus::CapacityExceeded);
     EXPECT_FALSE(excessive_retries.available);
     EXPECT_EQ(captures, 0);
+
+    const auto no_retries =
+        ObserveResourceSnapshotGeneration(generation_a, UserDataA.size(), true, 0, 64, capture);
+    EXPECT_EQ(no_retries.status, ResourceSnapshotGenerationStatus::CapacityExceeded);
+    EXPECT_FALSE(no_retries.available);
+    EXPECT_EQ(captures, 0);
+}
+
+TEST(ShaderResourceSnapshotGeneration, AggregatesPrivacySafeFrameDrawAndStageCoverage) {
+    ResourceSnapshotGenerationDiagnostic diagnostic;
+    diagnostic.ObserveFrameBoundary();
+    diagnostic.ObserveDraw();
+    diagnostic.ObserveDispatch();
+
+    const ResourceSnapshotGenerationObservation stable{
+        .status = ResourceSnapshotGenerationStatus::Stable,
+        .validation_captures = 1,
+        .available = true,
+        .rendered_generation_stable = true,
+    };
+    const ResourceSnapshotGenerationObservation changed{
+        .status = ResourceSnapshotGenerationStatus::ChangedThenStable,
+        .validation_captures = 2,
+        .available = true,
+        .user_data_changed = true,
+        .resource_data_changed = true,
+    };
+
+    EXPECT_FALSE(diagnostic.ObserveStage(0, 8, stable).should_report);
+    const auto event = diagnostic.ObserveStage(3, 12, changed);
+    EXPECT_TRUE(event.should_report);
+    EXPECT_EQ(event.occurrence, 1);
+    EXPECT_EQ(event.frame, 1);
+    EXPECT_EQ(event.draw, 1);
+    EXPECT_EQ(event.dispatch, 1);
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_TRUE(snapshot.stable);
+    EXPECT_EQ(snapshot.frames, 1);
+    EXPECT_EQ(snapshot.draws, 1);
+    EXPECT_EQ(snapshot.dispatches, 1);
+    EXPECT_EQ(snapshot.observations, 2);
+    EXPECT_EQ(snapshot.stable_generations, 1);
+    EXPECT_EQ(snapshot.changed_then_stable, 1);
+    EXPECT_EQ(snapshot.validation_captures, 3);
+    EXPECT_EQ(snapshot.user_data_changes, 1);
+    EXPECT_EQ(snapshot.resource_data_changes, 1);
+    EXPECT_EQ(snapshot.observed_words, 20);
+    EXPECT_EQ(snapshot.maximum_snapshot_words, 12);
+    EXPECT_EQ(snapshot.stage_observations[0], 1);
+    EXPECT_EQ(snapshot.stage_observations[3], 1);
+    EXPECT_EQ(snapshot.last_status, ResourceSnapshotGenerationStatus::ChangedThenStable);
+}
+
+TEST(ShaderResourceSnapshotGeneration, FinalSummaryPublicationIsSingleShot) {
+    ResourceSnapshotGenerationDiagnostic diagnostic;
+    EXPECT_TRUE(diagnostic.TryMarkReported());
+    EXPECT_FALSE(diagnostic.TryMarkReported());
 }
 
 } // namespace

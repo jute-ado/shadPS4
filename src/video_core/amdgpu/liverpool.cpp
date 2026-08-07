@@ -13,6 +13,7 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "shader_recompiler/resource_snapshot_generation.h"
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
@@ -273,6 +274,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
+                    Shader::ObserveResourceSnapshotFrameBoundary();
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,

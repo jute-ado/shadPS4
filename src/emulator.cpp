@@ -40,6 +40,7 @@
 #include "core/memory.h"
 #include "core/user_settings.h"
 #include "emulator.h"
+#include "shader_recompiler/resource_snapshot_generation_report.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderdoc.h"
 
@@ -81,6 +82,7 @@ void Emulator::Shutdown() {
     if (exit_done) {
         return;
     }
+    Shader::ReportResourceSnapshotGenerationDiagnosticOnce(false);
     Common::Log::Flush();
     if (controllers) {
         controllers->ResetLightbarColors();

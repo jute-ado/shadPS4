@@ -17,6 +17,7 @@
 #include "shader_recompiler/ir/type.h"
 #include "shader_recompiler/params.h"
 #include "shader_recompiler/resource.h"
+#include "shader_recompiler/resource_snapshot_generation.h"
 #include "shader_recompiler/runtime_info.h"
 
 namespace Serialization {
@@ -24,6 +25,8 @@ struct Archive;
 }
 
 namespace Shader {
+
+static_assert(NumResourceSnapshotLogicalStages == static_cast<u32>(LogicalStage::NumLogicalStages));
 
 enum class Qualifier : u8 {
     None,
@@ -190,13 +193,49 @@ struct Info : InfoPersistent {
 
     void RefreshFlatBuf() {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
-        ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
-        std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
-        if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+        CaptureFlatBuf(flattened_ud_buf);
+
+        if (!ResourceSnapshotGenerationDiagnosticEnabled()) {
+            return;
+        }
+
+        const auto observation = ObserveResourceSnapshotGeneration(
+            flattened_ud_buf, user_data.size(), true, MaxResourceSnapshotValidationCaptures,
+            MaxResourceSnapshotDiagnosticWords, [&]() -> std::optional<std::vector<u32>> {
+                try {
+                    std::vector<u32> validation(srt_info.flattened_bufsize_dw);
+                    CaptureFlatBuf(validation);
+                    return validation;
+                } catch (const std::bad_alloc&) {
+                    return std::nullopt;
+                }
+            });
+        const auto event = GetResourceSnapshotGenerationDiagnostic().ObserveStage(
+            static_cast<u32>(l_stage), flattened_ud_buf.size(), observation);
+        if (event.should_report) {
+            LOG_WARNING(Render_Recompiler,
+                        "ShaderResourceGeneration occurrence={} frame={} draw={} dispatch={} "
+                        "stage={} status={} words={} captures={} user_data_changed={} "
+                        "resource_data_changed={}",
+                        event.occurrence, event.frame, event.draw, event.dispatch,
+                        static_cast<u32>(l_stage), static_cast<u32>(observation.status),
+                        flattened_ud_buf.size(), observation.validation_captures,
+                        observation.user_data_changed, observation.resource_data_changed);
         }
     }
 
+private:
+    void CaptureFlatBuf(std::span<u32> destination) const {
+        ASSERT(destination.size() == srt_info.flattened_bufsize_dw);
+        ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
+        ASSERT(destination.size() >= user_data.size());
+        std::memcpy(destination.data(), user_data.data(), user_data.size_bytes());
+        if (srt_info.walker_func) {
+            srt_info.walker_func(user_data.data(), destination.data());
+        }
+    }
+
+public:
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
