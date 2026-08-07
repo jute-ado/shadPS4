@@ -95,6 +95,25 @@ Liverpool::Liverpool() {
             : device_resident_read_report_start + report_count;
     device_resident_read_min_draw = static_cast<u32>(std::min<u64>(
         parse_bound("SHADPS4_DEVICE_RESIDENT_READ_MIN_DRAW", 0), std::numeric_limits<u32>::max()));
+    if (const char* value = std::getenv("SHADPS4_DEVICE_RESIDENT_READ_DRAW_LIST")) {
+        std::string_view remaining{value};
+        while (!remaining.empty() && device_resident_read_draw_allowlist_count <
+                                         device_resident_read_draw_allowlist.size()) {
+            const auto separator = remaining.find(',');
+            const auto token = remaining.substr(0, separator);
+            u32 draw{};
+            const auto result = std::from_chars(token.data(), token.data() + token.size(), draw);
+            if (result.ec != std::errc{} || result.ptr != token.data() + token.size()) {
+                device_resident_read_draw_allowlist_count = 0;
+                break;
+            }
+            device_resident_read_draw_allowlist[device_resident_read_draw_allowlist_count++] = draw;
+            if (separator == std::string_view::npos) {
+                break;
+            }
+            remaining.remove_prefix(separator + 1);
+        }
+    }
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 

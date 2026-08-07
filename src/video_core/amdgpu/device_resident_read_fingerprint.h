@@ -7,6 +7,7 @@
 #include <array>
 #include <limits>
 #include <optional>
+#include <span>
 
 #include "common/types.h"
 
@@ -94,8 +95,11 @@ public:
         return sequence >= start && sequence < end;
     }
 
-    [[nodiscard]] static constexpr bool ShouldObserveDraw(u32 draw, u32 minimum_draw) noexcept {
-        return draw >= minimum_draw;
+    [[nodiscard]] static constexpr bool ShouldObserveDraw(
+        u32 draw, u32 minimum_draw, std::span<const u32> draw_allowlist = {}) noexcept {
+        return draw_allowlist.empty() ? draw >= minimum_draw
+                                      : std::find(draw_allowlist.begin(), draw_allowlist.end(),
+                                                  draw) != draw_allowlist.end();
     }
 
     [[nodiscard]] static constexpr DeviceResidentReadSemanticOrdinal DecodeSemanticIdentity(

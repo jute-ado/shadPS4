@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
@@ -111,6 +112,13 @@ public:
 
     [[nodiscard]] u32 DeviceResidentReadMinimumDraw() const noexcept {
         return device_resident_read_min_draw;
+    }
+
+    [[nodiscard]] bool ShouldObserveDeviceResidentReadDraw(u32 draw) const noexcept {
+        return DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(
+            draw, device_resident_read_min_draw,
+            std::span<const u32>{device_resident_read_draw_allowlist.data(),
+                                 device_resident_read_draw_allowlist_count});
     }
 
     void ReportDeviceResidentReadFrame();
@@ -224,6 +232,8 @@ private:
     u64 device_resident_read_frame_sequence{};
     u64 device_resident_read_report_start{};
     u64 device_resident_read_report_end{};
+    std::array<u32, 16> device_resident_read_draw_allowlist{};
+    u32 device_resident_read_draw_allowlist_count{};
     u32 device_resident_read_min_draw{};
     bool device_resident_read_diagnostic_enabled{};
     EopFlipTracker eop_flip_tracker;

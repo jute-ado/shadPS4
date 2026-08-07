@@ -954,8 +954,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             if (liverpool->IsDeviceResidentReadDiagnosticCollecting() &&
-                AmdGpu::DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(
-                    device_read_draw_ordinal, liverpool->DeviceResidentReadMinimumDraw()) &&
+                liverpool->ShouldObserveDeviceResidentReadDraw(device_read_draw_ordinal) &&
                 resolved_buffer_id && vk_buffer->usage == VideoCore::MemoryUsage::DeviceLocal) {
                 const u64 semantic_identity = (static_cast<u64>(device_read_draw_ordinal) << 32) |
                                               (static_cast<u64>(stage.l_stage) << 24) | i;

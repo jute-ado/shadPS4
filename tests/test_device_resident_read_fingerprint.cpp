@@ -237,6 +237,11 @@ TEST(DeviceResidentReadFingerprint, CollectsOnlyInsideRequestedFrameWindow) {
                                                                          /*minimum_draw=*/234));
     EXPECT_TRUE(DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(/*draw=*/234,
                                                                         /*minimum_draw=*/234));
+    constexpr std::array boundary_draws{233u, 402u, 653u, 956u, 1054u};
+    EXPECT_TRUE(DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(
+        /*draw=*/653, /*minimum_draw=*/0, boundary_draws));
+    EXPECT_FALSE(DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(
+        /*draw=*/654, /*minimum_draw=*/0, boundary_draws));
 }
 
 TEST(DeviceResidentReadFingerprint, SemanticOrdinalSurvivesPhysicalDeduplication) {
