@@ -35,6 +35,7 @@ TEST(OcclusionQueryReuseDiagnostic, ReportsFreshReuseAndPriorValidityWithoutAddr
 
     results[2] = 12;
     EXPECT_FALSE(diagnostic.Observe(0x2000, results.data(), 2).has_value());
+    results[0] = 11;
     const auto second = diagnostic.Observe(0x3000, results.data(), 2);
 
     ASSERT_TRUE(second.has_value());
