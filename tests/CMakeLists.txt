@@ -173,6 +173,7 @@ list(APPEND TEST_TARGETS shadps4_videodec2_picture_info_store_test)
 
 if (WIN32)
     add_executable(shadps4_windows_long_path_test
+        ${CMAKE_SOURCE_DIR}/src/dist/windows_long_path_aware.manifest
         test_windows_long_path.cpp
     )
     target_compile_features(shadps4_windows_long_path_test PRIVATE cxx_std_23)
