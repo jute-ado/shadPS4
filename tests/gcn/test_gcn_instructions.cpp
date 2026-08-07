@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <half.hpp>
 #include <sirit/sirit.h>
+#include <spirv/unified1/spirv.hpp>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -120,10 +121,10 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     u32 page_limit = 0;
     u32 u64_zero = 0;
     for (const auto& inst : instructions) {
-        if (inst.opcode == spv::OpName && inst.words.size() >= 3 &&
+        if (inst.opcode == spv::Op::OpName && inst.words.size() >= 3 &&
             SpirvLiteralString(inst.words, 2) == "get_bda_pointer") {
             get_bda_pointer_id = inst.words[1];
-        } else if (inst.opcode == spv::OpTypeInt && inst.words.size() == 4 &&
+        } else if (inst.opcode == spv::Op::OpTypeInt && inst.words.size() == 4 &&
                    inst.words[2] == 64U && inst.words[3] == 0U) {
             u64_type = inst.words[1];
         }
@@ -134,7 +135,7 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     // The DMA page table covers the 40-bit guest address space with 16 KiB pages.
     constexpr u64 expected_page_limit = u64{1} << (40U - 14U);
     for (const auto& inst : instructions) {
-        if (inst.opcode != spv::OpConstant || inst.words.size() < 4 ||
+        if (inst.opcode != spv::Op::OpConstant || inst.words.size() < 4 ||
             inst.words[1] != u64_type) {
             continue;
         }
@@ -155,11 +156,11 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     size_t function_end = instructions.size();
     for (size_t i = 0; i < instructions.size(); ++i) {
         const auto& inst = instructions[i];
-        if (inst.opcode == spv::OpFunction && inst.words.size() >= 3 &&
+        if (inst.opcode == spv::Op::OpFunction && inst.words.size() >= 3 &&
             inst.words[2] == get_bda_pointer_id) {
             function_begin = i;
         } else if (function_begin != instructions.size() &&
-                   inst.opcode == spv::OpFunctionEnd) {
+                   inst.opcode == spv::Op::OpFunctionEnd) {
             function_end = i;
             break;
         }
@@ -177,26 +178,26 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     bool valid_path_adds_offset = false;
     for (size_t i = function_begin; i < function_end; ++i) {
         const auto& inst = instructions[i];
-        if (inst.opcode == spv::OpShiftRightLogical && inst.words.size() == 5 &&
+        if (inst.opcode == spv::Op::OpShiftRightLogical && inst.words.size() == 5 &&
             inst.words[1] == u64_type && page_id == 0U) {
             page_id = inst.words[2];
-        } else if (inst.opcode == spv::OpULessThan && inst.words.size() == 5 &&
+        } else if (inst.opcode == spv::Op::OpULessThan && inst.words.size() == 5 &&
                    inst.words[3] == page_id && inst.words[4] == page_limit) {
             range_check_id = inst.words[2];
             range_check_index = i;
-        } else if (inst.opcode == spv::OpUConvert && inst.words.size() == 4 &&
+        } else if (inst.opcode == spv::Op::OpUConvert && inst.words.size() == 4 &&
                    inst.words[3] == page_id) {
             page_convert_index = i;
-        } else if (inst.opcode == spv::OpAccessChain && page_access_index == function_end) {
+        } else if (inst.opcode == spv::Op::OpAccessChain && page_access_index == function_end) {
             page_access_index = i;
-        } else if (inst.opcode == spv::OpLoad && inst.words.size() >= 4 &&
+        } else if (inst.opcode == spv::Op::OpLoad && inst.words.size() >= 4 &&
                    inst.words[1] == u64_type) {
             valid_path_loads_bda = true;
-        } else if (inst.opcode == spv::OpIAdd && inst.words.size() == 5 &&
+        } else if (inst.opcode == spv::Op::OpIAdd && inst.words.size() == 5 &&
                    inst.words[1] == u64_type) {
             valid_path_adds_offset = true;
         }
-        if (inst.opcode == spv::OpBranchConditional && inst.words.size() == 4 &&
+        if (inst.opcode == spv::Op::OpBranchConditional && inst.words.size() == 4 &&
             inst.words[1] == range_check_id) {
             valid_label = inst.words[2];
             invalid_label = inst.words[3];
@@ -217,12 +218,12 @@ TEST_F(GcnTest, direct_memory_bda_lookup_bounds_checks_page_before_descriptor_ac
     bool invalid_path_returns_zero = false;
     for (size_t i = function_begin; i < function_end; ++i) {
         const auto& inst = instructions[i];
-        if (inst.opcode == spv::OpLabel) {
+        if (inst.opcode == spv::Op::OpLabel) {
             in_invalid_block = inst.words[1] == invalid_label;
-        } else if (in_invalid_block && inst.opcode == spv::OpAccessChain) {
+        } else if (in_invalid_block && inst.opcode == spv::Op::OpAccessChain) {
             invalid_block_accesses_descriptor = true;
         }
-        if (inst.opcode == spv::OpPhi) {
+        if (inst.opcode == spv::Op::OpPhi) {
             for (size_t operand = 3; operand + 1 < inst.words.size(); operand += 2) {
                 invalid_path_returns_zero |= inst.words[operand] == u64_zero &&
                                              inst.words[operand + 1] == invalid_label;
