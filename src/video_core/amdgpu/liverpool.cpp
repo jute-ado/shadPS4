@@ -80,6 +80,14 @@ Liverpool::Liverpool() {
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+    if (pixel_pipe_stat_diagnostic_enabled) {
+        LOG_INFO(Render,
+                 "PixelPipeStatControlDiagnostic kind=summary controls={} dumps={} resets={} "
+                 "layout_mismatches={} nonzero_counter_ids={} short_control_packets={}",
+                 pixel_pipe_stat_control_count, pixel_pipe_stat_dump_count,
+                 pixel_pipe_stat_reset_count, pixel_pipe_stat_layout_mismatch_count,
+                 pixel_pipe_stat_nonzero_counter_count, pixel_pipe_stat_short_control_count);
+    }
 }
 
 void Liverpool::ProcessCommands() {
@@ -696,11 +704,22 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                           magic_enum::enum_name(event->event_type.Value()),
                           magic_enum::enum_name(event->event_index.Value()));
                 if (event->event_type.Value() == EventType::PixelPipeStatControl &&
-                    header->type3.NumWords() >= 3) {
+                    header->type3.NumWords() < 3) {
+                    if (pixel_pipe_stat_diagnostic_enabled) {
+                        ++pixel_pipe_stat_short_control_count;
+                    }
+                } else if (event->event_type.Value() == EventType::PixelPipeStatControl) {
                     pixel_pipe_stat_control =
                         DecodePixelPipeStatControl(event->address[0], event->address[1]);
                     pixel_pipe_stat_control_seen = true;
                     ++pixel_pipe_stat_control_sequence;
+                    if (pixel_pipe_stat_diagnostic_enabled) {
+                        ++pixel_pipe_stat_control_count;
+                        pixel_pipe_stat_layout_mismatch_count +=
+                            !IsFixedPixelPipeStatLayout(pixel_pipe_stat_control, num_counter_pairs);
+                        pixel_pipe_stat_nonzero_counter_count +=
+                            pixel_pipe_stat_control.counter_id != 0;
+                    }
                     if (pixel_pipe_stat_diagnostic_enabled &&
                         pixel_pipe_stat_diagnostic_records < PixelPipeStatDiagnosticRecordLimit) {
                         const u32 enabled_instances =
@@ -721,12 +740,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             IsFixedPixelPipeStatLayout(pixel_pipe_stat_control, num_counter_pairs));
                         ++pixel_pipe_stat_diagnostic_records;
                     }
+                } else if (event->event_type.Value() == EventType::PixelPipeStatReset) {
+                    if (pixel_pipe_stat_diagnostic_enabled) {
+                        ++pixel_pipe_stat_reset_count;
+                        if (pixel_pipe_stat_reset_records < PixelPipeStatResetRecordLimit) {
+                            LOG_INFO(Render,
+                                     "PixelPipeStatControlDiagnostic kind=reset sequence={} "
+                                     "control_seen={} packet_words={}",
+                                     pixel_pipe_stat_control_sequence, pixel_pipe_stat_control_seen,
+                                     header->type3.NumWords());
+                            ++pixel_pipe_stat_reset_records;
+                        }
+                    }
                 } else if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
                     // TODO: handle proper synchronization, for now signal that update is done
                     // immediately
                     regs.cp_strmout_cntl.offset_update_done = 1;
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
+                        if (pixel_pipe_stat_diagnostic_enabled) {
+                            ++pixel_pipe_stat_dump_count;
+                        }
                         if (pixel_pipe_stat_diagnostic_enabled &&
                             pixel_pipe_stat_last_dump_sequence !=
                                 pixel_pipe_stat_control_sequence &&

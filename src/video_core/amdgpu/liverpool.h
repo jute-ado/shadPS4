@@ -206,10 +206,18 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     static constexpr u32 PixelPipeStatDiagnosticRecordLimit = 64;
+    static constexpr u32 PixelPipeStatResetRecordLimit = 8;
     PixelPipeStatControl pixel_pipe_stat_control{};
     u32 pixel_pipe_stat_control_sequence{};
     u32 pixel_pipe_stat_last_dump_sequence{std::numeric_limits<u32>::max()};
     u32 pixel_pipe_stat_diagnostic_records{};
+    u32 pixel_pipe_stat_reset_records{};
+    u64 pixel_pipe_stat_control_count{};
+    u64 pixel_pipe_stat_dump_count{};
+    u64 pixel_pipe_stat_reset_count{};
+    u64 pixel_pipe_stat_layout_mismatch_count{};
+    u64 pixel_pipe_stat_nonzero_counter_count{};
+    u64 pixel_pipe_stat_short_control_count{};
     bool pixel_pipe_stat_control_seen{};
     bool pixel_pipe_stat_diagnostic_enabled{};
     EopFlipTracker eop_flip_tracker;
