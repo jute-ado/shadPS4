@@ -141,3 +141,18 @@ TEST(DrawResourceContentProvenanceDiagnostic, SelectsExplicitStagedOnlyProbeMode
     diagnostic.ConfigureProbeMode(DrawResourceContentProbeMode::StagedOnly);
     EXPECT_EQ(diagnostic.GetProbeMode(), DrawResourceContentProbeMode::StagedOnly);
 }
+
+TEST(DrawResourceContentProvenanceDiagnostic, EnforcesConfiguredPerFrameProbeBudget) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/2};
+    diagnostic.ConfigureProbeByteLimit(64);
+
+    diagnostic.BeginDraw();
+    ASSERT_TRUE(diagnostic.CanProbeCpuUpload(64));
+    diagnostic.RecordStagedUpload(1, 64);
+    EXPECT_FALSE(diagnostic.CanProbeCpuUpload(1));
+    diagnostic.EndDraw();
+    EXPECT_EQ(diagnostic.TakeSnapshot().bytes_probed, 64);
+
+    diagnostic.BeginDraw();
+    EXPECT_TRUE(diagnostic.CanProbeCpuUpload(64));
+}
