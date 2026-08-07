@@ -141,8 +141,13 @@ struct VirtualMemoryArea {
             : type == VMAType::Flexible ? PhysicalBackingMappingClass::Flexible
             : type == VMAType::File     ? PhysicalBackingMappingClass::File
                                         : PhysicalBackingMappingClass::Unsupported;
-        return Core::CollectPhysicalBackingSpans(base, size, mapping_class,
-                                                 physical_backing_eligible, phys_areas);
+        // Imported backing is coherent memory, but publication still needs an ordered
+        // notification before a host write can replace bytes already visible through BDA.
+        // CPU-writable mappings do not have that contract yet, so keep them fail-closed.
+        const bool can_publish =
+            physical_backing_eligible && !True(prot & MemoryProt::CpuWrite);
+        return Core::CollectPhysicalBackingSpans(base, size, mapping_class, can_publish,
+                                                 phys_areas);
     }
 };
 
