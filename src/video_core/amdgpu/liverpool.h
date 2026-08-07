@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/cond_exec_packet.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -97,6 +98,8 @@ public:
         rasterizer = rasterizer_;
     }
 
+    void ReportCondExecFrame();
+
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if (std::this_thread::get_id() == gpu_id) {
@@ -146,6 +149,11 @@ public:
     Common::SlotVector<AscQueueInfo> asc_queues{};
 
 private:
+    bool IsCondExecDiagnosticCollecting() const {
+        return cond_exec_diagnostic_enabled && cond_exec_frame_sequence >= cond_exec_report_start &&
+               cond_exec_frame_sequence < cond_exec_report_end;
+    }
+
     struct Task {
         struct promise_type {
             auto get_return_object() {
@@ -204,6 +212,13 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    CondExecDiagnostic cond_exec_diagnostic{};
+    CondExecFrameChangeTracker cond_exec_frame_changes{};
+    CondExecDiagnosticReport cond_exec_total_report{};
+    u64 cond_exec_frame_sequence{};
+    u64 cond_exec_report_start{};
+    u64 cond_exec_report_end{};
+    bool cond_exec_diagnostic_enabled{};
 
     struct ConstantEngine {
         void Reset() {

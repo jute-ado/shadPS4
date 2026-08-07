@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <charconv>
+#include <cstdlib>
+#include <limits>
+
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -68,12 +72,93 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    cond_exec_diagnostic_enabled = std::getenv("SHADPS4_COND_EXEC_DIAGNOSTIC") != nullptr;
+    const auto parse_bound = [](const char* name, u64 fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        u64 parsed{};
+        const std::string_view text{value};
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+        return result.ec == std::errc{} ? parsed : fallback;
+    };
+    cond_exec_report_start = parse_bound("SHADPS4_COND_EXEC_REPORT_START", 0);
+    const u64 report_count =
+        std::min<u64>(parse_bound("SHADPS4_COND_EXEC_REPORT_COUNT", 5000), 5000);
+    cond_exec_report_end = cond_exec_report_start > std::numeric_limits<u64>::max() - report_count
+                               ? std::numeric_limits<u64>::max()
+                               : cond_exec_report_start + report_count;
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+}
+
+void Liverpool::ReportCondExecFrame() {
+    if (!cond_exec_diagnostic_enabled) {
+        return;
+    }
+    const u64 sequence = cond_exec_frame_sequence++;
+    if (sequence < cond_exec_report_start || sequence >= cond_exec_report_end) {
+        return;
+    }
+    const auto report = cond_exec_diagnostic.TakeFrameReport();
+
+#define ACCUMULATE(field) cond_exec_total_report.field += report.field
+    ACCUMULATE(total_packets);
+    ACCUMULATE(gfx7_packets);
+    ACCUMULATE(decode_rejections);
+    ACCUMULATE(nonzero_exec_counts);
+    ACCUMULATE(retained_records);
+    ACCUMULATE(truncated_records);
+    ACCUMULATE(false_conditions);
+    ACCUMULATE(full_word_nonzero_low_byte_zero);
+    ACCUMULATE(gpu_modified_conditions);
+    ACCUMULATE(layout_mismatches);
+    ACCUMULATE(query_dumps);
+    ACCUMULATE(query_condition_overlaps);
+    ACCUMULATE(truncated_query_ranges);
+    ACCUMULATE(predicated_packets);
+    ACCUMULATE(set_predication_packets);
+    ACCUMULATE(reserved_control_nonzero);
+#undef ACCUMULATE
+
+    if (cond_exec_frame_changes.ShouldReport(report)) {
+        LOG_INFO(Render,
+                 "CondExecDiagnostic sequence={} total={} gfx7={} rejected={} exec_nonzero={} "
+                 "false={} "
+                 "low_byte_false={} gpu_modified={} layout_mismatch={} query_dumps={} "
+                 "query_overlap={} predicated={} set_predication={} reserved_nonzero={} "
+                 "truncated={} query_truncated={}",
+                 sequence, report.total_packets, report.gfx7_packets, report.decode_rejections,
+                 report.nonzero_exec_counts, report.false_conditions,
+                 report.full_word_nonzero_low_byte_zero, report.gpu_modified_conditions,
+                 report.layout_mismatches, report.query_dumps, report.query_condition_overlaps,
+                 report.predicated_packets, report.set_predication_packets,
+                 report.reserved_control_nonzero, report.truncated_records,
+                 report.truncated_query_ranges);
+    }
+    if (sequence + 1 == cond_exec_report_end) {
+        const auto& total = cond_exec_total_report;
+        LOG_INFO(Render,
+                 "CondExecDiagnosticSummary start={} frames={} reported_changes={} "
+                 "truncated_changes={} total={} "
+                 "gfx7={} rejected={} exec_nonzero={} false={} low_byte_false={} gpu_modified={} "
+                 "layout_mismatch={} query_dumps={} query_overlap={} predicated={} "
+                 "set_predication={} reserved_nonzero={} truncated={} query_truncated={}",
+                 cond_exec_report_start, cond_exec_report_end - cond_exec_report_start,
+                 cond_exec_frame_changes.ReportedRecords(),
+                 cond_exec_frame_changes.TruncatedRecords(), total.total_packets,
+                 total.gfx7_packets, total.decode_rejections, total.nonzero_exec_counts,
+                 total.false_conditions, total.full_word_nonzero_low_byte_zero,
+                 total.gpu_modified_conditions, total.layout_mismatches, total.query_dumps,
+                 total.query_condition_overlaps, total.predicated_packets,
+                 total.set_predication_packets, total.reserved_control_nonzero,
+                 total.truncated_records, total.truncated_query_ranges);
+    }
 }
 
 void Liverpool::ProcessCommands() {
@@ -264,6 +349,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            if (IsCondExecDiagnosticCollecting() &&
+                header->type3.predicate.Value() == PM4Predicate::PredEnable) {
+                cond_exec_diagnostic.ObservePredicatedPacket();
+            }
             switch (opcode) {
             case PM4ItOpcode::Nop: {
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -426,6 +515,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
+                if (IsCondExecDiagnosticCollecting()) {
+                    cond_exec_diagnostic.ObserveSetPredication();
+                }
                 LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
                 break;
             }
@@ -698,6 +790,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
+                        if (IsCondExecDiagnosticCollecting()) {
+                            cond_exec_diagnostic.ObserveQueryDump(reinterpret_cast<VAddr>(results),
+                                                                  2 * sizeof(u64),
+                                                                  num_counter_pairs);
+                        }
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
@@ -893,6 +990,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::CondExec: {
                 const auto* cond_exec = reinterpret_cast<const PM4CmdCondExec*>(header);
+                if (IsCondExecDiagnosticCollecting()) {
+                    const auto decoded = count <= dcb.size() - 1
+                                             ? DecodeGfx7CondExec(dcb.subspan(1, count))
+                                             : std::nullopt;
+                    if (decoded.has_value()) {
+                        const bool gpu_modified =
+                            rasterizer && rasterizer->GetBufferCache().IsRegionGpuModified(
+                                              decoded->address, sizeof(u32));
+                        const u32 condition_word = *std::bit_cast<const u32*>(decoded->address);
+                        cond_exec_diagnostic.Observe(*decoded, condition_word, gpu_modified);
+                    } else {
+                        cond_exec_diagnostic.ObserveRejectedPacket(count);
+                    }
+                }
                 if (cond_exec->command.Value() != 0) {
                     LOG_WARNING(Render, "IT_COND_EXEC used a reserved command");
                 }
