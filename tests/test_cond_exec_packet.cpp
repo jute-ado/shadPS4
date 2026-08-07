@@ -88,5 +88,25 @@ TEST(CondExecPacket, CorrelatesFullWordConditionsWithQueryAndPredicationState) {
     EXPECT_EQ(next_frame.query_condition_overlaps, 1U);
 }
 
+TEST(CondExecPacket, ReportsBaselineAndBoundedFrameTupleChanges) {
+    CondExecFrameChangeTracker changes;
+    CondExecDiagnosticReport report{};
+
+    EXPECT_TRUE(changes.ShouldReport(report));
+    EXPECT_FALSE(changes.ShouldReport(report));
+    report.total_packets = 1;
+    EXPECT_TRUE(changes.ShouldReport(report));
+    EXPECT_FALSE(changes.ShouldReport(report));
+
+    for (u32 i = 2; i < CondExecFrameChangeTracker::MaxRecords; ++i) {
+        report.total_packets = i;
+        EXPECT_TRUE(changes.ShouldReport(report));
+    }
+    report.total_packets = CondExecFrameChangeTracker::MaxRecords;
+    EXPECT_FALSE(changes.ShouldReport(report));
+    EXPECT_EQ(changes.ReportedRecords(), CondExecFrameChangeTracker::MaxRecords);
+    EXPECT_EQ(changes.TruncatedRecords(), 1U);
+}
+
 } // namespace
 } // namespace AmdGpu
