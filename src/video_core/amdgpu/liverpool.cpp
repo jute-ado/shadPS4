@@ -115,9 +115,14 @@ Liverpool::Liverpool() {
     }
     if (const char* mode =
             std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_MODE");
-        mode != nullptr && std::string_view{mode} == "staged") {
-        draw_resource_content_provenance_diagnostic.ConfigureProbeMode(
-            DrawResourceContentProbeMode::StagedOnly);
+        mode != nullptr) {
+        if (std::string_view{mode} == "staged") {
+            draw_resource_content_provenance_diagnostic.ConfigureProbeMode(
+                DrawResourceContentProbeMode::StagedOnly);
+        } else if (std::string_view{mode} == "source") {
+            draw_resource_content_provenance_diagnostic.ConfigureProbeMode(
+                DrawResourceContentProbeMode::SourceSnapshot);
+        }
     }
     if (const char* max_bytes =
             std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_MAX_BYTES")) {
@@ -471,6 +476,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                "staged_changed_ordinals={} "
                                                                "staged_content_aba_resources={} "
                                                                "staged_content_aba_ordinals={} "
+                                                               "source_changed_resources={} "
+                                                               "source_changed_ordinals={} "
+                                                               "source_content_aba_resources={} "
+                                                               "source_content_aba_ordinals={} "
                                                                "concurrent_write_resources={} "
                                                                "endpoint_capture_resources={} "
                                                                "staged_mismatch_resources={} "
@@ -514,6 +523,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                        .first_staged_content_aba_resources,
                                                                    content_provenance
                                                                        .reported_staged_content_aba_resources),
+                                                               content_provenance
+                                                                   .source_changed_resources,
+                                                               FormatContentResourceOrdinals(
+                                                                   content_provenance
+                                                                       .first_source_changed_resources,
+                                                                   content_provenance
+                                                                       .reported_source_changed_resources),
+                                                               content_provenance
+                                                                   .source_content_aba_resources,
+                                                               FormatContentResourceOrdinals(
+                                                                   content_provenance
+                                                                       .first_source_content_aba_resources,
+                                                                   content_provenance
+                                                                       .reported_source_content_aba_resources),
                                                                content_provenance
                                                                    .concurrent_write_resources,
                                                                content_provenance

@@ -454,6 +454,13 @@ u64 BufferCache::CopyCpuUploadWithProvenance(StreamBuffer& target, VAddr device_
     }
 
     std::array<u8, AmdGpu::DrawResourceContentProvenanceDiagnostic::MaxFullProbeBytes> guest_copy;
+    if (diagnostic->GetProbeMode() == AmdGpu::DrawResourceContentProbeMode::SourceSnapshot) {
+        memory->CopySparseMemory(device_addr, guest_copy.data(), size);
+        const u64 source_token = diagnostic->FingerprintBytes(guest_copy.data(), size);
+        const u64 offset = target.Copy(device_addr, size, alignment);
+        diagnostic->RecordSourceSnapshot(source_token, size);
+        return offset;
+    }
     const auto [staged, offset] = target.Map(size, alignment);
     if (diagnostic->GetProbeMode() == AmdGpu::DrawResourceContentProbeMode::StagedOnly) {
         memory->CopySparseMemory(device_addr, staged, size);
