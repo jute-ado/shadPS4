@@ -85,7 +85,29 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                 snapshot.eop_irq_delivered_sequence);
         }
         if (AmdGpu::CommandBufferLifetimeDiagnosticEnabled()) {
-            const auto snapshot = AmdGpu::GetCommandBufferLifetimeDiagnostic().Read();
+            const auto snapshot = AmdGpu::GetCommandBufferLifetimeDiagnostic().FreezeAndRead();
+            LOG_CRITICAL(
+                Debug,
+                "Command buffer lifetime diagnostic window: frozen {} stable {} in-flight {}, "
+                "count-only {}, minimum {}, limit {}, observed {} last observed {} kind {}, "
+                "count-only buffers {}, pre-window {}, selected {}, selection loss {}",
+                snapshot.frozen, snapshot.stable, snapshot.in_flight_operations,
+                snapshot.count_only_mode, snapshot.minimum_buffer_ordinal,
+                snapshot.selected_buffer_limit, snapshot.observed_buffers,
+                snapshot.last_observed_buffer_ordinal,
+                static_cast<u32>(snapshot.last_observed_buffer_kind), snapshot.count_only_buffers,
+                snapshot.pre_window_buffers, snapshot.selected_buffers,
+                snapshot.selection_capacity_loss);
+            LOG_CRITICAL(
+                Debug,
+                "Command buffer lifetime diagnostic budget: bytes {}/{}, hashes "
+                "submit/initial/later/final {}/{}/{}/{}, budget loss total {} "
+                "submit/initial/later/final {}/{}/{}/{}",
+                snapshot.hashed_bytes, snapshot.total_hash_byte_budget, snapshot.submit_hashes,
+                snapshot.initial_hashes, snapshot.later_resume_hashes, snapshot.final_hashes,
+                snapshot.hash_budget_exhaustions, snapshot.submit_budget_exhaustions,
+                snapshot.initial_budget_exhaustions, snapshot.later_resume_budget_exhaustions,
+                snapshot.final_budget_exhaustions);
             LOG_CRITICAL(
                 Debug,
                 "Command buffer lifetime diagnostic: sequence {}..{}, observed {}, mutations "

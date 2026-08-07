@@ -123,7 +123,9 @@ TEST(CommandBufferLifetimeDiagnostic, OversizedAndDisabledBuffersAreNeverSampled
         {.enabled = true, .max_words_per_signature = 3, .max_resume_checks = 4}};
     EXPECT_FALSE(bounded.Begin(CommandBufferKind::TopLevelCcb, words).Active());
     EXPECT_EQ(bounded.Read().oversized_buffers, 1);
-    EXPECT_EQ(bounded.Read().observed_buffers, 0);
+    EXPECT_EQ(bounded.Read().observed_buffers, 1);
+    EXPECT_EQ(bounded.Read().selected_buffers, 1);
+    EXPECT_EQ(bounded.Read().hashed_bytes, 0);
 
     CommandBufferLifetimeDiagnostic disabled{
         {.enabled = false, .max_words_per_signature = 16, .max_resume_checks = 4}};
