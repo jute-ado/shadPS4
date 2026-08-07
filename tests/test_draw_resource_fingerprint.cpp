@@ -168,3 +168,27 @@ TEST(DrawResourceFingerprintDiagnostic, ReportsHostIdentityABAReturnsByDrawOrdin
     ASSERT_EQ(returned.reported_host_identity_aba_return_draws, 1);
     EXPECT_EQ(returned.first_host_identity_aba_return_draw_ordinals[0], 0);
 }
+
+TEST(DrawResourceFingerprintDiagnostic, ReportsHostBufferRangeABAReturnsByDrawOrdinal) {
+    DrawResourceFingerprintDiagnostic diagnostic{/*report_limit=*/3};
+
+    const auto record = [&](u64 offset) {
+        diagnostic.BeginDraw();
+        diagnostic.RecordHostBufferIdentity(/*binding_ordinal=*/0, /*role=*/1,
+                                            /*object=*/7, /*backing=*/11, offset,
+                                            /*size=*/256);
+        diagnostic.EndDraw();
+        return diagnostic.TakeSnapshot();
+    };
+
+    EXPECT_EQ(record(64).host_identity_aba_return_draws, 0);
+    const auto middle = record(128);
+    EXPECT_EQ(middle.changed_host_identity_draws, 1);
+    EXPECT_EQ(middle.host_identity_aba_return_draws, 0);
+
+    const auto returned = record(64);
+    EXPECT_EQ(returned.changed_host_identity_draws, 1);
+    EXPECT_EQ(returned.host_identity_aba_return_draws, 1);
+    ASSERT_EQ(returned.reported_host_identity_aba_return_draws, 1);
+    EXPECT_EQ(returned.first_host_identity_aba_return_draw_ordinals[0], 0);
+}
