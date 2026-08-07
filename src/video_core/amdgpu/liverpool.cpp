@@ -10,6 +10,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -225,8 +226,27 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_EXIT;
 }
 
-Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                                           bool is_indirect, bool parent_ce_unfinished) {
     FIBER_ENTER(dcb_task_name);
+
+    if (is_indirect) {
+        const auto observation = nested_ce_diagnostic.ObserveNested(
+            cblock.ce_count, cblock.de_count, parent_ce_unfinished);
+        if (observation.should_report) {
+            LOG_INFO(Render,
+                     "NestedConstantEngineEntry occurrence={} process_time_us={} hazard={} "
+                     "parent_ce_unfinished={} ce_count={} de_count={} difference={} "
+                     "top_level_entries={} top_level_ccb_entries={}",
+                     observation.occurrence, Libraries::Kernel::sceKernelGetProcessTime(),
+                     observation.hazard, observation.parent_ce_unfinished, observation.ce_count,
+                     observation.de_count, observation.difference,
+                     nested_ce_diagnostic.TopLevelEntries(),
+                     nested_ce_diagnostic.TopLevelEntriesWithCcb());
+        }
+    } else {
+        nested_ce_diagnostic.ObserveTopLevel(!ccb.empty());
+    }
 
     cblock.Reset();
 
@@ -851,8 +871,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+                const bool parent_ce_unfinished = ce_task.handle && !ce_task.handle.done();
                 auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {}, true,
+                    parent_ce_unfinished);
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {

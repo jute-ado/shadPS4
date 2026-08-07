@@ -19,6 +19,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/nested_ce_diagnostic.h"
 #include "video_core/amdgpu/regs.h"
 
 namespace Vulkan {
@@ -180,7 +181,8 @@ private:
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb);
+    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                         bool is_indirect = false, bool parent_ce_unfinished = false);
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
@@ -204,6 +206,7 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    NestedCeDiagnosticTracker nested_ce_diagnostic{64};
 
     struct ConstantEngine {
         void Reset() {
