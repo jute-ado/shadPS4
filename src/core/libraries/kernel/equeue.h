@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -90,12 +91,21 @@ struct EqueueEvent {
     std::unique_ptr<boost::asio::steady_timer> timer;
 
     void Clear() {
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore && trigger_count > 1) {
+            --trigger_count;
+            return;
+        }
         is_triggered = false;
+        trigger_count = 0;
         event.fflags = 0;
         event.data = 0;
     }
 
     void Trigger(void* data) {
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore &&
+            trigger_count != std::numeric_limits<u32>::max()) {
+            ++trigger_count;
+        }
         is_triggered = true;
         event.data = reinterpret_cast<uintptr_t>(data);
     }
@@ -138,7 +148,56 @@ struct EqueueEvent {
 
 private:
     bool is_triggered = false;
+    u32 trigger_count = 0;
 };
+
+inline int DrainReadyEvents(std::vector<EqueueEvent>& events, OrbisKernelEvent* output,
+                            int capacity) {
+    int count = 0;
+
+    // Give every ready event identity one slot before using remaining caller
+    // capacity for repeated GraphicsCore occurrences.
+    for (auto it = events.begin(); it != events.end() && count < capacity;) {
+        if (!it->IsTriggered()) {
+            ++it;
+            continue;
+        }
+
+        output[count++] = it->event;
+        const bool one_shot = it->event.flags & OrbisKernelEvent::Flags::OneShot;
+        if (it->event.flags & OrbisKernelEvent::Flags::Clear) {
+            it->Clear();
+        }
+        if (one_shot) {
+            it = events.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    while (count < capacity) {
+        bool drained = false;
+        for (auto& event : events) {
+            if (count == capacity) {
+                break;
+            }
+            if (!event.IsTriggered() ||
+                event.event.filter != OrbisKernelEvent::Filter::GraphicsCore ||
+                !(event.event.flags & OrbisKernelEvent::Flags::Clear)) {
+                continue;
+            }
+
+            output[count++] = event.event;
+            event.Clear();
+            drained = true;
+        }
+        if (!drained) {
+            break;
+        }
+    }
+
+    return count;
+}
 
 class EqueueInternal {
     struct SmallTimer {
