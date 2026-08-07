@@ -398,6 +398,40 @@ TEST(BufferResidency, MaterializesUncontendedBufferReadsWithoutTransitioningText
     EXPECT_TRUE(texture_plan->read_snapshot_order.empty());
 }
 
+TEST(BufferResidency, CollectsFixedFunctionBufferReadsBeforeOwnershipPlanning) {
+    using Role = VideoCore::PhysicalBackingCommandBufferReadRole;
+    using Read = VideoCore::PhysicalBackingCommandBufferRead;
+    std::vector<Read> reads;
+
+    EXPECT_TRUE(VideoCore::AppendPhysicalBackingCommandBufferRead(reads, Role::Vertex,
+                                                                  0x1000'0000, 0x400));
+    EXPECT_TRUE(VideoCore::AppendPhysicalBackingCommandBufferRead(reads, Role::Index,
+                                                                  0x2000'0000, 0x800));
+    EXPECT_TRUE(VideoCore::AppendPhysicalBackingCommandBufferRead(reads, Role::IndirectArgs,
+                                                                  0x3000'0000, 0x40));
+    EXPECT_TRUE(VideoCore::AppendPhysicalBackingCommandBufferRead(reads, Role::IndirectCount,
+                                                                  0x4000'0000, 4));
+
+    EXPECT_EQ(reads, (std::vector<Read>{
+                         {Role::Vertex, 0x1000'0000, 0x400},
+                         {Role::Index, 0x2000'0000, 0x800},
+                         {Role::IndirectArgs, 0x3000'0000, 0x40},
+                         {Role::IndirectCount, 0x4000'0000, 4},
+                     }));
+
+    const auto valid_reads = reads;
+    EXPECT_FALSE(VideoCore::AppendPhysicalBackingCommandBufferRead(
+        reads, Role::Vertex, std::numeric_limits<VAddr>::max() - 3, 8));
+    EXPECT_FALSE(VideoCore::AppendPhysicalBackingCommandBufferRead(
+        reads, Role::Vertex, 0x5000'0000,
+        static_cast<u64>(std::numeric_limits<u32>::max()) + 1));
+    EXPECT_TRUE(
+        VideoCore::AppendPhysicalBackingCommandBufferRead(reads, Role::Vertex, 0, 0x400));
+    EXPECT_TRUE(VideoCore::AppendPhysicalBackingCommandBufferRead(reads, Role::Vertex,
+                                                                  0x5000'0000, 0));
+    EXPECT_EQ(reads, valid_reads);
+}
+
 TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
     using Owner = VideoCore::PhysicalBackingCachePageOwnerLocation;
     constexpr u64 requested_page = 0xab8d'0000;
