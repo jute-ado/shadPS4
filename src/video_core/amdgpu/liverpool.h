@@ -109,6 +109,10 @@ public:
                    device_resident_read_report_end);
     }
 
+    [[nodiscard]] u32 DeviceResidentReadMinimumDraw() const noexcept {
+        return device_resident_read_min_draw;
+    }
+
     void ReportDeviceResidentReadFrame();
 
     template <bool wait_done = false>
@@ -220,6 +224,7 @@ private:
     u64 device_resident_read_frame_sequence{};
     u64 device_resident_read_report_start{};
     u64 device_resident_read_report_end{};
+    u32 device_resident_read_min_draw{};
     bool device_resident_read_diagnostic_enabled{};
     EopFlipTracker eop_flip_tracker;
 

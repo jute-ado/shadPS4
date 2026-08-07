@@ -93,6 +93,8 @@ Liverpool::Liverpool() {
         device_resident_read_report_start > std::numeric_limits<u64>::max() - report_count
             ? std::numeric_limits<u64>::max()
             : device_resident_read_report_start + report_count;
+    device_resident_read_min_draw = static_cast<u32>(std::min<u64>(
+        parse_bound("SHADPS4_DEVICE_RESIDENT_READ_MIN_DRAW", 0), std::numeric_limits<u32>::max()));
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 

@@ -94,6 +94,10 @@ public:
         return sequence >= start && sequence < end;
     }
 
+    [[nodiscard]] static constexpr bool ShouldObserveDraw(u32 draw, u32 minimum_draw) noexcept {
+        return draw >= minimum_draw;
+    }
+
     [[nodiscard]] static constexpr DeviceResidentReadSemanticOrdinal DecodeSemanticIdentity(
         u64 identity) noexcept {
         return {

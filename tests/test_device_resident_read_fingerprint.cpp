@@ -233,6 +233,10 @@ TEST(DeviceResidentReadFingerprint, CollectsOnlyInsideRequestedFrameWindow) {
     EXPECT_FALSE(DeviceResidentReadFingerprintPlanner::ShouldCollect(/*sequence=*/3912,
                                                                      /*start=*/3400,
                                                                      /*end=*/3912));
+    EXPECT_FALSE(DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(/*draw=*/233,
+                                                                         /*minimum_draw=*/234));
+    EXPECT_TRUE(DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(/*draw=*/234,
+                                                                        /*minimum_draw=*/234));
 }
 
 TEST(DeviceResidentReadFingerprint, SemanticOrdinalSurvivesPhysicalDeduplication) {

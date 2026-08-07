@@ -369,6 +369,16 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 void Rasterizer::ScheduleDeviceResidentReadFingerprint(u64 sequence, bool capture) {
     const auto plan = device_read_planner.TakeFramePlan();
     device_read_draw_ordinal = 0;
+    u32 first_observed_draw{};
+    u32 last_observed_draw{};
+    if (plan.range_count != 0) {
+        first_observed_draw = AmdGpu::DeviceResidentReadFingerprintPlanner::DecodeSemanticIdentity(
+                                  plan.ranges[0].semantic_identity)
+                                  .draw;
+        last_observed_draw = AmdGpu::DeviceResidentReadFingerprintPlanner::DecodeSemanticIdentity(
+                                 plan.ranges[plan.range_count - 1].semantic_identity)
+                                 .draw;
+    }
     const auto release_pins = [this] {
         for (const auto buffer_id : device_read_pins) {
             buffer_cache.ReleaseBufferDiagnosticPin(buffer_id);
@@ -382,17 +392,18 @@ void Rasterizer::ScheduleDeviceResidentReadFingerprint(u64 sequence, bool captur
     if (plan.range_count == 0 || plan.sample_bytes == 0) {
         LOG_INFO(Render,
                  "DeviceResidentReadFingerprint sequence={} depth_draws={} excluded_non_depth={} "
-                 "observations={} ranges={} copied_samples=0 planned_sample_bytes={} first=0 "
+                 "observations={} ranges={} first_draw={} last_draw={} copied_samples=0 "
+                 "planned_sample_bytes={} first=0 "
                  "unchanged=0 changed=0 changed_ordinals= exact_aba=0 aba_ordinals= "
                  "multi_version=0 serial_advanced=0 source_unavailable=0 busy=0 "
                  "rejected_not_gpu_modified={} rejected_writable={} rejected_write_alias={} "
                  "rejected_oob={} truncated_observations={} truncated_ranges={} "
                  "truncated_history={} pin_failures={}",
                  sequence, plan.depth_draws, plan.excluded_non_depth_draws, plan.observations,
-                 plan.range_count, plan.sample_bytes, plan.rejected_not_gpu_modified,
-                 plan.rejected_writable, plan.rejected_write_alias, plan.rejected_out_of_bounds,
-                 plan.truncated_observations, plan.truncated_ranges, plan.truncated_history,
-                 plan.pin_failures);
+                 plan.range_count, first_observed_draw, last_observed_draw, plan.sample_bytes,
+                 plan.rejected_not_gpu_modified, plan.rejected_writable, plan.rejected_write_alias,
+                 plan.rejected_out_of_bounds, plan.truncated_observations, plan.truncated_ranges,
+                 plan.truncated_history, plan.pin_failures);
         release_pins();
         return;
     }
@@ -403,16 +414,17 @@ void Rasterizer::ScheduleDeviceResidentReadFingerprint(u64 sequence, bool captur
     if (download == nullptr) {
         LOG_INFO(Render,
                  "DeviceResidentReadFingerprint sequence={} depth_draws={} excluded_non_depth={} "
-                 "observations={} ranges={} planned_sample_bytes={} busy=1 "
+                 "observations={} ranges={} first_draw={} last_draw={} planned_sample_bytes={} "
+                 "busy=1 "
                  "rejected_not_gpu_modified={} "
                  "rejected_writable={} rejected_write_alias={} rejected_oob={} "
                  "truncated_observations={} truncated_ranges={} truncated_history={} "
                  "pin_failures={}",
                  sequence, plan.depth_draws, plan.excluded_non_depth_draws, plan.observations,
-                 plan.range_count, plan.sample_bytes, plan.rejected_not_gpu_modified,
-                 plan.rejected_writable, plan.rejected_write_alias, plan.rejected_out_of_bounds,
-                 plan.truncated_observations, plan.truncated_ranges, plan.truncated_history,
-                 plan.pin_failures);
+                 plan.range_count, first_observed_draw, last_observed_draw, plan.sample_bytes,
+                 plan.rejected_not_gpu_modified, plan.rejected_writable, plan.rejected_write_alias,
+                 plan.rejected_out_of_bounds, plan.truncated_observations, plan.truncated_ranges,
+                 plan.truncated_history, plan.pin_failures);
         release_pins();
         return;
     }
@@ -516,7 +528,8 @@ void Rasterizer::ScheduleDeviceResidentReadFingerprint(u64 sequence, bool captur
         .pBufferMemoryBarriers = &post_barrier,
     });
 
-    scheduler.DeferOperation([this, sequence, download, download_offset, plan, range_status] {
+    scheduler.DeferOperation([this, sequence, download, download_offset, plan, range_status,
+                              first_observed_draw, last_observed_draw] {
         device_read_download_buffer->InvalidateMappedRange(download_offset, plan.sample_bytes);
         u32 first{};
         u32 unchanged{};
@@ -580,20 +593,20 @@ void Rasterizer::ScheduleDeviceResidentReadFingerprint(u64 sequence, bool captur
         }
         LOG_INFO(Render,
                  "DeviceResidentReadFingerprint sequence={} depth_draws={} excluded_non_depth={} "
-                 "observations={} ranges={} copied_samples={} planned_sample_bytes={} first={} "
-                 "unchanged={} "
+                 "observations={} ranges={} first_draw={} last_draw={} copied_samples={} "
+                 "planned_sample_bytes={} first={} unchanged={} "
                  "changed={} changed_ordinals={} exact_aba={} aba_ordinals={} multi_version={} "
                  "serial_advanced={} source_unavailable={} busy=0 "
                  "rejected_not_gpu_modified={} rejected_writable={} rejected_write_alias={} "
                  "rejected_oob={} truncated_observations={} truncated_ranges={} "
                  "truncated_history={} pin_failures={}",
                  sequence, plan.depth_draws, plan.excluded_non_depth_draws, plan.observations,
-                 plan.range_count, copied_samples, plan.sample_bytes, first, unchanged, changed,
-                 changed_ordinals, exact_aba, aba_ordinals, multi_version, serial_advanced,
-                 source_unavailable, plan.rejected_not_gpu_modified, plan.rejected_writable,
-                 plan.rejected_write_alias, plan.rejected_out_of_bounds,
-                 plan.truncated_observations, plan.truncated_ranges, plan.truncated_history,
-                 plan.pin_failures);
+                 plan.range_count, first_observed_draw, last_observed_draw, copied_samples,
+                 plan.sample_bytes, first, unchanged, changed, changed_ordinals, exact_aba,
+                 aba_ordinals, multi_version, serial_advanced, source_unavailable,
+                 plan.rejected_not_gpu_modified, plan.rejected_writable, plan.rejected_write_alias,
+                 plan.rejected_out_of_bounds, plan.truncated_observations, plan.truncated_ranges,
+                 plan.truncated_history, plan.pin_failures);
     });
     release_pins();
 }
@@ -940,8 +953,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
-            if (liverpool->IsDeviceResidentReadDiagnosticCollecting() && resolved_buffer_id &&
-                vk_buffer->usage == VideoCore::MemoryUsage::DeviceLocal) {
+            if (liverpool->IsDeviceResidentReadDiagnosticCollecting() &&
+                AmdGpu::DeviceResidentReadFingerprintPlanner::ShouldObserveDraw(
+                    device_read_draw_ordinal, liverpool->DeviceResidentReadMinimumDraw()) &&
+                resolved_buffer_id && vk_buffer->usage == VideoCore::MemoryUsage::DeviceLocal) {
                 const u64 semantic_identity = (static_cast<u64>(device_read_draw_ordinal) << 32) |
                                               (static_cast<u64>(stage.l_stage) << 24) | i;
                 device_read_planner.Observe({
