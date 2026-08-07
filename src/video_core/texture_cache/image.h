@@ -25,6 +25,14 @@ VK_DEFINE_HANDLE(VmaAllocator)
 
 namespace VideoCore {
 
+constexpr bool IsImageWriteAccess(vk::AccessFlags2 access) {
+    constexpr vk::AccessFlags2 WriteAccessMask =
+        vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderWrite |
+        vk::AccessFlagBits2::eColorAttachmentWrite |
+        vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eMemoryWrite;
+    return static_cast<bool>(access & WriteAccessMask);
+}
+
 enum ImageFlagBits : u32 {
     Empty = 0,
     MaybeCpuDirty = 1 << 0, ///< The page this image is in was touched before the image address
