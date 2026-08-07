@@ -12,6 +12,43 @@
 
 namespace AmdGpu {
 
+class DiagnosticReadbackPin {
+public:
+    void Acquire() {
+        ++count;
+    }
+
+    bool Release() {
+        if (count == 0) {
+            return false;
+        }
+        --count;
+        const bool delete_now = count == 0 && delete_pending;
+        delete_pending &= !delete_now;
+        return delete_now;
+    }
+
+    bool RequestDelete() {
+        if (count == 0) {
+            return true;
+        }
+        delete_pending = true;
+        return false;
+    }
+
+    bool IsPinned() const {
+        return count != 0;
+    }
+
+    bool IsDeletePending() const {
+        return delete_pending;
+    }
+
+private:
+    u32 count{};
+    bool delete_pending{};
+};
+
 struct IndirectArgumentReadbackObservation {
     u64 source_token{};
     u64 range_identity{};
