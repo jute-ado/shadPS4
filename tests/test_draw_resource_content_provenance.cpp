@@ -170,3 +170,21 @@ TEST(DrawResourceContentProvenanceDiagnostic, EnforcesConfiguredPerFrameProbeBud
     diagnostic.BeginDraw();
     EXPECT_TRUE(diagnostic.CanProbeCpuUpload(64));
 }
+
+TEST(DrawResourceContentProvenanceDiagnostic, SkipsConfiguredBytesBeforeProbing) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/1};
+    diagnostic.ConfigureProbeByteSkip(64);
+
+    diagnostic.BeginDraw();
+    ASSERT_TRUE(diagnostic.ShouldSkipCpuUpload(64));
+    diagnostic.RecordSkipped(64);
+    EXPECT_FALSE(diagnostic.ShouldSkipCpuUpload(16));
+    ASSERT_TRUE(diagnostic.CanProbeCpuUpload(16));
+    diagnostic.RecordStagedUpload(1, 16);
+    diagnostic.EndDraw();
+
+    const auto snapshot = diagnostic.TakeSnapshot();
+    EXPECT_EQ(snapshot.skipped_resources, 1);
+    EXPECT_EQ(snapshot.skipped_bytes, 64);
+    EXPECT_EQ(snapshot.bytes_probed, 16);
+}
