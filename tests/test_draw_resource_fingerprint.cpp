@@ -1,0 +1,80 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <array>
+
+#include <gtest/gtest.h>
+
+#include "video_core/amdgpu/draw_resource_fingerprint_diagnostic.h"
+
+using AmdGpu::DrawResourceDescriptorKind;
+using AmdGpu::DrawResourceFingerprintDiagnostic;
+
+TEST(DrawResourceFingerprintDiagnostic, IdentifiesConsumedDescriptorChangesByDrawOrdinal) {
+    DrawResourceFingerprintDiagnostic diagnostic{/*report_limit=*/4};
+    std::array<u32, 4> buffer{0x1000, 16, 3, 4};
+    std::array<u32, 8> image{0x2000, 2, 3, 4, 5, 6, 7, 8};
+    std::array<u32, 4> vertex{0x3000, 32, 7, 8};
+
+    const auto record_frame = [&] {
+        diagnostic.BeginDraw();
+        diagnostic.RecordDescriptor(DrawResourceDescriptorKind::Buffer, buffer.data(),
+                                    sizeof(buffer));
+        diagnostic.RecordDescriptor(DrawResourceDescriptorKind::Image, image.data(),
+                                    sizeof(image));
+        diagnostic.EndDraw();
+
+        diagnostic.BeginDraw();
+        diagnostic.RecordDescriptor(DrawResourceDescriptorKind::Vertex, vertex.data(),
+                                    sizeof(vertex));
+        diagnostic.EndDraw();
+        return diagnostic.TakeSnapshot();
+    };
+
+    const auto baseline = record_frame();
+    EXPECT_TRUE(baseline.should_report);
+    EXPECT_FALSE(baseline.matches_previous_frame);
+    EXPECT_EQ(baseline.draws, 2);
+    EXPECT_EQ(baseline.descriptors, 3);
+    EXPECT_EQ(baseline.bytes_hashed, sizeof(buffer) + sizeof(image) + sizeof(vertex));
+    EXPECT_EQ(baseline.changed_draws, 2);
+    ASSERT_EQ(baseline.reported_changed_draws, 2);
+    EXPECT_EQ(baseline.first_changed_draw_ordinals[0], 0);
+    EXPECT_EQ(baseline.first_changed_draw_ordinals[1], 1);
+
+    const auto unchanged = record_frame();
+    EXPECT_TRUE(unchanged.matches_previous_frame);
+    EXPECT_EQ(unchanged.combined_hash, baseline.combined_hash);
+    EXPECT_EQ(unchanged.changed_draws, 0);
+
+    image[3] ^= 1;
+    const auto changed = record_frame();
+    EXPECT_FALSE(changed.matches_previous_frame);
+    EXPECT_EQ(changed.changed_draws, 1);
+    ASSERT_EQ(changed.reported_changed_draws, 1);
+    EXPECT_EQ(changed.first_changed_draw_ordinals[0], 0);
+}
+
+TEST(DrawResourceFingerprintDiagnostic, BoundsDrawsDescriptorsAndBytes) {
+    DrawResourceFingerprintDiagnostic diagnostic{/*report_limit=*/1};
+    std::array<u8, DrawResourceFingerprintDiagnostic::MaxBytesPerFrame> payload{};
+
+    for (u32 draw = 0; draw < DrawResourceFingerprintDiagnostic::MaxDrawsPerFrame + 2; ++draw) {
+        diagnostic.BeginDraw();
+        for (u32 descriptor = 0;
+             descriptor < DrawResourceFingerprintDiagnostic::MaxDescriptorsPerDraw + 1;
+             ++descriptor) {
+            diagnostic.RecordDescriptor(DrawResourceDescriptorKind::Buffer, payload.data(),
+                                        payload.size());
+        }
+        diagnostic.EndDraw();
+    }
+
+    const auto bounded = diagnostic.TakeSnapshot();
+    EXPECT_EQ(bounded.draws, DrawResourceFingerprintDiagnostic::MaxDrawsPerFrame);
+    EXPECT_EQ(bounded.bytes_hashed, DrawResourceFingerprintDiagnostic::MaxBytesPerFrame);
+    EXPECT_GT(bounded.truncated_draws, 0);
+    EXPECT_GT(bounded.truncated_descriptors, 0);
+    EXPECT_GT(bounded.truncated_bytes, 0);
+    EXPECT_FALSE(diagnostic.TakeSnapshot().should_report);
+}
