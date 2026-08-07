@@ -353,5 +353,37 @@ TEST(CommandBufferLifetimeDiagnostic, PreFetchChecksHaveAReportedHardCapacity) {
     EXPECT_EQ(snapshot.prefetch_check_capacity_loss, 1);
 }
 
+TEST(CommandBufferLifetimeDiagnostic, DisabledReportDoesNotClaimOrFreezeTheDiagnostic) {
+    CommandBufferLifetimeDiagnostic diagnostic{{.enabled = false}};
+
+    EXPECT_FALSE(diagnostic.FreezeAndReadOnce().has_value());
+    EXPECT_FALSE(diagnostic.Read().frozen);
+}
+
+TEST(CommandBufferLifetimeDiagnostic, CrashAndNormalShutdownShareOneFrozenSnapshotClaim) {
+    CommandBufferLifetimeDiagnostic diagnostic{{.enabled = true,
+                                                .selected_buffer_count = 1,
+                                                .total_hash_byte_budget = 1024,
+                                                .baseline_byte_budget = 1024,
+                                                .max_words_per_signature = 16,
+                                                .max_resume_checks = 4,
+                                                .max_prefetch_checks = 4}};
+    std::array<u32, 3> words{1, 2, 3};
+    auto probe = diagnostic.Begin(CommandBufferKind::TopLevelDcb, words);
+    probe.ObserveInitial(words);
+    probe.ObservePacketHeader(words, 0);
+    probe.ObservePacketBody(words, 0, 3);
+
+    const auto first_termination_path = diagnostic.FreezeAndReadOnce();
+    ASSERT_TRUE(first_termination_path.has_value());
+    EXPECT_TRUE(first_termination_path->frozen);
+    EXPECT_TRUE(first_termination_path->stable);
+    EXPECT_EQ(first_termination_path->observed_buffers, 1);
+    EXPECT_EQ(first_termination_path->prefetch_checks, 1);
+    EXPECT_EQ(first_termination_path->baseline_buffers, 1);
+
+    EXPECT_FALSE(diagnostic.FreezeAndReadOnce().has_value());
+}
+
 } // namespace
 } // namespace AmdGpu
