@@ -109,3 +109,26 @@ TEST(DrawResourceContentProvenanceDiagnostic, CapturesOnlyConfiguredFrameWindow)
     EXPECT_FALSE(after.should_report);
     EXPECT_EQ(after.sequence, 3);
 }
+
+TEST(DrawResourceContentProvenanceDiagnostic, ReportsStagedOnlyContentAba) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/3};
+
+    const auto record = [&](u64 token) {
+        diagnostic.BeginDraw();
+        diagnostic.RecordStagedUpload(token, 64);
+        diagnostic.EndDraw();
+        return diagnostic.TakeSnapshot();
+    };
+
+    EXPECT_EQ(record(1).staged_content_aba_resources, 0);
+    const auto middle = record(2);
+    EXPECT_EQ(middle.staged_changed_resources, 1);
+    EXPECT_EQ(middle.staged_content_aba_resources, 0);
+
+    const auto returned = record(1);
+    EXPECT_EQ(returned.staged_changed_resources, 1);
+    EXPECT_EQ(returned.staged_content_aba_resources, 1);
+    ASSERT_EQ(returned.reported_staged_content_aba_resources, 1);
+    EXPECT_EQ(returned.first_staged_content_aba_resources[0].draw_ordinal, 0);
+    EXPECT_EQ(returned.first_staged_content_aba_resources[0].resource_ordinal, 0);
+}
