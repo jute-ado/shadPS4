@@ -375,6 +375,29 @@ TEST(BufferResidency, LeavesUncontendedReadOnlyPagesOutOfCommandSnapshots) {
     EXPECT_EQ(plan->writer_finalize_order, (std::vector<Resource>{writer}));
 }
 
+TEST(BufferResidency, MaterializesUncontendedBufferReadsWithoutTransitioningTextures) {
+    using Kind = VideoCore::PhysicalBackingCommandResourceKind;
+    using Resource = VideoCore::PhysicalBackingCommandResource;
+    using Access = VideoCore::PhysicalBackingCommandAccess;
+    constexpr u64 page = 0xab8d'0000;
+    const Resource buffer{Kind::Buffer, 41};
+    const Resource texture{Kind::Texture, 16};
+
+    const std::array buffer_accesses{Access{buffer, false, {page}}};
+    const auto buffer_plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(buffer_accesses);
+
+    ASSERT_TRUE(buffer_plan.has_value());
+    EXPECT_EQ(buffer_plan->read_snapshot_order, (std::vector<Resource>{buffer}));
+    EXPECT_TRUE(buffer_plan->writer_prepare_order.empty());
+    EXPECT_TRUE(buffer_plan->writer_finalize_order.empty());
+
+    const std::array texture_accesses{Access{texture, false, {page}}};
+    const auto texture_plan = VideoCore::PlanPhysicalBackingGpuCommandAliases(texture_accesses);
+
+    ASSERT_TRUE(texture_plan.has_value());
+    EXPECT_TRUE(texture_plan->read_snapshot_order.empty());
+}
+
 TEST(BufferResidency, RetiresOnlyPhysicalOwnersOverlappedByCpuWrite) {
     using Owner = VideoCore::PhysicalBackingCachePageOwnerLocation;
     constexpr u64 requested_page = 0xab8d'0000;
