@@ -597,6 +597,19 @@ gtest_discover_tests(shadps4_presented_frame_timing_trace_test
     DISCOVERY_TIMEOUT 60
 )
 
+add_executable(shadps4_device_resident_read_fingerprint_test
+    test_device_resident_read_fingerprint.cpp
+)
+target_include_directories(shadps4_device_resident_read_fingerprint_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_device_resident_read_fingerprint_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_device_resident_read_fingerprint_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(shadps4_device_resident_read_fingerprint_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
 add_executable(shadps4_test_lab_audio_capture_test
     ${CMAKE_SOURCE_DIR}/src/core/libraries/audio/test_lab_audio_capture.cpp
     test_test_lab_audio_capture.cpp
