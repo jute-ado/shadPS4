@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -57,7 +58,7 @@ TEST(DrawResourceFingerprintDiagnostic, IdentifiesConsumedDescriptorChangesByDra
 
 TEST(DrawResourceFingerprintDiagnostic, BoundsDrawsDescriptorsAndBytes) {
     DrawResourceFingerprintDiagnostic diagnostic{/*report_limit=*/1};
-    std::array<u8, DrawResourceFingerprintDiagnostic::MaxBytesPerFrame> payload{};
+    std::vector<u8> payload(DrawResourceFingerprintDiagnostic::MaxBytesPerFrame);
 
     for (u32 draw = 0; draw < DrawResourceFingerprintDiagnostic::MaxDrawsPerFrame + 2; ++draw) {
         diagnostic.BeginDraw();
