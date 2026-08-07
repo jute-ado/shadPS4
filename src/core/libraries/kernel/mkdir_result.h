@@ -11,11 +11,15 @@ namespace Libraries::Kernel {
 
 constexpr int ClassifyMkdirResult(bool created, const std::error_code& error,
                                   bool exists_after_create) {
+    if (!created && exists_after_create &&
+        (!error || error == std::errc::file_exists)) {
+        return POSIX_EEXIST;
+    }
     if (error) {
         return POSIX_EIO;
     }
     if (!created) {
-        return exists_after_create ? POSIX_EEXIST : POSIX_EIO;
+        return POSIX_EIO;
     }
     return exists_after_create ? 0 : POSIX_ENOENT;
 }
