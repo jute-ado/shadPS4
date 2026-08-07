@@ -84,10 +84,9 @@ public:
         ++report.query_dumps;
         for (u32 instance = 0; instance < instances; ++instance) {
             const VAddr offset = static_cast<VAddr>(instance) * stride_bytes;
-            const VAddr lane_address =
-                address > std::numeric_limits<VAddr>::max() - offset
-                    ? std::numeric_limits<VAddr>::max()
-                    : address + offset;
+            const VAddr lane_address = address > std::numeric_limits<VAddr>::max() - offset
+                                           ? std::numeric_limits<VAddr>::max()
+                                           : address + offset;
             const Range range{lane_address, sizeof(u64)};
             for (u32 i = 0; i < indirect_range_count; ++i) {
                 report.query_overlap_pairs += Overlaps(range, indirect_ranges[i]);

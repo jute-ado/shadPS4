@@ -260,8 +260,13 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         buffer_cache.BindIndexBuffer(0, buffer_barriers);
     }
 
-    const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+    const VAddr argument_address = arg_address + offset;
+    const u32 argument_size = stride * max_count;
+    const bool arguments_gpu_modified =
+        buffer_cache.IsRegionGpuModified(argument_address, argument_size);
+    liverpool->ObserveIndirectArguments(argument_address, argument_size, arguments_gpu_modified,
+                                        stride, max_count);
+    const auto& [buffer, base] = buffer_cache.ObtainBuffer(argument_address, argument_size, false);
 
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};

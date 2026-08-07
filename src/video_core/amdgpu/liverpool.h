@@ -19,6 +19,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/indirect_argument_dataflow.h"
 #include "video_core/amdgpu/regs.h"
 
 namespace Vulkan {
@@ -96,6 +97,10 @@ public:
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
     }
+
+    void ObserveIndirectArguments(VAddr address, u32 size, bool gpu_modified, u32 stride,
+                                  u32 max_count);
+    void ReportIndirectArgumentFrame();
 
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
@@ -203,6 +208,11 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    IndirectArgumentDataflowTracker indirect_argument_tracker{};
+    u64 indirect_argument_frame_sequence{};
+    u64 indirect_argument_report_start{};
+    u64 indirect_argument_report_end{};
+    bool indirect_argument_diagnostic_enabled{};
     EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {

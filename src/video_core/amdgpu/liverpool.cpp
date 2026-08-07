@@ -3,6 +3,13 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <array>
+#include <charconv>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,12 +75,92 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    indirect_argument_diagnostic_enabled =
+        std::getenv("SHADPS4_INDIRECT_DATAFLOW_DIAGNOSTIC") != nullptr;
+    const auto parse_bound = [](const char* name, u64 fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        u64 parsed{};
+        const std::string_view text{value};
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+        return result.ec == std::errc{} ? parsed : fallback;
+    };
+    indirect_argument_report_start = parse_bound("SHADPS4_INDIRECT_DATAFLOW_REPORT_START", 0);
+    const u64 report_count = parse_bound("SHADPS4_INDIRECT_DATAFLOW_REPORT_COUNT", 5000);
+    indirect_argument_report_end =
+        indirect_argument_report_start > std::numeric_limits<u64>::max() - report_count
+            ? std::numeric_limits<u64>::max()
+            : indirect_argument_report_start + report_count;
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+}
+
+void Liverpool::ObserveIndirectArguments(VAddr address, u32 size, bool gpu_modified, u32 stride,
+                                         u32 max_count) {
+    if (!indirect_argument_diagnostic_enabled) {
+        return;
+    }
+
+    static constexpr u32 MaxHashBytes = 4096;
+    std::array<u8, MaxHashBytes> bytes{};
+    const bool can_hash = !gpu_modified && size <= bytes.size() &&
+                          Core::Memory::Instance()->IsValidMapping(address, size);
+    u64 hash = 14695981039346656037ULL;
+    bool zero_command{};
+    if (can_hash) {
+        Core::Memory::Instance()->CopySparseMemory(address, bytes.data(), size);
+        for (u32 i = 0; i < size; ++i) {
+            hash = (hash ^ bytes[i]) * 1099511628211ULL;
+        }
+        for (u32 command = 0; command < max_count; ++command) {
+            const u64 offset = static_cast<u64>(command) * stride;
+            if (offset + sizeof(u64) > size) {
+                break;
+            }
+            u32 element_count{};
+            u32 instance_count{};
+            std::memcpy(&element_count, bytes.data() + offset, sizeof(element_count));
+            std::memcpy(&instance_count, bytes.data() + offset + sizeof(u32),
+                        sizeof(instance_count));
+            zero_command |= element_count == 0 || instance_count == 0;
+        }
+    }
+
+    indirect_argument_tracker.ObserveIndirect({
+        .address = address,
+        .size = size,
+        .content_hash = hash,
+        .gpu_modified = gpu_modified,
+        .content_hash_valid = can_hash,
+        .zero_command = zero_command,
+    });
+}
+
+void Liverpool::ReportIndirectArgumentFrame() {
+    if (!indirect_argument_diagnostic_enabled) {
+        return;
+    }
+    const auto report = indirect_argument_tracker.TakeFrameReport();
+    const u64 sequence = indirect_argument_frame_sequence++;
+    if (sequence < indirect_argument_report_start || sequence >= indirect_argument_report_end) {
+        return;
+    }
+    LOG_INFO(Render,
+             "IndirectArgumentDataflow sequence={} draws={} gpu_modified={} cpu_visible={} "
+             "unhashed={} first_ranges={} content_changes={} zero_commands={} query_dumps={} "
+             "query_overlap_pairs={} truncated_indirect={} truncated_query={} "
+             "truncated_history={}",
+             sequence, report.indirect_draws, report.gpu_modified_draws, report.cpu_visible_draws,
+             report.indirect_draws - report.gpu_modified_draws - report.cpu_visible_draws,
+             report.first_observed_ranges, report.content_changes, report.zero_commands,
+             report.query_dumps, report.query_overlap_pairs, report.truncated_indirect_ranges,
+             report.truncated_query_ranges, report.truncated_history_ranges);
 }
 
 void Liverpool::ProcessCommands() {
@@ -698,6 +785,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
+                        if (indirect_argument_diagnostic_enabled) {
+                            indirect_argument_tracker.ObserveQueryDump(
+                                reinterpret_cast<VAddr>(results), 2 * sizeof(u64),
+                                num_counter_pairs);
+                        }
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
