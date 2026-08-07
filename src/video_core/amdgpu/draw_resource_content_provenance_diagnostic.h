@@ -74,6 +74,8 @@ struct DrawResourceContentProvenanceSnapshot {
     u32 endpoint_capture_resources{};
     u32 staged_mismatch_resources{};
     u32 resident_unobserved_resources{};
+    u32 skipped_resources{};
+    u64 skipped_bytes{};
     u32 truncated_resources{};
     u64 truncated_bytes{};
 };
@@ -106,6 +108,10 @@ public:
     void ConfigureProbeByteLimit(u32 limit) noexcept {
         max_probe_bytes_per_frame =
             limit < MaxProbeBytesPerFrame ? limit : MaxProbeBytesPerFrame;
+    }
+
+    void ConfigureProbeByteSkip(u32 skip) noexcept {
+        probe_byte_skip = skip;
     }
 
     [[nodiscard]] DrawResourceContentProbeMode GetProbeMode() const noexcept {
@@ -148,6 +154,10 @@ public:
                size <= max_probe_bytes_per_frame - current_probe_bytes;
     }
 
+    [[nodiscard]] bool ShouldSkipCpuUpload(u32 size) const noexcept {
+        return draw_active && size != 0 && current_skipped_bytes < probe_byte_skip;
+    }
+
     [[nodiscard]] bool IsDrawActive() const noexcept {
         return draw_active;
     }
@@ -187,6 +197,17 @@ public:
             .key = CurrentKey(),
             .kind = ObservationKind::ResidentUnobserved,
         });
+        ++current_resource_ordinal;
+    }
+
+    void RecordSkipped(u32 size) noexcept {
+        if (Append({
+                .key = CurrentKey(),
+                .size = size,
+                .kind = ObservationKind::Skipped,
+            })) {
+            current_skipped_bytes += size;
+        }
         ++current_resource_ordinal;
     }
 
@@ -288,6 +309,10 @@ public:
             case ObservationKind::ResidentUnobserved:
                 ++snapshot.resident_unobserved_resources;
                 break;
+            case ObservationKind::Skipped:
+                ++snapshot.skipped_resources;
+                snapshot.skipped_bytes += current.size;
+                break;
             case ObservationKind::Truncated:
                 ++snapshot.truncated_resources;
                 snapshot.truncated_bytes += current.size;
@@ -308,6 +333,7 @@ private:
         CpuUpload,
         StagedOnly,
         ResidentUnobserved,
+        Skipped,
         Truncated,
     };
 
@@ -372,10 +398,14 @@ private:
 
     void RecountCurrentProbeBytes() noexcept {
         current_probe_bytes = 0;
+        current_skipped_bytes = 0;
         for (u32 index = 0; index < current_observations; ++index) {
             if ((*current_frame)[index].kind == ObservationKind::CpuUpload ||
                 (*current_frame)[index].kind == ObservationKind::StagedOnly) {
                 current_probe_bytes += (*current_frame)[index].size;
+            }
+            if ((*current_frame)[index].kind == ObservationKind::Skipped) {
+                current_skipped_bytes += (*current_frame)[index].size;
             }
         }
     }
@@ -385,6 +415,7 @@ private:
         current_draws = 0;
         current_observations = 0;
         current_probe_bytes = 0;
+        current_skipped_bytes = 0;
         current_resource_ordinal = 0;
         draw_observation_begin = 0;
         overflow_resources = 0;
@@ -411,6 +442,8 @@ private:
     bool draw_active{};
     DrawResourceContentProbeMode probe_mode{DrawResourceContentProbeMode::FullProvenance};
     u32 max_probe_bytes_per_frame{MaxProbeBytesPerFrame};
+    u32 probe_byte_skip{};
+    u32 current_skipped_bytes{};
 };
 
 } // namespace AmdGpu
