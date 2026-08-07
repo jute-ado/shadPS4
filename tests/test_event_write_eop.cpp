@@ -15,6 +15,7 @@
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/eop_submission_batch.h"
+#include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/renderer_vulkan/gpu_completion_submission.h"
 
 namespace {
@@ -104,6 +105,32 @@ TEST(EventWriteEop, FlushesPendingEopBeforeGuestMemoryWait) {
                          [&] { operations.emplace_back("unexpected-submit"); });
 
     EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
+}
+
+TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
+    std::vector<std::string> operations;
+    std::vector<Common::UniqueFunction<void>> gpu_completions;
+    const auto defer_completion = [&](Common::UniqueFunction<void>&& completion) {
+        gpu_completions.emplace_back(std::move(completion));
+    };
+
+    AmdGpu::DeferEopUntilGpuCompletion(
+        TestEopPacket{.data = 1}, defer_completion,
+        [&](u32) { operations.emplace_back("fence"); },
+        [&] { operations.emplace_back("interrupt"); }, [] {});
+    AmdGpu::SubmitSubmissionBoundary([&] { operations.emplace_back("boundary"); },
+                                     defer_completion,
+                                     [&] { operations.emplace_back("submit"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
+    ASSERT_EQ(gpu_completions.size(), 2u);
+
+    gpu_completions[0]();
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "fence", "interrupt"}));
+
+    gpu_completions[1]();
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"submit", "fence", "interrupt", "boundary"}));
 }
 
 TEST(EventWriteEop, PublishesFenceInterruptAndFlipOnlyAfterExactGpuCompletion) {
