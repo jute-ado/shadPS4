@@ -16,6 +16,12 @@ TEST(MkdirResult, ReportsConcurrentCreatorAsExistingDirectory) {
     EXPECT_EQ(ClassifyMkdirResult(false, no_error, true), POSIX_EEXIST);
 }
 
+TEST(MkdirResult, ReportsConcurrentCreatorFileExistsErrorAsExistingDirectory) {
+    const auto file_exists = std::make_error_code(std::errc::file_exists);
+
+    EXPECT_EQ(ClassifyMkdirResult(false, file_exists, true), POSIX_EEXIST);
+}
+
 TEST(MkdirResult, PreservesFilesystemErrorWhenDirectoryExistsAfterFailure) {
     const std::error_code io_error = std::make_error_code(std::errc::io_error);
 
