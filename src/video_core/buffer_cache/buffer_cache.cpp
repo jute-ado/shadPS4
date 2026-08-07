@@ -151,7 +151,8 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 
 void BufferCache::BindVertexBuffers(
     const Vulkan::GraphicsPipeline& pipeline,
-    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    boost::container::small_vector<HostBufferBindingIdentity, 64>& identities) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -244,6 +245,8 @@ void BufferCache::BindVertexBuffers(
         }
         host_sizes.push_back(buffer.GetSize());
         host_strides.push_back(buffer.GetStride());
+        identities.emplace_back(/*role=*/1, host_buffers.back(), host_offsets.back(),
+                                host_sizes.back());
     }
 
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -257,7 +260,8 @@ void BufferCache::BindVertexBuffers(
 }
 
 void BufferCache::BindIndexBuffer(
-    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    boost::container::small_vector<HostBufferBindingIdentity, 64>& identities) {
     const auto& regs = liverpool->regs;
 
     // Figure out index type and size.
@@ -277,6 +281,7 @@ void BufferCache::BindIndexBuffer(
         }
     }
     const auto cmdbuf = scheduler.CommandBuffer();
+    identities.emplace_back(/*role=*/2, vk_buffer->Handle(), offset, index_buffer_size);
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
 }
 

@@ -153,6 +153,8 @@ private:
     };
     boost::container::small_vector<DrawHostImageIdentity, Shader::NUM_IMAGES>
         draw_host_image_identities;
+    boost::container::small_vector<VideoCore::HostBufferBindingIdentity, 64>
+        draw_host_buffer_identities;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
 };
