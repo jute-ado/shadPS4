@@ -329,6 +329,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                "changed_shape_draws={} "
                                                                "changed_shape_ordinals={} "
                                                                "shape_combined_hash={:#x} "
+                                                               "location_matches_previous={} "
+                                                               "changed_location_draws={} "
+                                                               "location_aba_return_draws={} "
+                                                               "location_aba_return_ordinals={} "
+                                                               "location_combined_hash={:#x} "
                                                                "truncated_draws={} "
                                                                "truncated_descriptors={} "
                                                                "truncated_bytes={}",
@@ -363,6 +368,29 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                    return ordinals;
                                                                }(),
                                                                draw_resources.shape_combined_hash,
+                                                               draw_resources
+                                                                   .location_matches_previous_frame,
+                                                               draw_resources
+                                                                   .changed_location_draws,
+                                                               draw_resources
+                                                                   .location_aba_return_draws,
+                                                               [&] {
+                                                                   std::string ordinals;
+                                                                   for (u32 i = 0;
+                                                                        i < draw_resources
+                                                                                .reported_location_aba_return_draws;
+                                                                        ++i) {
+                                                                       if (!ordinals.empty()) {
+                                                                           ordinals += ',';
+                                                                       }
+                                                                       ordinals += std::to_string(
+                                                                           draw_resources
+                                                                               .first_location_aba_return_draw_ordinals[i]);
+                                                                   }
+                                                                   return ordinals;
+                                                               }(),
+                                                               draw_resources
+                                                                   .location_combined_hash,
                                                                draw_resources.truncated_draws,
                                                                draw_resources
                                                                    .truncated_descriptors,

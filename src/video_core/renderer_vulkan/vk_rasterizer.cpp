@@ -451,27 +451,35 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
             const auto sharp = desc.GetSharp(*stage);
             auto shape = sharp;
             shape.base_address = 0;
+            const u64 location = sharp.base_address;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Buffer, &sharp,
-                                         sizeof(sharp), &shape, sizeof(shape));
+                                         sizeof(sharp), &shape, sizeof(shape), &location,
+                                         sizeof(location));
         }
         for (const auto& desc : stage->images) {
             const auto sharp = desc.GetSharp(*stage);
             auto shape = sharp;
             shape.base_address = 0;
+            const u64 location = sharp.base_address;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Image, &sharp,
-                                         sizeof(sharp), &shape, sizeof(shape));
+                                         sizeof(sharp), &shape, sizeof(shape), &location,
+                                         sizeof(location));
         }
         for (const auto& desc : stage->samplers) {
             const auto sharp = desc.GetSharp(*stage);
+            constexpr u64 NoLocation = 0;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Sampler, &sharp,
-                                         sizeof(sharp));
+                                         sizeof(sharp), &sharp, sizeof(sharp), &NoLocation,
+                                         sizeof(NoLocation));
         }
         for (const auto& desc : stage->fmasks) {
             const auto sharp = desc.GetSharp(*stage);
             auto shape = sharp;
             shape.base_address = 0;
+            const u64 location = sharp.base_address;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::FMask, &sharp,
-                                         sizeof(sharp), &shape, sizeof(shape));
+                                         sizeof(sharp), &shape, sizeof(shape), &location,
+                                         sizeof(location));
         }
     }
 
@@ -481,8 +489,10 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
             const auto sharp = attribute.GetSharp(vertex_info);
             auto shape = sharp;
             shape.base_address = 0;
+            const u64 location = sharp.base_address;
             diagnostic->RecordDescriptor(AmdGpu::DrawResourceDescriptorKind::Vertex, &sharp,
-                                         sizeof(sharp), &shape, sizeof(shape));
+                                         sizeof(sharp), &shape, sizeof(shape), &location,
+                                         sizeof(location));
         }
     }
     diagnostic->EndDraw();
