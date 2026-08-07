@@ -217,6 +217,19 @@ target_link_libraries(shadps4_gnm_graphics_event_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_gnm_graphics_event_test)
 
+add_executable(shadps4_equeue_graphics_occurrence_test
+    test_equeue_graphics_occurrence.cpp
+)
+target_include_directories(shadps4_equeue_graphics_occurrence_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_equeue_graphics_occurrence_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_equeue_graphics_occurrence_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_equeue_graphics_occurrence_test)
+
 add_executable(shadps4_videodec2_picture_info_store_test
     test_videodec2_picture_info_store.cpp
 )
