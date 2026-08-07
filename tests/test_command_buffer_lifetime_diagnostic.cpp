@@ -262,5 +262,96 @@ TEST(CommandBufferLifetimeDiagnostic, FreezeProducesAStableSnapshotAndStopsEvery
     EXPECT_EQ(after.final_mutations, frozen.final_mutations);
 }
 
+TEST(CommandBufferLifetimeDiagnostic, ConsumedPrefixReuseIsNotAPreFetchMutation) {
+    CommandBufferLifetimeDiagnostic diagnostic{{.enabled = true,
+                                                .selected_buffer_count = 1,
+                                                .total_hash_byte_budget = 1024,
+                                                .baseline_byte_budget = 1024,
+                                                .max_words_per_signature = 16,
+                                                .max_resume_checks = 4,
+                                                .max_prefetch_checks = 4}};
+    std::array<u32, 6> words{10, 11, 12, 20, 21, 22};
+    auto probe = diagnostic.Begin(CommandBufferKind::TopLevelDcb, words);
+    probe.ObserveInitial(words);
+    probe.ObservePacketHeader(words, 0);
+    probe.ObservePacketBody(words, 0, 3);
+
+    words[0] = 99;
+    const auto second_packet = std::span<const u32>{words}.subspan(3);
+    probe.ObservePacketHeader(second_packet, 1);
+    probe.ObservePacketBody(second_packet, 1, 3);
+    probe.ObserveFinal();
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_EQ(snapshot.prefetch_mutations, 0);
+    EXPECT_EQ(snapshot.final_mutations, 1);
+}
+
+TEST(CommandBufferLifetimeDiagnostic, DetectsExactPacketMutationBeforeFetch) {
+    CommandBufferLifetimeDiagnostic diagnostic{{.enabled = true,
+                                                .selected_buffer_count = 1,
+                                                .total_hash_byte_budget = 1024,
+                                                .baseline_byte_budget = 1024,
+                                                .max_words_per_signature = 16,
+                                                .max_resume_checks = 4,
+                                                .max_prefetch_checks = 4}};
+    std::array<u32, 6> words{10, 11, 12, 20, 21, 22};
+    auto probe = diagnostic.Begin(CommandBufferKind::TopLevelCcb, words);
+    probe.ObserveInitial(words);
+    words[4] = 77;
+
+    const auto second_packet = std::span<const u32>{words}.subspan(3);
+    probe.ObservePacketHeader(second_packet, 1);
+    probe.ObservePacketBody(second_packet, 1, 3);
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_EQ(snapshot.prefetch_mutations, 1);
+    EXPECT_EQ(snapshot.last_prefetch_buffer_ordinal, 1);
+    EXPECT_EQ(snapshot.last_prefetch_buffer_kind, CommandBufferKind::TopLevelCcb);
+    EXPECT_EQ(snapshot.last_prefetch_packet_index, 1);
+    EXPECT_EQ(snapshot.last_prefetch_word_offset, 3);
+    EXPECT_EQ(snapshot.last_prefetch_word_count, 3);
+}
+
+TEST(CommandBufferLifetimeDiagnostic, BaselineByteBudgetMakesCoverageLossExplicit) {
+    CommandBufferLifetimeDiagnostic diagnostic{{.enabled = true,
+                                                .selected_buffer_count = 1,
+                                                .total_hash_byte_budget = 1024,
+                                                .baseline_byte_budget = 8,
+                                                .max_words_per_signature = 16,
+                                                .max_resume_checks = 4,
+                                                .max_prefetch_checks = 4}};
+    std::array<u32, 4> words{1, 2, 3, 4};
+    auto probe = diagnostic.Begin(CommandBufferKind::TopLevelDcb, words);
+    EXPECT_TRUE(probe.Active());
+    probe.ObservePacketHeader(words, 0);
+    probe.ObservePacketBody(words, 0, 4);
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_EQ(snapshot.baseline_bytes, 0);
+    EXPECT_EQ(snapshot.baseline_buffers, 0);
+    EXPECT_EQ(snapshot.baseline_budget_exhaustions, 1);
+    EXPECT_EQ(snapshot.prefetch_checks, 0);
+}
+
+TEST(CommandBufferLifetimeDiagnostic, PreFetchChecksHaveAReportedHardCapacity) {
+    CommandBufferLifetimeDiagnostic diagnostic{{.enabled = true,
+                                                .selected_buffer_count = 1,
+                                                .total_hash_byte_budget = 1024,
+                                                .baseline_byte_budget = 1024,
+                                                .max_words_per_signature = 16,
+                                                .max_resume_checks = 4,
+                                                .max_prefetch_checks = 1}};
+    std::array<u32, 4> words{1, 2, 3, 4};
+    auto probe = diagnostic.Begin(CommandBufferKind::IndirectDcb, words);
+    probe.ObservePacketHeader(words, 0);
+    probe.ObservePacketBody(words, 0, 2);
+    probe.ObservePacketHeader(std::span<const u32>{words}.subspan(2), 1);
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_EQ(snapshot.prefetch_checks, 1);
+    EXPECT_EQ(snapshot.prefetch_check_capacity_loss, 1);
+}
+
 } // namespace
 } // namespace AmdGpu
