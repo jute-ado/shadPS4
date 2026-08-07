@@ -16,6 +16,7 @@ namespace AmdGpu {
 enum class DrawResourceContentProbeMode : u8 {
     FullProvenance,
     StagedOnly,
+    SourceSnapshot,
 };
 
 enum class DrawResourceUploadProvenance : u8 {
@@ -70,6 +71,14 @@ struct DrawResourceContentProvenanceSnapshot {
     u32 reported_staged_content_aba_resources{};
     std::array<DrawResourceContentOrdinal, MaxReportedResources>
         first_staged_content_aba_resources{};
+    u32 source_changed_resources{};
+    u32 reported_source_changed_resources{};
+    std::array<DrawResourceContentOrdinal, MaxReportedResources>
+        first_source_changed_resources{};
+    u32 source_content_aba_resources{};
+    u32 reported_source_content_aba_resources{};
+    std::array<DrawResourceContentOrdinal, MaxReportedResources>
+        first_source_content_aba_resources{};
     u32 concurrent_write_resources{};
     u32 endpoint_capture_resources{};
     u32 staged_mismatch_resources{};
@@ -192,6 +201,18 @@ public:
         ++current_resource_ordinal;
     }
 
+    void RecordSourceSnapshot(u64 source, u32 size) noexcept {
+        if (Append({
+                .key = CurrentKey(),
+                .token = source,
+                .size = size,
+                .kind = ObservationKind::SourceSnapshot,
+            })) {
+            current_probe_bytes += size;
+        }
+        ++current_resource_ordinal;
+    }
+
     void RecordResidentUnobserved() noexcept {
         Append(Observation{
             .key = CurrentKey(),
@@ -306,6 +327,28 @@ public:
                 }
                 break;
             }
+            case ObservationKind::SourceSnapshot: {
+                const auto* previous = MatchingAt(*previous_frame, previous_observations, index,
+                                                  current.key);
+                if (previous != nullptr && IsSourceSnapshot(*previous) &&
+                    current.token != previous->token) {
+                    ++snapshot.source_changed_resources;
+                    Report(current.key, snapshot.reported_source_changed_resources,
+                           snapshot.first_source_changed_resources);
+                }
+                const auto* previous_previous =
+                    MatchingAt(*previous_previous_frame, previous_previous_observations, index,
+                               current.key);
+                if (previous != nullptr && previous_previous != nullptr &&
+                    IsSourceSnapshot(*previous) && IsSourceSnapshot(*previous_previous) &&
+                    current.token == previous_previous->token &&
+                    current.token != previous->token) {
+                    ++snapshot.source_content_aba_resources;
+                    Report(current.key, snapshot.reported_source_content_aba_resources,
+                           snapshot.first_source_content_aba_resources);
+                }
+                break;
+            }
             case ObservationKind::ResidentUnobserved:
                 ++snapshot.resident_unobserved_resources;
                 break;
@@ -332,6 +375,7 @@ private:
     enum class ObservationKind : u8 {
         CpuUpload,
         StagedOnly,
+        SourceSnapshot,
         ResidentUnobserved,
         Skipped,
         Truncated,
@@ -387,6 +431,10 @@ private:
         return observation.kind == ObservationKind::StagedOnly;
     }
 
+    [[nodiscard]] static bool IsSourceSnapshot(const Observation& observation) noexcept {
+        return observation.kind == ObservationKind::SourceSnapshot;
+    }
+
     static void Report(
         DrawResourceContentOrdinal key, u32& reported,
         std::array<DrawResourceContentOrdinal,
@@ -401,7 +449,8 @@ private:
         current_skipped_bytes = 0;
         for (u32 index = 0; index < current_observations; ++index) {
             if ((*current_frame)[index].kind == ObservationKind::CpuUpload ||
-                (*current_frame)[index].kind == ObservationKind::StagedOnly) {
+                (*current_frame)[index].kind == ObservationKind::StagedOnly ||
+                (*current_frame)[index].kind == ObservationKind::SourceSnapshot) {
                 current_probe_bytes += (*current_frame)[index].size;
             }
             if ((*current_frame)[index].kind == ObservationKind::Skipped) {
