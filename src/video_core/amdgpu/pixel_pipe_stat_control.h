@@ -20,8 +20,7 @@ constexpr PixelPipeStatControl DecodePixelPipeStatControl(u32 control_lo, u32 co
     return {
         .counter_id = (control_lo >> 3) & 0x3FU,
         .stride_bytes = 4U << ((control_lo >> 9) & 0x3U),
-        .instance_mask = static_cast<u64>(control_lo >> 11) |
-                         (static_cast<u64>(control_hi) << 21),
+        .instance_mask = static_cast<u64>(control_lo >> 11) | (static_cast<u64>(control_hi) << 21),
     };
 }
 
@@ -31,7 +30,7 @@ struct PixelPipeStatLayout {
 };
 
 constexpr PixelPipeStatLayout BuildPixelPipeStatLayout(const PixelPipeStatControl& control,
-                                                        u32 max_instances) {
+                                                       u32 max_instances) {
     PixelPipeStatLayout layout{};
     const u32 bounded_instances =
         max_instances < layout.offsets.size() ? max_instances : layout.offsets.size();

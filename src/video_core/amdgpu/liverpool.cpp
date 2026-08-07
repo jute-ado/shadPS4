@@ -3,6 +3,9 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <bit>
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -15,6 +18,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/amdgpu/pixel_pipe_stat_control.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -68,6 +72,8 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    pixel_pipe_stat_diagnostic_enabled =
+        std::getenv("SHADPS4_PIXEL_PIPE_STAT_CONTROL_DIAGNOSTIC") != nullptr;
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -689,12 +695,51 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 LOG_DEBUG(Render, "Encountered EventWrite: event_type = {}, event_index = {}",
                           magic_enum::enum_name(event->event_type.Value()),
                           magic_enum::enum_name(event->event_index.Value()));
-                if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
+                if (event->event_type.Value() == EventType::PixelPipeStatControl &&
+                    header->type3.NumWords() >= 3) {
+                    pixel_pipe_stat_control =
+                        DecodePixelPipeStatControl(event->address[0], event->address[1]);
+                    pixel_pipe_stat_control_seen = true;
+                    ++pixel_pipe_stat_control_sequence;
+                    if (pixel_pipe_stat_diagnostic_enabled &&
+                        pixel_pipe_stat_diagnostic_records < PixelPipeStatDiagnosticRecordLimit) {
+                        const u32 enabled_instances =
+                            static_cast<u32>(std::popcount(pixel_pipe_stat_control.instance_mask));
+                        const u32 highest_instance =
+                            pixel_pipe_stat_control.instance_mask == 0
+                                ? 0
+                                : static_cast<u32>(
+                                      std::bit_width(pixel_pipe_stat_control.instance_mask) - 1);
+                        LOG_INFO(
+                            Render,
+                            "PixelPipeStatControlDiagnostic kind=control sequence={} "
+                            "counter_id={} stride_bytes={} enabled_instances={} "
+                            "highest_instance={} matches_fixed_layout={}",
+                            pixel_pipe_stat_control_sequence, pixel_pipe_stat_control.counter_id,
+                            pixel_pipe_stat_control.stride_bytes, enabled_instances,
+                            highest_instance,
+                            IsFixedPixelPipeStatLayout(pixel_pipe_stat_control, num_counter_pairs));
+                        ++pixel_pipe_stat_diagnostic_records;
+                    }
+                } else if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
                     // TODO: handle proper synchronization, for now signal that update is done
                     // immediately
                     regs.cp_strmout_cntl.offset_update_done = 1;
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
+                        if (pixel_pipe_stat_diagnostic_enabled &&
+                            pixel_pipe_stat_last_dump_sequence !=
+                                pixel_pipe_stat_control_sequence &&
+                            pixel_pipe_stat_diagnostic_records <
+                                PixelPipeStatDiagnosticRecordLimit) {
+                            LOG_INFO(Render,
+                                     "PixelPipeStatControlDiagnostic kind=dump sequence={} "
+                                     "control_seen={} fixed_instances={}",
+                                     pixel_pipe_stat_control_sequence, pixel_pipe_stat_control_seen,
+                                     num_counter_pairs);
+                            pixel_pipe_stat_last_dump_sequence = pixel_pipe_stat_control_sequence;
+                            ++pixel_pipe_stat_diagnostic_records;
+                        }
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();

@@ -11,10 +11,9 @@ namespace {
 TEST(PixelPipeStatControl, DecodesCounterStrideAndSplitInstanceMask) {
     constexpr u32 CounterId = 37;
     constexpr u32 StrideEncoding = 1;
-    constexpr u64 InstanceMask = (1ULL << 0) | (1ULL << 5) | (1ULL << 21) |
-                                 (1ULL << 42);
-    constexpr u32 ControlLo = (CounterId << 3) | (StrideEncoding << 9) |
-                              (static_cast<u32>(InstanceMask) << 11);
+    constexpr u64 InstanceMask = (1ULL << 0) | (1ULL << 5) | (1ULL << 21) | (1ULL << 42);
+    constexpr u32 ControlLo =
+        (CounterId << 3) | (StrideEncoding << 9) | (static_cast<u32>(InstanceMask) << 11);
     constexpr u32 ControlHi = static_cast<u32>(InstanceMask >> 21);
 
     constexpr auto control = DecodePixelPipeStatControl(ControlLo, ControlHi);

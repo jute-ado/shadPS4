@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <semaphore>
 #include <span>
@@ -19,6 +20,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/pixel_pipe_stat_control.h"
 #include "video_core/amdgpu/regs.h"
 
 namespace Vulkan {
@@ -203,6 +205,13 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    static constexpr u32 PixelPipeStatDiagnosticRecordLimit = 64;
+    PixelPipeStatControl pixel_pipe_stat_control{};
+    u32 pixel_pipe_stat_control_sequence{};
+    u32 pixel_pipe_stat_last_dump_sequence{std::numeric_limits<u32>::max()};
+    u32 pixel_pipe_stat_diagnostic_records{};
+    bool pixel_pipe_stat_control_seen{};
+    bool pixel_pipe_stat_diagnostic_enabled{};
     EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {
