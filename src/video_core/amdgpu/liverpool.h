@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/draw_resource_content_provenance_diagnostic.h"
 #include "video_core/amdgpu/draw_resource_fingerprint_diagnostic.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
@@ -101,6 +102,13 @@ public:
     [[nodiscard]] DrawResourceFingerprintDiagnostic* GetDrawResourceFingerprintDiagnostic() {
         return draw_resource_fingerprint_diagnostic_enabled ? &draw_resource_fingerprint_diagnostic
                                                             : nullptr;
+    }
+
+    [[nodiscard]] DrawResourceContentProvenanceDiagnostic*
+    GetDrawResourceContentProvenanceDiagnostic() {
+        return draw_resource_content_provenance_diagnostic_enabled
+                   ? &draw_resource_content_provenance_diagnostic
+                   : nullptr;
     }
 
     template <bool wait_done = false>
@@ -214,6 +222,11 @@ private:
     u64 draw_resource_fingerprint_report_start{1};
     u64 draw_resource_fingerprint_report_count{10000};
     DrawResourceFingerprintDiagnostic draw_resource_fingerprint_diagnostic{/*report_limit=*/10000};
+    bool draw_resource_content_provenance_diagnostic_enabled{};
+    u64 draw_resource_content_provenance_report_start{1};
+    u64 draw_resource_content_provenance_report_count{10000};
+    DrawResourceContentProvenanceDiagnostic draw_resource_content_provenance_diagnostic{
+        /*report_limit=*/10000};
 
     struct ConstantEngine {
         void Reset() {

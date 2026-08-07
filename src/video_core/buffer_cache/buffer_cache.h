@@ -193,6 +193,9 @@ private:
     vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
                             size_t total_size_bytes);
 
+    u64 CopyCpuUploadWithProvenance(StreamBuffer& target, VAddr device_addr, u32 size,
+                                    u32 alignment);
+
     bool SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size);
 
     void WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes);

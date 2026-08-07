@@ -201,8 +201,16 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    auto* content_diagnostic = liverpool->GetDrawResourceContentProvenanceDiagnostic();
+    if (content_diagnostic != nullptr) {
+        content_diagnostic->BeginDraw();
+    }
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        if (content_diagnostic != nullptr) {
+            content_diagnostic->AbortDraw();
+        }
         return;
     }
     RecordDrawResourceFingerprint(pipeline);
@@ -211,6 +219,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+    }
+    if (content_diagnostic != nullptr) {
+        content_diagnostic->EndDraw();
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
@@ -250,8 +261,16 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    auto* content_diagnostic = liverpool->GetDrawResourceContentProvenanceDiagnostic();
+    if (content_diagnostic != nullptr) {
+        content_diagnostic->BeginDraw();
+    }
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        if (content_diagnostic != nullptr) {
+            content_diagnostic->AbortDraw();
+        }
         return;
     }
     RecordDrawResourceFingerprint(pipeline);
@@ -269,6 +288,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     u32 count_base{};
     if (count_address != 0) {
         std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
+    }
+    if (content_diagnostic != nullptr) {
+        content_diagnostic->EndDraw();
     }
 
     if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,

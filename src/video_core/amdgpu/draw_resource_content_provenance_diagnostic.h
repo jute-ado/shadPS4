@@ -71,6 +71,7 @@ class DrawResourceContentProvenanceDiagnostic {
 public:
     static constexpr u32 MaxObservationsPerFrame = 16384;
     static constexpr u32 MaxProbeBytesPerFrame = 4_MB;
+    static constexpr u32 MaxFullProbeBytes = 16_KB;
 
     explicit DrawResourceContentProvenanceDiagnostic(u64 report_limit_)
         : report_limit{report_limit_}, current_frame{std::make_unique<Frame>()},
@@ -106,7 +107,11 @@ public:
 
     [[nodiscard]] bool CanProbeCpuUpload(u32 size) const noexcept {
         return draw_active && current_observations < MaxObservationsPerFrame &&
-               size <= MaxProbeBytesPerFrame - current_probe_bytes;
+               size <= MaxFullProbeBytes && size <= MaxProbeBytesPerFrame - current_probe_bytes;
+    }
+
+    [[nodiscard]] bool IsDrawActive() const noexcept {
+        return draw_active;
     }
 
     [[nodiscard]] u64 FingerprintBytes(const void* data, size_t size) const noexcept {

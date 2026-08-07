@@ -25,6 +25,22 @@
 
 namespace AmdGpu {
 
+static std::string FormatContentResourceOrdinals(
+    const std::array<DrawResourceContentOrdinal,
+                     DrawResourceContentProvenanceSnapshot::MaxReportedResources>& resources,
+    u32 count) {
+    std::string output;
+    for (u32 i = 0; i < count; ++i) {
+        if (!output.empty()) {
+            output += ',';
+        }
+        output += std::to_string(resources[i].draw_ordinal);
+        output += ':';
+        output += std::to_string(resources[i].resource_ordinal);
+    }
+    return output;
+}
+
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
 
@@ -83,6 +99,19 @@ Liverpool::Liverpool() {
     if (const char* report_count =
             std::getenv("SHADPS4_DRAW_RESOURCE_FINGERPRINT_REPORT_COUNT")) {
         draw_resource_fingerprint_report_count = std::strtoull(report_count, nullptr, 10);
+    }
+    const char* content_provenance_diagnostic =
+        std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_DIAGNOSTIC");
+    draw_resource_content_provenance_diagnostic_enabled =
+        content_provenance_diagnostic != nullptr &&
+        std::string_view{content_provenance_diagnostic} == "1";
+    if (const char* report_start =
+            std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_REPORT_START")) {
+        draw_resource_content_provenance_report_start = std::strtoull(report_start, nullptr, 10);
+    }
+    if (const char* report_count =
+            std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_REPORT_COUNT")) {
+        draw_resource_content_provenance_report_count = std::strtoull(report_count, nullptr, 10);
     }
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
@@ -294,10 +323,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                     ? draw_resource_fingerprint_diagnostic
                                                           .TakeSnapshot()
                                                     : DrawResourceFingerprintSnapshot{};
+                    const auto content_provenance =
+                        draw_resource_content_provenance_diagnostic_enabled
+                            ? draw_resource_content_provenance_diagnostic.TakeSnapshot()
+                            : DrawResourceContentProvenanceSnapshot{};
                     const u64 queued_time_us = Libraries::Kernel::sceKernelGetProcessTime();
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
-                                                   [this, draw_resources, queued_time_us] {
+                                                   [this, draw_resources, content_provenance,
+                                                    queued_time_us] {
                                                        const bool in_report_window =
                                                            draw_resources.sequence >=
                                                                draw_resource_fingerprint_report_start &&
@@ -395,6 +429,64 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                draw_resources
                                                                    .truncated_descriptors,
                                                                draw_resources.truncated_bytes);
+                                                       }
+                                                       const bool content_in_report_window =
+                                                           content_provenance.sequence >=
+                                                               draw_resource_content_provenance_report_start &&
+                                                           content_provenance.sequence -
+                                                                   draw_resource_content_provenance_report_start <
+                                                               draw_resource_content_provenance_report_count;
+                                                       if (content_provenance.should_report &&
+                                                           content_in_report_window) {
+                                                           LOG_INFO(
+                                                               Render,
+                                                               "DrawResourceContentProvenance "
+                                                               "sequence={} queued_time_us={} "
+                                                               "completed_time_us={} draws={} "
+                                                               "observations={} bytes_probed={} "
+                                                               "coherent_changed_resources={} "
+                                                               "coherent_changed_ordinals={} "
+                                                               "coherent_content_aba_resources={} "
+                                                               "coherent_content_aba_ordinals={} "
+                                                               "concurrent_write_resources={} "
+                                                               "endpoint_capture_resources={} "
+                                                               "staged_mismatch_resources={} "
+                                                               "resident_unobserved_resources={} "
+                                                               "truncated_resources={} "
+                                                               "truncated_bytes={}",
+                                                               content_provenance.sequence,
+                                                               queued_time_us,
+                                                               Libraries::Kernel::
+                                                                   sceKernelGetProcessTime(),
+                                                               content_provenance.draws,
+                                                               content_provenance.observations,
+                                                               content_provenance.bytes_probed,
+                                                               content_provenance
+                                                                   .coherent_changed_resources,
+                                                               FormatContentResourceOrdinals(
+                                                                   content_provenance
+                                                                       .first_coherent_changed_resources,
+                                                                   content_provenance
+                                                                       .reported_coherent_changed_resources),
+                                                               content_provenance
+                                                                   .coherent_content_aba_resources,
+                                                               FormatContentResourceOrdinals(
+                                                                   content_provenance
+                                                                       .first_coherent_content_aba_resources,
+                                                                   content_provenance
+                                                                       .reported_coherent_content_aba_resources),
+                                                               content_provenance
+                                                                   .concurrent_write_resources,
+                                                               content_provenance
+                                                                   .endpoint_capture_resources,
+                                                               content_provenance
+                                                                   .staged_mismatch_resources,
+                                                               content_provenance
+                                                                   .resident_unobserved_resources,
+                                                               content_provenance
+                                                                   .truncated_resources,
+                                                               content_provenance
+                                                                   .truncated_bytes);
                                                        }
                                                        SendCommand([] {
                                                            Platform::IrqC::Instance()->Signal(

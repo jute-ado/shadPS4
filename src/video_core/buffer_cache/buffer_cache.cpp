@@ -395,7 +395,8 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
-        const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
+        const u64 offset = CopyCpuUploadWithProvenance(
+            stream_buffer, device_addr, size, instance.UniformMinAlignment());
         return {&stream_buffer, offset};
     }
     if (IsBufferInvalid(buffer_id)) {
@@ -403,6 +404,10 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     }
     Buffer& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
+    if (auto* diagnostic = liverpool->GetDrawResourceContentProvenanceDiagnostic();
+        diagnostic != nullptr && diagnostic->IsDrawActive()) {
+        diagnostic->RecordResidentUnobserved();
+    }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
     }
@@ -415,6 +420,10 @@ std::pair<Buffer*, u32> BufferCache::ObtainBufferForImage(VAddr gpu_addr, u32 si
     if (buffer_id) {
         if (Buffer& buffer = slot_buffers[buffer_id]; buffer.IsInBounds(gpu_addr, size)) {
             SynchronizeBuffer(buffer, gpu_addr, size, false, false);
+            if (auto* diagnostic = liverpool->GetDrawResourceContentProvenanceDiagnostic();
+                diagnostic != nullptr && diagnostic->IsDrawActive()) {
+                diagnostic->RecordResidentUnobserved();
+            }
             return {&buffer, buffer.Offset(gpu_addr)};
         }
     }
@@ -423,10 +432,33 @@ std::pair<Buffer*, u32> BufferCache::ObtainBufferForImage(VAddr gpu_addr, u32 si
         return ObtainBuffer(gpu_addr, size, false, false);
     }
     // In all other cases, just do a CPU copy to the staging buffer.
-    const auto [data, offset] = staging_buffer.Map(size, 16);
-    memory->CopySparseMemory(gpu_addr, data, size);
-    staging_buffer.Commit();
+    const u64 offset = CopyCpuUploadWithProvenance(staging_buffer, gpu_addr, size, 16);
     return {&staging_buffer, offset};
+}
+
+u64 BufferCache::CopyCpuUploadWithProvenance(StreamBuffer& target, VAddr device_addr, u32 size,
+                                             u32 alignment) {
+    auto* diagnostic = liverpool->GetDrawResourceContentProvenanceDiagnostic();
+    if (diagnostic == nullptr || !diagnostic->IsDrawActive()) {
+        return target.Copy(device_addr, size, alignment);
+    }
+    if (!diagnostic->CanProbeCpuUpload(size)) {
+        const u64 offset = target.Copy(device_addr, size, alignment);
+        diagnostic->RecordTruncated(size);
+        return offset;
+    }
+
+    std::array<u8, AmdGpu::DrawResourceContentProvenanceDiagnostic::MaxFullProbeBytes> guest_copy;
+    const auto [staged, offset] = target.Map(size, alignment);
+    memory->CopySparseMemory(device_addr, guest_copy.data(), size);
+    const u64 before_token = diagnostic->FingerprintBytes(guest_copy.data(), size);
+    memory->CopySparseMemory(device_addr, staged, size);
+    const u64 staged_token = diagnostic->FingerprintBytes(staged, size);
+    memory->CopySparseMemory(device_addr, guest_copy.data(), size);
+    const u64 after_token = diagnostic->FingerprintBytes(guest_copy.data(), size);
+    target.Commit();
+    diagnostic->RecordCpuUpload(before_token, staged_token, after_token, size);
+    return offset;
 }
 
 bool BufferCache::IsRegionRegistered(VAddr addr, size_t size) {
