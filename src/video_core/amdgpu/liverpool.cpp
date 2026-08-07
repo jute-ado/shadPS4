@@ -124,6 +124,11 @@ Liverpool::Liverpool() {
         draw_resource_content_provenance_diagnostic.ConfigureProbeByteLimit(
             static_cast<u32>(std::strtoul(max_bytes, nullptr, 10)));
     }
+    if (const char* skip_bytes =
+            std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_SKIP_BYTES")) {
+        draw_resource_content_provenance_diagnostic.ConfigureProbeByteSkip(
+            static_cast<u32>(std::strtoul(skip_bytes, nullptr, 10)));
+    }
     draw_resource_content_provenance_diagnostic.ConfigureCaptureWindow(
         draw_resource_content_provenance_report_start,
         draw_resource_content_provenance_report_count);
@@ -470,6 +475,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                "endpoint_capture_resources={} "
                                                                "staged_mismatch_resources={} "
                                                                "resident_unobserved_resources={} "
+                                                               "skipped_resources={} "
+                                                               "skipped_bytes={} "
                                                                "truncated_resources={} "
                                                                "truncated_bytes={}",
                                                                content_provenance.sequence,
@@ -515,6 +522,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                    .staged_mismatch_resources,
                                                                content_provenance
                                                                    .resident_unobserved_resources,
+                                                               content_provenance.skipped_resources,
+                                                               content_provenance.skipped_bytes,
                                                                content_provenance
                                                                    .truncated_resources,
                                                                content_provenance

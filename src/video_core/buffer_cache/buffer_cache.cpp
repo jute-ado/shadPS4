@@ -442,6 +442,11 @@ u64 BufferCache::CopyCpuUploadWithProvenance(StreamBuffer& target, VAddr device_
     if (diagnostic == nullptr || !diagnostic->IsDrawActive()) {
         return target.Copy(device_addr, size, alignment);
     }
+    if (diagnostic->ShouldSkipCpuUpload(size)) {
+        const u64 offset = target.Copy(device_addr, size, alignment);
+        diagnostic->RecordSkipped(size);
+        return offset;
+    }
     if (!diagnostic->CanProbeCpuUpload(size)) {
         const u64 offset = target.Copy(device_addr, size, alignment);
         diagnostic->RecordTruncated(size);
