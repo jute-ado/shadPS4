@@ -13,9 +13,9 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
+#include "video_core/amdgpu/eop_boundary_diagnostic.h"
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
-#include "video_core/amdgpu/eop_boundary_diagnostic.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -162,8 +162,11 @@ void Liverpool::Process(std::stop_token stoken) {
     }
 }
 
-Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb,
+                                           CommandBufferLifetimeDiagnostic::Probe ccb_lifetime) {
     FIBER_ENTER(ccb_task_name);
+
+    ccb_lifetime.ObserveInitial(ccb);
 
     while (!ccb.empty()) {
         ProcessCommands();
@@ -201,18 +204,27 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
             while ((cblock.de_count - cblock.ce_count) >= diff) {
+                ccb_lifetime.Suspend(ccb);
                 YIELD_CE();
+                ccb_lifetime.Resume(ccb);
             }
             break;
         }
         case PM4ItOpcode::IndirectBufferConst: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task =
-                ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
+            const std::span indirect_ccb{indirect_buffer->Address<const u32>(),
+                                         indirect_buffer->ib_size};
+            // An indirect buffer becomes observable only when its parent packet is decoded. The
+            // probe covers the child fetch-to-completion lifetime, not rewrites before this fetch.
+            auto indirect_lifetime = GetCommandBufferLifetimeDiagnostic().Begin(
+                CommandBufferKind::IndirectCcb, indirect_ccb);
+            auto task = ProcessCeUpdate(indirect_ccb, std::move(indirect_lifetime));
             RESUME_CE(task);
 
             while (!task.handle.done()) {
+                ccb_lifetime.Suspend(ccb);
                 YIELD_CE();
+                ccb_lifetime.Resume(ccb);
                 RESUME_CE(task);
             }
             break;
@@ -225,11 +237,17 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         ccb = NextPacket(ccb, header->type3.NumWords() + 1);
     }
 
+    ccb_lifetime.ObserveFinal();
+
     FIBER_EXIT;
 }
 
-Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                                           CommandBufferLifetimeDiagnostic::Probe dcb_lifetime,
+                                           CommandBufferLifetimeDiagnostic::Probe ccb_lifetime) {
     FIBER_ENTER(dcb_task_name);
+
+    dcb_lifetime.ObserveInitial(dcb);
 
     cblock.Reset();
 
@@ -239,7 +257,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     if (!ccb.empty()) {
         // In case of CCB provided kick off CE asap to have the constant heap ready to use
-        ce_task = ProcessCeUpdate(ccb);
+        ce_task = ProcessCeUpdate(ccb, std::move(ccb_lifetime));
         RESUME_GFX(ce_task);
     }
     const bool host_markers_enabled = rasterizer && EmulatorSettings.IsVkHostMarkersEnabled();
@@ -819,7 +837,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
+                        dcb_lifetime.Suspend(dcb);
                         YIELD_GFX();
+                        dcb_lifetime.Resume(dcb);
                     }
                     mem_semaphore->Decrement();
                 }
@@ -835,7 +855,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 while (!rewind->Valid()) {
+                    dcb_lifetime.Suspend(dcb);
                     YIELD_GFX();
+                    dcb_lifetime.Resume(dcb);
                 }
                 break;
             }
@@ -853,18 +875,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    dcb_lifetime.Suspend(dcb);
                     YIELD_GFX();
+                    dcb_lifetime.Resume(dcb);
                 }
                 break;
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-                auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                const std::span indirect_dcb{indirect_buffer->Address<const u32>(),
+                                             indirect_buffer->ib_size};
+                // An indirect buffer becomes observable only when its parent packet is decoded.
+                // The probe covers the child fetch-to-completion lifetime, not earlier rewrites.
+                auto indirect_lifetime = GetCommandBufferLifetimeDiagnostic().Begin(
+                    CommandBufferKind::IndirectDcb, indirect_dcb);
+                auto task = ProcessGraphics(indirect_dcb, {}, std::move(indirect_lifetime));
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
+                    dcb_lifetime.Suspend(dcb);
                     YIELD_GFX();
+                    dcb_lifetime.Resume(dcb);
                     RESUME_GFX(task);
                 }
                 break;
@@ -927,6 +958,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         }
         ce_task.handle.destroy();
     }
+
+    dcb_lifetime.ObserveFinal();
 
     FIBER_EXIT;
 }
@@ -1245,7 +1278,10 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
         std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);
     }
 
-    auto task = ProcessGraphics(dcb, ccb);
+    auto& lifetime_diagnostic = GetCommandBufferLifetimeDiagnostic();
+    auto dcb_lifetime = lifetime_diagnostic.Begin(CommandBufferKind::TopLevelDcb, dcb);
+    auto ccb_lifetime = lifetime_diagnostic.Begin(CommandBufferKind::TopLevelCcb, ccb);
+    auto task = ProcessGraphics(dcb, ccb, std::move(dcb_lifetime), std::move(ccb_lifetime));
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);

@@ -61,6 +61,25 @@ TEST(CommandBufferLifetimeDiagnostic, DetectsMutationAcrossALaterCoroutineResume
     EXPECT_EQ(snapshot.last_remaining_words, 3);
 }
 
+TEST(CommandBufferLifetimeDiagnostic, LaterResumeComparesAgainstTheSubmitBaseline) {
+    CommandBufferLifetimeDiagnostic diagnostic{
+        {.enabled = true, .max_words_per_signature = 16, .max_resume_checks = 4}};
+    std::array<u32, 5> words{1, 2, 3, 4, 5};
+    auto probe = diagnostic.Begin(CommandBufferKind::TopLevelDcb, words);
+    probe.ObserveInitial(words);
+
+    words[0] = 66;
+    const auto remaining = std::span<const u32>{words}.subspan(3);
+    probe.Suspend(remaining);
+    probe.Resume(remaining);
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_EQ(snapshot.later_resume_mutations, 1);
+    EXPECT_EQ(snapshot.last_mutation_phase, CommandBufferMutationPhase::LaterResume);
+    EXPECT_EQ(snapshot.last_logical_word_offset, 3);
+    EXPECT_EQ(snapshot.last_remaining_words, 2);
+}
+
 TEST(CommandBufferLifetimeDiagnostic, FinalCheckCatchesMutationOfAlreadyConsumedPrefix) {
     CommandBufferLifetimeDiagnostic diagnostic{
         {.enabled = true, .max_words_per_signature = 16, .max_resume_checks = 4}};
@@ -111,6 +130,21 @@ TEST(CommandBufferLifetimeDiagnostic, OversizedAndDisabledBuffersAreNeverSampled
     EXPECT_FALSE(disabled.Begin(CommandBufferKind::IndirectDcb, words).Active());
     EXPECT_EQ(disabled.Read().observed_buffers, 0);
     EXPECT_EQ(disabled.Read().oversized_buffers, 0);
+}
+
+TEST(CommandBufferLifetimeDiagnostic, MutationReportsRetainSemanticBufferKind) {
+    CommandBufferLifetimeDiagnostic diagnostic{
+        {.enabled = true, .max_words_per_signature = 16, .max_resume_checks = 4}};
+    std::array<u32, 3> words{1, 2, 3};
+    auto probe = diagnostic.Begin(CommandBufferKind::IndirectCcb, words);
+    probe.ObserveInitial(words);
+    probe.Suspend(words);
+    words[1] = 44;
+    probe.Resume(words);
+
+    const auto snapshot = diagnostic.Read();
+    EXPECT_EQ(snapshot.last_buffer_kind, CommandBufferKind::IndirectCcb);
+    EXPECT_EQ(snapshot.last_buffer_ordinal, 1);
 }
 
 } // namespace

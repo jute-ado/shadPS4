@@ -9,6 +9,7 @@
 #include "core/signals.h"
 #include "core/windows_exception_policy.h"
 #include "emulator.h"
+#include "video_core/amdgpu/command_buffer_lifetime_diagnostic.h"
 #include "video_core/amdgpu/eop_boundary_diagnostic.h"
 
 #ifdef _WIN32
@@ -82,6 +83,22 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                 snapshot.eop_decoded_sequence, snapshot.eop_irq_requested,
                 snapshot.eop_irq_requested_sequence, snapshot.eop_irq_delivered,
                 snapshot.eop_irq_delivered_sequence);
+        }
+        if (AmdGpu::CommandBufferLifetimeDiagnosticEnabled()) {
+            const auto snapshot = AmdGpu::GetCommandBufferLifetimeDiagnostic().Read();
+            LOG_CRITICAL(
+                Debug,
+                "Command buffer lifetime diagnostic: sequence {}..{}, observed {}, mutations "
+                "initial/later/final {}/{}/{}, resume checks {} capacity loss {}, oversized {}, "
+                "invalid spans {}, last buffer {} kind {} phase {} resume {} offset {} words {}",
+                snapshot.sequence_before, snapshot.sequence_after, snapshot.observed_buffers,
+                snapshot.initial_mutations, snapshot.later_resume_mutations,
+                snapshot.final_mutations, snapshot.resume_checks,
+                snapshot.resume_check_capacity_loss, snapshot.oversized_buffers,
+                snapshot.invalid_remaining_spans, snapshot.last_buffer_ordinal,
+                static_cast<u32>(snapshot.last_buffer_kind),
+                static_cast<u32>(snapshot.last_mutation_phase), snapshot.last_resume_ordinal,
+                snapshot.last_logical_word_offset, snapshot.last_remaining_words);
         }
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();

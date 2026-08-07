@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/command_buffer_lifetime_diagnostic.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -180,8 +181,11 @@ private:
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessCeUpdate(std::span<const u32> ccb);
+    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                         CommandBufferLifetimeDiagnostic::Probe dcb_lifetime = {},
+                         CommandBufferLifetimeDiagnostic::Probe ccb_lifetime = {});
+    Task ProcessCeUpdate(std::span<const u32> ccb,
+                         CommandBufferLifetimeDiagnostic::Probe ccb_lifetime = {});
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
