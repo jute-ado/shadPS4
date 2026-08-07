@@ -166,6 +166,19 @@ TEST(PhysicalBackingAllocationProvenance, VirtualMemoryAreaCollectsOnlyEligibleB
     EXPECT_FALSE(area.CollectPhysicalBackingSpans());
 }
 
+TEST(PhysicalBackingAllocationProvenance,
+     UntrackedCpuWritableMappingCannotPublishImportedBacking) {
+    Core::VirtualMemoryArea area{};
+    area.base = GuestBase;
+    area.size = PageSize;
+    area.type = Core::VMAType::Direct;
+    area.prot = Core::MemoryProt::CpuReadWrite | Core::MemoryProt::GpuReadWrite;
+    area.physical_backing_eligible = true;
+    area.phys_areas.emplace(0, MakeMappedArea(6 * PageSize, PageSize, 4));
+
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans());
+}
+
 TEST(PhysicalBackingAllocationProvenance, MappingClassRejectsEveryMismatchedDmaState) {
     constexpr PhysicalMemoryType Types[]{
         PhysicalMemoryType::Free,   PhysicalMemoryType::Allocated, PhysicalMemoryType::Mapped,
