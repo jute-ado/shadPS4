@@ -56,6 +56,11 @@ bool EqueueInternal::AddEvent(EqueueEvent& event) {
     {
         std::scoped_lock lock{m_mutex};
 
+        if (id == 0x40 && filter == OrbisKernelEvent::Filter::GraphicsCore &&
+            eop_delivery_diagnostic_slot.load() == EqueueDeliveryDiagnostic::InvalidSlot) {
+            eop_delivery_diagnostic_slot.store(EqueueDeliveryDiagnostic::RegisterQueue());
+        }
+
         // Calculate timer interval
         event.time_added = std::chrono::steady_clock::now();
         if (event.event.filter == OrbisKernelEvent::Filter::Timer) {
@@ -172,11 +177,18 @@ bool EqueueInternal::RemoveEvent(u64 id, s16 filter) {
     return has_found;
 }
 
-int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKernelUseconds* timo) {
+int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKernelUseconds* timo,
+                                  EqueueDeliveryDiagnostic::DeliveryToken* eop_delivery) {
+    if (eop_delivery != nullptr) {
+        *eop_delivery = {};
+    }
+    EqueueDeliveryDiagnostic::RecordWaitMode(eop_delivery_diagnostic_slot.load(),
+                                             timo != nullptr && *timo == 0);
     if (timo != nullptr && *timo == 0) {
         // Effectively acts as a poll; only events that have already
         // arrived at the time of this function call can be received
-        return GetTriggeredEvents(ev, num);
+        return EqueueDetail::PollReadyEvents(
+            m_mutex, [&] { return GetTriggeredEvents(ev, num, eop_delivery); });
     }
     const auto micros = timo ? *timo : 0u;
 
@@ -188,7 +200,7 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     int count = 0;
 
     const auto predicate = [&] {
-        count = GetTriggeredEvents(ev, num);
+        count = GetTriggeredEvents(ev, num, eop_delivery);
         return count > 0;
     };
 
@@ -221,6 +233,10 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
                 } else {
                     event.Trigger(trigger_data);
                 }
+                if (ident == 0x40 && filter == OrbisKernelEvent::Filter::GraphicsCore) {
+                    eop_pending_diagnostic_occurrence = EqueueDeliveryDiagnostic::RecordAccepted(
+                        eop_delivery_diagnostic_slot.load());
+                }
                 has_found = true;
             }
         }
@@ -229,13 +245,27 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
     return has_found;
 }
 
-int EqueueInternal::GetTriggeredEvents(OrbisKernelEvent* ev, int num) {
+int EqueueInternal::GetTriggeredEvents(OrbisKernelEvent* ev, int num,
+                                       EqueueDeliveryDiagnostic::DeliveryToken* eop_delivery) {
     int count = 0;
     for (auto it = m_events.begin(); it != m_events.end();) {
         if (it->IsTriggered()) {
             ev[count++] = it->event;
+            if (it->event.ident == 0x40 &&
+                it->event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+                const EqueueDeliveryDiagnostic::DeliveryToken token{
+                    eop_delivery_diagnostic_slot.load(), eop_pending_diagnostic_occurrence};
+                EqueueDeliveryDiagnostic::RecordDequeued(token);
+                if (eop_delivery != nullptr) {
+                    *eop_delivery = token;
+                }
+            }
             if (it->event.flags & OrbisKernelEvent::Flags::Clear) {
                 it->Clear();
+                if (it->event.ident == 0x40 &&
+                    it->event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+                    eop_pending_diagnostic_occurrence = 0;
+                }
             }
             if (it->event.flags & OrbisKernelEvent::Flags::OneShot) {
                 it = m_events.erase(it);
@@ -480,12 +510,14 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    *out = equeue->WaitForEvents(ev, num, timo);
+    EqueueDeliveryDiagnostic::DeliveryToken eop_delivery{};
+    *out = equeue->WaitForEvents(ev, num, timo, &eop_delivery);
 
     if (*out == 0) {
         return ORBIS_KERNEL_ERROR_ETIMEDOUT;
     }
 
+    EqueueDeliveryDiagnostic::RecordReturned(eop_delivery);
     return ORBIS_OK;
 }
 

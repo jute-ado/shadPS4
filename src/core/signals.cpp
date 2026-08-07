@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/decoder.h"
 #include "common/signal_context.h"
+#include "core/libraries/kernel/equeue_delivery_diagnostic.h"
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
 #include "core/windows_exception_policy.h"
@@ -82,6 +83,25 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                 snapshot.eop_decoded_sequence, snapshot.eop_irq_requested,
                 snapshot.eop_irq_requested_sequence, snapshot.eop_irq_delivered,
                 snapshot.eop_irq_delivered_sequence);
+        }
+        if (Libraries::Kernel::EqueueDeliveryDiagnostic::Enabled()) {
+            const auto snapshot = Libraries::Kernel::EqueueDeliveryDiagnostic::FreezeAndRead();
+            LOG_CRITICAL(Debug,
+                         "EOP equeue delivery diagnostic: stable {}, sequence {}, queues {}, "
+                         "overflow {}",
+                         snapshot.frozen_stable, snapshot.sequence, snapshot.queue_count,
+                         snapshot.registration_overflow);
+            for (u32 slot = 0; slot < snapshot.queue_count; ++slot) {
+                const auto& queue = snapshot.queues[slot];
+                LOG_CRITICAL(
+                    Debug,
+                    "EOP equeue {}: polls {}, waits {}, accepted {} occurrence {}@{}, dequeued {} "
+                    "occurrence {}@{}, returned {} occurrence {}@{}",
+                    slot, queue.zero_poll_calls, queue.blocking_wait_calls, queue.accepted,
+                    queue.accepted_occurrence, queue.accepted_sequence, queue.dequeued,
+                    queue.dequeued_occurrence, queue.dequeued_sequence, queue.returned,
+                    queue.returned_occurrence, queue.returned_sequence);
+            }
         }
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();

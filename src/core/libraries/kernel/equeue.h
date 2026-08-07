@@ -3,21 +3,34 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 #include <boost/asio/steady_timer.hpp>
 
 #include <unordered_map>
 #include "common/rdtsc.h"
 #include "common/types.h"
+#include "core/libraries/kernel/equeue_delivery_diagnostic.h"
 
 namespace Core::Loader {
 class SymbolsResolver;
 }
 
 namespace Libraries::Kernel {
+
+namespace EqueueDetail {
+
+template <typename Drain>
+decltype(auto) PollReadyEvents(std::mutex& mutex, Drain&& drain) {
+    std::scoped_lock lock{mutex};
+    return std::forward<Drain>(drain)();
+}
+
+} // namespace EqueueDetail
 
 class EqueueInternal;
 struct EqueueEvent;
@@ -159,9 +172,11 @@ public:
     bool ScheduleEvent(u64 id, s16 filter,
                        void (*callback)(OrbisKernelEqueue, const OrbisKernelEvent&));
     bool RemoveEvent(u64 id, s16 filter);
-    int WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKernelUseconds* timo);
+    int WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKernelUseconds* timo,
+                      EqueueDeliveryDiagnostic::DeliveryToken* eop_delivery = nullptr);
     bool TriggerEvent(u64 ident, s16 filter, void* trigger_data);
-    int GetTriggeredEvents(OrbisKernelEvent* ev, int num);
+    int GetTriggeredEvents(OrbisKernelEvent* ev, int num,
+                           EqueueDeliveryDiagnostic::DeliveryToken* eop_delivery = nullptr);
 
     bool AddSmallTimer(EqueueEvent& event);
     bool HasSmallTimer() {
@@ -187,6 +202,8 @@ private:
     std::vector<EqueueEvent> m_events;
     std::condition_variable m_cond;
     std::unordered_map<u64, SmallTimer> m_small_timers;
+    std::atomic<u32> eop_delivery_diagnostic_slot{EqueueDeliveryDiagnostic::InvalidSlot};
+    u64 eop_pending_diagnostic_occurrence{};
 };
 
 EqueueInternal* GetEqueue(OrbisKernelEqueue eq);
