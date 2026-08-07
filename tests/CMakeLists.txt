@@ -148,6 +148,20 @@ target_compile_features(shadps4_address_space_operation_gate_test PRIVATE cxx_st
 target_link_libraries(shadps4_address_space_operation_gate_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_address_space_operation_gate_test)
 
+add_executable(shadps4_irq_controller_test
+    test_irq_controller.cpp
+)
+target_include_directories(shadps4_irq_controller_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_irq_controller_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_irq_controller_test PRIVATE
+    GTest::gtest_main
+    magic_enum::magic_enum
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_irq_controller_test)
+
 add_executable(shadps4_gnm_graphics_event_test
     test_gnm_graphics_event.cpp
 )
