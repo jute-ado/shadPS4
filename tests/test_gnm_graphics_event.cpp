@@ -17,3 +17,25 @@ TEST(GnmGraphicsEvent, RegistrationUsesClearSemantics) {
                                      Libraries::Kernel::OrbisKernelEvent::Flags::Clear);
     EXPECT_EQ(event.event.udata, user_data);
 }
+
+TEST(GnmGraphicsEvent, RepeatedTriggersCoalesceAndCountOccurrencesUntilClear) {
+    auto event = Libraries::GnmDriver::MakeGraphicsEvent(0x40, nullptr);
+
+    event.Trigger(reinterpret_cast<void*>(1));
+    event.Trigger(reinterpret_cast<void*>(2));
+    event.Trigger(reinterpret_cast<void*>(3));
+
+    EXPECT_TRUE(event.IsTriggered());
+    EXPECT_EQ(event.event.fflags, 3u);
+    EXPECT_EQ(event.event.data, 3u);
+
+    event.Clear();
+    EXPECT_FALSE(event.IsTriggered());
+    EXPECT_EQ(event.event.fflags, 0u);
+    EXPECT_EQ(event.event.data, 0u);
+
+    event.Trigger(reinterpret_cast<void*>(4));
+    EXPECT_TRUE(event.IsTriggered());
+    EXPECT_EQ(event.event.fflags, 1u);
+    EXPECT_EQ(event.event.data, 4u);
+}
