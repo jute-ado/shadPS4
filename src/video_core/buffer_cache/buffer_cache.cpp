@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <string_view>
 #include "common/alignment.h"
 #include "common/debug.h"
 #include "common/scope_exit.h"
@@ -70,6 +72,19 @@ BufferCache::~BufferCache() = default;
 void BufferCache::ApplyPhysicalBackingBdaDeltas(
     std::span<const PhysicalBackingBdaDelta> deltas) {
     if (deltas.empty()) {
+        return;
+    }
+    static const bool disable_physical_backing_deltas = [] {
+        const char* value = std::getenv("SHADPS4_DIAGNOSTIC_DISABLE_PHYSICAL_BACKING_BDA_DELTAS");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    if (disable_physical_backing_deltas) {
+        static bool logged = false;
+        if (!logged) {
+            LOG_WARNING(Render_Vulkan,
+                        "Diagnostic disabled every physical backing BDA delta application");
+            logged = true;
+        }
         return;
     }
     std::vector<PhysicalBackingBdaDelta> ordered{deltas.begin(), deltas.end()};
