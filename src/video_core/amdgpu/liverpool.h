@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/cond_exec_diagnostic.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -203,6 +204,7 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    CondExecDiagnosticTracker cond_exec_diagnostic{64};
     EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {

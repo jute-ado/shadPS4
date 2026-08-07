@@ -10,6 +10,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -896,8 +897,30 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (cond_exec->command.Value() != 0) {
                     LOG_WARNING(Render, "IT_COND_EXEC used a reserved command");
                 }
-                const auto skip = *cond_exec->Address() == false;
-                if (skip) {
+                const auto* address = reinterpret_cast<const u32*>(cond_exec->Address());
+                const VAddr gpu_address = reinterpret_cast<VAddr>(address);
+                bool registered = false;
+                bool gpu_dirty = false;
+                if (rasterizer != nullptr) {
+                    auto& buffer_cache = rasterizer->GetBufferCache();
+                    registered = buffer_cache.IsRegionRegistered(gpu_address, sizeof(u32));
+                    gpu_dirty =
+                        registered && buffer_cache.IsRegionGpuModified(gpu_address, sizeof(u32));
+                }
+                const u32 value = *address;
+                const auto observation = cond_exec_diagnostic.Observe(value, registered, gpu_dirty);
+                const bool legacy_skip = static_cast<u8>(value) == 0;
+                if (observation.should_report) {
+                    LOG_INFO(Render,
+                             "CondExecProvenance occurrence={} process_time_us={} registered={} "
+                             "gpu_dirty={} sample_kind={} full_word_skip={} legacy_skip={} "
+                             "exec_count={}",
+                             observation.occurrence, Libraries::Kernel::sceKernelGetProcessTime(),
+                             observation.registered, observation.gpu_dirty,
+                             magic_enum::enum_name(observation.sample_kind), observation.skip,
+                             legacy_skip, cond_exec->exec_count.Value());
+                }
+                if (legacy_skip) {
                     dcb = NextPacket(dcb,
                                      header->type3.NumWords() + 1 + cond_exec->exec_count.Value());
                     continue;
