@@ -97,6 +97,9 @@ struct EqueueEvent {
 
     void Trigger(void* data) {
         is_triggered = true;
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+            ++event.fflags;
+        }
         event.data = reinterpret_cast<uintptr_t>(data);
     }
 
