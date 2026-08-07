@@ -171,6 +171,16 @@ target_compile_features(shadps4_videodec2_picture_info_store_test PRIVATE cxx_st
 target_link_libraries(shadps4_videodec2_picture_info_store_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_videodec2_picture_info_store_test)
 
+if (WIN32)
+    add_executable(shadps4_windows_long_path_test
+        ${CMAKE_SOURCE_DIR}/src/dist/windows_long_path_aware.manifest
+        test_windows_long_path.cpp
+    )
+    target_compile_features(shadps4_windows_long_path_test PRIVATE cxx_std_23)
+    target_link_libraries(shadps4_windows_long_path_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_long_path_test)
+endif()
+
 add_executable(shadps4_gnm_submission_gate_test
     test_gnm_submission_gate.cpp
 )

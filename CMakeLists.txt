@@ -1380,7 +1380,10 @@ if (WIN32)
 endif()
 
 if (WIN32)
-    target_sources(shadps4 PRIVATE src/dist/shadps4.rc)
+    target_sources(shadps4 PRIVATE
+        src/dist/shadps4.rc
+        src/dist/windows_long_path_aware.manifest
+    )
 endif()
 
 add_compile_definitions(BOOST_ASIO_STANDALONE)
