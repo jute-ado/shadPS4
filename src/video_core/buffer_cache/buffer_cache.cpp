@@ -175,6 +175,7 @@ void BufferCache::BindVertexBuffers(
     struct BufferRange {
         VAddr base_address;
         VAddr end_address;
+        Buffer* object;
         vk::Buffer vk_buffer;
         u64 offset;
 
@@ -212,6 +213,7 @@ void BufferCache::BindVertexBuffers(
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
         const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
+        range.object = buffer;
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
         if (IsRegionGpuModified(range.base_address, size)) {
@@ -229,6 +231,7 @@ void BufferCache::BindVertexBuffers(
     Vulkan::VertexInputs<vk::DeviceSize> host_sizes;
     Vulkan::VertexInputs<vk::DeviceSize> host_strides;
     for (const auto& buffer : guest_buffers) {
+        Buffer* host_object{};
         if (buffer.base_address != 0 && buffer.GetSize() > 0) {
             const auto host_buffer_info =
                 std::ranges::find_if(ranges_merged, [&](const BufferRange& range) {
@@ -236,6 +239,7 @@ void BufferCache::BindVertexBuffers(
                            buffer.base_address < range.end_address;
                 });
             ASSERT(host_buffer_info != ranges_merged.cend());
+            host_object = host_buffer_info->object;
             host_buffers.emplace_back(host_buffer_info->vk_buffer);
             host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
                                    host_buffer_info->base_address);
@@ -245,8 +249,9 @@ void BufferCache::BindVertexBuffers(
         }
         host_sizes.push_back(buffer.GetSize());
         host_strides.push_back(buffer.GetStride());
-        identities.emplace_back(/*role=*/1, host_buffers.back(), host_offsets.back(),
-                                host_sizes.back());
+        identities.emplace_back(
+            /*role=*/1, static_cast<u64>(reinterpret_cast<uintptr_t>(host_object)),
+            host_buffers.back(), host_offsets.back(), host_sizes.back());
     }
 
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -281,7 +286,9 @@ void BufferCache::BindIndexBuffer(
         }
     }
     const auto cmdbuf = scheduler.CommandBuffer();
-    identities.emplace_back(/*role=*/2, vk_buffer->Handle(), offset, index_buffer_size);
+    identities.emplace_back(/*role=*/2,
+                            static_cast<u64>(reinterpret_cast<uintptr_t>(vk_buffer)),
+                            vk_buffer->Handle(), offset, index_buffer_size);
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
 }
 

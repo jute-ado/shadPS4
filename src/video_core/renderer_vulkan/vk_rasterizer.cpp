@@ -521,15 +521,9 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
         }
     }
     u32 host_identity_ordinal = 0;
-    for (const auto& info : buffer_infos) {
-        diagnostic->RecordHostBufferIdentity(
-            host_identity_ordinal++, /*role=*/0, /*object=*/0,
-            static_cast<u64>(reinterpret_cast<uintptr_t>(static_cast<VkBuffer>(info.buffer))),
-            info.offset, info.range);
-    }
     for (const auto& identity : draw_host_buffer_identities) {
         diagnostic->RecordHostBufferIdentity(
-            host_identity_ordinal++, identity.role, /*object=*/0,
+            host_identity_ordinal++, identity.role, identity.object,
             static_cast<u64>(
                 reinterpret_cast<uintptr_t>(static_cast<VkBuffer>(identity.buffer))),
             identity.offset, identity.size);
@@ -773,6 +767,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
+            draw_host_buffer_identities.emplace_back(
+                /*role=*/0, static_cast<u64>(reinterpret_cast<uintptr_t>(vk_buffer)),
+                vk_buffer->Handle(), offset_aligned, size + adjust);
             if (auto barrier =
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,

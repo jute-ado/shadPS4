@@ -36,6 +36,7 @@ class PageManager;
 
 struct HostBufferBindingIdentity {
     u32 role{};
+    u64 object{};
     vk::Buffer buffer{};
     u64 offset{};
     u64 size{};
