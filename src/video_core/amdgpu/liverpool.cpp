@@ -119,6 +119,11 @@ Liverpool::Liverpool() {
         draw_resource_content_provenance_diagnostic.ConfigureProbeMode(
             DrawResourceContentProbeMode::StagedOnly);
     }
+    if (const char* max_bytes =
+            std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_MAX_BYTES")) {
+        draw_resource_content_provenance_diagnostic.ConfigureProbeByteLimit(
+            static_cast<u32>(std::strtoul(max_bytes, nullptr, 10)));
+    }
     draw_resource_content_provenance_diagnostic.ConfigureCaptureWindow(
         draw_resource_content_provenance_report_start,
         draw_resource_content_provenance_report_count);
