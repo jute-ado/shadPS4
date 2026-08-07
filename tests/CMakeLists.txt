@@ -309,6 +309,18 @@ target_link_libraries(shadps4_depth_association_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_depth_association_test)
 
+add_executable(shadps4_attachment_publication_diagnostic_test
+    test_attachment_publication_diagnostic.cpp
+)
+target_include_directories(shadps4_attachment_publication_diagnostic_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_attachment_publication_diagnostic_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_attachment_publication_diagnostic_test PRIVATE
+    GTest::gtest_main
+)
+list(APPEND TEST_TARGETS shadps4_attachment_publication_diagnostic_test)
+
 add_executable(shadps4_module_mapping_test
     test_module_mapping.cpp
 )
