@@ -7,6 +7,7 @@
 
 using AmdGpu::ClassifyDrawResourceUpload;
 using AmdGpu::DrawResourceContentProvenanceDiagnostic;
+using AmdGpu::DrawResourceContentProbeMode;
 using AmdGpu::DrawResourceUploadProvenance;
 
 TEST(DrawResourceContentProvenanceDiagnostic, ClassifiesUploadReceipts) {
@@ -131,4 +132,12 @@ TEST(DrawResourceContentProvenanceDiagnostic, ReportsStagedOnlyContentAba) {
     ASSERT_EQ(returned.reported_staged_content_aba_resources, 1);
     EXPECT_EQ(returned.first_staged_content_aba_resources[0].draw_ordinal, 0);
     EXPECT_EQ(returned.first_staged_content_aba_resources[0].resource_ordinal, 0);
+}
+
+TEST(DrawResourceContentProvenanceDiagnostic, SelectsExplicitStagedOnlyProbeMode) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/1};
+    EXPECT_EQ(diagnostic.GetProbeMode(), DrawResourceContentProbeMode::FullProvenance);
+
+    diagnostic.ConfigureProbeMode(DrawResourceContentProbeMode::StagedOnly);
+    EXPECT_EQ(diagnostic.GetProbeMode(), DrawResourceContentProbeMode::StagedOnly);
 }
