@@ -20,7 +20,11 @@ enum class DrawTopologyKind : u32 {
 
 enum class DrawTopologyResult : u32 {
     Submitted,
-    Filtered,
+    FilterFastClear,
+    FilterFmaskDecompress,
+    FilterResolve,
+    FilterPrimitiveNone,
+    FilterDepthStencilCopy,
     MissingPipeline,
     BindingFailed,
     Count,
@@ -57,6 +61,11 @@ struct FrameDrawTopologySnapshot {
     u64 indirect_indexed{};
     u64 submitted{};
     u64 filtered{};
+    u64 filter_fast_clear{};
+    u64 filter_fmask_decompress{};
+    u64 filter_resolve{};
+    u64 filter_primitive_none{};
+    u64 filter_depth_stencil_copy{};
     u64 missing_pipeline{};
     u64 binding_failed{};
     u64 occlusion_control{};
@@ -99,6 +108,14 @@ public:
 
     FrameDrawTopologySnapshot TakeSnapshot() noexcept {
         const u64 sequence = frame_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        const u64 filter_fast_clear = Take(result_counts, DrawTopologyResult::FilterFastClear);
+        const u64 filter_fmask_decompress =
+            Take(result_counts, DrawTopologyResult::FilterFmaskDecompress);
+        const u64 filter_resolve = Take(result_counts, DrawTopologyResult::FilterResolve);
+        const u64 filter_primitive_none =
+            Take(result_counts, DrawTopologyResult::FilterPrimitiveNone);
+        const u64 filter_depth_stencil_copy =
+            Take(result_counts, DrawTopologyResult::FilterDepthStencilCopy);
         return {
             .should_report = sequence <= report_limit,
             .sequence = sequence,
@@ -107,7 +124,13 @@ public:
             .indirect = Take(draw_counts, DrawTopologyKind::Indirect),
             .indirect_indexed = Take(draw_counts, DrawTopologyKind::IndirectIndexed),
             .submitted = Take(result_counts, DrawTopologyResult::Submitted),
-            .filtered = Take(result_counts, DrawTopologyResult::Filtered),
+            .filtered = filter_fast_clear + filter_fmask_decompress + filter_resolve +
+                        filter_primitive_none + filter_depth_stencil_copy,
+            .filter_fast_clear = filter_fast_clear,
+            .filter_fmask_decompress = filter_fmask_decompress,
+            .filter_resolve = filter_resolve,
+            .filter_primitive_none = filter_primitive_none,
+            .filter_depth_stencil_copy = filter_depth_stencil_copy,
             .missing_pipeline = Take(result_counts, DrawTopologyResult::MissingPipeline),
             .binding_failed = Take(result_counts, DrawTopologyResult::BindingFailed),
             .occlusion_control = Take(occlusion_counts, OcclusionEventKind::Control),
