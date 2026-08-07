@@ -40,6 +40,7 @@
 #include "core/memory.h"
 #include "core/user_settings.h"
 #include "emulator.h"
+#include "video_core/amdgpu/command_buffer_lifetime_report.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderdoc.h"
 
@@ -81,6 +82,7 @@ void Emulator::Shutdown() {
     if (exit_done) {
         return;
     }
+    AmdGpu::ReportCommandBufferLifetimeDiagnosticOnce();
     Common::Log::Flush();
     if (controllers) {
         controllers->ResetLightbarColors();

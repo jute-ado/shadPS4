@@ -128,6 +128,7 @@ private:
     };
 
     struct State {
+        std::atomic<bool> report_claimed{};
         std::atomic<bool> frozen{};
         std::atomic<u32> in_flight_operations{};
         std::atomic<u64> sequence{};
@@ -548,6 +549,19 @@ public:
             std::atomic_signal_fence(std::memory_order_seq_cst);
         }
         return ReadSnapshot();
+    }
+
+    [[nodiscard]] std::optional<CommandBufferLifetimeSnapshot> FreezeAndReadOnce(
+        u32 maximum_spin_count = 100'000) noexcept {
+        if (!config.enabled) {
+            return std::nullopt;
+        }
+        bool expected = false;
+        if (!state.report_claimed.compare_exchange_strong(expected, true,
+                                                          std::memory_order_acq_rel)) {
+            return std::nullopt;
+        }
+        return FreezeAndRead(maximum_spin_count);
     }
 
 private:
