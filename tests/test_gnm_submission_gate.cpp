@@ -4,11 +4,15 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "core/libraries/gnmdriver/submission_gate.h"
+#include "core/libraries/gnmdriver/submission_transaction.h"
 
 using namespace std::chrono_literals;
 
@@ -91,6 +95,102 @@ TEST(GnmSubmissionGate, HostBackpressureDoesNotTellTheGuestToDropAFrame) {
     EXPECT_TRUE(gate.AreGuestSubmitsAllowed());
 
     complete_boundary();
+}
+
+TEST(GnmSubmissionTransaction, FlipRegistrationAndCommandEnqueueStayAtomic) {
+    SubmissionGate gate;
+    std::mutex trace_mutex;
+    std::vector<std::string> trace;
+    std::promise<void> first_registered;
+    std::promise<void> release_first;
+    auto first_registered_future = first_registered.get_future();
+    auto release_first_future = release_first.get_future().share();
+
+    const auto append = [&](std::string entry) {
+        std::scoped_lock lock{trace_mutex};
+        trace.emplace_back(std::move(entry));
+    };
+
+    auto first = std::async(std::launch::async, [&] {
+        return RunSubmissionTransaction(
+            gate, [] { return 0; },
+            [&] {
+                append("register A");
+                first_registered.set_value();
+                release_first_future.wait();
+                return 0;
+            },
+            [&] {
+                append("enqueue A");
+                return 0;
+            });
+    });
+    ASSERT_EQ(first_registered_future.wait_for(1s), std::future_status::ready);
+
+    std::atomic<bool> second_validated{};
+    auto second = std::async(std::launch::async, [&] {
+        return RunSubmissionTransaction(
+            gate,
+            [&] {
+                second_validated = true;
+                return 0;
+            },
+            [&] {
+                append("register B");
+                return 0;
+            },
+            [&] {
+                append("enqueue B");
+                return 0;
+            });
+    });
+    while (!second_validated.load()) {
+        std::this_thread::yield();
+    }
+
+    EXPECT_EQ(second.wait_for(20ms), std::future_status::timeout);
+    release_first.set_value();
+
+    EXPECT_EQ(first.get(), 0);
+    EXPECT_EQ(second.get(), 0);
+    EXPECT_EQ(trace, (std::vector<std::string>{"register A", "enqueue A", "register B",
+                                               "enqueue B"}));
+}
+
+TEST(GnmSubmissionTransaction, RejectedValidationLeavesNoFlipRegistration) {
+    SubmissionGate gate;
+    bool registered = false;
+    bool enqueued = false;
+
+    const auto result = RunSubmissionTransaction(
+        gate, [] { return -1; },
+        [&] {
+            registered = true;
+            return 0;
+        },
+        [&] {
+            enqueued = true;
+            return 0;
+        });
+
+    EXPECT_EQ(result, -1);
+    EXPECT_FALSE(registered);
+    EXPECT_FALSE(enqueued);
+}
+
+TEST(GnmSubmissionTransaction, RejectedFlipRegistrationLeavesNoCommandEnqueue) {
+    SubmissionGate gate;
+    bool enqueued = false;
+
+    const auto result = RunSubmissionTransaction(
+        gate, [] { return 0; }, [] { return -2; },
+        [&] {
+            enqueued = true;
+            return 0;
+        });
+
+    EXPECT_EQ(result, -2);
+    EXPECT_FALSE(enqueued);
 }
 
 } // namespace
