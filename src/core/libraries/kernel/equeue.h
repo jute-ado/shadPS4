@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 #include <boost/asio/steady_timer.hpp>
 
@@ -18,6 +19,16 @@ class SymbolsResolver;
 }
 
 namespace Libraries::Kernel {
+
+namespace EqueueDetail {
+
+template <typename Drain>
+decltype(auto) PollReadyEvents(std::mutex& mutex, Drain&& drain) {
+    std::scoped_lock lock{mutex};
+    return std::forward<Drain>(drain)();
+}
+
+} // namespace EqueueDetail
 
 class EqueueInternal;
 struct EqueueEvent;
