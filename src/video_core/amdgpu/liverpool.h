@@ -20,6 +20,7 @@
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
+#include "video_core/frame_draw_topology_diagnostic.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -95,6 +96,30 @@ public:
 
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
+    }
+
+    void RecordDrawTopology(VideoCore::DrawTopologyKind kind) noexcept {
+        if (draw_topology_diagnostic_enabled) {
+            draw_topology_diagnostic.ObserveDraw(kind);
+        }
+    }
+
+    void RecordDrawTopologyResult(VideoCore::DrawTopologyResult result) noexcept {
+        if (draw_topology_diagnostic_enabled) {
+            draw_topology_diagnostic.ObserveDrawResult(result);
+        }
+    }
+
+    void RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket packet) noexcept {
+        if (draw_topology_diagnostic_enabled) {
+            draw_topology_diagnostic.ObservePacket(packet);
+        }
+    }
+
+    void RecordOcclusionEvent(VideoCore::OcclusionEventKind kind) noexcept {
+        if (draw_topology_diagnostic_enabled) {
+            draw_topology_diagnostic.ObserveOcclusion(kind);
+        }
     }
 
     template <bool wait_done = false>
@@ -204,6 +229,8 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    VideoCore::FrameDrawTopologyDiagnostic draw_topology_diagnostic{10000};
+    bool draw_topology_diagnostic_enabled{};
 
     struct ConstantEngine {
         void Reset() {

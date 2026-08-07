@@ -60,8 +60,7 @@ TEST(FrameDrawTopologyDiagnostic, SnapshotsAndClearsBoundedFrameCounters) {
     EXPECT_EQ(second.sequence, 2);
     EXPECT_TRUE(second.should_report);
     EXPECT_EQ(second.direct + second.direct_indexed + second.indirect + second.indirect_indexed, 0);
-    EXPECT_EQ(second.submitted + second.filtered + second.missing_pipeline +
-                  second.binding_failed,
+    EXPECT_EQ(second.submitted + second.filtered + second.missing_pipeline + second.binding_failed,
               0);
     EXPECT_EQ(second.packet_hash, FrameDrawTopologyDiagnostic::EmptyPacketHash());
 

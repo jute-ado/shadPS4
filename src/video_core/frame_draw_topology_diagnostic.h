@@ -89,8 +89,8 @@ public:
         packet_counts[static_cast<size_t>(packet)].fetch_add(1, std::memory_order_relaxed);
         u64 hash = packet_hash.load(std::memory_order_relaxed);
         const u64 value = static_cast<u64>(packet) + 1;
-        while (!packet_hash.compare_exchange_weak(
-            hash, (hash ^ value) * 1099511628211ULL, std::memory_order_relaxed)) {
+        while (!packet_hash.compare_exchange_weak(hash, (hash ^ value) * 1099511628211ULL,
+                                                  std::memory_order_relaxed)) {
         }
     }
 
@@ -153,8 +153,7 @@ private:
     std::atomic<u64> frame_sequence{};
     std::array<std::atomic<u64>, static_cast<size_t>(DrawTopologyKind::Count)> draw_counts{};
     std::array<std::atomic<u64>, static_cast<size_t>(DrawTopologyResult::Count)> result_counts{};
-    std::array<std::atomic<u64>, static_cast<size_t>(OcclusionEventKind::Count)>
-        occlusion_counts{};
+    std::array<std::atomic<u64>, static_cast<size_t>(OcclusionEventKind::Count)> occlusion_counts{};
     std::array<std::atomic<u64>, static_cast<size_t>(DrawTopologyPacket::Count)> packet_counts{};
     std::atomic<u64> packet_hash{EmptyPacketHash()};
 };

@@ -65,22 +65,26 @@ bool Rasterizer::FilterDraw() {
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::EliminateFastClear) {
         // Clears the render target if FCE is launched before any draws
         EliminateFastClear();
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::FilterFastClear);
         return false;
     }
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::FmaskDecompress) {
         // TODO: check for a valid MRT1 to promote the draw to the resolve pass.
         LOG_TRACE(Render_Vulkan, "FMask decompression pass skipped");
         ScopedMarkerInsert("FmaskDecompress");
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::FilterFmaskDecompress);
         return false;
     }
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Resolve) {
         LOG_TRACE(Render_Vulkan, "Resolve pass");
         Resolve();
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::FilterResolve);
         return false;
     }
     if (regs.primitive_type == AmdGpu::PrimitiveType::None) {
         LOG_TRACE(Render_Vulkan, "Primitive type 'None' skipped");
         ScopedMarkerInsert("PrimitiveTypeNone");
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::FilterPrimitiveNone);
         return false;
     }
 
@@ -101,6 +105,7 @@ bool Rasterizer::FilterDraw() {
         // We need to detect this case and perform the copy, otherwise it will have no effect.
         LOG_TRACE(Render_Vulkan, "Performing depth-stencil override copy");
         DepthStencilCopy(depth_copy, stencil_copy);
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::FilterDepthStencilCopy);
         return false;
     }
 
@@ -189,6 +194,8 @@ void Rasterizer::EliminateFastClear() {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
+    liverpool->RecordDrawTopology(is_indexed ? VideoCore::DrawTopologyKind::DirectIndexed
+                                             : VideoCore::DrawTopologyKind::Direct);
     scheduler.PopPendingOperations();
 
     if (!FilterDraw()) {
@@ -198,11 +205,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto& regs = liverpool->regs;
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::MissingPipeline);
         return;
     }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::BindingFailed);
         return;
     }
     const auto state = BeginRendering(pipeline);
@@ -231,6 +240,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
+    liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::Submitted);
     ResetBindings();
 }
 
@@ -238,6 +248,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address) {
     RENDERER_TRACE;
 
+    liverpool->RecordDrawTopology(is_indexed ? VideoCore::DrawTopologyKind::IndirectIndexed
+                                             : VideoCore::DrawTopologyKind::Indirect);
     scheduler.PopPendingOperations();
 
     if (!FilterDraw()) {
@@ -246,11 +258,13 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::MissingPipeline);
         return;
     }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::BindingFailed);
         return;
     }
     const auto state = BeginRendering(pipeline);
@@ -310,6 +324,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
+    liverpool->RecordDrawTopologyResult(VideoCore::DrawTopologyResult::Submitted);
     ResetBindings();
 }
 

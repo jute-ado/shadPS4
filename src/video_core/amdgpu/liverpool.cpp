@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -10,6 +11,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -67,6 +69,9 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 }
 
 Liverpool::Liverpool() {
+    if (const char* enabled = std::getenv("SHADPS4_DRAW_TOPOLOGY_DIAGNOSTIC")) {
+        draw_topology_diagnostic_enabled = std::string_view{enabled} == "1";
+    }
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
@@ -274,14 +279,47 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    const auto topology = draw_topology_diagnostic_enabled
+                                              ? draw_topology_diagnostic.TakeSnapshot()
+                                              : VideoCore::FrameDrawTopologySnapshot{};
+                    const u64 queued_time_us = Libraries::Kernel::sceKernelGetProcessTime();
                     ASSERT_MSG(
-                        eop_flip_tracker.QueueFlip(eop_position,
-                                                   [this] {
-                                                       SendCommand([] {
-                                                           Platform::IrqC::Instance()->Signal(
-                                                               Platform::InterruptId::GfxFlip);
-                                                       });
-                                                   }),
+                        eop_flip_tracker.QueueFlip(
+                            eop_position,
+                            [this, topology, queued_time_us] {
+                                if (topology.should_report) {
+                                    LOG_INFO(
+                                        Render,
+                                        "FrameDrawTopology sequence={} "
+                                        "queued_time_us={} completed_time_us={} "
+                                        "direct={} direct_indexed={} indirect={} "
+                                        "indirect_indexed={} submitted={} filtered={} "
+                                        "filter_fast_clear={} filter_fmask={} "
+                                        "filter_resolve={} filter_primitive_none={} "
+                                        "filter_depth_copy={} missing_pipeline={} "
+                                        "binding_failed={} occlusion_control={} "
+                                        "occlusion_dump={} occlusion_reset={} "
+                                        "set_base={} index_buffer_size={} "
+                                        "set_predication={} packet_hash={:#x}",
+                                        topology.sequence, queued_time_us,
+                                        Libraries::Kernel::sceKernelGetProcessTime(),
+                                        topology.direct, topology.direct_indexed, topology.indirect,
+                                        topology.indirect_indexed, topology.submitted,
+                                        topology.filtered, topology.filter_fast_clear,
+                                        topology.filter_fmask_decompress, topology.filter_resolve,
+                                        topology.filter_primitive_none,
+                                        topology.filter_depth_stencil_copy,
+                                        topology.missing_pipeline, topology.binding_failed,
+                                        topology.occlusion_control, topology.occlusion_dump,
+                                        topology.occlusion_reset, topology.set_base,
+                                        topology.index_buffer_size, topology.set_predication,
+                                        topology.packet_hash);
+                                }
+                                SendCommand([] {
+                                    Platform::IrqC::Instance()->Signal(
+                                        Platform::InterruptId::GfxFlip);
+                                });
+                            }),
                         "A patched flip could not be associated with its EOP packet");
                     break;
                 }
@@ -426,6 +464,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::SetPredication);
                 LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
                 break;
             }
@@ -435,6 +474,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndex2: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndex2);
                 const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndex2*>(header);
                 regs.max_index_size = draw_index->max_size;
                 regs.index_base_address.base_addr_lo = draw_index->index_base_lo;
@@ -457,6 +497,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexOffset2: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndexOffset2);
                 const auto* draw_index_off =
                     reinterpret_cast<const PM4CmdDrawIndexOffset2*>(header);
                 regs.max_index_size = draw_index_off->max_size;
@@ -479,6 +520,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexAuto: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndexAuto);
                 const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
                 regs.num_indices = draw_index->index_count;
                 regs.draw_initiator = draw_index->draw_initiator;
@@ -499,6 +541,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndirect: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndirect);
                 const auto* draw_indirect = reinterpret_cast<const PM4CmdDrawIndirect*>(header);
                 const auto offset = draw_indirect->data_offset;
                 const auto stride = sizeof(DrawIndirectArgs);
@@ -519,6 +562,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndirectMulti: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndirectMulti);
                 const auto* draw_indirect =
                     reinterpret_cast<const PM4CmdDrawIndirectMulti*>(header);
                 const auto offset = draw_indirect->data_offset;
@@ -541,6 +585,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexIndirect: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndexIndirect);
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirect*>(header);
                 const auto offset = draw_index_indirect->data_offset;
@@ -562,6 +607,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexIndirectMulti: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::DrawIndexIndirectMulti);
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirectMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
@@ -586,6 +632,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexIndirectCountMulti: {
+                RecordDrawTopologyPacket(
+                    VideoCore::DrawTopologyPacket::DrawIndexIndirectCountMulti);
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirectCountMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
@@ -674,11 +722,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::IndexBufferSize: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::IndexBufferSize);
                 const auto* index_size = reinterpret_cast<const PM4CmdDrawIndexBufferSize*>(header);
                 regs.num_indices = index_size->num_indices;
                 break;
             }
             case PM4ItOpcode::SetBase: {
+                RecordDrawTopologyPacket(VideoCore::DrawTopologyPacket::SetBase);
                 const auto* set_base = reinterpret_cast<const PM4CmdSetBase*>(header);
                 ASSERT(set_base->base_index == PM4CmdSetBase::BaseIndex::DrawIndexIndirPatchTable);
                 indirect_args_addr = set_base->Address<u64>();
@@ -686,6 +736,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWrite: {
                 const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+                switch (event->event_type.Value()) {
+                case EventType::PixelPipeStatControl:
+                    RecordOcclusionEvent(VideoCore::OcclusionEventKind::Control);
+                    break;
+                case EventType::PixelPipeStatDump:
+                    RecordOcclusionEvent(VideoCore::OcclusionEventKind::Dump);
+                    break;
+                case EventType::PixelPipeStatReset:
+                    RecordOcclusionEvent(VideoCore::OcclusionEventKind::Reset);
+                    break;
+                default:
+                    break;
+                }
                 LOG_DEBUG(Render, "Encountered EventWrite: event_type = {}, event_index = {}",
                           magic_enum::enum_name(event->event_type.Value()),
                           magic_enum::enum_name(event->event_index.Value()));
