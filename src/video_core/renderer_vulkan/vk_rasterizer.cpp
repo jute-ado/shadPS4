@@ -526,7 +526,7 @@ void Rasterizer::RecordDrawResourceFingerprint(const GraphicsPipeline* pipeline)
             host_identity_ordinal++, identity.role, identity.object,
             static_cast<u64>(
                 reinterpret_cast<uintptr_t>(static_cast<VkBuffer>(identity.buffer))),
-            identity.offset, identity.size);
+            /*offset=*/0, /*size=*/0);
     }
     for (u32 binding = 0; binding < draw_host_image_identities.size(); ++binding) {
         const auto& identity = draw_host_image_identities[binding];
