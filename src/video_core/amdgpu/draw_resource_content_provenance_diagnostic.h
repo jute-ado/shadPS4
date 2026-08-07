@@ -55,6 +55,14 @@ struct DrawResourceContentProvenanceSnapshot {
     u32 reported_coherent_content_aba_resources{};
     std::array<DrawResourceContentOrdinal, MaxReportedResources>
         first_coherent_content_aba_resources{};
+    u32 staged_changed_resources{};
+    u32 reported_staged_changed_resources{};
+    std::array<DrawResourceContentOrdinal, MaxReportedResources>
+        first_staged_changed_resources{};
+    u32 staged_content_aba_resources{};
+    u32 reported_staged_content_aba_resources{};
+    std::array<DrawResourceContentOrdinal, MaxReportedResources>
+        first_staged_content_aba_resources{};
     u32 concurrent_write_resources{};
     u32 endpoint_capture_resources{};
     u32 staged_mismatch_resources{};
@@ -147,6 +155,18 @@ public:
         ++current_resource_ordinal;
     }
 
+    void RecordStagedUpload(u64 staged, u32 size) noexcept {
+        if (Append({
+                .key = CurrentKey(),
+                .token = staged,
+                .size = size,
+                .kind = ObservationKind::StagedOnly,
+            })) {
+            current_probe_bytes += size;
+        }
+        ++current_resource_ordinal;
+    }
+
     void RecordResidentUnobserved() noexcept {
         Append(Observation{
             .key = CurrentKey(),
@@ -228,6 +248,28 @@ public:
                 }
                 break;
             }
+            case ObservationKind::StagedOnly: {
+                const auto* previous = MatchingAt(*previous_frame, previous_observations, index,
+                                                  current.key);
+                if (previous != nullptr && IsStagedOnly(*previous) &&
+                    current.token != previous->token) {
+                    ++snapshot.staged_changed_resources;
+                    Report(current.key, snapshot.reported_staged_changed_resources,
+                           snapshot.first_staged_changed_resources);
+                }
+                const auto* previous_previous =
+                    MatchingAt(*previous_previous_frame, previous_previous_observations, index,
+                               current.key);
+                if (previous != nullptr && previous_previous != nullptr &&
+                    IsStagedOnly(*previous) && IsStagedOnly(*previous_previous) &&
+                    current.token == previous_previous->token &&
+                    current.token != previous->token) {
+                    ++snapshot.staged_content_aba_resources;
+                    Report(current.key, snapshot.reported_staged_content_aba_resources,
+                           snapshot.first_staged_content_aba_resources);
+                }
+                break;
+            }
             case ObservationKind::ResidentUnobserved:
                 ++snapshot.resident_unobserved_resources;
                 break;
@@ -249,6 +291,7 @@ public:
 private:
     enum class ObservationKind : u8 {
         CpuUpload,
+        StagedOnly,
         ResidentUnobserved,
         Truncated,
     };
@@ -301,6 +344,10 @@ private:
                observation.provenance == DrawResourceUploadProvenance::Coherent;
     }
 
+    [[nodiscard]] static bool IsStagedOnly(const Observation& observation) noexcept {
+        return observation.kind == ObservationKind::StagedOnly;
+    }
+
     static void Report(
         DrawResourceContentOrdinal key, u32& reported,
         std::array<DrawResourceContentOrdinal,
@@ -313,7 +360,8 @@ private:
     void RecountCurrentProbeBytes() noexcept {
         current_probe_bytes = 0;
         for (u32 index = 0; index < current_observations; ++index) {
-            if ((*current_frame)[index].kind == ObservationKind::CpuUpload) {
+            if ((*current_frame)[index].kind == ObservationKind::CpuUpload ||
+                (*current_frame)[index].kind == ObservationKind::StagedOnly) {
                 current_probe_bytes += (*current_frame)[index].size;
             }
         }
