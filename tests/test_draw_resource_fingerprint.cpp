@@ -111,3 +111,37 @@ TEST(DrawResourceFingerprintDiagnostic, SeparatesDescriptorLocationFromShapeChan
     ASSERT_EQ(shape_changed.reported_changed_shape_draws, 1);
     EXPECT_EQ(shape_changed.first_changed_shape_draw_ordinals[0], 0);
 }
+
+TEST(DrawResourceFingerprintDiagnostic, ReportsLocationOnlyABAReturnsByDrawOrdinal) {
+    DrawResourceFingerprintDiagnostic diagnostic{/*report_limit=*/3};
+    std::array<u32, 4> descriptor{0x1000, 16, 3, 4};
+    std::array<u32, 4> shape = descriptor;
+    shape[0] = 0;
+    u64 location = descriptor[0];
+
+    const auto record = [&] {
+        descriptor[0] = static_cast<u32>(location);
+        diagnostic.BeginDraw();
+        diagnostic.RecordDescriptor(DrawResourceDescriptorKind::Buffer, descriptor.data(),
+                                    sizeof(descriptor), shape.data(), sizeof(shape), &location,
+                                    sizeof(location));
+        diagnostic.EndDraw();
+        return diagnostic.TakeSnapshot();
+    };
+
+    const auto first = record();
+    EXPECT_EQ(first.changed_location_draws, 1);
+    EXPECT_EQ(first.location_aba_return_draws, 0);
+
+    location = 0x2000;
+    const auto middle = record();
+    EXPECT_EQ(middle.changed_location_draws, 1);
+    EXPECT_EQ(middle.location_aba_return_draws, 0);
+
+    location = 0x1000;
+    const auto returned = record();
+    EXPECT_EQ(returned.changed_location_draws, 1);
+    EXPECT_EQ(returned.location_aba_return_draws, 1);
+    ASSERT_EQ(returned.reported_location_aba_return_draws, 1);
+    EXPECT_EQ(returned.first_location_aba_return_draw_ordinals[0], 0);
+}
