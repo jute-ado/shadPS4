@@ -19,6 +19,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/indirect_args_fingerprint_diagnostic.h"
 #include "video_core/amdgpu/regs.h"
 
 namespace Vulkan {
@@ -203,6 +204,8 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    bool indirect_args_fingerprint_diagnostic_enabled{};
+    IndirectArgsFingerprintDiagnostic indirect_args_fingerprint_diagnostic{/*report_limit=*/10000};
     EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {

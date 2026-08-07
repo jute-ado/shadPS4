@@ -3,6 +3,9 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <cstdlib>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,6 +71,10 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    const char* indirect_args_diagnostic =
+        std::getenv("SHADPS4_INDIRECT_ARGS_FINGERPRINT_DIAGNOSTIC");
+    indirect_args_fingerprint_diagnostic_enabled =
+        indirect_args_diagnostic != nullptr && std::string_view{indirect_args_diagnostic} == "1";
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -274,9 +281,40 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    const auto indirect_args = indirect_args_fingerprint_diagnostic_enabled
+                                                   ? indirect_args_fingerprint_diagnostic
+                                                         .TakeSnapshot()
+                                                   : IndirectArgsFingerprintSnapshot{};
+                    const u64 queued_time_us = Libraries::Kernel::sceKernelGetProcessTime();
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
-                                                   [this] {
+                                                   [this, indirect_args, queued_time_us] {
+                                                       if (indirect_args.should_report) {
+                                                           LOG_INFO(
+                                                               Render,
+                                                               "IndirectArgsFingerprint sequence={} "
+                                                               "queued_time_us={} completed_time_us={} "
+                                                               "invocations={} argument_records={} "
+                                                               "bytes_hashed={} truncated_invocations={} "
+                                                               "truncated_argument_records={} "
+                                                               "matches_previous={} changed_mask={:#x} "
+                                                               "combined_hash={:#x}",
+                                                               indirect_args.sequence,
+                                                               queued_time_us,
+                                                               Libraries::Kernel::
+                                                                   sceKernelGetProcessTime(),
+                                                               indirect_args.invocations,
+                                                               indirect_args.argument_records,
+                                                               indirect_args.bytes_hashed,
+                                                               indirect_args.truncated_invocations,
+                                                               indirect_args
+                                                                   .truncated_argument_records,
+                                                               indirect_args
+                                                                   .matches_previous_frame,
+                                                               indirect_args
+                                                                   .changed_invocation_mask,
+                                                               indirect_args.combined_hash);
+                                                       }
                                                        SendCommand([] {
                                                            Platform::IrqC::Instance()->Signal(
                                                                Platform::InterruptId::GfxFlip);
@@ -502,6 +540,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_indirect = reinterpret_cast<const PM4CmdDrawIndirect*>(header);
                 const auto offset = draw_indirect->data_offset;
                 const auto stride = sizeof(DrawIndirectArgs);
+                if (indirect_args_fingerprint_diagnostic_enabled) {
+                    indirect_args_fingerprint_diagnostic.Record(
+                        IndirectArgsKind::Draw,
+                        reinterpret_cast<const void*>(indirect_args_addr + offset), stride, 1,
+                        sizeof(DrawIndirectArgs));
+                }
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -522,6 +566,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_indirect =
                     reinterpret_cast<const PM4CmdDrawIndirectMulti*>(header);
                 const auto offset = draw_indirect->data_offset;
+                if (indirect_args_fingerprint_diagnostic_enabled) {
+                    indirect_args_fingerprint_diagnostic.Record(
+                        IndirectArgsKind::Draw,
+                        reinterpret_cast<const void*>(indirect_args_addr + offset),
+                        draw_indirect->stride, draw_indirect->count,
+                        sizeof(DrawIndirectArgs));
+                }
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -545,6 +596,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     reinterpret_cast<const PM4CmdDrawIndexIndirect*>(header);
                 const auto offset = draw_index_indirect->data_offset;
                 const auto stride = sizeof(DrawIndexedIndirectArgs);
+                if (indirect_args_fingerprint_diagnostic_enabled) {
+                    indirect_args_fingerprint_diagnostic.Record(
+                        IndirectArgsKind::DrawIndexed,
+                        reinterpret_cast<const void*>(indirect_args_addr + offset), stride, 1,
+                        sizeof(DrawIndexedIndirectArgs));
+                }
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -565,6 +622,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirectMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
+                if (indirect_args_fingerprint_diagnostic_enabled) {
+                    indirect_args_fingerprint_diagnostic.Record(
+                        IndirectArgsKind::DrawIndexed,
+                        reinterpret_cast<const void*>(indirect_args_addr + offset),
+                        draw_index_indirect->stride, draw_index_indirect->count,
+                        sizeof(DrawIndexedIndirectArgs));
+                }
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -589,6 +653,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirectCountMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
+                if (indirect_args_fingerprint_diagnostic_enabled) {
+                    indirect_args_fingerprint_diagnostic.Record(
+                        IndirectArgsKind::DrawIndexed,
+                        reinterpret_cast<const void*>(indirect_args_addr + offset),
+                        draw_index_indirect->stride, draw_index_indirect->count,
+                        sizeof(DrawIndexedIndirectArgs));
+                }
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -645,6 +716,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto& cs_program = GetCsRegs();
                 const auto offset = dispatch_indirect->data_offset;
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
+                if (indirect_args_fingerprint_diagnostic_enabled) {
+                    indirect_args_fingerprint_diagnostic.Record(
+                        IndirectArgsKind::Dispatch,
+                        reinterpret_cast<const void*>(indirect_args_addr + offset), size, 1, size);
+                }
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDumpCompute(base_addr, reinterpret_cast<uintptr_t>(header),
                                                    cs_program);
