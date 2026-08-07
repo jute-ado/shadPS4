@@ -101,6 +101,11 @@ public:
         probe_mode = mode;
     }
 
+    void ConfigureProbeByteLimit(u32 limit) noexcept {
+        max_probe_bytes_per_frame =
+            limit < MaxProbeBytesPerFrame ? limit : MaxProbeBytesPerFrame;
+    }
+
     [[nodiscard]] DrawResourceContentProbeMode GetProbeMode() const noexcept {
         return probe_mode;
     }
@@ -137,7 +142,8 @@ public:
 
     [[nodiscard]] bool CanProbeCpuUpload(u32 size) const noexcept {
         return draw_active && current_observations < MaxObservationsPerFrame &&
-               size <= MaxFullProbeBytes && size <= MaxProbeBytesPerFrame - current_probe_bytes;
+               size <= MaxFullProbeBytes && current_probe_bytes <= max_probe_bytes_per_frame &&
+               size <= max_probe_bytes_per_frame - current_probe_bytes;
     }
 
     [[nodiscard]] bool IsDrawActive() const noexcept {
@@ -410,6 +416,7 @@ private:
     u32 overflow_resources{};
     bool draw_active{};
     DrawResourceContentProbeMode probe_mode{DrawResourceContentProbeMode::FullProvenance};
+    u32 max_probe_bytes_per_frame{MaxProbeBytesPerFrame};
 };
 
 } // namespace AmdGpu
