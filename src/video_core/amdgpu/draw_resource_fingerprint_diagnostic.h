@@ -140,6 +140,20 @@ public:
         ++current_draw_host_identities;
     }
 
+    void RecordHostBufferIdentity(u32 binding_ordinal, u32 role, u64 object, u64 backing,
+                                  u64 offset, u64 size) noexcept {
+        if (!draw_active || !accept_draw) {
+            return;
+        }
+        MixValue(current_draw_host_identity_hash, binding_ordinal);
+        MixValue(current_draw_host_identity_hash, role);
+        MixValue(current_draw_host_identity_hash, object);
+        MixValue(current_draw_host_identity_hash, backing);
+        MixValue(current_draw_host_identity_hash, offset);
+        MixValue(current_draw_host_identity_hash, size);
+        ++current_draw_host_identities;
+    }
+
     void EndDraw() noexcept {
         if (!draw_active) {
             return;
