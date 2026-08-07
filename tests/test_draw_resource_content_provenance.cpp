@@ -83,3 +83,29 @@ TEST(DrawResourceContentProvenanceDiagnostic, MarksResidentAndTruncatedContentUn
     EXPECT_EQ(snapshot.truncated_resources, 1);
     EXPECT_EQ(snapshot.truncated_bytes, 8192);
 }
+
+TEST(DrawResourceContentProvenanceDiagnostic, CapturesOnlyConfiguredFrameWindow) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/4};
+    diagnostic.ConfigureCaptureWindow(/*start=*/2, /*count=*/1);
+
+    diagnostic.BeginDraw();
+    EXPECT_FALSE(diagnostic.IsDrawActive());
+    const auto before = diagnostic.TakeSnapshot();
+    EXPECT_FALSE(before.should_report);
+    EXPECT_EQ(before.sequence, 1);
+
+    diagnostic.BeginDraw();
+    ASSERT_TRUE(diagnostic.IsDrawActive());
+    diagnostic.RecordCpuUpload(1, 1, 1, 64);
+    diagnostic.EndDraw();
+    const auto inside = diagnostic.TakeSnapshot();
+    EXPECT_TRUE(inside.should_report);
+    EXPECT_EQ(inside.sequence, 2);
+    EXPECT_EQ(inside.observations, 1);
+
+    diagnostic.BeginDraw();
+    EXPECT_FALSE(diagnostic.IsDrawActive());
+    const auto after = diagnostic.TakeSnapshot();
+    EXPECT_FALSE(after.should_report);
+    EXPECT_EQ(after.sequence, 3);
+}
