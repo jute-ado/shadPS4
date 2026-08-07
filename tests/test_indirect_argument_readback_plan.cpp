@@ -93,9 +93,8 @@ TEST(IndirectArgumentReadbackPlan, RejectsUnsupportedAndBoundsRecordCount) {
 
 TEST(IndirectArgumentReadbackPlan, NonCoherentReservationsAreAtomDisjointAndNeverWrap) {
     constexpr u32 AtomSize = 256;
-    constexpr u32 FrameBytes =
-        IndirectArgumentReadbackPlanner::MaxRecordsPerFrame *
-        IndirectArgumentReadbackPlanner::CommandBytes;
+    constexpr u32 FrameBytes = IndirectArgumentReadbackPlanner::MaxRecordsPerFrame *
+                               IndirectArgumentReadbackPlanner::CommandBytes;
     constexpr u64 WindowBytes = IndirectArgumentReadbackPlanner::RequiredWindowBytes(AtomSize);
     static_assert(WindowBytes == IndirectArgumentReadbackPlanner::MaxReportFrames * 512ULL);
 

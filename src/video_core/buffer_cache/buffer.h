@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/diagnostic_readback_pin.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -149,6 +150,7 @@ public:
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
+    void InvalidateMappedRange(u64 offset, u64 size);
 
 public:
     VAddr cpu_addr = 0;
@@ -167,6 +169,7 @@ public:
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
         vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
     vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    DiagnosticReadbackPin diagnostic_readback_pin{};
 };
 
 class StreamBuffer : public Buffer {

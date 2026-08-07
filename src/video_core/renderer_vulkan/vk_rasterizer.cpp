@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <cstring>
+
 #include "common/debug.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -39,6 +42,12 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
+    if (std::getenv("SHADPS4_INDIRECT_DATAFLOW_DIAGNOSTIC") != nullptr) {
+        indirect_readback_buffer.emplace(
+            instance, scheduler, VideoCore::MemoryUsage::Download,
+            AmdGpu::IndirectArgumentReadbackPlanner::RequiredWindowBytes(
+                instance.NonCoherentAtomSize()));
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -266,7 +275,36 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         buffer_cache.IsRegionGpuModified(argument_address, argument_size);
     liverpool->ObserveIndirectArguments(argument_address, argument_size, arguments_gpu_modified,
                                         stride, max_count);
-    const auto& [buffer, base] = buffer_cache.ObtainBuffer(argument_address, argument_size, false);
+    VideoCore::BufferId argument_buffer_id{};
+    const bool collect_readback = indirect_readback_buffer.has_value() && is_indexed &&
+                                  arguments_gpu_modified &&
+                                  stride == sizeof(VkDrawIndexedIndirectCommand);
+    if (collect_readback) {
+        argument_buffer_id = buffer_cache.FindBuffer(argument_address, argument_size);
+    }
+    const auto& [buffer, base] = buffer_cache.ObtainBuffer(argument_address, argument_size, false,
+                                                           false, argument_buffer_id);
+    if (collect_readback) {
+        const bool already_pinned = std::ranges::find(indirect_readback_pins, argument_buffer_id) !=
+                                    indirect_readback_pins.end();
+        const bool has_pin_capacity =
+            already_pinned || indirect_readback_pins.size() < indirect_readback_pins.capacity();
+        if (has_pin_capacity &&
+            (already_pinned || buffer_cache.PinBufferForDiagnostic(argument_buffer_id))) {
+            if (!already_pinned) {
+                indirect_readback_pins.push_back(argument_buffer_id);
+            }
+            indirect_readback_planner.Observe({
+                .source_buffer_id = argument_buffer_id.index,
+                .range_identity = argument_address,
+                .source_offset = base,
+                .stride = stride,
+                .max_count = max_count,
+                .indexed = true,
+                .gpu_modified = true,
+            });
+        }
+    }
 
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};
@@ -316,6 +354,133 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     ResetBindings();
+}
+
+void Rasterizer::ScheduleIndirectArgumentReadback(u64 sequence, bool capture) {
+    const auto plan = indirect_readback_planner.TakeFramePlan();
+    const auto release_pins = [this] {
+        for (const auto buffer_id : indirect_readback_pins) {
+            buffer_cache.ReleaseBufferDiagnosticPin(buffer_id);
+        }
+        indirect_readback_pins.clear();
+    };
+    if (!capture || !indirect_readback_buffer.has_value() || plan.record_count == 0) {
+        release_pins();
+        return;
+    }
+
+    const u32 readback_bytes =
+        plan.record_count * AmdGpu::IndirectArgumentReadbackPlanner::CommandBytes;
+    auto& download_buffer = *indirect_readback_buffer;
+    const auto [download, download_offset] =
+        download_buffer.Map(readback_bytes, instance.NonCoherentAtomSize(), false);
+    if (download == nullptr) {
+        LOG_INFO(Render,
+                 "IndirectArgumentReadback sequence={} records={} busy=1 truncated_records={} "
+                 "truncated_history={}",
+                 sequence, plan.record_count, plan.truncated_records, plan.truncated_history);
+        release_pins();
+        return;
+    }
+    download_buffer.Commit();
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+
+    boost::container::static_vector<VideoCore::BufferId,
+                                    AmdGpu::IndirectArgumentReadbackPlanner::MaxRecordsPerFrame>
+        sources;
+    boost::container::static_vector<vk::BufferMemoryBarrier2,
+                                    AmdGpu::IndirectArgumentReadbackPlanner::MaxRecordsPerFrame + 1>
+        pre_barriers;
+    for (u32 i = 0; i < plan.record_count; ++i) {
+        const VideoCore::BufferId source_id{plan.records[i].source_buffer_id};
+        if (std::ranges::find(sources, source_id) != sources.end()) {
+            continue;
+        }
+        sources.push_back(source_id);
+        auto& source = buffer_cache.GetBuffer(source_id);
+        if (auto barrier = source.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                                             vk::PipelineStageFlagBits2::eTransfer)) {
+            pre_barriers.push_back(*barrier);
+        }
+    }
+    pre_barriers.push_back(vk::BufferMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+        .srcAccessMask = vk::AccessFlagBits2::eHostRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .buffer = download_buffer.Handle(),
+        .offset = download_offset,
+        .size = readback_bytes,
+    });
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+        .pBufferMemoryBarriers = pre_barriers.data(),
+    });
+
+    for (const auto source_id : sources) {
+        auto& source = buffer_cache.GetBuffer(source_id);
+        boost::container::static_vector<vk::BufferCopy,
+                                        AmdGpu::IndirectArgumentReadbackPlanner::MaxRecordsPerFrame>
+            copies;
+        for (u32 i = 0; i < plan.record_count; ++i) {
+            const auto& record = plan.records[i];
+            if (record.source_buffer_id != source_id.index) {
+                continue;
+            }
+            copies.push_back(vk::BufferCopy{
+                .srcOffset = record.source_offset,
+                .dstOffset = download_offset + record.destination_offset,
+                .size = AmdGpu::IndirectArgumentReadbackPlanner::CommandBytes,
+            });
+        }
+        cmdbuf.copyBuffer(source.Handle(), download_buffer.Handle(), copies);
+    }
+
+    const vk::BufferMemoryBarrier2 post_barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        .buffer = download_buffer.Handle(),
+        .offset = download_offset,
+        .size = readback_bytes,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &post_barrier,
+    });
+
+    scheduler.DeferOperation([this, sequence, download, download_offset, readback_bytes, plan] {
+        indirect_readback_buffer->InvalidateMappedRange(download_offset, readback_bytes);
+        u32 first_observations{};
+        u32 changed_records{};
+        u32 changed_field_mask{};
+        u32 zero_index_counts{};
+        u32 zero_instance_counts{};
+        for (u32 i = 0; i < plan.record_count; ++i) {
+            std::array<u32, 5> command{};
+            std::memcpy(command.data(), download + plan.records[i].destination_offset,
+                        AmdGpu::IndirectArgumentReadbackPlanner::CommandBytes);
+            const auto change =
+                indirect_readback_reducer.Observe(plan.records[i].stable_identity, command);
+            first_observations += change.first_observation;
+            changed_records += change.changed_field_mask != 0;
+            changed_field_mask |= change.changed_field_mask;
+            zero_index_counts += change.zero_index_count;
+            zero_instance_counts += change.zero_instance_count;
+        }
+        LOG_INFO(Render,
+                 "IndirectArgumentReadback sequence={} records={} batches={} first={} changed={} "
+                 "changed_field_mask={} zero_index={} zero_instance={} busy=0 "
+                 "truncated_records={} truncated_history={}",
+                 sequence, plan.record_count, plan.batch_count, first_observations, changed_records,
+                 changed_field_mask, zero_index_counts, zero_instance_counts,
+                 plan.truncated_records, plan.truncated_history);
+    });
+    release_pins();
 }
 
 void Rasterizer::DispatchDirect() {

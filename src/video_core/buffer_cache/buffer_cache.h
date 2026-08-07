@@ -145,6 +145,9 @@ public:
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
 
+    bool PinBufferForDiagnostic(BufferId buffer_id);
+    void ReleaseBufferDiagnosticPin(BufferId buffer_id);
+
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 

@@ -21,6 +21,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/eop_completion.h"
+#include "video_core/amdgpu/indirect_argument_readback_plan.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
@@ -88,7 +89,9 @@ Liverpool::Liverpool() {
         return result.ec == std::errc{} ? parsed : fallback;
     };
     indirect_argument_report_start = parse_bound("SHADPS4_INDIRECT_DATAFLOW_REPORT_START", 0);
-    const u64 report_count = parse_bound("SHADPS4_INDIRECT_DATAFLOW_REPORT_COUNT", 5000);
+    const u64 report_count =
+        std::min<u64>(parse_bound("SHADPS4_INDIRECT_DATAFLOW_REPORT_COUNT", 5000),
+                      IndirectArgumentReadbackPlanner::MaxReportFrames);
     indirect_argument_report_end =
         indirect_argument_report_start > std::numeric_limits<u64>::max() - report_count
             ? std::numeric_limits<u64>::max()
@@ -148,7 +151,12 @@ void Liverpool::ReportIndirectArgumentFrame() {
     }
     const auto report = indirect_argument_tracker.TakeFrameReport();
     const u64 sequence = indirect_argument_frame_sequence++;
-    if (sequence < indirect_argument_report_start || sequence >= indirect_argument_report_end) {
+    const bool selected =
+        sequence >= indirect_argument_report_start && sequence < indirect_argument_report_end;
+    if (rasterizer) {
+        rasterizer->ScheduleIndirectArgumentReadback(sequence, selected);
+    }
+    if (!selected) {
         return;
     }
     LOG_INFO(Render,

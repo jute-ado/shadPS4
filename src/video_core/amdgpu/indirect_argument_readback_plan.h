@@ -9,48 +9,14 @@
 #include <span>
 
 #include "common/types.h"
+#include "video_core/buffer_cache/diagnostic_readback_pin.h"
 
 namespace AmdGpu {
 
-class DiagnosticReadbackPin {
-public:
-    void Acquire() {
-        ++count;
-    }
-
-    bool Release() {
-        if (count == 0) {
-            return false;
-        }
-        --count;
-        const bool delete_now = count == 0 && delete_pending;
-        delete_pending &= !delete_now;
-        return delete_now;
-    }
-
-    bool RequestDelete() {
-        if (count == 0) {
-            return true;
-        }
-        delete_pending = true;
-        return false;
-    }
-
-    bool IsPinned() const {
-        return count != 0;
-    }
-
-    bool IsDeletePending() const {
-        return delete_pending;
-    }
-
-private:
-    u32 count{};
-    bool delete_pending{};
-};
+using VideoCore::DiagnosticReadbackPin;
 
 struct IndirectArgumentReadbackObservation {
-    u64 source_token{};
+    u32 source_buffer_id{};
     u64 range_identity{};
     u64 source_offset{};
     u32 stride{};
@@ -60,7 +26,7 @@ struct IndirectArgumentReadbackObservation {
 };
 
 struct IndirectArgumentReadbackRecord {
-    u64 source_token{};
+    u32 source_buffer_id{};
     u64 source_offset{};
     u32 destination_offset{};
     u32 stable_identity{};
@@ -84,9 +50,15 @@ public:
     static constexpr u32 MaxRecordsPerFrame = 16;
     static constexpr u32 MaxHistoryRanges = 256;
     static constexpr u32 MaxReportFrames = 5000;
-    static constexpr u32 DownloadRingBytes = 2 * 1024 * 1024;
-    static constexpr u32 RequiredWindowBytes =
-        MaxReportFrames * MaxRecordsPerFrame * CommandBytes;
+    static constexpr u32 MaxFrameBytes = MaxRecordsPerFrame * CommandBytes;
+
+    static constexpr u64 RequiredWindowBytes(u64 atom_size) {
+        if (atom_size == 0) {
+            return 0;
+        }
+        const u64 padded_frame_bytes = ((MaxFrameBytes + atom_size - 1) / atom_size) * atom_size;
+        return MaxReportFrames * padded_frame_bytes;
+    }
 
     void Observe(const IndirectArgumentReadbackObservation& observation) {
         if (!observation.gpu_modified) {
@@ -126,13 +98,13 @@ public:
 
             bool source_seen{};
             for (u32 i = 0; i < plan.record_count; ++i) {
-                source_seen |= plan.records[i].source_token == observation.source_token;
+                source_seen |= plan.records[i].source_buffer_id == observation.source_buffer_id;
             }
             if (!source_seen) {
                 ++plan.batch_count;
             }
             plan.records[plan.record_count] = {
-                .source_token = observation.source_token,
+                .source_buffer_id = observation.source_buffer_id,
                 .source_offset = source_offset,
                 .destination_offset = plan.record_count * CommandBytes,
                 .stable_identity = *stable_identity,
@@ -167,22 +139,27 @@ private:
 };
 
 struct IndirectReadbackReservation {
-    u32 offset{};
-    u32 next_offset{};
+    u64 offset{};
+    u64 next_offset{};
 };
 
 constexpr std::optional<IndirectReadbackReservation> TryReserveIndirectReadback(
-    u32 current_offset, u32 size, bool busy) {
-    if (busy) {
+    u64 current_offset, u64 size, u64 capacity, u64 alignment, bool busy) {
+    if (busy || alignment == 0) {
         return std::nullopt;
     }
-    constexpr u32 Alignment = 4;
-    const u32 aligned = (current_offset + Alignment - 1) & ~(Alignment - 1);
-    if (aligned < current_offset || size > IndirectArgumentReadbackPlanner::DownloadRingBytes ||
-        aligned > IndirectArgumentReadbackPlanner::DownloadRingBytes - size) {
+    const u64 offset_padding = (alignment - current_offset % alignment) % alignment;
+    const u64 size_padding = (alignment - size % alignment) % alignment;
+    if (current_offset > std::numeric_limits<u64>::max() - offset_padding ||
+        size > std::numeric_limits<u64>::max() - size_padding) {
         return std::nullopt;
     }
-    return IndirectReadbackReservation{.offset = aligned, .next_offset = aligned + size};
+    const u64 aligned = current_offset + offset_padding;
+    const u64 padded_size = size + size_padding;
+    if (padded_size > capacity || aligned > capacity - padded_size) {
+        return std::nullopt;
+    }
+    return IndirectReadbackReservation{.offset = aligned, .next_offset = aligned + padded_size};
 }
 
 struct IndirectArgumentReadbackChange {
@@ -230,8 +207,5 @@ private:
     std::array<Entry, IndirectArgumentReadbackPlanner::MaxHistoryRanges> entries{};
     u32 count{};
 };
-
-static_assert(IndirectArgumentReadbackPlanner::RequiredWindowBytes <=
-              IndirectArgumentReadbackPlanner::DownloadRingBytes);
 
 } // namespace AmdGpu

@@ -456,6 +456,23 @@ BufferId BufferCache::FindBuffer(VAddr device_addr, u32 size) {
     return CreateBuffer(device_addr, size);
 }
 
+bool BufferCache::PinBufferForDiagnostic(BufferId buffer_id) {
+    if (IsBufferInvalid(buffer_id)) {
+        return false;
+    }
+    slot_buffers[buffer_id].diagnostic_readback_pin.Acquire();
+    return true;
+}
+
+void BufferCache::ReleaseBufferDiagnosticPin(BufferId buffer_id) {
+    if (!buffer_id || !slot_buffers.is_allocated(buffer_id)) {
+        return;
+    }
+    if (slot_buffers[buffer_id].diagnostic_readback_pin.Release()) {
+        scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
+    }
+}
+
 BufferCache::OverlapResult BufferCache::ResolveOverlaps(VAddr device_addr, u32 wanted_size) {
     static constexpr int STREAM_LEAP_THRESHOLD = 16;
     boost::container::small_vector<BufferId, 16> overlap_ids;
@@ -933,10 +950,19 @@ void BufferCache::TouchBuffer(const Buffer& buffer) {
 }
 
 void BufferCache::DeleteBuffer(BufferId buffer_id) {
+    if (!buffer_id || !slot_buffers.is_allocated(buffer_id)) {
+        return;
+    }
     Buffer& buffer = slot_buffers[buffer_id];
+    const auto decision = buffer.diagnostic_readback_pin.RequestDelete();
+    if (!decision.logical_delete) {
+        return;
+    }
     Unregister(buffer_id);
-    scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
     buffer.is_deleted = true;
+    if (decision.erase_now) {
+        scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
+    }
 }
 
 } // namespace VideoCore
