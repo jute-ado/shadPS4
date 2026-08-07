@@ -378,108 +378,111 @@ static Error saveDataMount(const OrbisSaveDataMount2* mount_info,
         return Error::PARAMETER;
     }
 
-    // check backup status
-    {
-        const auto save_path =
-            SaveInstance::MakeDirSavePath(mount_info->userId, title_id, mount_info->dirName->data);
-        if (Backup::IsBackupExecutingFor(save_path) && g_fw_ver) {
-            return Error::BACKUP_BUSY;
-        }
-    }
-
-    auto mount_mode = mount_info->mountMode;
-    const bool is_ro = True(mount_mode & OrbisSaveDataMountMode::RDONLY);
-
-    const bool create = True(mount_mode & OrbisSaveDataMountMode::CREATE);
-    const bool create_if_not_exist =
-        True(mount_mode & OrbisSaveDataMountMode::CREATE2) && g_fw_ver >= ElfInfo::FW_450;
-    ASSERT(!create || !create_if_not_exist); // Can't have both
-
-    const bool copy_icon = True(mount_mode & OrbisSaveDataMountMode::COPY_ICON);
-
-    const bool ignore_corrupt =
-        True(mount_mode & OrbisSaveDataMountMode::DESTRUCT_OFF) || g_fw_ver < ElfInfo::FW_160;
-
-    const std::string_view dir_name{mount_info->dirName->data};
-
-    // find available mount point
-    int slot_num = -1;
-    for (size_t i = 0; i < g_mount_slots.size(); i++) {
-        const auto& instance = g_mount_slots[i];
-        if (instance.has_value()) {
-            const auto& slot_name = instance->GetDirName();
-            if (slot_name == dir_name) {
-                return Error::BUSY;
+    return RunFilesystemOperation(
+        [&]() -> Error {
+            // check backup status
+            {
+                const auto save_path = SaveInstance::MakeDirSavePath(mount_info->userId, title_id,
+                                                                     mount_info->dirName->data);
+                if (Backup::IsBackupExecutingFor(save_path) && g_fw_ver) {
+                    return Error::BACKUP_BUSY;
+                }
             }
-        } else {
-            slot_num = static_cast<int>(i);
-            break;
-        }
-    }
-    if (slot_num == -1) {
-        return Error::MOUNT_FULL;
-    }
 
-    SaveInstance save_instance{slot_num, mount_info->userId, std::string{title_id}, dir_name,
-                               (int)mount_info->blocks};
+            auto mount_mode = mount_info->mountMode;
+            const bool is_ro = True(mount_mode & OrbisSaveDataMountMode::RDONLY);
 
-    if (save_instance.Mounted()) {
-        UNREACHABLE_MSG("Save instance should not be mounted");
-    }
+            const bool create = True(mount_mode & OrbisSaveDataMountMode::CREATE);
+            const bool create_if_not_exist =
+                True(mount_mode & OrbisSaveDataMountMode::CREATE2) && g_fw_ver >= ElfInfo::FW_450;
+            ASSERT(!create || !create_if_not_exist); // Can't have both
 
-    if (!create && !create_if_not_exist && !save_instance.Exists()) {
-        return Error::NOT_FOUND;
-    }
-    if (create && save_instance.Exists()) {
-        return Error::EXISTS;
-    }
+            const bool copy_icon = True(mount_mode & OrbisSaveDataMountMode::COPY_ICON);
 
-    bool to_be_created = !save_instance.Exists();
+            const bool ignore_corrupt = True(mount_mode & OrbisSaveDataMountMode::DESTRUCT_OFF) ||
+                                        g_fw_ver < ElfInfo::FW_160;
 
-    if (to_be_created) { // Check size
+            const std::string_view dir_name{mount_info->dirName->data};
 
-        if (mount_info->blocks < OrbisSaveDataBlocksMin2 ||
-            mount_info->blocks > OrbisSaveDataBlocksMax) {
-            LOG_INFO(Lib_SaveData, "called with invalid block size");
-        }
+            // find available mount point
+            int slot_num = -1;
+            for (size_t i = 0; i < g_mount_slots.size(); i++) {
+                const auto& instance = g_mount_slots[i];
+                if (instance.has_value()) {
+                    const auto& slot_name = instance->GetDirName();
+                    if (slot_name == dir_name) {
+                        return Error::BUSY;
+                    }
+                } else {
+                    slot_num = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (slot_num == -1) {
+                return Error::MOUNT_FULL;
+            }
 
-        const auto root_save =
-            EmulatorSettings.GetHomeDir() / std::to_string(mount_info->userId) / "savedata";
-        fs::create_directories(root_save);
-        const auto available = fs::space(root_save).available;
+            SaveInstance save_instance{slot_num, mount_info->userId, std::string{title_id},
+                                       dir_name, (int)mount_info->blocks};
 
-        auto requested_size = save_instance.GetMaxBlocks() * OrbisSaveDataBlockSize;
-        if (requested_size > available) {
-            mount_result->required_blocks = (requested_size - available) / OrbisSaveDataBlockSize;
-            return Error::NO_SPACE_FS;
-        }
-    }
+            if (save_instance.Mounted()) {
+                UNREACHABLE_MSG("Save instance should not be mounted");
+            }
 
-    try {
-        save_instance.SetupAndMount(is_ro, copy_icon, ignore_corrupt);
-    } catch (const fs::filesystem_error& e) {
-        if (e.code() == std::errc::illegal_byte_sequence) {
-            LOG_ERROR(Lib_SaveData, "Corrupted save data");
-            return Error::BROKEN;
-        }
-        if (e.code() == std::errc::no_space_on_device) {
-            return Error::NO_SPACE_FS;
-        }
-        LOG_ERROR(Lib_SaveData, "Failed to mount save data: {}", e.what());
-        return Error::INTERNAL;
-    }
+            if (!create && !create_if_not_exist && !save_instance.Exists()) {
+                return Error::NOT_FOUND;
+            }
+            if (create && save_instance.Exists()) {
+                return Error::EXISTS;
+            }
 
-    mount_result->mount_point.data.FromString(save_instance.GetMountPoint());
+            bool to_be_created = !save_instance.Exists();
 
-    if (g_fw_ver >= ElfInfo::FW_450) {
-        mount_result->mount_status = create_if_not_exist && to_be_created
-                                         ? OrbisSaveDataMountStatus::CREATED
-                                         : OrbisSaveDataMountStatus::NOTHING;
-    }
+            if (to_be_created) { // Check size
 
-    g_mount_slots[slot_num].emplace(std::move(save_instance));
+                if (mount_info->blocks < OrbisSaveDataBlocksMin2 ||
+                    mount_info->blocks > OrbisSaveDataBlocksMax) {
+                    LOG_INFO(Lib_SaveData, "called with invalid block size");
+                }
 
-    return Error::OK;
+                const auto root_save =
+                    EmulatorSettings.GetHomeDir() / std::to_string(mount_info->userId) / "savedata";
+                fs::create_directories(root_save);
+                const auto available = fs::space(root_save).available;
+
+                auto requested_size = save_instance.GetMaxBlocks() * OrbisSaveDataBlockSize;
+                if (requested_size > available) {
+                    mount_result->required_blocks =
+                        (requested_size - available) / OrbisSaveDataBlockSize;
+                    return Error::NO_SPACE_FS;
+                }
+            }
+
+            save_instance.SetupAndMount(is_ro, copy_icon, ignore_corrupt);
+
+            mount_result->mount_point.data.FromString(save_instance.GetMountPoint());
+
+            if (g_fw_ver >= ElfInfo::FW_450) {
+                mount_result->mount_status = create_if_not_exist && to_be_created
+                                                 ? OrbisSaveDataMountStatus::CREATED
+                                                 : OrbisSaveDataMountStatus::NOTHING;
+            }
+
+            g_mount_slots[slot_num].emplace(std::move(save_instance));
+
+            return Error::OK;
+        },
+        [&](const fs::filesystem_error& e) -> Error {
+            if (e.code() == std::errc::illegal_byte_sequence) {
+                LOG_ERROR(Lib_SaveData, "Corrupted save data");
+                return Error::BROKEN;
+            }
+            if (e.code() == std::errc::no_space_on_device) {
+                return Error::NO_SPACE_FS;
+            }
+            LOG_ERROR(Lib_SaveData, "Failed to mount save data: {}", e.what());
+            return Error::INTERNAL;
+        });
 }
 
 static Error Umount(const OrbisSaveDataMountPoint* mountPoint, bool call_backup = false) {
