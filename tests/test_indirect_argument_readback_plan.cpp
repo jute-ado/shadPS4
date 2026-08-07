@@ -15,7 +15,7 @@ TEST(IndirectArgumentReadbackPlan, PacksRecordsAndPreservesStableIdentityAcrossR
 
     for (u32 i = 0; i < 9; ++i) {
         planner.Observe({
-            .source_token = i < 5 ? 10U : 20U,
+            .source_buffer_id = i < 5 ? 10U : 20U,
             .range_identity = 0x1000U + i * 20U,
             .source_offset = i * 20U,
             .stride = IndirectArgumentReadbackPlanner::CommandBytes,
@@ -35,7 +35,7 @@ TEST(IndirectArgumentReadbackPlan, PacksRecordsAndPreservesStableIdentityAcrossR
 
     for (s32 i = 8; i >= 0; --i) {
         planner.Observe({
-            .source_token = i < 5 ? 10U : 20U,
+            .source_buffer_id = i < 5 ? 10U : 20U,
             .range_identity = 0x1000U + static_cast<u32>(i) * 20U,
             .source_offset = static_cast<u32>(i) * 20U,
             .stride = IndirectArgumentReadbackPlanner::CommandBytes,
@@ -54,7 +54,7 @@ TEST(IndirectArgumentReadbackPlan, PacksRecordsAndPreservesStableIdentityAcrossR
 TEST(IndirectArgumentReadbackPlan, RejectsUnsupportedAndBoundsRecordCount) {
     IndirectArgumentReadbackPlanner planner;
     auto observation = IndirectArgumentReadbackObservation{
-        .source_token = 1,
+        .source_buffer_id = 1,
         .range_identity = 0x2000,
         .source_offset = 0,
         .stride = IndirectArgumentReadbackPlanner::CommandBytes,
@@ -91,19 +91,25 @@ TEST(IndirectArgumentReadbackPlan, RejectsUnsupportedAndBoundsRecordCount) {
     EXPECT_EQ(plan.truncated_records, 1U);
 }
 
-TEST(IndirectArgumentReadbackPlan, RingReservationNeverWaitsOrWraps) {
-    static_assert(IndirectArgumentReadbackPlanner::RequiredWindowBytes <=
-                  IndirectArgumentReadbackPlanner::DownloadRingBytes);
+TEST(IndirectArgumentReadbackPlan, NonCoherentReservationsAreAtomDisjointAndNeverWrap) {
+    constexpr u32 AtomSize = 256;
+    constexpr u32 FrameBytes =
+        IndirectArgumentReadbackPlanner::MaxRecordsPerFrame *
+        IndirectArgumentReadbackPlanner::CommandBytes;
+    constexpr u64 WindowBytes = IndirectArgumentReadbackPlanner::RequiredWindowBytes(AtomSize);
+    static_assert(WindowBytes == IndirectArgumentReadbackPlanner::MaxReportFrames * 512ULL);
 
-    const auto reservation = TryReserveIndirectReadback(100, 9 * 20, false);
+    const auto reservation =
+        TryReserveIndirectReadback(100, FrameBytes, WindowBytes, AtomSize, false);
     ASSERT_TRUE(reservation.has_value());
-    EXPECT_EQ(reservation->offset, 100U);
-    EXPECT_EQ(reservation->next_offset, 280U);
+    EXPECT_EQ(reservation->offset, AtomSize);
+    EXPECT_EQ(reservation->next_offset, AtomSize + 512U);
 
-    EXPECT_FALSE(TryReserveIndirectReadback(100, 9 * 20, true).has_value());
-    EXPECT_FALSE(TryReserveIndirectReadback(
-                     IndirectArgumentReadbackPlanner::DownloadRingBytes - 100, 180, false)
-                     .has_value());
+    EXPECT_FALSE(
+        TryReserveIndirectReadback(100, FrameBytes, WindowBytes, AtomSize, true).has_value());
+    EXPECT_FALSE(
+        TryReserveIndirectReadback(WindowBytes - 100, FrameBytes, WindowBytes, AtomSize, false)
+            .has_value());
 }
 
 TEST(IndirectArgumentReadbackPlan, ReducesChangesAndZeroCountsWithoutExposingValues) {
