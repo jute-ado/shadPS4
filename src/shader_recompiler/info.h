@@ -17,6 +17,7 @@
 #include "shader_recompiler/ir/type.h"
 #include "shader_recompiler/params.h"
 #include "shader_recompiler/resource.h"
+#include "shader_recompiler/resource_snapshot.h"
 #include "shader_recompiler/runtime_info.h"
 
 namespace Serialization {
@@ -118,6 +119,7 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    mutable std::vector<u32> diagnostic_flattened_ud_buf;
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -190,12 +192,26 @@ struct Info : InfoPersistent {
 
     void RefreshFlatBuf() {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+        CaptureFlatBuf(flattened_ud_buf);
+    }
+
+    [[nodiscard]] bool FlatBufMatchesCurrentResources() const {
+        diagnostic_flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+        CaptureFlatBuf(diagnostic_flattened_ud_buf);
+        return flattened_ud_buf == diagnostic_flattened_ud_buf;
+    }
+
+private:
+    void CaptureFlatBuf(std::span<u32> destination) const {
+        ASSERT(destination.size() == srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
-        std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+        std::memcpy(destination.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+            srt_info.walker_func(user_data.data(), destination.data());
         }
     }
+
+public:
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD

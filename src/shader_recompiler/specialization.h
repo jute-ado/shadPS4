@@ -5,6 +5,7 @@
 
 #include <bitset>
 
+#include "common/logging/log.h"
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -12,6 +13,8 @@
 #include "shader_recompiler/profile.h"
 
 namespace Shader {
+
+inline ResourceGenerationMismatchCounter ResourceGenerationMismatches{64};
 
 struct VsAttribSpecialization {
     u32 divisor{};
@@ -97,6 +100,16 @@ struct StageSpecialization {
                         Backend::Bindings start_)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
         fetch_shader_data = Gcn::ParseFetchShader(info_);
+        const auto capture_vertex_inputs = [&] {
+            boost::container::small_vector<AmdGpu::Buffer, 32> inputs;
+            if (fetch_shader_data) {
+                for (const auto& attribute : fetch_shader_data->attributes) {
+                    inputs.emplace_back(attribute.GetSharp(info_));
+                }
+            }
+            return inputs;
+        };
+        const auto vertex_inputs_before = capture_vertex_inputs();
         if (info_.stage == Stage::Vertex && fetch_shader_data) {
             // Specialize shader on VS input number types to follow spec.
             ForEachSharp(vs_attribs, fetch_shader_data->attributes,
@@ -163,6 +176,22 @@ struct StageSpecialization {
             TessellationDataConstantBuffer tess_constants{};
             info->ReadTessConstantBuffer(tess_constants);
             runtime_info.InitFromTessConstants(tess_constants);
+        }
+
+        const auto vertex_inputs_after = capture_vertex_inputs();
+        const bool vertex_mismatch = vertex_inputs_before != vertex_inputs_after;
+        const bool srt_mismatch = !info_.FlatBufMatchesCurrentResources();
+        if (vertex_mismatch || srt_mismatch) {
+            const std::array before{false, false};
+            const std::array after{srt_mismatch, vertex_mismatch};
+            const auto observation = ResourceGenerationMismatches.Observe(before, after);
+            if (observation.should_report) {
+                LOG_WARNING(Render_Vulkan,
+                            "ShaderResourceGenerationMismatch occurrence={} stage={} program={:#x} "
+                            "srt={} vertex={}",
+                            observation.occurrence, info_.stage, info_.pgm_hash, srt_mismatch,
+                            vertex_mismatch);
+            }
         }
     }
 

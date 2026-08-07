@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <compare>
 #include <cstddef>
 #include <functional>
@@ -24,6 +25,39 @@ struct ResourceSnapshotRange {
 };
 
 static constexpr size_t MaxResourceSnapshotRanges = 256;
+
+struct ResourceGenerationMismatchObservation {
+    bool mismatched{};
+    bool should_report{};
+    u64 occurrence{};
+};
+
+class ResourceGenerationMismatchCounter {
+public:
+    explicit ResourceGenerationMismatchCounter(u64 report_limit_) : report_limit{report_limit_} {}
+
+    template <std::ranges::input_range First, std::ranges::input_range Second>
+    ResourceGenerationMismatchObservation Observe(const First& first, const Second& second) {
+        if (std::ranges::equal(first, second)) {
+            return {};
+        }
+
+        const u64 occurrence = total.fetch_add(1, std::memory_order_relaxed) + 1;
+        return {
+            .mismatched = true,
+            .should_report = occurrence <= report_limit,
+            .occurrence = occurrence,
+        };
+    }
+
+    [[nodiscard]] u64 Total() const noexcept {
+        return total.load(std::memory_order_relaxed);
+    }
+
+private:
+    u64 report_limit;
+    std::atomic<u64> total{};
+};
 
 /**
  * Captures one immutable resource generation while the caller owns every source range.
