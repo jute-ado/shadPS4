@@ -16,6 +16,7 @@
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/libraries/gnmdriver/graphics_event.h"
 #include "core/libraries/gnmdriver/submission_gate.h"
+#include "core/libraries/gnmdriver/submission_transaction.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/libs.h"
@@ -2155,42 +2156,8 @@ static inline s32 PatchFlipRequest(u32* cmdbuf, u32 size, u32 vo_handle, u32 buf
     return ORBIS_OK;
 }
 
-s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(u32 count, u32* dcb_gpu_addrs[],
-                                                   u32* dcb_sizes_in_bytes, u32* ccb_gpu_addrs[],
-                                                   u32* ccb_sizes_in_bytes, u32 vo_handle,
-                                                   u32 buf_idx, u32 flip_mode, s64 flip_arg) {
-    return sceGnmSubmitAndFlipCommandBuffersForWorkload(
-        count, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes,
-        vo_handle, buf_idx, flip_mode, flip_arg);
-}
-
-s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
-    u32 workload, u32 count, u32* dcb_gpu_addrs[], u32* dcb_sizes_in_bytes, u32* ccb_gpu_addrs[],
-    u32* ccb_sizes_in_bytes, u32 vo_handle, u32 buf_idx, u32 flip_mode, s64 flip_arg) {
-    LOG_DEBUG(Lib_GnmDriver, "called [buf = {}]", buf_idx);
-
-    auto* cmdbuf = dcb_gpu_addrs[count - 1];
-    const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
-
-    const s32 patch_result =
-        PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg, nullptr /*unk*/);
-    if (patch_result != ORBIS_OK) {
-        return patch_result;
-    }
-
-    return sceGnmSubmitCommandBuffers(count, const_cast<const u32**>(dcb_gpu_addrs),
-                                      dcb_sizes_in_bytes, const_cast<const u32**>(ccb_gpu_addrs),
-                                      ccb_sizes_in_bytes);
-}
-
-int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
-                                                       const u32* dcb_gpu_addrs[],
-                                                       u32* dcb_sizes_in_bytes,
-                                                       const u32* ccb_gpu_addrs[],
-                                                       u32* ccb_sizes_in_bytes) {
-    HLE_TRACE;
-    LOG_DEBUG(Lib_GnmDriver, "called");
-
+static int ValidateCommandBuffers(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_sizes_in_bytes,
+                                  u32* ccb_sizes_in_bytes) {
     if (!dcb_gpu_addrs || !dcb_sizes_in_bytes) {
         LOG_ERROR(Lib_GnmDriver, "dcbGpuAddrs and dcbSizesInBytes must not be NULL");
         return 0x80d11000;
@@ -2213,8 +2180,50 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
-    auto submission = submission_gate.Enter();
+    return ORBIS_OK;
+}
 
+static int SubmitCommandBuffersLocked(u32 count, const u32* dcb_gpu_addrs[],
+                                      u32* dcb_sizes_in_bytes, const u32* ccb_gpu_addrs[],
+                                      u32* ccb_sizes_in_bytes);
+
+s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(u32 count, u32* dcb_gpu_addrs[],
+                                                   u32* dcb_sizes_in_bytes, u32* ccb_gpu_addrs[],
+                                                   u32* ccb_sizes_in_bytes, u32 vo_handle,
+                                                   u32 buf_idx, u32 flip_mode, s64 flip_arg) {
+    return sceGnmSubmitAndFlipCommandBuffersForWorkload(
+        count, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes,
+        vo_handle, buf_idx, flip_mode, flip_arg);
+}
+
+s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
+    u32 workload, u32 count, u32* dcb_gpu_addrs[], u32* dcb_sizes_in_bytes, u32* ccb_gpu_addrs[],
+    u32* ccb_sizes_in_bytes, u32 vo_handle, u32 buf_idx, u32 flip_mode, s64 flip_arg) {
+    LOG_DEBUG(Lib_GnmDriver, "called [buf = {}]", buf_idx);
+
+    return RunSubmissionTransaction(
+        submission_gate,
+        [&] {
+            return ValidateCommandBuffers(count, const_cast<const u32**>(dcb_gpu_addrs),
+                                          dcb_sizes_in_bytes, ccb_sizes_in_bytes);
+        },
+        [&] {
+            auto* cmdbuf = dcb_gpu_addrs[count - 1];
+            const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
+            return PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg,
+                                    nullptr /*unk*/);
+        },
+        [&] {
+            return SubmitCommandBuffersLocked(count, const_cast<const u32**>(dcb_gpu_addrs),
+                                              dcb_sizes_in_bytes,
+                                              const_cast<const u32**>(ccb_gpu_addrs),
+                                              ccb_sizes_in_bytes);
+        });
+}
+
+static int SubmitCommandBuffersLocked(u32 count, const u32* dcb_gpu_addrs[],
+                                      u32* dcb_sizes_in_bytes, const u32* ccb_gpu_addrs[],
+                                      u32* ccb_sizes_in_bytes) {
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
     }
@@ -2287,6 +2296,25 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
     }
 
     return ORBIS_OK;
+}
+
+int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
+                                                       const u32* dcb_gpu_addrs[],
+                                                       u32* dcb_sizes_in_bytes,
+                                                       const u32* ccb_gpu_addrs[],
+                                                       u32* ccb_sizes_in_bytes) {
+    HLE_TRACE;
+    LOG_DEBUG(Lib_GnmDriver, "called");
+
+    const int validation_result =
+        ValidateCommandBuffers(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_sizes_in_bytes);
+    if (validation_result != ORBIS_OK) {
+        return validation_result;
+    }
+
+    auto submission = submission_gate.Enter();
+    return SubmitCommandBuffersLocked(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs,
+                                      ccb_sizes_in_bytes);
 }
 
 s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[],
