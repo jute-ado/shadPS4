@@ -22,6 +22,7 @@
 #include "core/file_sys/directories/pfs_directory.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/file_system.h"
+#include "core/libraries/kernel/mkdir_result.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/libs.h"
@@ -604,14 +605,17 @@ s32 PS4_SYSV_ABI posix_mkdir(const char* path, u16 mode) {
     }
 
     // CUSA02456: path = /aotl after sceSaveDataMount(mode = 1)
-    std::error_code ec;
-    if (dir_name.empty() || !fs::create_directory(dir_name, ec)) {
+    if (dir_name.empty()) {
         *__Error() = POSIX_EIO;
         return -1;
     }
 
-    if (!fs::exists(dir_name)) {
-        *__Error() = POSIX_ENOENT;
+    std::error_code ec;
+    const bool created = fs::create_directory(dir_name, ec);
+    const bool exists_after_create = !ec && fs::exists(dir_name);
+    const int result = ClassifyMkdirResult(created, ec, exists_after_create);
+    if (result != 0) {
+        *__Error() = result;
         return -1;
     }
     return ORBIS_OK;
