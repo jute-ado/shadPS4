@@ -6,8 +6,10 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/occlusion_query_reuse_diagnostic.h"
+#include "video_core/amdgpu/pixel_pipe_stat_control.h"
 
 using AmdGpu::OcclusionQueryReuseDiagnostic;
+using AmdGpu::PixelPipeStatControl;
 
 TEST(OcclusionQueryReuseDiagnostic, ReportsFreshReuseAndPriorValidityWithoutAddresses) {
     OcclusionQueryReuseDiagnostic diagnostic{/*report_interval=*/2, /*report_limit=*/2,
@@ -62,4 +64,43 @@ TEST(OcclusionQueryReuseDiagnostic, BoundsRememberedTargets) {
     EXPECT_EQ(snapshot->unknown_targets, 1);
     EXPECT_EQ(snapshot->reused_targets, 1);
     EXPECT_EQ(snapshot->distinct_targets, 1);
+}
+
+TEST(OcclusionQueryReuseDiagnostic, ReportsActiveControlLayoutOnDumps) {
+    OcclusionQueryReuseDiagnostic diagnostic{/*report_interval=*/2, /*report_limit=*/2,
+                                             /*target_limit=*/4};
+    std::array<u64, 8> results{};
+    diagnostic.ObserveControl(PixelPipeStatControl{
+        .counter_id = 7, .stride_bytes = 8, .instance_enable_mask = 0b0101});
+
+    EXPECT_FALSE(diagnostic.Observe(0x1000, results.data(), 4).has_value());
+    const auto mismatched = diagnostic.Observe(0x1000, results.data(), 4);
+
+    ASSERT_TRUE(mismatched.has_value());
+    EXPECT_EQ(mismatched->controls, 1);
+    EXPECT_EQ(mismatched->control_changes, 0);
+    EXPECT_EQ(mismatched->dumps_without_control, 0);
+    EXPECT_EQ(mismatched->hardcoded_layout_mismatches, 2);
+    EXPECT_EQ(mismatched->counter_id_min, 7);
+    EXPECT_EQ(mismatched->counter_id_max, 7);
+    EXPECT_EQ(mismatched->stride_bytes_min, 8);
+    EXPECT_EQ(mismatched->stride_bytes_max, 8);
+    EXPECT_EQ(mismatched->enabled_instances_min, 2);
+    EXPECT_EQ(mismatched->enabled_instances_max, 2);
+    EXPECT_EQ(mismatched->instance_mask_and, 0b0101);
+    EXPECT_EQ(mismatched->instance_mask_or, 0b0101);
+
+    diagnostic.ObserveControl(PixelPipeStatControl{
+        .counter_id = 0, .stride_bytes = 16, .instance_enable_mask = 0b1111});
+    EXPECT_FALSE(diagnostic.Observe(0x1000, results.data(), 4).has_value());
+    const auto matching = diagnostic.Observe(0x1000, results.data(), 4);
+
+    ASSERT_TRUE(matching.has_value());
+    EXPECT_EQ(matching->controls, 1);
+    EXPECT_EQ(matching->control_changes, 1);
+    EXPECT_EQ(matching->hardcoded_layout_mismatches, 0);
+    EXPECT_EQ(matching->counter_id_min, 0);
+    EXPECT_EQ(matching->stride_bytes_min, 16);
+    EXPECT_EQ(matching->enabled_instances_min, 4);
+    EXPECT_EQ(matching->instance_mask_and, 0b1111);
 }
