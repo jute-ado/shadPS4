@@ -13,25 +13,23 @@ using Libraries::Kernel::ClassifyMkdirResult;
 TEST(MkdirResult, ReportsConcurrentCreatorAsExistingDirectory) {
     const std::error_code no_error;
 
-    EXPECT_EQ(ClassifyMkdirResult(false, no_error, true), POSIX_EEXIST);
-    EXPECT_EQ(ClassifyMkdirResult(false, no_error, false), POSIX_EEXIST);
+    EXPECT_EQ(ClassifyMkdirResult(false, no_error), POSIX_EEXIST);
 }
 
 TEST(MkdirResult, ReportsConcurrentCreatorFileExistsErrorAsExistingDirectory) {
     const auto file_exists = std::make_error_code(std::errc::file_exists);
 
-    EXPECT_EQ(ClassifyMkdirResult(false, file_exists, true), POSIX_EEXIST);
+    EXPECT_EQ(ClassifyMkdirResult(false, file_exists), POSIX_EEXIST);
 }
 
 TEST(MkdirResult, PreservesFilesystemErrorWhenDirectoryExistsAfterFailure) {
     const std::error_code io_error = std::make_error_code(std::errc::io_error);
 
-    EXPECT_EQ(ClassifyMkdirResult(false, io_error, true), POSIX_EIO);
+    EXPECT_EQ(ClassifyMkdirResult(false, io_error), POSIX_EIO);
 }
 
-TEST(MkdirResult, ReportsSuccessfulCreationRegardlessOfLaterRemoval) {
+TEST(MkdirResult, ReportsSuccessfulCreationAtomically) {
     const std::error_code no_error;
 
-    EXPECT_EQ(ClassifyMkdirResult(true, no_error, true), 0);
-    EXPECT_EQ(ClassifyMkdirResult(true, no_error, false), 0);
+    EXPECT_EQ(ClassifyMkdirResult(true, no_error), 0);
 }

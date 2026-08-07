@@ -612,9 +612,7 @@ s32 PS4_SYSV_ABI posix_mkdir(const char* path, u16 mode) {
 
     std::error_code ec;
     const bool created = fs::create_directory(dir_name, ec);
-    std::error_code exists_ec;
-    const bool exists_after_create = fs::exists(dir_name, exists_ec) && !exists_ec;
-    const int result = ClassifyMkdirResult(created, ec, exists_after_create);
+    const int result = ClassifyMkdirResult(created, ec);
     if (result != 0) {
         *__Error() = result;
         return -1;

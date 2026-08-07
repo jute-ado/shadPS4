@@ -9,19 +9,14 @@
 
 namespace Libraries::Kernel {
 
-constexpr int ClassifyMkdirResult(bool created, const std::error_code& error,
-                                  bool exists_after_create) {
-    if (!created && exists_after_create &&
-        (!error || error == std::errc::file_exists)) {
+constexpr int ClassifyMkdirResult(bool created, const std::error_code& error) {
+    if (created) {
+        return 0;
+    }
+    if (!error || error == std::errc::file_exists) {
         return POSIX_EEXIST;
     }
-    if (error) {
-        return POSIX_EIO;
-    }
-    if (!created) {
-        return POSIX_EIO;
-    }
-    return exists_after_create ? 0 : POSIX_ENOENT;
+    return POSIX_EIO;
 }
 
 } // namespace Libraries::Kernel
