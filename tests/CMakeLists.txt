@@ -105,6 +105,20 @@ target_link_libraries(shadps4_present_frame_transition_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_present_frame_transition_test)
 
+add_executable(shadps4_tiled_buffer_publication_test
+    test_tiled_buffer_publication.cpp
+)
+target_include_directories(shadps4_tiled_buffer_publication_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}
+)
+target_compile_features(shadps4_tiled_buffer_publication_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_tiled_buffer_publication_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_tiled_buffer_publication_test)
+
 add_executable(shadps4_pipeline_bind_tracker_test
     test_pipeline_bind_tracker.cpp
 )
