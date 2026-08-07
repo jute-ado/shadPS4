@@ -124,5 +124,31 @@ TEST(ShaderResourceSnapshot, NormalizesOverlappingRangesBeforeOwnership) {
     EXPECT_EQ(released, (std::vector<ResourceSnapshotRange>{acquired[1], acquired[0]}));
 }
 
+TEST(ShaderResourceSnapshot, BoundsGenerationMismatchDiagnosticsWithoutHidingOccurrences) {
+    ResourceGenerationMismatchCounter counter{2};
+    const ResourceTable torn{0xa0, 0xa1, 0xa2, 0xa3, 0xb4, 0xb5, 0xb6, 0xb7};
+
+    const auto stable = counter.Observe(GenerationA, GenerationA);
+    EXPECT_FALSE(stable.mismatched);
+    EXPECT_FALSE(stable.should_report);
+    EXPECT_EQ(stable.occurrence, 0);
+
+    const auto first = counter.Observe(GenerationA, torn);
+    EXPECT_TRUE(first.mismatched);
+    EXPECT_TRUE(first.should_report);
+    EXPECT_EQ(first.occurrence, 1);
+
+    const auto second = counter.Observe(torn, GenerationB);
+    EXPECT_TRUE(second.mismatched);
+    EXPECT_TRUE(second.should_report);
+    EXPECT_EQ(second.occurrence, 2);
+
+    const auto third = counter.Observe(GenerationA, GenerationB);
+    EXPECT_TRUE(third.mismatched);
+    EXPECT_FALSE(third.should_report);
+    EXPECT_EQ(third.occurrence, 3);
+    EXPECT_EQ(counter.Total(), 3);
+}
+
 } // namespace
 } // namespace Shader
