@@ -3,6 +3,9 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <cstdlib>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,6 +71,9 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    const char* query_reuse_diagnostic = std::getenv("SHADPS4_OCCLUSION_QUERY_REUSE_DIAGNOSTIC");
+    occlusion_query_reuse_diagnostic_enabled =
+        query_reuse_diagnostic != nullptr && std::string_view{query_reuse_diagnostic} == "1";
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -698,6 +704,26 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
+                        if (occlusion_query_reuse_diagnostic_enabled) {
+                            const auto snapshot = occlusion_query_reuse_diagnostic.Observe(
+                                reinterpret_cast<std::uintptr_t>(results), results,
+                                num_counter_pairs);
+                            if (snapshot.has_value()) {
+                                LOG_INFO(Render,
+                                         "OcclusionQueryReuse sequence={} dumps={} fresh={} "
+                                         "reused={} unknown={} no_prior_valid={} "
+                                         "partial_prior_valid={} all_prior_valid={} "
+                                         "distinct_targets={} counter_pairs_min={} "
+                                         "counter_pairs_max={}",
+                                         snapshot->sequence, snapshot->dumps,
+                                         snapshot->fresh_targets, snapshot->reused_targets,
+                                         snapshot->unknown_targets, snapshot->no_prior_valid,
+                                         snapshot->partial_prior_valid,
+                                         snapshot->all_prior_valid, snapshot->distinct_targets,
+                                         snapshot->min_counter_pairs,
+                                         snapshot->max_counter_pairs);
+                            }
+                        }
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
