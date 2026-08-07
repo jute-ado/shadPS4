@@ -74,13 +74,22 @@ public:
     static constexpr u32 MaxFullProbeBytes = 16_KB;
 
     explicit DrawResourceContentProvenanceDiagnostic(u64 report_limit_)
-        : report_limit{report_limit_}, current_frame{std::make_unique<Frame>()},
+        : report_limit{report_limit_}, capture_count{report_limit_},
+          current_frame{std::make_unique<Frame>()},
           previous_frame{std::make_unique<Frame>()},
           previous_previous_frame{std::make_unique<Frame>()} {}
+
+    void ConfigureCaptureWindow(u64 start, u64 count) noexcept {
+        capture_start = start;
+        capture_count = count;
+    }
 
     void BeginDraw() noexcept {
         if (draw_active) {
             AbortDraw();
+        }
+        if (!IsInCaptureWindow(reports_emitted + 1)) {
+            return;
         }
         draw_active = true;
         draw_observation_begin = current_observations;
@@ -164,9 +173,15 @@ public:
             return {};
         }
 
+        const u64 sequence = ++reports_emitted;
+        if (!IsInCaptureWindow(sequence)) {
+            ResetCurrent();
+            return {.sequence = sequence};
+        }
+
         DrawResourceContentProvenanceSnapshot snapshot{
             .should_report = true,
-            .sequence = ++reports_emitted,
+            .sequence = sequence,
             .draws = current_draws,
             .observations = current_observations,
             .bytes_probed = current_probe_bytes,
@@ -254,6 +269,10 @@ private:
         return {current_draws, current_resource_ordinal};
     }
 
+    [[nodiscard]] bool IsInCaptureWindow(u64 sequence) const noexcept {
+        return sequence >= capture_start && sequence - capture_start < capture_count;
+    }
+
     bool Append(const Observation& observation) noexcept {
         if (!draw_active) {
             return false;
@@ -314,6 +333,8 @@ private:
 
     const u64 report_limit;
     u64 reports_emitted{};
+    u64 capture_start{1};
+    u64 capture_count{};
     std::unique_ptr<Frame> current_frame;
     std::unique_ptr<Frame> previous_frame;
     std::unique_ptr<Frame> previous_previous_frame;

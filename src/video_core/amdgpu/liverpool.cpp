@@ -113,6 +113,9 @@ Liverpool::Liverpool() {
             std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_REPORT_COUNT")) {
         draw_resource_content_provenance_report_count = std::strtoull(report_count, nullptr, 10);
     }
+    draw_resource_content_provenance_diagnostic.ConfigureCaptureWindow(
+        draw_resource_content_provenance_report_start,
+        draw_resource_content_provenance_report_count);
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
