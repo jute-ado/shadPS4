@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "common/types.h"
+#include "video_core/amdgpu/pixel_pipe_stat_control.h"
 
 namespace AmdGpu {
 
@@ -25,6 +26,18 @@ struct OcclusionQueryReuseSnapshot {
     u64 distinct_targets{};
     u32 min_counter_pairs{};
     u32 max_counter_pairs{};
+    u64 controls{};
+    u64 control_changes{};
+    u64 dumps_without_control{};
+    u64 hardcoded_layout_mismatches{};
+    u32 counter_id_min{};
+    u32 counter_id_max{};
+    u32 stride_bytes_min{};
+    u32 stride_bytes_max{};
+    u32 enabled_instances_min{};
+    u32 enabled_instances_max{};
+    u64 instance_mask_and{};
+    u64 instance_mask_or{};
 };
 
 class OcclusionQueryReuseDiagnostic {
@@ -35,6 +48,14 @@ public:
         : report_interval{std::max<u64>(report_interval_, 1)}, report_limit{report_limit_},
           target_limit{target_limit_} {
         seen_targets.reserve(static_cast<size_t>(target_limit));
+    }
+
+    void ObserveControl(const PixelPipeStatControl& control) noexcept {
+        if (active_control.has_value() && active_control.value() != control) {
+            ++current.control_changes;
+        }
+        active_control = control;
+        ++current.controls;
     }
 
     [[nodiscard]] std::optional<OcclusionQueryReuseSnapshot> Observe(
@@ -64,6 +85,31 @@ public:
             ++current.partial_prior_valid;
         }
 
+
+        if (!active_control.has_value()) {
+            ++current.dumps_without_control;
+        } else {
+            const auto& control = active_control.value();
+            const u64 expected_instance_mask =
+                counter_pairs >= 64 ? std::numeric_limits<u64>::max()
+                                    : ((1ULL << counter_pairs) - 1);
+            if (control.stride_bytes != 16 ||
+                control.instance_enable_mask != expected_instance_mask) {
+                ++current.hardcoded_layout_mismatches;
+            }
+            const u32 enabled_instances = control.EnabledInstanceCount();
+            current.counter_id_min = std::min(current.counter_id_min, control.counter_id);
+            current.counter_id_max = std::max(current.counter_id_max, control.counter_id);
+            current.stride_bytes_min = std::min(current.stride_bytes_min, control.stride_bytes);
+            current.stride_bytes_max = std::max(current.stride_bytes_max, control.stride_bytes);
+            current.enabled_instances_min =
+                std::min(current.enabled_instances_min, enabled_instances);
+            current.enabled_instances_max =
+                std::max(current.enabled_instances_max, enabled_instances);
+            current.instance_mask_and &= control.instance_enable_mask;
+            current.instance_mask_or |= control.instance_enable_mask;
+        }
+
         current.min_counter_pairs = std::min(current.min_counter_pairs, counter_pairs);
         current.max_counter_pairs = std::max(current.max_counter_pairs, counter_pairs);
         ++current.dumps;
@@ -74,18 +120,33 @@ public:
         current.sequence = ++reports_emitted;
         current.distinct_targets = seen_targets.size();
         const auto snapshot = current;
-        current = {};
-        current.min_counter_pairs = std::numeric_limits<u32>::max();
+        ResetCurrent();
         return snapshot;
     }
 
 private:
+    void ResetCurrent() noexcept {
+        current = {};
+        current.min_counter_pairs = std::numeric_limits<u32>::max();
+        current.counter_id_min = std::numeric_limits<u32>::max();
+        current.stride_bytes_min = std::numeric_limits<u32>::max();
+        current.enabled_instances_min = std::numeric_limits<u32>::max();
+        current.instance_mask_and = std::numeric_limits<u64>::max();
+    }
+
     const u64 report_interval;
     const u64 report_limit;
     const u64 target_limit;
     u64 reports_emitted{};
     std::unordered_set<std::uintptr_t> seen_targets;
-    OcclusionQueryReuseSnapshot current{.min_counter_pairs = std::numeric_limits<u32>::max()};
+    std::optional<PixelPipeStatControl> active_control;
+    OcclusionQueryReuseSnapshot current{
+        .min_counter_pairs = std::numeric_limits<u32>::max(),
+        .counter_id_min = std::numeric_limits<u32>::max(),
+        .stride_bytes_min = std::numeric_limits<u32>::max(),
+        .enabled_instances_min = std::numeric_limits<u32>::max(),
+        .instance_mask_and = std::numeric_limits<u64>::max(),
+    };
 };
 
 } // namespace AmdGpu

@@ -44,6 +44,8 @@ struct PixelPipeStatControl {
     u32 counter_id{};
     u32 stride_bytes{};
     u64 instance_enable_mask{};
+
+    auto operator<=>(const PixelPipeStatControl&) const = default;
 };
 
 } // namespace AmdGpu
