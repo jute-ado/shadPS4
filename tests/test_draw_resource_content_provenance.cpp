@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include "video_core/amdgpu/draw_resource_content_provenance_diagnostic.h"
 
 using AmdGpu::ClassifyDrawResourceUpload;
@@ -20,6 +22,18 @@ TEST(DrawResourceContentProvenanceDiagnostic, ClassifiesUploadReceipts) {
               DrawResourceUploadProvenance::ConcurrentWriterOther);
     EXPECT_EQ(ClassifyDrawResourceUpload(1, 2, 1),
               DrawResourceUploadProvenance::StagedMismatch);
+}
+
+TEST(DrawResourceContentProvenanceDiagnostic, FingerprintsContentForEqualityOnly) {
+    DrawResourceContentProvenanceDiagnostic diagnostic{/*report_limit=*/1};
+    const std::array<u8, 4> first{1, 2, 3, 4};
+    const std::array<u8, 4> same{1, 2, 3, 4};
+    const std::array<u8, 4> different{1, 2, 3, 5};
+
+    EXPECT_EQ(diagnostic.FingerprintBytes(first.data(), first.size()),
+              diagnostic.FingerprintBytes(same.data(), same.size()));
+    EXPECT_NE(diagnostic.FingerprintBytes(first.data(), first.size()),
+              diagnostic.FingerprintBytes(different.data(), different.size()));
 }
 
 TEST(DrawResourceContentProvenanceDiagnostic, ReportsCoherentContentChangeAndAba) {

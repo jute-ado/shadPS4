@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <memory>
 
+#include <xxhash.h>
+
 #include "common/types.h"
 
 namespace AmdGpu {
@@ -151,13 +153,7 @@ public:
     }
 
     [[nodiscard]] u64 FingerprintBytes(const void* data, size_t size) const noexcept {
-        u64 hash = HashSeed;
-        const auto* bytes = static_cast<const u8*>(data);
-        for (size_t i = 0; i < size; ++i) {
-            hash ^= bytes[i];
-            hash *= 1099511628211ULL;
-        }
-        return hash;
+        return XXH3_64bits(data, size);
     }
 
     void RecordCpuUpload(u64 before, u64 staged, u64 after, u32 size) noexcept {
@@ -324,8 +320,6 @@ private:
     };
 
     using Frame = std::array<Observation, MaxObservationsPerFrame>;
-
-    static constexpr u64 HashSeed = 14695981039346656037ULL;
 
     [[nodiscard]] DrawResourceContentOrdinal CurrentKey() const noexcept {
         return {current_draws, current_resource_ordinal};

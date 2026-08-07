@@ -617,7 +617,8 @@ target_include_directories(shadps4_draw_resource_content_provenance_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_draw_resource_content_provenance_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_draw_resource_content_provenance_test PRIVATE GTest::gtest_main)
+target_link_libraries(shadps4_draw_resource_content_provenance_test PRIVATE GTest::gtest_main
+                                                                         xxHash::xxhash)
 gtest_discover_tests(shadps4_draw_resource_content_provenance_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     DISCOVERY_TIMEOUT 60
