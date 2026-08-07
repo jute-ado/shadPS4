@@ -768,7 +768,6 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                                                 vk::ImageLayout::eTransferDstOptimal, region);
     }
 
-    flags |= VideoCore::ImageFlagBits::GpuModified;
     flags &= ~VideoCore::ImageFlagBits::Dirty;
 }
 

@@ -974,6 +974,7 @@ void Rasterizer::Resolve() {
     ScopeMarkerBegin(fmt::format("Resolve:MRT0={:#x}:MRT1={:#x}",
                                  liverpool->regs.color_buffers[0].Address(),
                                  liverpool->regs.color_buffers[1].Address()));
+    texture_cache.MarkImageGpuModified(mrt1_image);
     mrt1_image.Resolve(mrt0_image, mrt0_desc.view_info.range, mrt1_desc.view_info.range);
     ScopeMarkerEnd();
 }
