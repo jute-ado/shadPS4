@@ -67,10 +67,10 @@ TEST(EventWriteEop, RetainsEveryFlipAssociatedWithTheSameEop) {
     std::vector<int> flips;
     AmdGpu::EopFlipTracker tracker;
 
-    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Following,
-                                  [&] { flips.emplace_back(1); }));
-    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Following,
-                                  [&] { flips.emplace_back(2); }));
+    ASSERT_TRUE(
+        tracker.QueueFlip(AmdGpu::FlipEopPosition::Following, [&] { flips.emplace_back(1); }));
+    ASSERT_TRUE(
+        tracker.QueueFlip(AmdGpu::FlipEopPosition::Following, [&] { flips.emplace_back(2); }));
     auto complete_eop = tracker.BeginEop();
 
     EXPECT_TRUE(flips.empty());
@@ -84,6 +84,7 @@ TEST(EventWriteEop, BatchesConsecutiveEopsIntoOneSubmissionBoundary) {
 
     batch.MarkEopPending();
     batch.MarkEopPending();
+    EXPECT_TRUE(batch.HasPending());
     EXPECT_TRUE(operations.empty());
 
     batch.SubmitBoundary([&] { operations.emplace_back("prepare"); },
@@ -91,6 +92,7 @@ TEST(EventWriteEop, BatchesConsecutiveEopsIntoOneSubmissionBoundary) {
     batch.FlushIfPending([&] { operations.emplace_back("unexpected-prepare"); },
                          [&] { operations.emplace_back("unexpected-submit"); });
 
+    EXPECT_FALSE(batch.HasPending());
     EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
 }
 
@@ -115,11 +117,9 @@ TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
     };
 
     AmdGpu::DeferEopUntilGpuCompletion(
-        TestEopPacket{.data = 1}, defer_completion,
-        [&](u32) { operations.emplace_back("fence"); },
+        TestEopPacket{.data = 1}, defer_completion, [&](u32) { operations.emplace_back("fence"); },
         [&] { operations.emplace_back("interrupt"); }, [] {});
-    AmdGpu::SubmitSubmissionBoundary([&] { operations.emplace_back("boundary"); },
-                                     defer_completion,
+    AmdGpu::SubmitSubmissionBoundary([&] { operations.emplace_back("boundary"); }, defer_completion,
                                      [&] { operations.emplace_back("submit"); });
 
     EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
@@ -129,8 +129,7 @@ TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
     EXPECT_EQ(operations, (std::vector<std::string>{"submit", "fence", "interrupt"}));
 
     gpu_completions[1]();
-    EXPECT_EQ(operations,
-              (std::vector<std::string>{"submit", "fence", "interrupt", "boundary"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "fence", "interrupt", "boundary"}));
 }
 
 TEST(EventWriteEop, PublishesFenceInterruptAndFlipOnlyAfterExactGpuCompletion) {
@@ -144,16 +143,14 @@ TEST(EventWriteEop, PublishesFenceInterruptAndFlipOnlyAfterExactGpuCompletion) {
             gpu_completion = std::move(completion);
         },
         [&](u32) { operations.emplace_back("fence"); },
-        [&] { operations.emplace_back("interrupt"); },
-        [&] { operations.emplace_back("flip"); });
+        [&] { operations.emplace_back("interrupt"); }, [&] { operations.emplace_back("flip"); });
 
     EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
     ASSERT_TRUE(gpu_completion);
 
     gpu_completion();
 
-    EXPECT_EQ(operations,
-              (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
 }
 
 TEST(GpuCompletionSubmission, BindsCompletionToTickReturnedByExactSubmission) {
@@ -162,16 +159,15 @@ TEST(GpuCompletionSubmission, BindsCompletionToTickReturnedByExactSubmission) {
     std::vector<std::string> operations;
     u64 deferred_tick{};
 
-    const u64 submitted_tick = sequencer.Submit(
-        [] {},
-        [&] {
-            operations.emplace_back("submit");
-            return 41u;
-        },
-        [&](auto&&, u64 tick) {
-            operations.emplace_back("defer");
-            deferred_tick = tick;
-        });
+    const u64 submitted_tick = sequencer.Submit([] {},
+                                                [&] {
+                                                    operations.emplace_back("submit");
+                                                    return 41u;
+                                                },
+                                                [&](auto&&, u64 tick) {
+                                                    operations.emplace_back("defer");
+                                                    deferred_tick = tick;
+                                                });
 
     EXPECT_EQ(submitted_tick, 41u);
     EXPECT_EQ(deferred_tick, submitted_tick);
@@ -189,15 +185,14 @@ TEST(GpuCompletionSubmission, SharesExactTickAssociationWithOrdinarySubmissions)
     std::latch release_exact_submit{1};
 
     std::jthread exact_submission{[&] {
-        static_cast<void>(sequencer.Submit(
-            [] {},
-            [&] {
-                const u64 tick = next_tick.fetch_add(1);
-                exact_submit_entered.count_down();
-                release_exact_submit.wait();
-                return tick;
-            },
-            [&](auto&&, u64 tick) { deferred_tick = tick; }));
+        static_cast<void>(sequencer.Submit([] {},
+                                           [&] {
+                                               const u64 tick = next_tick.fetch_add(1);
+                                               exact_submit_entered.count_down();
+                                               release_exact_submit.wait();
+                                               return tick;
+                                           },
+                                           [&](auto&&, u64 tick) { deferred_tick = tick; }));
     }};
     exact_submit_entered.wait();
 
