@@ -76,12 +76,18 @@ public:
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
 
-    const GraphicsPipeline* GetGraphicsPipeline();
+    struct GraphicsPipelineResult {
+        const GraphicsPipeline* pipeline{};
+        Shader::Gcn::VertexInputSnapshot vertex_inputs{};
+    };
+
+    GraphicsPipelineResult GetGraphicsPipeline();
 
     const ComputePipeline* GetComputePipeline();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
-                              std::optional<Shader::Gcn::FetchShaderData>, u64>;
+                              std::optional<Shader::Gcn::FetchShaderData>,
+                              Shader::Gcn::VertexInputSnapshot, u64>;
     Result GetProgram(Shader::Stage stage, Shader::LogicalStage l_stage,
                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
 
@@ -129,6 +135,7 @@ private:
     std::array<const Shader::Info*, MaxShaderStages> infos{};
     std::array<vk::ShaderModule, MaxShaderStages> modules{};
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
+    Shader::Gcn::VertexInputSnapshot vertex_inputs{};
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start

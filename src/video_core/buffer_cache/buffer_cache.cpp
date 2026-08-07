@@ -150,14 +150,14 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 }
 
 void BufferCache::BindVertexBuffers(
-    const Vulkan::GraphicsPipeline& pipeline,
+    const Vulkan::GraphicsPipeline& pipeline, const Shader::Gcn::VertexInputSnapshot& vertex_inputs,
     boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
     Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
     Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
-    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers, vertex_inputs,
                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
     if (instance.IsVertexInputDynamicState()) {

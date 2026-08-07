@@ -4,6 +4,7 @@
 #pragma once
 
 #include <bitset>
+#include <utility>
 
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
@@ -94,25 +95,36 @@ struct StageSpecialization {
 
     StageSpecialization() = default;
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
-                        Backend::Bindings start_)
+                        Backend::Bindings start_, Gcn::VertexInputSnapshot* vertex_inputs = nullptr)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
         fetch_shader_data = Gcn::ParseFetchShader(info_);
+        Gcn::VertexInputSnapshot captured_vertex_inputs;
+        if (fetch_shader_data) {
+            captured_vertex_inputs = Gcn::VertexInputSnapshot::Capture(*fetch_shader_data, info_);
+        }
         if (info_.stage == Stage::Vertex && fetch_shader_data) {
             // Specialize shader on VS input number types to follow spec.
-            ForEachSharp(vs_attribs, fetch_shader_data->attributes,
-                         [this](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                             using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
-                             if (const auto step_rate = desc.GetStepRate();
-                                 step_rate != InstanceIdType::None) {
-                                 spec.divisor = step_rate == InstanceIdType::OverStepRate0
-                                                    ? runtime_info.vs_info.step_rate_0
-                                                    : (step_rate == InstanceIdType::OverStepRate1
-                                                           ? runtime_info.vs_info.step_rate_1
-                                                           : 1);
-                             }
-                             spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
-                         });
+            for (size_t index = 0; index < fetch_shader_data->attributes.size(); ++index) {
+                const auto& desc = fetch_shader_data->attributes[index];
+                auto& spec = vs_attribs.emplace_back();
+                const auto sharp = captured_vertex_inputs.buffers[index];
+                if (!sharp) {
+                    continue;
+                }
+                using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
+                if (const auto step_rate = desc.GetStepRate(); step_rate != InstanceIdType::None) {
+                    spec.divisor = step_rate == InstanceIdType::OverStepRate0
+                                       ? runtime_info.vs_info.step_rate_0
+                                       : (step_rate == InstanceIdType::OverStepRate1
+                                              ? runtime_info.vs_info.step_rate_1
+                                              : 1);
+                }
+                spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
+                spec.dst_select = sharp.DstSelect();
+            }
+        }
+        if (vertex_inputs) {
+            *vertex_inputs = std::move(captured_vertex_inputs);
         }
         u32 binding{};
         ForEachSharp(binding, buffers, info->buffers,

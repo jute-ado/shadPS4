@@ -20,7 +20,7 @@ class TextureCache;
 namespace Vulkan {
 
 static constexpr u32 MaxShaderStages = static_cast<u32>(Shader::LogicalStage::NumLogicalStages);
-static constexpr u32 MaxVertexBufferCount = 32;
+static constexpr u32 MaxVertexBufferCount = Shader::Gcn::MaxVertexBufferCount;
 
 class Instance;
 class Scheduler;
@@ -88,6 +88,7 @@ public:
                      std::span<const Shader::Info*, MaxShaderStages> stages,
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
                      std::optional<const Shader::Gcn::FetchShaderData> fetch_shader,
+                     const Shader::Gcn::VertexInputSnapshot& vertex_inputs,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
                      bool preloading);
     ~GraphicsPipeline();
@@ -104,7 +105,8 @@ public:
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
                          VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
-                         VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0,
+                         VertexInputs<AmdGpu::Buffer>& guest_buffers,
+                         const Shader::Gcn::VertexInputSnapshot& vertex_inputs, u32 step_rate_0,
                          u32 step_rate_1) const;
 
 private:

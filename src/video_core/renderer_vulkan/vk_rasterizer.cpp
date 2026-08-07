@@ -196,7 +196,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    auto pipeline_result = pipeline_cache.GetGraphicsPipeline();
+    const GraphicsPipeline* pipeline = pipeline_result.pipeline;
     if (!pipeline) {
         return;
     }
@@ -207,7 +208,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, pipeline_result.vertex_inputs, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
     }
@@ -244,7 +245,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    auto pipeline_result = pipeline_cache.GetGraphicsPipeline();
+    const GraphicsPipeline* pipeline = pipeline_result.pipeline;
     if (!pipeline) {
         return;
     }
@@ -255,7 +257,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, pipeline_result.vertex_inputs, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(0, buffer_barriers);
     }
