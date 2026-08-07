@@ -25,14 +25,19 @@ struct DrawResourceFingerprintSnapshot {
 
     bool should_report{};
     bool matches_previous_frame{};
+    bool shape_matches_previous_frame{};
     u64 sequence{};
     u64 combined_hash{};
+    u64 shape_combined_hash{};
     u32 draws{};
     u32 descriptors{};
     u32 bytes_hashed{};
     u32 changed_draws{};
     u32 reported_changed_draws{};
     std::array<u32, MaxReportedChangedDraws> first_changed_draw_ordinals{};
+    u32 changed_shape_draws{};
+    u32 reported_changed_shape_draws{};
+    std::array<u32, MaxReportedChangedDraws> first_changed_shape_draw_ordinals{};
     u32 truncated_draws{};
     u32 truncated_descriptors{};
     u64 truncated_bytes{};
@@ -57,6 +62,7 @@ public:
         draw_active = true;
         accept_draw = current_draws < MaxDrawsPerFrame;
         current_draw_hash = EmptyHash();
+        current_draw_shape_hash = EmptyHash();
         current_draw_descriptors = 0;
         if (!accept_draw) {
             ++truncated_draws;
@@ -65,6 +71,11 @@ public:
 
     void RecordDescriptor(DrawResourceDescriptorKind kind, const void* descriptor,
                           size_t size) noexcept {
+        RecordDescriptor(kind, descriptor, size, descriptor, size);
+    }
+
+    void RecordDescriptor(DrawResourceDescriptorKind kind, const void* descriptor, size_t size,
+                          const void* shape, size_t shape_size) noexcept {
         if (!draw_active || !accept_draw) {
             return;
         }
@@ -73,18 +84,23 @@ public:
             truncated_bytes += size;
             return;
         }
-        if (size > MaxBytesPerFrame - bytes_hashed) {
+        if (size > MaxBytesPerFrame - bytes_hashed ||
+            shape_size > MaxBytesPerFrame - shape_bytes_hashed) {
             ++truncated_descriptors;
-            truncated_bytes += size;
+            truncated_bytes += size + shape_size;
             return;
         }
 
         MixValue(current_draw_hash, kind);
         MixValue(current_draw_hash, size);
         MixBytes(current_draw_hash, descriptor, size);
+        MixValue(current_draw_shape_hash, kind);
+        MixValue(current_draw_shape_hash, shape_size);
+        MixBytes(current_draw_shape_hash, shape, shape_size);
         ++current_draw_descriptors;
         ++descriptors;
         bytes_hashed += static_cast<u32>(size);
+        shape_bytes_hashed += static_cast<u32>(shape_size);
     }
 
     void EndDraw() noexcept {
@@ -93,8 +109,11 @@ public:
         }
         if (accept_draw) {
             MixValue(current_draw_hash, current_draw_descriptors);
+            MixValue(current_draw_shape_hash, current_draw_descriptors);
             current_draw_hashes[current_draws++] = current_draw_hash;
+            current_draw_shape_hashes[current_draws - 1] = current_draw_shape_hash;
             MixValue(combined_hash, current_draw_hash);
+            MixValue(shape_combined_hash, current_draw_shape_hash);
         }
         draw_active = false;
         accept_draw = false;
@@ -111,6 +130,7 @@ public:
             .should_report = true,
             .sequence = ++reports_emitted,
             .combined_hash = combined_hash,
+            .shape_combined_hash = shape_combined_hash,
             .draws = current_draws,
             .descriptors = descriptors,
             .bytes_hashed = bytes_hashed,
@@ -133,10 +153,27 @@ public:
                 snapshot.first_changed_draw_ordinals[snapshot.reported_changed_draws++] = draw;
             }
         }
+        for (u32 draw = 0; draw < compared_draws; ++draw) {
+            const bool present_now = draw < current_draws;
+            const bool present_before = has_previous && draw < previous_draws;
+            if (present_now && present_before &&
+                current_draw_shape_hashes[draw] == previous_draw_shape_hashes[draw]) {
+                continue;
+            }
+            ++snapshot.changed_shape_draws;
+            if (snapshot.reported_changed_shape_draws <
+                DrawResourceFingerprintSnapshot::MaxReportedChangedDraws) {
+                snapshot.first_changed_shape_draw_ordinals
+                    [snapshot.reported_changed_shape_draws++] = draw;
+            }
+        }
         snapshot.matches_previous_frame =
             has_previous && current_draws == previous_draws && snapshot.changed_draws == 0;
+        snapshot.shape_matches_previous_frame = has_previous && current_draws == previous_draws &&
+                                                snapshot.changed_shape_draws == 0;
 
         previous_draw_hashes = current_draw_hashes;
+        previous_draw_shape_hashes = current_draw_shape_hashes;
         previous_draws = current_draws;
         has_previous = true;
         ResetCurrent();
@@ -163,11 +200,15 @@ private:
 
     void ResetCurrent() noexcept {
         current_draw_hashes = {};
+        current_draw_shape_hashes = {};
         combined_hash = EmptyHash();
+        shape_combined_hash = EmptyHash();
         current_draw_hash = EmptyHash();
+        current_draw_shape_hash = EmptyHash();
         current_draws = 0;
         descriptors = 0;
         bytes_hashed = 0;
+        shape_bytes_hashed = 0;
         current_draw_descriptors = 0;
         truncated_draws = 0;
         truncated_descriptors = 0;
@@ -180,13 +221,18 @@ private:
     u64 reports_emitted{};
     std::array<u64, MaxDrawsPerFrame> current_draw_hashes{};
     std::array<u64, MaxDrawsPerFrame> previous_draw_hashes{};
+    std::array<u64, MaxDrawsPerFrame> current_draw_shape_hashes{};
+    std::array<u64, MaxDrawsPerFrame> previous_draw_shape_hashes{};
     u64 combined_hash{EmptyHash()};
+    u64 shape_combined_hash{EmptyHash()};
     u64 current_draw_hash{EmptyHash()};
+    u64 current_draw_shape_hash{EmptyHash()};
     u64 truncated_bytes{};
     u32 current_draws{};
     u32 previous_draws{};
     u32 descriptors{};
     u32 bytes_hashed{};
+    u32 shape_bytes_hashed{};
     u32 current_draw_descriptors{};
     u32 truncated_draws{};
     u32 truncated_descriptors{};
