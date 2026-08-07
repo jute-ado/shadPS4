@@ -49,6 +49,24 @@ TEST(SaveDataFilesystemBoundary, ConvertsFilesystemFailureToGuestInternalError) 
     EXPECT_NE(reported_message.find("synthetic write failure"), std::string::npos);
 }
 
+TEST(SaveDataFilesystemBoundary, PreservesGuestResultReturnedByOperation) {
+    const auto result = RunFilesystemOperation(
+        [] { return Error::BUSY; }, [](const std::filesystem::filesystem_error&) {});
+
+    EXPECT_EQ(result, Error::BUSY);
+}
+
+TEST(SaveDataFilesystemBoundary, PreservesGuestResultMappedByFailureHandler) {
+    const auto result = RunFilesystemOperation(
+        [] {
+            throw std::filesystem::filesystem_error(
+                "synthetic capacity failure", std::make_error_code(std::errc::no_space_on_device));
+        },
+        [](const std::filesystem::filesystem_error&) { return Error::NO_SPACE_FS; });
+
+    EXPECT_EQ(result, Error::NO_SPACE_FS);
+}
+
 TEST(SaveDataFilesystemBoundary, DoesNotHideProgrammingErrors) {
     EXPECT_THROW(
         RunFilesystemOperation(
