@@ -46,6 +46,12 @@ struct DrawResourceFingerprintSnapshot {
     u32 location_aba_return_draws{};
     u32 reported_location_aba_return_draws{};
     std::array<u32, MaxReportedChangedDraws> first_location_aba_return_draw_ordinals{};
+    u32 changed_host_identity_draws{};
+    u32 reported_changed_host_identity_draws{};
+    std::array<u32, MaxReportedChangedDraws> first_changed_host_identity_draw_ordinals{};
+    u32 host_identity_aba_return_draws{};
+    u32 reported_host_identity_aba_return_draws{};
+    std::array<u32, MaxReportedChangedDraws> first_host_identity_aba_return_draw_ordinals{};
     u32 truncated_draws{};
     u32 truncated_descriptors{};
     u64 truncated_bytes{};
@@ -72,7 +78,9 @@ public:
         current_draw_hash = EmptyHash();
         current_draw_shape_hash = EmptyHash();
         current_draw_location_hash = EmptyHash();
+        current_draw_host_identity_hash = EmptyHash();
         current_draw_descriptors = 0;
+        current_draw_host_identities = 0;
         if (!accept_draw) {
             ++truncated_draws;
         }
@@ -121,6 +129,17 @@ public:
         shape_bytes_hashed += static_cast<u32>(shape_size);
     }
 
+    void RecordHostIdentity(u32 binding_ordinal, u32 slot, u64 uid, u64 backing) noexcept {
+        if (!draw_active || !accept_draw) {
+            return;
+        }
+        MixValue(current_draw_host_identity_hash, binding_ordinal);
+        MixValue(current_draw_host_identity_hash, slot);
+        MixValue(current_draw_host_identity_hash, uid);
+        MixValue(current_draw_host_identity_hash, backing);
+        ++current_draw_host_identities;
+    }
+
     void EndDraw() noexcept {
         if (!draw_active) {
             return;
@@ -132,6 +151,9 @@ public:
             current_draw_hashes[current_draws++] = current_draw_hash;
             current_draw_shape_hashes[current_draws - 1] = current_draw_shape_hash;
             current_draw_location_hashes[current_draws - 1] = current_draw_location_hash;
+            MixValue(current_draw_host_identity_hash, current_draw_host_identities);
+            current_draw_host_identity_hashes[current_draws - 1] =
+                current_draw_host_identity_hash;
             MixValue(combined_hash, current_draw_hash);
             MixValue(shape_combined_hash, current_draw_shape_hash);
             MixValue(location_combined_hash, current_draw_location_hash);
@@ -179,6 +201,21 @@ public:
             const bool present_now = draw < current_draws;
             const bool present_before = has_previous && draw < previous_draws;
             if (present_now && present_before &&
+                current_draw_host_identity_hashes[draw] ==
+                    previous_draw_host_identity_hashes[draw]) {
+                continue;
+            }
+            ++snapshot.changed_host_identity_draws;
+            if (snapshot.reported_changed_host_identity_draws <
+                DrawResourceFingerprintSnapshot::MaxReportedChangedDraws) {
+                snapshot.first_changed_host_identity_draw_ordinals
+                    [snapshot.reported_changed_host_identity_draws++] = draw;
+            }
+        }
+        for (u32 draw = 0; draw < compared_draws; ++draw) {
+            const bool present_now = draw < current_draws;
+            const bool present_before = has_previous && draw < previous_draws;
+            if (present_now && present_before &&
                 current_draw_location_hashes[draw] == previous_draw_location_hashes[draw]) {
                 continue;
             }
@@ -207,6 +244,24 @@ public:
                     [snapshot.reported_location_aba_return_draws++] = draw;
             }
         }
+        for (u32 draw = 0; draw < aba_compared_draws; ++draw) {
+            const bool present_in_all = draw < current_draws && has_previous &&
+                                        draw < previous_draws && has_previous_previous &&
+                                        draw < previous_previous_draws;
+            if (!present_in_all ||
+                current_draw_host_identity_hashes[draw] !=
+                    previous_previous_draw_host_identity_hashes[draw] ||
+                current_draw_host_identity_hashes[draw] ==
+                    previous_draw_host_identity_hashes[draw]) {
+                continue;
+            }
+            ++snapshot.host_identity_aba_return_draws;
+            if (snapshot.reported_host_identity_aba_return_draws <
+                DrawResourceFingerprintSnapshot::MaxReportedChangedDraws) {
+                snapshot.first_host_identity_aba_return_draw_ordinals
+                    [snapshot.reported_host_identity_aba_return_draws++] = draw;
+            }
+        }
         for (u32 draw = 0; draw < compared_draws; ++draw) {
             const bool present_now = draw < current_draws;
             const bool present_before = has_previous && draw < previous_draws;
@@ -229,11 +284,13 @@ public:
                                                    snapshot.changed_location_draws == 0;
 
         previous_previous_draw_location_hashes = previous_draw_location_hashes;
+        previous_previous_draw_host_identity_hashes = previous_draw_host_identity_hashes;
         previous_previous_draws = previous_draws;
         has_previous_previous = has_previous;
         previous_draw_hashes = current_draw_hashes;
         previous_draw_shape_hashes = current_draw_shape_hashes;
         previous_draw_location_hashes = current_draw_location_hashes;
+        previous_draw_host_identity_hashes = current_draw_host_identity_hashes;
         previous_draws = current_draws;
         has_previous = true;
         ResetCurrent();
@@ -262,17 +319,20 @@ private:
         current_draw_hashes = {};
         current_draw_shape_hashes = {};
         current_draw_location_hashes = {};
+        current_draw_host_identity_hashes = {};
         combined_hash = EmptyHash();
         shape_combined_hash = EmptyHash();
         location_combined_hash = EmptyHash();
         current_draw_hash = EmptyHash();
         current_draw_shape_hash = EmptyHash();
         current_draw_location_hash = EmptyHash();
+        current_draw_host_identity_hash = EmptyHash();
         current_draws = 0;
         descriptors = 0;
         bytes_hashed = 0;
         shape_bytes_hashed = 0;
         current_draw_descriptors = 0;
+        current_draw_host_identities = 0;
         truncated_draws = 0;
         truncated_descriptors = 0;
         truncated_bytes = 0;
@@ -289,12 +349,16 @@ private:
     std::array<u64, MaxDrawsPerFrame> current_draw_location_hashes{};
     std::array<u64, MaxDrawsPerFrame> previous_draw_location_hashes{};
     std::array<u64, MaxDrawsPerFrame> previous_previous_draw_location_hashes{};
+    std::array<u64, MaxDrawsPerFrame> current_draw_host_identity_hashes{};
+    std::array<u64, MaxDrawsPerFrame> previous_draw_host_identity_hashes{};
+    std::array<u64, MaxDrawsPerFrame> previous_previous_draw_host_identity_hashes{};
     u64 combined_hash{EmptyHash()};
     u64 shape_combined_hash{EmptyHash()};
     u64 location_combined_hash{EmptyHash()};
     u64 current_draw_hash{EmptyHash()};
     u64 current_draw_shape_hash{EmptyHash()};
     u64 current_draw_location_hash{EmptyHash()};
+    u64 current_draw_host_identity_hash{EmptyHash()};
     u64 truncated_bytes{};
     u32 current_draws{};
     u32 previous_draws{};
@@ -303,6 +367,7 @@ private:
     u32 bytes_hashed{};
     u32 shape_bytes_hashed{};
     u32 current_draw_descriptors{};
+    u32 current_draw_host_identities{};
     u32 truncated_draws{};
     u32 truncated_descriptors{};
     bool draw_active{};
