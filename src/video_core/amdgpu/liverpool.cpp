@@ -113,6 +113,12 @@ Liverpool::Liverpool() {
             std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_REPORT_COUNT")) {
         draw_resource_content_provenance_report_count = std::strtoull(report_count, nullptr, 10);
     }
+    if (const char* mode =
+            std::getenv("SHADPS4_DRAW_RESOURCE_CONTENT_PROVENANCE_MODE");
+        mode != nullptr && std::string_view{mode} == "staged") {
+        draw_resource_content_provenance_diagnostic.ConfigureProbeMode(
+            DrawResourceContentProbeMode::StagedOnly);
+    }
     draw_resource_content_provenance_diagnostic.ConfigureCaptureWindow(
         draw_resource_content_provenance_report_start,
         draw_resource_content_provenance_report_count);
@@ -451,6 +457,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                "coherent_changed_ordinals={} "
                                                                "coherent_content_aba_resources={} "
                                                                "coherent_content_aba_ordinals={} "
+                                                               "staged_changed_resources={} "
+                                                               "staged_changed_ordinals={} "
+                                                               "staged_content_aba_resources={} "
+                                                               "staged_content_aba_ordinals={} "
                                                                "concurrent_write_resources={} "
                                                                "endpoint_capture_resources={} "
                                                                "staged_mismatch_resources={} "
@@ -478,6 +488,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                        .first_coherent_content_aba_resources,
                                                                    content_provenance
                                                                        .reported_coherent_content_aba_resources),
+                                                               content_provenance
+                                                                   .staged_changed_resources,
+                                                               FormatContentResourceOrdinals(
+                                                                   content_provenance
+                                                                       .first_staged_changed_resources,
+                                                                   content_provenance
+                                                                       .reported_staged_changed_resources),
+                                                               content_provenance
+                                                                   .staged_content_aba_resources,
+                                                               FormatContentResourceOrdinals(
+                                                                   content_provenance
+                                                                       .first_staged_content_aba_resources,
+                                                                   content_provenance
+                                                                       .reported_staged_content_aba_resources),
                                                                content_provenance
                                                                    .concurrent_write_resources,
                                                                content_provenance
