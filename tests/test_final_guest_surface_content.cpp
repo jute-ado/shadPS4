@@ -283,6 +283,34 @@ TEST(FinalGuestSurfaceContent, WatchOrdinalSelectorIsStrictBoundedAndTransaction
     EXPECT_EQ(capped.loss, 1u);
 }
 
+TEST(FinalGuestSurfaceContent, RejectsWatchOrdinalOutsideActualPlanAndClearsHistory) {
+    const auto selector = Vulkan::ParseFinalGuestSurfaceWatchOrdinals("3477");
+    FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(), selector};
+    const auto larger_plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(1296, 720));
+    const auto route_plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(1280, 720));
+    ASSERT_GT(larger_plan.tile_count, 3476u);
+    ASSERT_EQ(route_plan.tile_count, 3476u);
+    std::vector<std::byte> a(larger_plan.sample_bytes, std::byte{1});
+    std::vector<std::byte> b(larger_plan.sample_bytes, std::byte{2});
+    std::vector<std::byte> route(route_plan.sample_bytes, std::byte{1});
+
+    (void)reducer.Observe(1, 1'000'000, Transport(1, 1), larger_plan, a);
+    (void)reducer.Observe(2, 1'100'000, Transport(1, 1), larger_plan, b);
+    const auto rejected = reducer.Observe(3, 1'200'000, Transport(1, 1), route_plan, route);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(rejected.selector_status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(rejected.selector_loss, 1u);
+    EXPECT_FALSE(rejected.exact_aba);
+    EXPECT_FALSE(rejected.stable_transport);
+    EXPECT_EQ(rejected.aba_tile_ordinal_count, 0u);
+    EXPECT_NE(Vulkan::FormatFinalGuestSurfaceReport(rejected).find("selector_loss=1"),
+              std::string::npos);
+
+    const auto after_loss = reducer.Observe(4, 1'300'000, Transport(1, 1), larger_plan, a);
+    EXPECT_FALSE(after_loss.exact_aba);
+    EXPECT_FALSE(after_loss.stable_transport);
+}
+
 TEST(FinalGuestSurfaceContent, DisabledAndOutsideWindowPerformZeroPlanningAndStateWork) {
     u32 work{};
     const auto planner = [&] {
@@ -332,6 +360,12 @@ TEST(FinalGuestSurfaceContent, ScreenshotCalibrationUsesExactFrameStampAndBounde
     EXPECT_TRUE(overflow.overflow_marker);
     EXPECT_EQ(overflow.overflow_loss, 1u);
     EXPECT_FALSE(calibration.Observe(stamp, identity, 0).emit);
+}
+
+TEST(FinalGuestSurfaceContent, ScreenshotCalibrationCountsOnlySilentAutomationRequests) {
+    EXPECT_EQ(Vulkan::FinalGuestSurfaceAutomationCalibrationCount(0, 3), 3u);
+    EXPECT_EQ(Vulkan::FinalGuestSurfaceAutomationCalibrationCount(7, 3), 3u);
+    EXPECT_EQ(Vulkan::FinalGuestSurfaceAutomationCalibrationCount(7, 0), 0u);
 }
 
 TEST(FinalGuestSurfaceContent, CalibrationClearsReusedFramesAndDoesNotClaimScaledOrFlippedMaps) {
