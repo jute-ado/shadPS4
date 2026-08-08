@@ -115,9 +115,14 @@ public:
         return input_assembly_frame_sequence;
     }
 
-    [[nodiscard]] const InputAssemblyCaptureWindow& InputAssemblyDeviceIntegrityWindow() const
-        noexcept {
+    [[nodiscard]] const InputAssemblyCaptureWindow& InputAssemblyDeviceIntegrityWindow()
+        const noexcept {
         return input_assembly_capture_window;
+    }
+
+    [[nodiscard]] const InputAssemblyLagConfig& InputAssemblyDeviceIntegrityLagConfig()
+        const noexcept {
+        return input_assembly_lag_config;
     }
 
     void ReportInputAssemblyDeviceIntegrityFrame(u64 process_time_us);
@@ -229,7 +234,9 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     u64 input_assembly_frame_sequence{};
-    InputAssemblyCaptureWindow input_assembly_capture_window{InputAssemblyCaptureWindow::Defaults()};
+    InputAssemblyCaptureWindow input_assembly_capture_window{
+        InputAssemblyCaptureWindow::Defaults()};
+    InputAssemblyLagConfig input_assembly_lag_config{InputAssemblyLagConfig::Defaults()};
     bool input_assembly_integrity_enabled{};
     EopFlipTracker eop_flip_tracker;
 

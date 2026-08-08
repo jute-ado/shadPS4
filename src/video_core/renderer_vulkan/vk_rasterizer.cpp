@@ -39,11 +39,16 @@ public:
     }
 
     InputAssemblyDeviceIntegrityState(const Instance& instance_, Scheduler& scheduler_,
-                                      AmdGpu::InputAssemblyCaptureWindow window_)
+                                      AmdGpu::InputAssemblyCaptureWindow window_,
+                                      AmdGpu::InputAssemblyLagConfig lag_config)
         : instance{instance_}, scheduler{scheduler_},
-          download{instance, scheduler, VideoCore::MemoryUsage::Download, 0,
-                   vk::BufferUsageFlagBits::eTransferDst, SlotStride(instance) * RingFrameSlots},
-          window{window_}, slot_stride{SlotStride(instance)} {
+          download{instance,
+                   scheduler,
+                   VideoCore::MemoryUsage::Download,
+                   0,
+                   vk::BufferUsageFlagBits::eTransferDst,
+                   SlotStride(instance) * RingFrameSlots},
+          reducer{lag_config}, window{window_}, slot_stride{SlotStride(instance)} {
         ASSERT(download.mapped_data.size() >= slot_stride * RingFrameSlots);
     }
 
@@ -88,7 +93,13 @@ public:
                      "semantics=0 samples=0 "
                      "bytes=0 first=0 unchanged=0 changed=0 content_aba=0 "
                      "stable_transport_aba=0 source_changed=0 "
-                     "serial_changed=0 authority_ambiguous=0 gap=0 incomplete=0 busy=0 "
+                     "serial_changed=0 lag_content_aba=0 lag_stable_transport_aba=0 "
+                     "lag_episode_return=0 lag_stable_transport_episode_return=0 "
+                     "lag_content_aba_events= lag_stable_transport_aba_events= "
+                     "lag_episode_events= lag_source_changed=0 lag_serial_changed=0 "
+                     "lag_unavailable=0 lag_ambiguous=0 lag_history_loss=0 lag_detail_loss=0 "
+                     "time_gap=0 "
+                     "authority_ambiguous=0 gap=0 incomplete=0 busy=0 "
                      "invalidation_failed=0 complete=1 frame_start={} frame_count={} draw_start={} "
                      "draw_count={} invalid=0 source_conflict=0 sample_loss=0 byte_loss=0 "
                      "semantic_loss=0",
@@ -120,23 +131,22 @@ public:
             auto* const mapped = slot_mapping;
             const u64 mapped_offset = slot_offset;
             const auto slot_token = active_slot;
-            scheduler.DeferOperation(
-                [this, mapped, mapped_offset, plan = std::move(plan), process_time_us, busy = busy,
-                 copied_samples = copied_samples, draw_count = last_draw_count,
-                 slot_token]() mutable {
-                    const bool invalidation_failed =
-                        !download.InvalidateMappedRange(mapped_offset, slot_stride);
-                    if (invalidation_failed) {
-                        plan.complete = false;
-                    }
-                    ReduceAndReport(mapped, plan, process_time_us, draw_count, busy,
-                                    invalidation_failed, copied_samples);
-                    if (!slot_pool.ReleaseAfterCpuConsume(slot_token)) {
-                        LOG_ERROR(Render,
-                                  "InputAssemblyDeviceIntegrity slot_release_failed=1 sequence={}",
-                                  plan.sequence);
-                    }
-                });
+            scheduler.DeferOperation([this, mapped, mapped_offset, plan = std::move(plan),
+                                      process_time_us, busy = busy, copied_samples = copied_samples,
+                                      draw_count = last_draw_count, slot_token]() mutable {
+                const bool invalidation_failed =
+                    !download.InvalidateMappedRange(mapped_offset, slot_stride);
+                if (invalidation_failed) {
+                    plan.complete = false;
+                }
+                ReduceAndReport(mapped, plan, process_time_us, draw_count, busy,
+                                invalidation_failed, copied_samples);
+                if (!slot_pool.ReleaseAfterCpuConsume(slot_token)) {
+                    LOG_ERROR(Render,
+                              "InputAssemblyDeviceIntegrity slot_release_failed=1 sequence={}",
+                              plan.sequence);
+                }
+            });
         } else {
             if (slot_active) {
                 ReleaseSlotAfterCpuConsume();
@@ -169,8 +179,7 @@ private:
         }
     }
 
-    void CopySamples(VideoCore::Buffer* source,
-                     const AmdGpu::NormalizedInputAssemblyRange& range,
+    void CopySamples(VideoCore::Buffer* source, const AmdGpu::NormalizedInputAssemblyRange& range,
                      const AmdGpu::InputAssemblyCaptureDecision& decision,
                      const VideoCore::InputAssemblyBufferBindings& bindings) {
         if (source == nullptr) {
@@ -189,8 +198,8 @@ private:
 
         const auto original_access = source->access_mask;
         const auto original_stage = source->stage;
-        const auto barrier_plan = AmdGpu::MakeInputAssemblyCopyBarrierPlan(
-            range.usage, vertex, index);
+        const auto barrier_plan =
+            AmdGpu::MakeInputAssemblyCopyBarrierPlan(range.usage, vertex, index);
         ASSERT(barrier_plan.copy_reads_source);
         vk::PipelineStageFlags2 pre_stage = original_stage;
         vk::AccessFlags2 pre_access = original_access;
@@ -291,6 +300,16 @@ private:
         u32 changed{};
         u32 aba{};
         u32 stable_transport_aba{};
+        u32 lag_content_aba{};
+        u32 lag_stable_transport_aba{};
+        u32 lag_episode_return{};
+        u32 lag_stable_transport_episode_return{};
+        u32 lag_source_changed{};
+        u32 lag_serial_changed{};
+        u32 lag_unavailable{};
+        u32 lag_ambiguous{};
+        u32 lag_history_loss{};
+        u32 time_gap{};
         u32 source_changed{};
         u32 serial_changed{};
         u32 authority_ambiguous{};
@@ -299,6 +318,9 @@ private:
         std::string changed_ordinals;
         std::string aba_ordinals;
         std::string stable_transport_aba_ordinals;
+        AmdGpu::InputAssemblyLagEventDetails lag_content_aba_details;
+        AmdGpu::InputAssemblyLagEventDetails lag_stable_transport_aba_details;
+        AmdGpu::InputAssemblyLagEventDetails lag_episode_details;
         const auto append_ordinal = [](std::string& text,
                                        const AmdGpu::InputAssemblySemanticOrdinal& semantic) {
             if (text.size() >= 160) {
@@ -327,7 +349,8 @@ private:
                 }
                 const auto& sample = plan.samples[reference.sample_index];
                 metadata = metadata == nullptr ? &sample : metadata;
-                if (sample.source != metadata->source || sample.write_serial != metadata->write_serial ||
+                if (sample.source != metadata->source ||
+                    sample.write_serial != metadata->write_serial ||
                     sample.authority != metadata->authority ||
                     reference.destination_offset > plan.sample_bytes ||
                     reference.size > plan.sample_bytes - reference.destination_offset) {
@@ -347,6 +370,7 @@ private:
             }
             const auto result = reducer.Observe({
                 .sequence = plan.sequence,
+                .process_time_us = process_time_us,
                 .semantic = semantic.semantic,
                 .source = metadata->source,
                 .write_serial = metadata->write_serial,
@@ -358,6 +382,32 @@ private:
             changed += result.changed;
             aba += result.exact_aba_return;
             stable_transport_aba += result.stable_transport_aba;
+            lag_content_aba += result.lag_exact_aba_return;
+            lag_stable_transport_aba += result.lag_stable_transport_aba;
+            lag_episode_return += result.lag_episode_return;
+            lag_stable_transport_episode_return += result.lag_stable_transport_episode_return;
+            lag_source_changed += result.lag_source_changed;
+            lag_serial_changed += result.lag_write_serial_changed;
+            lag_unavailable += result.lag_unavailable;
+            lag_ambiguous += result.lag_ambiguous;
+            lag_history_loss += result.lag_history_loss;
+            time_gap += result.time_gap;
+            if (result.lag_exact_aba_return) {
+                auto exact_result = result;
+                exact_result.lag_episode_return = false;
+                (void)lag_content_aba_details.Append(semantic.semantic, exact_result);
+            }
+            if (result.lag_stable_transport_aba) {
+                auto stable_result = result;
+                stable_result.lag_exact_aba_return = result.lag_stable_transport_aba;
+                stable_result.lag_episode_return = false;
+                (void)lag_stable_transport_aba_details.Append(semantic.semantic, stable_result);
+            }
+            if (result.lag_episode_return) {
+                auto episode_result = result;
+                episode_result.lag_exact_aba_return = false;
+                (void)lag_episode_details.Append(semantic.semantic, episode_result);
+            }
             source_changed += result.source_changed;
             serial_changed += result.write_serial_changed;
             authority_ambiguous += result.authority_ambiguous;
@@ -377,22 +427,54 @@ private:
                 append_ordinal(stable_transport_aba_ordinals, semantic.semantic);
             }
         }
+        const auto format_lag_events = [](const AmdGpu::InputAssemblyLagEventDetails& details) {
+            std::string text;
+            for (const auto& event : details.Events()) {
+                if (!text.empty()) {
+                    text += ',';
+                }
+                text += std::to_string(event.semantic.draw) + ':' +
+                        std::to_string(static_cast<u32>(event.semantic.kind)) + ':' +
+                        std::to_string(event.semantic.binding) + '@' +
+                        std::to_string(event.departure_sequence) + '/' +
+                        std::to_string(event.departure_process_time_us) + "->" +
+                        std::to_string(event.return_sequence) + '/' +
+                        std::to_string(event.return_process_time_us);
+            }
+            return text;
+        };
+        const auto lag_content_aba_events = format_lag_events(lag_content_aba_details);
+        const auto lag_stable_transport_aba_events =
+            format_lag_events(lag_stable_transport_aba_details);
+        const auto lag_episode_events = format_lag_events(lag_episode_details);
+        const u32 lag_detail_loss = lag_content_aba_details.LostEvents() +
+                                    lag_stable_transport_aba_details.LostEvents() +
+                                    lag_episode_details.LostEvents();
         LOG_INFO(Render,
                  "InputAssemblyDeviceIntegrity sequence={} process_time_us={} draws={} "
                  "semantics={} samples={} "
                  "bytes={} completed_samples={} first={} unchanged={} changed={} "
                  "changed_ordinals={} content_aba={} content_aba_ordinals={} "
                  "stable_transport_aba={} stable_transport_aba_ordinals={} source_changed={} "
-                 "serial_changed={} authority_ambiguous={} gap={} incomplete={} busy={} "
+                 "serial_changed={} lag_content_aba={} lag_stable_transport_aba={} "
+                 "lag_episode_return={} lag_stable_transport_episode_return={} "
+                 "lag_content_aba_events={} lag_stable_transport_aba_events={} "
+                 "lag_episode_events={} lag_source_changed={} lag_serial_changed={} "
+                 "lag_unavailable={} lag_ambiguous={} lag_history_loss={} lag_detail_loss={} "
+                 "time_gap={} "
+                 "authority_ambiguous={} gap={} incomplete={} busy={} "
                  "invalidation_failed={} complete={} frame_start={} frame_count={} draw_start={} "
                  "draw_count={} invalid={} source_conflict={} sample_loss={} byte_loss={} "
                  "semantic_loss={}",
-                 plan.sequence, process_time_us, draw_count, plan.semantic_count,
-                 plan.sample_count,
+                 plan.sequence, process_time_us, draw_count, plan.semantic_count, plan.sample_count,
                  plan.sample_bytes, completed_samples, first, unchanged, changed, changed_ordinals,
                  aba, aba_ordinals, stable_transport_aba, stable_transport_aba_ordinals,
-                 source_changed, serial_changed, authority_ambiguous, gap,
-                 incomplete, was_busy, invalidation_failed,
+                 source_changed, serial_changed, lag_content_aba, lag_stable_transport_aba,
+                 lag_episode_return, lag_stable_transport_episode_return, lag_content_aba_events,
+                 lag_stable_transport_aba_events, lag_episode_events, lag_source_changed,
+                 lag_serial_changed, lag_unavailable, lag_ambiguous, lag_history_loss,
+                 lag_detail_loss, time_gap, authority_ambiguous, gap, incomplete, was_busy,
+                 invalidation_failed,
                  plan.complete && !was_busy && !invalidation_failed &&
                      completed_samples == plan.sample_count,
                  window.frame_start, window.frame_count, window.draw_start, window.draw_count,
@@ -457,9 +539,9 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
     if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
-        input_assembly_integrity =
-            std::make_unique<InputAssemblyDeviceIntegrityState>(
-                instance, scheduler, liverpool->InputAssemblyDeviceIntegrityWindow());
+        input_assembly_integrity = std::make_unique<InputAssemblyDeviceIntegrityState>(
+            instance, scheduler, liverpool->InputAssemblyDeviceIntegrityWindow(),
+            liverpool->InputAssemblyDeviceIntegrityLagConfig());
     }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
@@ -630,9 +712,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto state = BeginRendering(pipeline);
 
     VideoCore::InputAssemblyBufferBindings input_bindings;
-    const bool capture_input = input_assembly_integrity != nullptr &&
-                               liverpool->IsInputAssemblyDeviceIntegrityCollecting() &&
-                               liverpool->ShouldCaptureInputAssemblyDraw(input_assembly_draw_ordinal);
+    const bool capture_input =
+        input_assembly_integrity != nullptr &&
+        liverpool->IsInputAssemblyDeviceIntegrityCollecting() &&
+        liverpool->ShouldCaptureInputAssemblyDraw(input_assembly_draw_ordinal);
     auto* const input_collector = capture_input ? &input_bindings : nullptr;
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, input_collector,
                                    input_assembly_draw_ordinal);
@@ -690,9 +773,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const auto state = BeginRendering(pipeline);
 
     VideoCore::InputAssemblyBufferBindings input_bindings;
-    const bool capture_input = input_assembly_integrity != nullptr &&
-                               liverpool->IsInputAssemblyDeviceIntegrityCollecting() &&
-                               liverpool->ShouldCaptureInputAssemblyDraw(input_assembly_draw_ordinal);
+    const bool capture_input =
+        input_assembly_integrity != nullptr &&
+        liverpool->IsInputAssemblyDeviceIntegrityCollecting() &&
+        liverpool->ShouldCaptureInputAssemblyDraw(input_assembly_draw_ordinal);
     auto* const input_collector = capture_input ? &input_bindings : nullptr;
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, input_collector,
                                    input_assembly_draw_ordinal);

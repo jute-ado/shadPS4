@@ -506,14 +506,14 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerRejectsSequenceAndTimeGaps) {
     };
 
     InputAssemblyImmediateReadbackReducer sequence_gap{InputAssemblyLagConfig::Defaults()};
-    sequence_gap.Observe(make(1, 0, a));
+    (void)sequence_gap.Observe(make(1, 0, a));
     EXPECT_TRUE(sequence_gap.Observe(make(3, 100'000, b)).sequence_gap);
     const auto after_sequence_gap = sequence_gap.Observe(make(4, 200'000, a));
     EXPECT_TRUE(after_sequence_gap.lag_unavailable);
     EXPECT_FALSE(after_sequence_gap.lag_exact_aba_return);
 
     InputAssemblyImmediateReadbackReducer time_gap{InputAssemblyLagConfig::Defaults()};
-    time_gap.Observe(make(10, 100'000, a));
+    (void)time_gap.Observe(make(10, 100'000, a));
     EXPECT_TRUE(time_gap.Observe(make(11, 90'000, b)).time_gap);
     const auto after_time_gap = time_gap.Observe(make(12, 200'000, a));
     EXPECT_TRUE(after_time_gap.lag_unavailable);
@@ -610,8 +610,8 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerLossBreaksEpisodeComparability) 
         };
     };
 
-    reducer.Observe(make(1, 0, a, true));
-    reducer.Observe(make(2, 100'000, b, true));
+    (void)reducer.Observe(make(1, 0, a, true));
+    (void)reducer.Observe(make(2, 100'000, b, true));
     EXPECT_TRUE(reducer.Observe(make(3, 200'000, b, false)).incomplete);
     const auto after_loss = reducer.Observe(make(4, 300'000, a, true));
     EXPECT_TRUE(after_loss.baseline_reset);

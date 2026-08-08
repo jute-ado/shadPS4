@@ -56,7 +56,7 @@ struct InputAssemblyPostObtainState {
     return {
         .needs_input_barrier = gpu_modified_after_obtain,
         .authority = gpu_modified_after_obtain ? InputAssemblyAuthority::GpuAuthoritative
-                                              : InputAssemblyAuthority::CpuAuthoritative,
+                                               : InputAssemblyAuthority::CpuAuthoritative,
     };
 }
 
@@ -504,6 +504,7 @@ private:
 
 struct InputAssemblyImmediateSnapshot {
     u64 sequence{};
+    u64 process_time_us{};
     InputAssemblySemanticOrdinal semantic{};
     InputAssemblyBufferToken source{};
     u64 write_serial{};
@@ -512,11 +513,43 @@ struct InputAssemblyImmediateSnapshot {
     bool complete{};
 };
 
+struct InputAssemblyLagConfig {
+    bool enabled{true};
+    u64 cadence_us{100'000};
+    u64 tolerance_us{25'000};
+
+    [[nodiscard]] static constexpr InputAssemblyLagConfig Defaults() noexcept {
+        return {};
+    }
+
+    [[nodiscard]] constexpr u64 HistoryHorizonUs() const noexcept {
+        if (cadence_us > (std::numeric_limits<u64>::max() - tolerance_us) / 3) {
+            return std::numeric_limits<u64>::max();
+        }
+        return cadence_us * 3 + tolerance_us;
+    }
+};
+
 struct InputAssemblyImmediateChange {
     bool first_observation{};
     bool changed{};
     bool exact_aba_return{};
     bool stable_transport_aba{};
+    bool lag_exact_aba_return{};
+    bool lag_stable_transport_aba{};
+    bool lag_episode_return{};
+    bool lag_stable_transport_episode_return{};
+    bool lag_source_changed{};
+    bool lag_write_serial_changed{};
+    bool lag_unavailable{};
+    bool lag_ambiguous{};
+    bool lag_history_loss{};
+    bool time_gap{};
+    bool disabled{};
+    u64 lag_departure_sequence{};
+    u64 lag_departure_process_time_us{};
+    u64 lag_return_sequence{};
+    u64 lag_return_process_time_us{};
     bool source_changed{};
     bool write_serial_changed{};
     bool authority_ambiguous{};
@@ -526,15 +559,68 @@ struct InputAssemblyImmediateChange {
     bool capacity_exceeded{};
 };
 
+struct InputAssemblyLagEvent {
+    InputAssemblySemanticOrdinal semantic{};
+    u64 departure_sequence{};
+    u64 departure_process_time_us{};
+    u64 return_sequence{};
+    u64 return_process_time_us{};
+};
+
+class InputAssemblyLagEventDetails {
+public:
+    static constexpr u32 MaxEvents = 8;
+
+    [[nodiscard]] bool Append(InputAssemblySemanticOrdinal semantic,
+                              const InputAssemblyImmediateChange& change) noexcept {
+        if (!change.lag_exact_aba_return && !change.lag_episode_return) {
+            return true;
+        }
+        if (count == events.size()) {
+            ++lost_events;
+            return false;
+        }
+        events[count++] = {
+            .semantic = semantic,
+            .departure_sequence = change.lag_departure_sequence,
+            .departure_process_time_us = change.lag_departure_process_time_us,
+            .return_sequence = change.lag_return_sequence,
+            .return_process_time_us = change.lag_return_process_time_us,
+        };
+        return true;
+    }
+
+    [[nodiscard]] std::span<const InputAssemblyLagEvent> Events() const noexcept {
+        return {events.data(), count};
+    }
+
+    [[nodiscard]] u32 LostEvents() const noexcept {
+        return lost_events;
+    }
+
+private:
+    std::array<InputAssemblyLagEvent, MaxEvents> events{};
+    u32 count{};
+    u32 lost_events{};
+};
+
 class InputAssemblyImmediateReadbackReducer {
 public:
     static constexpr u32 MaxEntries = InputAssemblyDeviceIntegrityPlanner::MaxHistoryIdentities;
     static constexpr u32 MaxSnapshotBytes = InputAssemblyDeviceIntegrityReducer::MaxSnapshotBytes;
+    static constexpr u32 MaxLagHistoryObservations = 32;
 
-    InputAssemblyImmediateReadbackReducer() : entries{std::make_unique<Entry[]>(MaxEntries)} {}
+    explicit InputAssemblyImmediateReadbackReducer(
+        InputAssemblyLagConfig config_ = InputAssemblyLagConfig::Defaults())
+        : config{config_},
+          entries{config.enabled && config.cadence_us != 0 ? std::make_unique<Entry[]>(MaxEntries)
+                                                           : nullptr} {}
 
     [[nodiscard]] InputAssemblyImmediateChange Observe(
         const InputAssemblyImmediateSnapshot& snapshot) noexcept {
+        if (entries == nullptr) {
+            return {.disabled = true};
+        }
         Entry* entry{};
         for (u32 i = 0; i < count; ++i) {
             if (entries[i].semantic == snapshot.semantic) {
@@ -545,12 +631,18 @@ public:
         if (!snapshot.complete) {
             if (entry != nullptr) {
                 ClearBaseline(*entry);
+                ClearLagHistory(*entry);
                 entry->observed = true;
             }
-            return {.incomplete = true};
+            return {.lag_ambiguous = true, .incomplete = true};
         }
         if (snapshot.bytes.empty() || snapshot.bytes.size() > MaxSnapshotBytes) {
-            return {.capacity_exceeded = true};
+            if (entry != nullptr) {
+                ClearBaseline(*entry);
+                ClearLagHistory(*entry);
+                entry->observed = true;
+            }
+            return {.lag_ambiguous = true, .capacity_exceeded = true};
         }
         if (entry == nullptr) {
             if (count >= MaxEntries) {
@@ -562,25 +654,39 @@ public:
 
         if (snapshot.authority == InputAssemblyAuthority::Unknown) {
             ClearBaseline(*entry);
+            ClearLagHistory(*entry);
             entry->observed = true;
             entry->authority = snapshot.authority;
-            return {.authority_ambiguous = true};
+            return {.lag_ambiguous = true, .authority_ambiguous = true};
         }
         if (!entry->has_baseline) {
             const bool prior_observation = entry->observed;
             SetBaseline(*entry, snapshot);
-            return prior_observation ? InputAssemblyImmediateChange{.baseline_reset = true}
-                                     : InputAssemblyImmediateChange{.first_observation = true};
+            PushLagObservation(*entry, snapshot);
+            return prior_observation
+                       ? InputAssemblyImmediateChange{.lag_ambiguous = true, .baseline_reset = true}
+                       : InputAssemblyImmediateChange{.first_observation = true};
         }
         if (entry->authority != snapshot.authority) {
             SetBaseline(*entry, snapshot);
-            return {.authority_ambiguous = true};
+            ClearLagHistory(*entry);
+            PushLagObservation(*entry, snapshot);
+            return {.lag_ambiguous = true, .authority_ambiguous = true};
         }
         const bool contiguous = entry->last_sequence != std::numeric_limits<u64>::max() &&
                                 snapshot.sequence == entry->last_sequence + 1;
         if (!contiguous) {
             SetBaseline(*entry, snapshot);
-            return {.sequence_gap = true};
+            ClearLagHistory(*entry);
+            PushLagObservation(*entry, snapshot);
+            return {.lag_ambiguous = true, .sequence_gap = true};
+        }
+        if ((snapshot.process_time_us != 0 || entry->last_process_time_us != 0) &&
+            snapshot.process_time_us <= entry->last_process_time_us) {
+            SetBaseline(*entry, snapshot);
+            ClearLagHistory(*entry);
+            PushLagObservation(*entry, snapshot);
+            return {.lag_ambiguous = true, .time_gap = true};
         }
 
         const auto previous =
@@ -600,6 +706,7 @@ public:
             entry->previous_previous_write_serial == snapshot.write_serial;
         const bool source_changed = entry->source != snapshot.source;
         const bool write_serial_changed = entry->write_serial != snapshot.write_serial;
+        auto lag_change = CompareLagHistory(*entry, snapshot);
 
         entry->previous_previous_size = entry->previous_size;
         std::copy_n(entry->previous.begin(), entry->previous_size,
@@ -613,13 +720,14 @@ public:
         entry->source = snapshot.source;
         entry->write_serial = snapshot.write_serial;
         entry->last_sequence = snapshot.sequence;
-        return {
-            .changed = changed,
-            .exact_aba_return = exact_aba,
-            .stable_transport_aba = stable_transport_aba,
-            .source_changed = source_changed,
-            .write_serial_changed = write_serial_changed,
-        };
+        entry->last_process_time_us = snapshot.process_time_us;
+        PushLagObservation(*entry, snapshot);
+        lag_change.changed = changed;
+        lag_change.exact_aba_return = exact_aba;
+        lag_change.stable_transport_aba = stable_transport_aba;
+        lag_change.source_changed = source_changed;
+        lag_change.write_serial_changed = write_serial_changed;
+        return lag_change;
     }
 
     void Reset() noexcept {
@@ -629,7 +737,28 @@ public:
         count = 0;
     }
 
+    [[nodiscard]] u32 EntryCount() const noexcept {
+        return count;
+    }
+
+    [[nodiscard]] u32 RetainedObservationCount() const noexcept {
+        u32 retained{};
+        for (u32 i = 0; i < count; ++i) {
+            retained += entries[i].lag_history_count;
+        }
+        return retained;
+    }
+
 private:
+    struct LagObservation {
+        InputAssemblyBufferToken source{};
+        u64 write_serial{};
+        u64 sequence{};
+        u64 process_time_us{};
+        std::array<std::byte, MaxSnapshotBytes> bytes{};
+        u32 size{};
+    };
+
     struct Entry {
         InputAssemblySemanticOrdinal semantic{};
         InputAssemblyBufferToken source{};
@@ -638,6 +767,7 @@ private:
         u64 previous_previous_write_serial{};
         u64 previous_previous_sequence{};
         u64 last_sequence{};
+        u64 last_process_time_us{};
         InputAssemblyAuthority authority{InputAssemblyAuthority::Unknown};
         std::array<std::byte, MaxSnapshotBytes> previous_previous{};
         std::array<std::byte, MaxSnapshotBytes> previous{};
@@ -646,6 +776,9 @@ private:
         bool observed{};
         bool has_baseline{};
         bool has_previous_previous{};
+        std::array<LagObservation, MaxLagHistoryObservations> lag_history{};
+        u32 lag_history_count{};
+        bool lag_history_evicted{};
     };
 
     static void ClearBaseline(Entry& entry) noexcept {
@@ -655,8 +788,12 @@ private:
         entry.has_previous_previous = false;
     }
 
-    static void SetBaseline(Entry& entry,
-                            const InputAssemblyImmediateSnapshot& snapshot) noexcept {
+    static void ClearLagHistory(Entry& entry) noexcept {
+        entry.lag_history_count = 0;
+        entry.lag_history_evicted = false;
+    }
+
+    static void SetBaseline(Entry& entry, const InputAssemblyImmediateSnapshot& snapshot) noexcept {
         entry.source = snapshot.source;
         entry.write_serial = snapshot.write_serial;
         entry.authority = snapshot.authority;
@@ -664,11 +801,141 @@ private:
         std::ranges::copy(snapshot.bytes, entry.previous.begin());
         entry.previous_previous_size = 0;
         entry.last_sequence = snapshot.sequence;
+        entry.last_process_time_us = snapshot.process_time_us;
         entry.observed = true;
         entry.has_baseline = true;
         entry.has_previous_previous = false;
     }
 
+    static void PushLagObservation(Entry& entry,
+                                   const InputAssemblyImmediateSnapshot& snapshot) noexcept {
+        if (entry.lag_history_count == MaxLagHistoryObservations) {
+            std::move(entry.lag_history.begin() + 1, entry.lag_history.end(),
+                      entry.lag_history.begin());
+            --entry.lag_history_count;
+            entry.lag_history_evicted = true;
+        }
+        auto& observation = entry.lag_history[entry.lag_history_count++];
+        observation.source = snapshot.source;
+        observation.write_serial = snapshot.write_serial;
+        observation.sequence = snapshot.sequence;
+        observation.process_time_us = snapshot.process_time_us;
+        observation.size = static_cast<u32>(snapshot.bytes.size());
+        std::ranges::copy(snapshot.bytes, observation.bytes.begin());
+    }
+
+    [[nodiscard]] const LagObservation* FindClosest(const Entry& entry, u64 target_time_us,
+                                                    u32 before_index) const noexcept {
+        const LagObservation* closest{};
+        u64 closest_distance = std::numeric_limits<u64>::max();
+        for (u32 i = 0; i < before_index; ++i) {
+            const auto& observation = entry.lag_history[i];
+            const u64 distance = observation.process_time_us > target_time_us
+                                     ? observation.process_time_us - target_time_us
+                                     : target_time_us - observation.process_time_us;
+            if (distance <= config.tolerance_us && distance < closest_distance) {
+                closest = &observation;
+                closest_distance = distance;
+            }
+        }
+        return closest;
+    }
+
+    [[nodiscard]] static bool EqualBytes(const LagObservation& observation,
+                                         std::span<const std::byte> bytes) noexcept {
+        return observation.size == bytes.size() &&
+               std::ranges::equal(
+                   std::span<const std::byte>{observation.bytes.data(), observation.size}, bytes);
+    }
+
+    [[nodiscard]] InputAssemblyImmediateChange CompareLagHistory(
+        const Entry& entry, const InputAssemblyImmediateSnapshot& snapshot) const noexcept {
+        InputAssemblyImmediateChange result{};
+        const u64 cadence = config.cadence_us;
+        if (cadence <= std::numeric_limits<u64>::max() / 2 &&
+            snapshot.process_time_us >= cadence * 2) {
+            const u64 prior_target = snapshot.process_time_us - cadence;
+            const u64 prior_previous_target = snapshot.process_time_us - cadence * 2;
+            const auto* prior = FindClosest(entry, prior_target, entry.lag_history_count);
+            u32 prior_index = entry.lag_history_count;
+            if (prior != nullptr) {
+                prior_index = static_cast<u32>(prior - entry.lag_history.data());
+            }
+            const auto* prior_previous = FindClosest(entry, prior_previous_target, prior_index);
+            if (prior == nullptr || prior_previous == nullptr) {
+                result.lag_unavailable = true;
+                if (entry.lag_history_evicted && entry.lag_history_count != 0 &&
+                    entry.lag_history.front().process_time_us > prior_previous_target) {
+                    result.lag_history_loss = true;
+                }
+            } else {
+                const bool returned = EqualBytes(*prior_previous, snapshot.bytes);
+                const bool departed = !EqualBytes(*prior, snapshot.bytes);
+                result.lag_exact_aba_return = returned && departed;
+                result.lag_source_changed =
+                    prior_previous->source != snapshot.source || prior->source != snapshot.source;
+                result.lag_write_serial_changed =
+                    prior_previous->write_serial != snapshot.write_serial ||
+                    prior->write_serial != snapshot.write_serial;
+                result.lag_stable_transport_aba = result.lag_exact_aba_return &&
+                                                  !result.lag_source_changed &&
+                                                  !result.lag_write_serial_changed;
+                if (result.lag_exact_aba_return) {
+                    result.lag_departure_sequence = prior->sequence;
+                    result.lag_departure_process_time_us = prior->process_time_us;
+                    result.lag_return_sequence = snapshot.sequence;
+                    result.lag_return_process_time_us = snapshot.process_time_us;
+                }
+            }
+        }
+
+        const u64 horizon = config.HistoryHorizonUs();
+        u32 oldest = 0;
+        while (oldest < entry.lag_history_count &&
+               snapshot.process_time_us - entry.lag_history[oldest].process_time_us > horizon) {
+            ++oldest;
+        }
+        std::optional<u32> departure;
+        std::optional<u32> baseline;
+        for (u32 i = entry.lag_history_count; i-- > oldest;) {
+            if (!departure.has_value()) {
+                if (!EqualBytes(entry.lag_history[i], snapshot.bytes)) {
+                    departure = i;
+                }
+                continue;
+            }
+            if (EqualBytes(entry.lag_history[i], snapshot.bytes)) {
+                baseline = i;
+                break;
+            }
+        }
+        if (baseline.has_value() && departure.has_value() &&
+            *baseline + 1 < entry.lag_history_count) {
+            const auto& baseline_observation = entry.lag_history[*baseline];
+            const auto& departure_observation = entry.lag_history[*baseline + 1];
+            result.lag_episode_return = true;
+            const bool episode_source_changed = baseline_observation.source != snapshot.source ||
+                                                departure_observation.source != snapshot.source;
+            const bool episode_serial_changed =
+                baseline_observation.write_serial != snapshot.write_serial ||
+                departure_observation.write_serial != snapshot.write_serial;
+            result.lag_source_changed |= episode_source_changed;
+            result.lag_write_serial_changed |= episode_serial_changed;
+            result.lag_stable_transport_episode_return =
+                !episode_source_changed && !episode_serial_changed;
+            if (!result.lag_exact_aba_return) {
+                result.lag_departure_sequence = departure_observation.sequence;
+                result.lag_departure_process_time_us = departure_observation.process_time_us;
+                result.lag_return_sequence = snapshot.sequence;
+                result.lag_return_process_time_us = snapshot.process_time_us;
+            }
+        } else if (departure.has_value() && entry.lag_history_evicted && oldest == 0) {
+            result.lag_history_loss = true;
+        }
+        return result;
+    }
+
+    InputAssemblyLagConfig config{};
     std::unique_ptr<Entry[]> entries;
     u32 count{};
 };

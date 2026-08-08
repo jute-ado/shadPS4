@@ -91,26 +91,37 @@ Liverpool::Liverpool() {
             return std::min(parsed, maximum);
         };
         const auto defaults = InputAssemblyCaptureWindow::Defaults();
-        input_assembly_capture_window.frame_start = parse_bound(
-            "SHADPS4_INPUT_ASSEMBLY_FRAME_START", defaults.frame_start,
-            std::numeric_limits<u64>::max());
-        input_assembly_capture_window.frame_count = parse_bound(
-            "SHADPS4_INPUT_ASSEMBLY_FRAME_COUNT", defaults.frame_count, 4096);
-        input_assembly_capture_window.draw_start = static_cast<u32>(parse_bound(
-            "SHADPS4_INPUT_ASSEMBLY_DRAW_START", defaults.draw_start,
-            std::numeric_limits<u32>::max()));
-        input_assembly_capture_window.draw_count = static_cast<u32>(parse_bound(
-            "SHADPS4_INPUT_ASSEMBLY_DRAW_COUNT", defaults.draw_count,
-            InputAssemblyDeviceReadbackPlanner::MaxSemanticsPerFrame));
+        input_assembly_capture_window.frame_start =
+            parse_bound("SHADPS4_INPUT_ASSEMBLY_FRAME_START", defaults.frame_start,
+                        std::numeric_limits<u64>::max());
+        input_assembly_capture_window.frame_count =
+            parse_bound("SHADPS4_INPUT_ASSEMBLY_FRAME_COUNT", defaults.frame_count, 4096);
+        input_assembly_capture_window.draw_start =
+            static_cast<u32>(parse_bound("SHADPS4_INPUT_ASSEMBLY_DRAW_START", defaults.draw_start,
+                                         std::numeric_limits<u32>::max()));
+        input_assembly_capture_window.draw_count =
+            static_cast<u32>(parse_bound("SHADPS4_INPUT_ASSEMBLY_DRAW_COUNT", defaults.draw_count,
+                                         InputAssemblyDeviceReadbackPlanner::MaxSemanticsPerFrame));
+        input_assembly_lag_config.cadence_us =
+            parse_bound("SHADPS4_INPUT_ASSEMBLY_LAG_CADENCE_US",
+                        InputAssemblyLagConfig::Defaults().cadence_us, 1'000'000);
+        if (input_assembly_lag_config.cadence_us == 0) {
+            input_assembly_lag_config.cadence_us = InputAssemblyLagConfig::Defaults().cadence_us;
+        }
+        input_assembly_lag_config.tolerance_us = parse_bound(
+            "SHADPS4_INPUT_ASSEMBLY_LAG_TOLERANCE_US",
+            InputAssemblyLagConfig::Defaults().tolerance_us, input_assembly_lag_config.cadence_us);
         LOG_INFO(Render,
                  "InputAssemblyDeviceIntegrityConfig enabled=1 frame_start={} frame_count={} "
-                 "draw_start={} draw_count={} samples_per_frame={} bytes_per_frame={}",
+                 "draw_start={} draw_count={} samples_per_frame={} bytes_per_frame={} "
+                 "lag_cadence_us={} lag_tolerance_us={} lag_history={}",
                  input_assembly_capture_window.frame_start,
                  input_assembly_capture_window.frame_count,
-                 input_assembly_capture_window.draw_start,
-                 input_assembly_capture_window.draw_count,
+                 input_assembly_capture_window.draw_start, input_assembly_capture_window.draw_count,
                  InputAssemblyDeviceReadbackPlanner::MaxSamplesPerFrame,
-                 InputAssemblyDeviceReadbackPlanner::MaxSampleBytesPerFrame);
+                 InputAssemblyDeviceReadbackPlanner::MaxSampleBytesPerFrame,
+                 input_assembly_lag_config.cadence_us, input_assembly_lag_config.tolerance_us,
+                 InputAssemblyImmediateReadbackReducer::MaxLagHistoryObservations);
     }
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
