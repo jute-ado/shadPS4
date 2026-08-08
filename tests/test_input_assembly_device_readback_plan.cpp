@@ -445,6 +445,12 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerFindsExactAndJitteredHundredMill
     EXPECT_TRUE(exact_return.lag_exact_aba_return);
     EXPECT_TRUE(exact_return.lag_stable_transport_aba);
     EXPECT_FALSE(exact_return.lag_unavailable);
+    EXPECT_EQ(exact_return.lag_baseline_sequence, 1);
+    EXPECT_EQ(exact_return.lag_baseline_process_time_us, 0);
+    EXPECT_EQ(exact_return.lag_departure_sequence, 2);
+    EXPECT_EQ(exact_return.lag_departure_process_time_us, 100'000);
+    EXPECT_EQ(exact_return.lag_return_sequence, 3);
+    EXPECT_EQ(exact_return.lag_return_process_time_us, 200'000);
 
     InputAssemblyImmediateReadbackReducer jittered{InputAssemblyLagConfig{
         .enabled = true,
@@ -456,6 +462,12 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerFindsExactAndJitteredHundredMill
     const auto jittered_return = jittered.Observe(snapshot(12, 207'000, a));
     EXPECT_TRUE(jittered_return.lag_exact_aba_return);
     EXPECT_TRUE(jittered_return.lag_stable_transport_aba);
+    EXPECT_EQ(jittered_return.lag_baseline_sequence, 10);
+    EXPECT_EQ(jittered_return.lag_baseline_process_time_us, 0);
+    EXPECT_EQ(jittered_return.lag_departure_sequence, 11);
+    EXPECT_EQ(jittered_return.lag_departure_process_time_us, 103'000);
+    EXPECT_EQ(jittered_return.lag_return_sequence, 12);
+    EXPECT_EQ(jittered_return.lag_return_process_time_us, 207'000);
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, LagReducerReportsUnavailableOutsideStrictTolerance) {
@@ -580,6 +592,8 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerFindsMultiObservationEpisodeRetu
     const auto first_return = observe(4, 300'000, a);
     EXPECT_TRUE(first_return.lag_episode_return);
     EXPECT_TRUE(first_return.lag_stable_transport_episode_return);
+    EXPECT_EQ(first_return.lag_baseline_sequence, 1);
+    EXPECT_EQ(first_return.lag_baseline_process_time_us, 0);
     EXPECT_EQ(first_return.lag_departure_sequence, 2);
     EXPECT_EQ(first_return.lag_departure_process_time_us, 100'000);
     EXPECT_EQ(first_return.lag_return_sequence, 4);
@@ -590,6 +604,44 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerFindsMultiObservationEpisodeRetu
     EXPECT_TRUE(second_return.lag_episode_return);
     EXPECT_EQ(second_return.lag_departure_sequence, 5);
     EXPECT_EQ(second_return.lag_return_sequence, 6);
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, StableEpisodeRequiresEveryIntermediateTransportToMatch) {
+    constexpr std::array a{std::byte{0x01}};
+    constexpr std::array b{std::byte{0x02}};
+    constexpr std::array c{std::byte{0x03}};
+    const auto semantic = Semantic(37, InputAssemblySourceKind::Vertex, 5);
+    const auto run = [&](bool change_source, bool change_serial) {
+        InputAssemblyImmediateReadbackReducer reducer{InputAssemblyLagConfig::Defaults()};
+        const auto observe = [&](u64 sequence, u64 time, InputAssemblyBufferToken source,
+                                 u64 serial, const auto& bytes) {
+            return reducer.Observe({
+                .sequence = sequence,
+                .process_time_us = time,
+                .semantic = semantic,
+                .source = source,
+                .write_serial = serial,
+                .authority = InputAssemblyAuthority::GpuAuthoritative,
+                .bytes = std::span<const std::byte>{bytes},
+                .complete = true,
+            });
+        };
+        (void)observe(1, 0, Buffer(5, 1), 9, a);
+        (void)observe(2, 100'000, Buffer(5, 1), 9, b);
+        (void)observe(3, 200'000, change_source ? Buffer(5, 2) : Buffer(5, 1),
+                      change_serial ? 10 : 9, c);
+        return observe(4, 300'000, Buffer(5, 1), 9, a);
+    };
+
+    const auto generation_changed = run(true, false);
+    EXPECT_TRUE(generation_changed.lag_episode_return);
+    EXPECT_FALSE(generation_changed.lag_stable_transport_episode_return);
+    EXPECT_TRUE(generation_changed.lag_source_changed);
+
+    const auto serial_changed = run(false, true);
+    EXPECT_TRUE(serial_changed.lag_episode_return);
+    EXPECT_FALSE(serial_changed.lag_stable_transport_episode_return);
+    EXPECT_TRUE(serial_changed.lag_write_serial_changed);
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, LagReducerLossBreaksEpisodeComparability) {
@@ -624,6 +676,9 @@ TEST(InputAssemblyDeviceReadbackPlan, LagEventDetailsAreBoundedAndExposeTimingOn
     InputAssemblyLagEventDetails details;
     InputAssemblyImmediateChange change{
         .lag_episode_return = true,
+        .lag_stable_transport_episode_return = true,
+        .lag_baseline_sequence = 84,
+        .lag_baseline_process_time_us = 1'400'000,
         .lag_departure_sequence = 90,
         .lag_departure_process_time_us = 1'500'000,
         .lag_return_sequence = 96,
@@ -635,10 +690,28 @@ TEST(InputAssemblyDeviceReadbackPlan, LagEventDetailsAreBoundedAndExposeTimingOn
     EXPECT_FALSE(details.Append(Semantic(999, InputAssemblySourceKind::Index, 0), change));
     EXPECT_EQ(details.Events().size(), InputAssemblyLagEventDetails::MaxEvents);
     EXPECT_EQ(details.LostEvents(), 1);
+    EXPECT_EQ(details.Events().front().baseline_sequence, 84);
+    EXPECT_EQ(details.Events().front().baseline_process_time_us, 1'400'000);
     EXPECT_EQ(details.Events().front().departure_sequence, 90);
     EXPECT_EQ(details.Events().front().departure_process_time_us, 1'500'000);
     EXPECT_EQ(details.Events().front().return_sequence, 96);
     EXPECT_EQ(details.Events().front().return_process_time_us, 1'600'000);
+    EXPECT_TRUE(details.Events().front().stable_transport);
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, LagToleranceMustKeepCadenceTargetsDisjoint) {
+    constexpr InputAssemblyLagConfig below_half{
+        .enabled = true, .cadence_us = 100, .tolerance_us = 49};
+    constexpr InputAssemblyLagConfig at_half{
+        .enabled = true, .cadence_us = 100, .tolerance_us = 50};
+    EXPECT_TRUE(InputAssemblyLagConfig::Defaults().HasDisjointTargets());
+    EXPECT_TRUE(below_half.HasDisjointTargets());
+    EXPECT_FALSE(at_half.HasDisjointTargets());
+    const auto normalized =
+        InputAssemblyLagConfig{.enabled = true, .cadence_us = 100, .tolerance_us = 100}
+            .Normalized();
+    EXPECT_EQ(normalized.tolerance_us, 49);
+    EXPECT_TRUE(normalized.HasDisjointTargets());
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, LagReducerBoundsHistoryAndReportsEvictedEvidence) {
