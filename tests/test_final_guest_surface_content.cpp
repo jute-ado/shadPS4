@@ -740,6 +740,51 @@ TEST(FinalGuestSurfaceContent, ReportsLocalizedTileAbaWhenWholeSampleDoesNotRetu
     EXPECT_EQ(report.loss.tile_detail, 0u);
 }
 
+TEST(FinalGuestSurfaceContent, MatchesLocalizedVisualOracleWhenReturnIsNotByteExact) {
+    FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(),
+                                     Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1")};
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(32, 32));
+    std::vector<std::byte> a(plan.sample_bytes, std::byte{0});
+    auto b = a;
+    auto c = a;
+    for (u32 pixel = 0; pixel < 876; ++pixel) {
+        const size_t offset = static_cast<size_t>(pixel) * 4;
+        b[offset] = std::byte{48};
+        b[offset + 1] = std::byte{48};
+        b[offset + 2] = std::byte{48};
+    }
+    for (u32 pixel = 0; pixel < 1024; ++pixel) {
+        const size_t offset = static_cast<size_t>(pixel) * 4;
+        c[offset] = std::byte{9};
+        c[offset + 1] = std::byte{9};
+        c[offset + 2] = std::byte{9};
+    }
+
+    (void)reducer.Observe(4259, 84'700'000,
+                          TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, a);
+    for (u64 sequence = 4260; sequence < 4263; ++sequence) {
+        (void)reducer.Observe(sequence, 84'700'000 + (sequence - 4259) * 25'000,
+                              TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, a);
+    }
+    (void)reducer.Observe(4263, 84'800'000,
+                          TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, b);
+    for (u64 sequence = 4264; sequence < 4267; ++sequence) {
+        (void)reducer.Observe(sequence, 84'800'000 + (sequence - 4263) * 25'000,
+                              TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, b);
+    }
+    const auto report = reducer.Observe(
+        4267, 84'900'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, c);
+
+    EXPECT_EQ(report.a_sequence, 4259u);
+    EXPECT_EQ(report.b_sequence, 4263u);
+    EXPECT_EQ(report.c_sequence, 4267u);
+    EXPECT_EQ(report.aba_tiles, 1u);
+    EXPECT_EQ(report.aba_tile_ordinal_count, 1u);
+    EXPECT_EQ(report.aba_tile_ordinals[0], 1u);
+    EXPECT_FALSE(report.exact_aba);
+    EXPECT_FALSE(report.whole_sample_aba);
+}
+
 TEST(FinalGuestSurfaceContent, LogsOnlyTaskSelectedMatchingWindowOrdinals) {
     const auto selector = Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1,2000,3476");
     FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(), selector};
