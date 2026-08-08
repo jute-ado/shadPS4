@@ -82,6 +82,18 @@ TEST(InputAssemblyDeviceReadbackPlan, AdmitsStreamAndDeviceLocalSources) {
     }
 }
 
+TEST(InputAssemblyDeviceReadbackPlan, PostObtainStateDrivesBarrierAndAuthority) {
+    const auto upload_cleared_gpu_state =
+        AmdGpu::ResolveInputAssemblyPostObtainState(/*gpu_modified_after_obtain=*/false);
+    EXPECT_FALSE(upload_cleared_gpu_state.needs_input_barrier);
+    EXPECT_EQ(upload_cleared_gpu_state.authority, InputAssemblyAuthority::CpuAuthoritative);
+
+    const auto gpu_resident_state =
+        AmdGpu::ResolveInputAssemblyPostObtainState(/*gpu_modified_after_obtain=*/true);
+    EXPECT_TRUE(gpu_resident_state.needs_input_barrier);
+    EXPECT_EQ(gpu_resident_state.authority, InputAssemblyAuthority::GpuAuthoritative);
+}
+
 TEST(InputAssemblyDeviceReadbackPlan, UsesBoundedGenericFrameAndDrawWindows) {
     const auto defaults = InputAssemblyCaptureWindow::Defaults();
     EXPECT_TRUE(defaults.ContainsFrame(4000));
