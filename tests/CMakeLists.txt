@@ -102,6 +102,19 @@ target_compile_features(shadps4_pp_input_shadow_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_pp_input_shadow_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pp_input_shadow_test)
 
+add_executable(shadps4_submit_info_test
+    test_submit_info.cpp
+)
+target_include_directories(shadps4_submit_info_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_submit_info_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_submit_info_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_submit_info_test)
+
 add_executable(shadps4_present_frame_ownership_test
     test_present_frame_ownership.cpp
 )
