@@ -95,6 +95,7 @@ struct FinalGuestSurfaceLoss {
     u32 invalid_extent{};
     u32 tile_capacity{};
     u32 byte_capacity{};
+    u32 ordinal_capacity{};
     u32 busy{};
     u32 invalidation{};
     u32 gap{};
@@ -103,7 +104,7 @@ struct FinalGuestSurfaceLoss {
     [[nodiscard]] constexpr bool Any() const noexcept {
         return unsupported_type || unsupported_samples || unsupported_mip || unsupported_layer ||
                unsupported_aspect || unsupported_format || invalid_extent || tile_capacity ||
-               byte_capacity || busy || invalidation || gap || history;
+               byte_capacity || ordinal_capacity || busy || invalidation || gap || history;
     }
 };
 
@@ -405,12 +406,14 @@ struct FinalGuestSurfaceReport {
            " stable=" + std::to_string(report.stable_transport) +
            " exact_aba=" + std::to_string(report.exact_aba) +
            " gap_loss=" + std::to_string(report.loss.gap) +
-           " history_loss=" + std::to_string(report.loss.history);
+           " history_loss=" + std::to_string(report.loss.history) +
+           " ordinal_loss=" + std::to_string(report.loss.ordinal_capacity);
 }
 
 class FinalGuestSurfaceReducer {
 public:
     static constexpr u32 MaxHistory = 32;
+    static constexpr u32 MaxSurfaceOrdinals = 16;
 
     explicit FinalGuestSurfaceReducer(FinalGuestSurfaceLagConfig config_) : config{config_} {}
 
@@ -436,6 +439,13 @@ public:
             report.status = FinalGuestSurfaceStatus::GapLoss;
             history.clear();
             history_evicted = false;
+        }
+        if (report.surface_ordinal == 0) {
+            report.status = FinalGuestSurfaceStatus::CapacityLoss;
+            report.loss.ordinal_capacity = 1;
+            history.clear();
+            history_evicted = false;
+            return report;
         }
         if (plan.status != FinalGuestSurfaceStatus::Complete || plan.loss.Any() ||
             bytes.size() != plan.sample_bytes) {
@@ -607,7 +617,7 @@ private:
 
     FinalGuestSurfaceLagConfig config{};
     std::deque<Observation> history{};
-    std::array<u64, 16> identities{};
+    std::array<u64, MaxSurfaceOrdinals> identities{};
     u32 identity_count{};
     u64 last_sequence{};
     u64 last_process_time_us{};

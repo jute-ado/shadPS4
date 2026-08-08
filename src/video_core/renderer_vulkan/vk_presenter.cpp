@@ -223,6 +223,7 @@ struct FinalGuestSurfaceContentConfig {
     case vk::Format::eB8G8R8A8Unorm:
     case vk::Format::eB8G8R8A8Srgb:
     case vk::Format::eA2R10G10B10UnormPack32:
+    case vk::Format::eA2B10G10R10UnormPack32:
         return FinalGuestSurfaceFormat::Rgba8;
     case vk::Format::eR16G16B16A16Sfloat:
         return FinalGuestSurfaceFormat::Rgba16;
@@ -432,25 +433,26 @@ private:
         ++emitted_frames;
         complete_frames += report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
         loss_frames += report.loss.Any();
-        LOG_INFO(Render,
-                 "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
-                 "tiles={} changed_tiles={} aba_tiles={} stable={} exact_aba={} "
-                 "a_sequence={} a_process_time_us={} b_sequence={} b_process_time_us={} "
-                 "c_sequence={} c_process_time_us={} status={} unsupported_type={} "
-                 "unsupported_samples={} unsupported_mip={} unsupported_layer={} "
-                 "unsupported_aspect={} unsupported_format={} invalid_extent={} "
-                 "tile_loss={} byte_loss={} busy={} invalidation_loss={} gap_loss={} "
-                 "history_loss={}",
-                 report.sequence, report.process_time_us, report.surface_ordinal, report.tile_count,
-                 report.changed_tiles, report.aba_tiles, report.stable_transport, report.exact_aba,
-                 report.a_sequence, report.a_process_time_us, report.b_sequence,
-                 report.b_process_time_us, report.c_sequence, report.c_process_time_us,
-                 static_cast<u32>(report.status), report.loss.unsupported_type,
-                 report.loss.unsupported_samples, report.loss.unsupported_mip,
-                 report.loss.unsupported_layer, report.loss.unsupported_aspect,
-                 report.loss.unsupported_format, report.loss.invalid_extent,
-                 report.loss.tile_capacity, report.loss.byte_capacity, report.loss.busy,
-                 report.loss.invalidation, report.loss.gap, report.loss.history);
+        LOG_INFO(
+            Render,
+            "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
+            "tiles={} changed_tiles={} aba_tiles={} stable={} exact_aba={} "
+            "a_sequence={} a_process_time_us={} b_sequence={} b_process_time_us={} "
+            "c_sequence={} c_process_time_us={} status={} unsupported_type={} "
+            "unsupported_samples={} unsupported_mip={} unsupported_layer={} "
+            "unsupported_aspect={} unsupported_format={} invalid_extent={} "
+            "tile_loss={} byte_loss={} ordinal_loss={} busy={} invalidation_loss={} gap_loss={} "
+            "history_loss={}",
+            report.sequence, report.process_time_us, report.surface_ordinal, report.tile_count,
+            report.changed_tiles, report.aba_tiles, report.stable_transport, report.exact_aba,
+            report.a_sequence, report.a_process_time_us, report.b_sequence,
+            report.b_process_time_us, report.c_sequence, report.c_process_time_us,
+            static_cast<u32>(report.status), report.loss.unsupported_type,
+            report.loss.unsupported_samples, report.loss.unsupported_mip,
+            report.loss.unsupported_layer, report.loss.unsupported_aspect,
+            report.loss.unsupported_format, report.loss.invalid_extent, report.loss.tile_capacity,
+            report.loss.byte_capacity, report.loss.ordinal_capacity, report.loss.busy,
+            report.loss.invalidation, report.loss.gap, report.loss.history);
 
         if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
             LOG_ERROR(Render,
