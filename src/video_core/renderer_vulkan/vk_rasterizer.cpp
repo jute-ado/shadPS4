@@ -61,7 +61,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
 
 Rasterizer::~Rasterizer() {
     // Presenter finishes the draw scheduler before releasing the rasterizer.
-    ReportFaultFrameCorrelation();
+    FinalizeFaultFrameCorrelationAfterSchedulerFinish();
 }
 
 void Rasterizer::CpSync() {
@@ -411,18 +411,49 @@ void Rasterizer::OnSubmit() {
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
     buffer_cache.RunGarbageCollector();
+    auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
+    if (diagnostic.ClaimWindowEndFinalizationSchedule()) {
+        // ProcessFaultBuffer queued its downloaded-page callback above. The scheduler preserves
+        // pending-operation FIFO order for a tick, so this report observes every retained batch.
+        scheduler.DeferOperation(
+            [this] { FinalizeFaultFrameCorrelationFromDeferredCallback(); });
+    }
 }
 
-void Rasterizer::ReportFaultFrameCorrelation() {
+void Rasterizer::EmitFaultFrameCorrelation(
+    std::span<const VideoCore::FaultFrameCorrelationObservation> observations) {
+    buffer_cache.ReportFaultFrameCorrelation(observations);
+}
+
+void Rasterizer::FinalizeFaultFrameCorrelationFromDeferredCallback() {
     auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
-    if (!diagnostic.GetConfiguration().enabled) {
+    // This callback is itself running from PopPendingOperations. Its FIFO predecessors have
+    // already completed, and recursively popping would deadlock the pending-operation mutex.
+    if (auto observations = diagnostic.Finalize([] {})) {
+        EmitFaultFrameCorrelation(*observations);
+    }
+}
+
+void Rasterizer::FinalizeFaultFrameCorrelationAfterSchedulerFinish() {
+    auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
+    if (auto observations = diagnostic.Finalize([this] { scheduler.PopPendingOperations(); })) {
+        EmitFaultFrameCorrelation(*observations);
+    }
+}
+
+void Rasterizer::FinalizeFaultFrameCorrelationBeforeQuickExit() {
+    auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
+    if (!diagnostic.NeedsFinalization()) {
         return;
     }
-    // Presenter has already waited for the last submitted tick. Pop the now-ready callbacks before
-    // freezing the reducer so no downloaded fault batch can race the final report.
-    scheduler.PopPendingOperations();
-    diagnostic.MarkDeferredCallbacksDrained();
-    buffer_cache.ReportFaultFrameCorrelation();
+    // This method is dispatched to Liverpool's GPU command-processor thread, the owner of the
+    // draw scheduler. No rendering thread mutates the scheduler concurrently here.
+    if (auto observations = diagnostic.Finalize([this] {
+            scheduler.Finish();
+            scheduler.PopPendingOperations();
+        })) {
+        EmitFaultFrameCorrelation(*observations);
+    }
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

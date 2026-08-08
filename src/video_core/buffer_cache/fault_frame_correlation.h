@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "common/types.h"
@@ -264,23 +265,45 @@ private:
     bool finished{};
 };
 
-class FaultFrameCorrelationReportGate {
+class FaultFrameCorrelationFinalizationGate {
 public:
-    void MarkDeferredCallbacksDrained() noexcept {
-        drained.store(true, std::memory_order_release);
-    }
+    enum class State : u32 {
+        Pending,
+        WindowScheduled,
+        Finalizing,
+        Reported,
+    };
 
-    [[nodiscard]] bool ClaimAfterDrain() noexcept {
-        if (!drained.load(std::memory_order_acquire)) {
+    [[nodiscard]] bool ClaimWindowEndSchedule(bool window_complete) noexcept {
+        if (!window_complete) {
             return false;
         }
-        bool expected = false;
-        return claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
+        State expected = State::Pending;
+        return state.compare_exchange_strong(expected, State::WindowScheduled,
+                                             std::memory_order_acq_rel);
+    }
+
+    template <typename Drain, typename Report>
+    [[nodiscard]] bool Finalize(Drain&& drain, Report&& report) {
+        State current = state.load(std::memory_order_acquire);
+        while (current == State::Pending || current == State::WindowScheduled) {
+            if (state.compare_exchange_weak(current, State::Finalizing,
+                                            std::memory_order_acq_rel)) {
+                std::forward<Drain>(drain)();
+                std::forward<Report>(report)();
+                state.store(State::Reported, std::memory_order_release);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool NeedsFinalization() const noexcept {
+        return state.load(std::memory_order_acquire) != State::Reported;
     }
 
 private:
-    std::atomic<bool> drained{};
-    std::atomic<bool> claimed{};
+    std::atomic<State> state{State::Pending};
 };
 
 class FaultFrameCorrelationRuntime {
@@ -304,16 +327,28 @@ public:
         reducer.ObserveBatch(stamp, private_page_ids, download_overflow);
     }
 
-    void MarkDeferredCallbacksDrained() noexcept {
-        report_gate.MarkDeferredCallbacksDrained();
+    [[nodiscard]] bool ClaimWindowEndFinalizationSchedule() noexcept {
+        const auto config = reducer.GetConfiguration();
+        if (!config.enabled || config.frame_count == 0) {
+            return false;
+        }
+        const u64 current_frame = frame_sequence.load(std::memory_order_acquire);
+        const bool window_complete = current_frame >= config.first_frame &&
+                                     current_frame - config.first_frame + 1 >= config.frame_count;
+        return finalization_gate.ClaimWindowEndSchedule(window_complete);
     }
 
-    [[nodiscard]] std::optional<std::vector<FaultFrameCorrelationObservation>>
-    FinishAfterDeferredCallbacksDrained() {
-        if (!report_gate.ClaimAfterDrain()) {
-            return std::nullopt;
-        }
-        return reducer.Finish();
+    template <typename Drain>
+    [[nodiscard]] std::optional<std::vector<FaultFrameCorrelationObservation>> Finalize(
+        Drain&& drain) {
+        std::optional<std::vector<FaultFrameCorrelationObservation>> result;
+        finalization_gate.Finalize(std::forward<Drain>(drain),
+                                   [&] { result.emplace(reducer.Finish()); });
+        return result;
+    }
+
+    [[nodiscard]] bool NeedsFinalization() const noexcept {
+        return reducer.GetConfiguration().enabled && finalization_gate.NeedsFinalization();
     }
 
     [[nodiscard]] FaultFrameCorrelationCoverage GetCoverage() const {
@@ -355,7 +390,7 @@ private:
     static constexpr u64 HardMaxPagesPerFrame = FaultFrameCorrelation::HardMaxPagesPerFrame;
     std::atomic<u64> frame_sequence{};
     FaultFrameCorrelation reducer;
-    FaultFrameCorrelationReportGate report_gate;
+    FaultFrameCorrelationFinalizationGate finalization_gate;
 };
 
 [[nodiscard]] inline FaultFrameCorrelationRuntime& GetFaultFrameCorrelationRuntime() {

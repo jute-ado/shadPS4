@@ -701,8 +701,9 @@ void BufferCache::ProcessFaultBuffer() {
     fault_manager.ProcessFaultBuffer();
 }
 
-void BufferCache::ReportFaultFrameCorrelation() {
-    fault_manager.ReportFaultFrameCorrelation();
+void BufferCache::ReportFaultFrameCorrelation(
+    std::span<const FaultFrameCorrelationObservation> observations) {
+    fault_manager.ReportFaultFrameCorrelation(observations);
 }
 
 void BufferCache::Register(BufferId buffer_id) {

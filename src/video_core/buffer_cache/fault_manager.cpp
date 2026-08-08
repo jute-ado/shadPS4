@@ -96,17 +96,14 @@ FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& 
     device.destroyShaderModule(module);
 }
 
-void FaultManager::ReportFaultFrameCorrelation() {
+void FaultManager::ReportFaultFrameCorrelation(
+    std::span<const FaultFrameCorrelationObservation> observations) {
     auto& diagnostic = GetFaultFrameCorrelationRuntime();
     const auto config = diagnostic.GetConfiguration();
     if (!config.enabled) {
         return;
     }
-    const auto observations = diagnostic.FinishAfterDeferredCallbacksDrained();
-    if (!observations) {
-        return;
-    }
-    for (const auto& observation : *observations) {
+    for (const auto& observation : observations) {
         LOG_INFO(Render_Vulkan,
                  "Fault frame correlation: frame={} process_time_us={} page_count={} "
                  "batch_count={} stable={} change={} exact_aba={} status={} loss={}",
@@ -122,7 +119,7 @@ void FaultManager::ReportFaultFrameCorrelation() {
              "incomplete_frames={} gap_frames={} stable_frames={} changed_frames={} "
              "exact_aba_frames={} total_batches={} total_unique_pages={} dropped_pages={}",
              config.first_frame, config.frame_count, config.page_cap, coverage.selected_frames,
-             observations->size(), coverage.complete_frames, coverage.no_batch_frames,
+             observations.size(), coverage.complete_frames, coverage.no_batch_frames,
              coverage.incomplete_frames, coverage.gap_frames, coverage.stable_frames,
              coverage.changed_frames, coverage.exact_aba_frames, coverage.total_batches,
              coverage.total_unique_pages, coverage.dropped_pages);

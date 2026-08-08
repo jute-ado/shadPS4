@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 

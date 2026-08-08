@@ -25,7 +25,9 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/eop_boundary_diagnostic.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/buffer_cache/fault_frame_correlation.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern Frontend::WindowSDL* g_window;
 std::unique_ptr<Vulkan::Presenter> presenter;
@@ -2857,6 +2859,24 @@ int PS4_SYSV_ABI Func_E51D44DB8151238C() {
 int PS4_SYSV_ABI Func_F916890425496553() {
     LOG_ERROR(Lib_GnmDriver, "(STUBBED) called");
     return ORBIS_OK;
+}
+
+void FinalizeFaultFrameCorrelationBeforeQuickExit() {
+    auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
+    if (!diagnostic.NeedsFinalization() || !presenter || !liverpool) {
+        return;
+    }
+    // The normal exit path calls from the host/UI thread. Never wait for the GPU processor from
+    // inside that processor (for example, an assertion-triggered quick exit).
+    if (liverpool->IsGpuThread()) {
+        return;
+    }
+    liverpool->WaitGpuIdle();
+    liverpool->SendCommand<true>([] {
+        if (presenter) {
+            presenter->GetRasterizer().FinalizeFaultFrameCorrelationBeforeQuickExit();
+        }
+    });
 }
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {

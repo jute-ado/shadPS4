@@ -164,7 +164,8 @@ public:
     void ProcessFaultBuffer();
 
     /// Reports the fault-frame diagnostic after its deferred callbacks have drained.
-    void ReportFaultFrameCorrelation();
+    void ReportFaultFrameCorrelation(
+        std::span<const FaultFrameCorrelationObservation> observations);
 
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);

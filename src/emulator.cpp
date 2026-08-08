@@ -33,6 +33,7 @@
 #include "core/file_format/trp.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/kernel.h"
+#include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/np/np_trophy.h"
 #include "core/libraries/save_data/save_backup.h"
@@ -533,6 +534,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     UpdatePlayTime(id);
     Storage::DataBase::Instance().Close();
 
+    Libraries::GnmDriver::FinalizeFaultFrameCorrelationBeforeQuickExit();
+    Common::Log::Flush();
     std::quick_exit(0);
 }
 

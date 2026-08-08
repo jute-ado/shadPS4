@@ -4,6 +4,7 @@
 #pragma once
 
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/fault_frame_correlation.h"
 #include "video_core/buffer_cache/range_set.h"
 
 namespace VideoCore {
@@ -24,7 +25,8 @@ public:
     }
 
     void ProcessFaultBuffer();
-    void ReportFaultFrameCorrelation();
+    void ReportFaultFrameCorrelation(
+        std::span<const FaultFrameCorrelationObservation> observations);
 
 private:
     Vulkan::Scheduler& scheduler;

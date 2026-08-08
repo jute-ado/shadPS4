@@ -90,6 +90,10 @@ public:
         return num_submits == 0;
     }
 
+    bool IsGpuThread() const noexcept {
+        return std::this_thread::get_id() == gpu_id;
+    }
+
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
         vo_port = port;
     }

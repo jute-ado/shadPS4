@@ -81,7 +81,7 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
-    void ReportFaultFrameCorrelation();
+    void FinalizeFaultFrameCorrelationBeforeQuickExit();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -111,6 +111,11 @@ private:
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 
     bool FilterDraw();
+
+    void FinalizeFaultFrameCorrelationFromDeferredCallback();
+    void FinalizeFaultFrameCorrelationAfterSchedulerFinish();
+    void EmitFaultFrameCorrelation(
+        std::span<const VideoCore::FaultFrameCorrelationObservation> observations);
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
