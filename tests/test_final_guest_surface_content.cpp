@@ -389,7 +389,7 @@ TEST(FinalGuestSurfaceContent, ReportsTrueHistoryEvictionWhenLagEndpointsCannotB
     const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(32, 32));
     std::vector<std::byte> content(plan.sample_bytes, std::byte{0x11});
     Vulkan::FinalGuestSurfaceReport report{};
-    for (u32 index = 0; index <= FinalGuestSurfaceReducer::MaxHistory; ++index) {
+    for (u32 index = 0; index <= FinalGuestSurfaceReducer::MaxHistory + 1; ++index) {
         report = reducer.Observe(index + 1, 2'000'000 + index * 10,
                                  TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, content);
     }
