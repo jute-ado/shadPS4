@@ -81,8 +81,61 @@ TEST(InputAssemblyDeviceIntegrity, PreservesVertexAndIndexSemanticsWhileDeduplic
     EXPECT_EQ(range.size, 96);
     ASSERT_EQ(range.semantic_count, 2);
     EXPECT_EQ(range.semantics[0].semantic, Semantic(7, InputAssemblySourceKind::Vertex, 2));
+    EXPECT_EQ(range.semantics[0].relative_offset, 0);
+    EXPECT_EQ(range.semantics[0].size, 64);
     EXPECT_EQ(range.semantics[1].semantic, Semantic(7, InputAssemblySourceKind::Index, 0));
+    EXPECT_EQ(range.semantics[1].relative_offset, 32);
+    EXPECT_EQ(range.semantics[1].size, 64);
     EXPECT_NE(range.semantics[0].stable_identity, range.semantics[1].stable_identity);
+}
+
+TEST(InputAssemblyDeviceIntegrity, RejectsBridgeTransactionallyWithoutMutatingAcceptedRanges) {
+    InputAssemblyDeviceIntegrityPlanner planner;
+    planner.BeginFrame(42);
+    planner.Observe(Observation(Semantic(1, InputAssemblySourceKind::Vertex, 0), Buffer(8, 1), 100,
+                                1, InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 300));
+    planner.Observe(Observation(Semantic(2, InputAssemblySourceKind::Index, 0), Buffer(8, 1),
+                                InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 99, 100,
+                                InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 300));
+    planner.Observe(Observation(Semantic(3, InputAssemblySourceKind::Vertex, 1), Buffer(8, 1), 100,
+                                InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame,
+                                InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 300, 2,
+                                InputAssemblyAuthority::CpuAuthoritative));
+
+    const auto plan = planner.EndFrame();
+    ASSERT_FALSE(plan.complete);
+    ASSERT_EQ(plan.range_count, 2);
+    EXPECT_EQ(plan.byte_count, 101);
+    EXPECT_EQ(plan.loss.byte_capacity, 1);
+    EXPECT_EQ(plan.loss.write_serial_ambiguity, 0);
+    EXPECT_EQ(plan.loss.authority_ambiguity, 0);
+    EXPECT_EQ(plan.ranges[0].source_offset, 100);
+    EXPECT_EQ(plan.ranges[0].size, 1);
+    EXPECT_EQ(plan.ranges[0].semantic_count, 1);
+    EXPECT_EQ(plan.ranges[1].source_offset,
+              InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 99);
+    EXPECT_EQ(plan.ranges[1].size, 100);
+    EXPECT_EQ(plan.ranges[1].semantic_count, 1);
+}
+
+TEST(InputAssemblyDeviceIntegrity, ComputesTransitiveOverlapClosureRegardlessOfInsertionOrder) {
+    InputAssemblyDeviceIntegrityPlanner planner;
+    planner.BeginFrame(43);
+    planner.Observe(
+        Observation(Semantic(1, InputAssemblySourceKind::Vertex, 0), Buffer(9, 1), 0, 10, 100));
+    planner.Observe(
+        Observation(Semantic(2, InputAssemblySourceKind::Vertex, 1), Buffer(9, 1), 50, 10, 100));
+    planner.Observe(
+        Observation(Semantic(3, InputAssemblySourceKind::Vertex, 2), Buffer(9, 1), 20, 35, 100));
+    planner.Observe(
+        Observation(Semantic(4, InputAssemblySourceKind::Index, 0), Buffer(9, 1), 8, 14, 100));
+
+    const auto plan = planner.EndFrame();
+    ASSERT_TRUE(plan.complete);
+    ASSERT_EQ(plan.range_count, 1);
+    EXPECT_EQ(plan.ranges[0].source_offset, 0);
+    EXPECT_EQ(plan.ranges[0].size, 60);
+    EXPECT_EQ(plan.ranges[0].semantic_count, 4);
 }
 
 TEST(InputAssemblyDeviceIntegrity, KeepsDistinctPhysicalBuffersSeparate) {
@@ -154,6 +207,40 @@ TEST(InputAssemblyDeviceIntegrity, MarksOverlappingWriteSerialsAmbiguous) {
     EXPECT_EQ(plan.loss.write_serial_ambiguity, 1);
 }
 
+TEST(InputAssemblyDeviceIntegrity, MarksMixedAuthorityOverlapIncompleteAndNonComparable) {
+    InputAssemblyDeviceIntegrityPlanner planner;
+    planner.BeginFrame(44);
+    planner.Observe(Observation(Semantic(1, InputAssemblySourceKind::Vertex, 0), Buffer(10, 1), 0,
+                                32, 128, 3, InputAssemblyAuthority::GpuAuthoritative));
+    planner.Observe(Observation(Semantic(2, InputAssemblySourceKind::Index, 0), Buffer(10, 1), 16,
+                                32, 128, 3, InputAssemblyAuthority::CpuAuthoritative));
+
+    const auto plan = planner.EndFrame();
+    ASSERT_FALSE(plan.complete);
+    ASSERT_EQ(plan.range_count, 1);
+    EXPECT_EQ(plan.loss.authority_ambiguity, 1);
+    EXPECT_TRUE(plan.ranges[0].authority_ambiguous);
+    EXPECT_EQ(plan.ranges[0].authority, InputAssemblyAuthority::Unknown);
+}
+
+TEST(InputAssemblyDeviceIntegrity, RejectsInvalidBufferTokenAndEmptyCompleteSnapshot) {
+    InputAssemblyDeviceIntegrityPlanner planner;
+    planner.BeginFrame(45);
+    planner.Observe(
+        Observation(Semantic(1, InputAssemblySourceKind::Vertex, 0), Buffer(1, 0), 0, 4, 4));
+    const auto plan = planner.EndFrame();
+    EXPECT_FALSE(plan.complete);
+    EXPECT_EQ(plan.range_count, 0);
+    EXPECT_EQ(plan.loss.invalid_source, 1);
+
+    InputAssemblyDeviceIntegrityReducer reducer;
+    const std::array<std::byte, 0> empty{};
+    const auto result = reducer.Observe(
+        Snapshot(1, 1, Buffer(1, 1), 1, InputAssemblyAuthority::GpuAuthoritative, empty));
+    EXPECT_TRUE(result.empty_snapshot);
+    EXPECT_FALSE(result.first_observation);
+}
+
 TEST(InputAssemblyDeviceIntegrity, RejectsWriteSerialAndBufferGenerationChangesAsContentChanges) {
     InputAssemblyDeviceIntegrityReducer reducer;
     constexpr std::array a{std::byte{0x01}, std::byte{0x02}};
@@ -221,6 +308,22 @@ TEST(InputAssemblyDeviceIntegrity, EnforcesFixedSemanticHistoryCap) {
     }
 }
 
+TEST(InputAssemblyDeviceIntegrity, CapacityRejectedObservationDoesNotConsumeHistoryIdentity) {
+    InputAssemblyDeviceIntegrityPlanner planner;
+    planner.BeginFrame(1);
+    planner.Observe(Observation(Semantic(999999, InputAssemblySourceKind::Vertex, 0), Buffer(1, 1),
+                                0, InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 1,
+                                InputAssemblyDeviceIntegrityPlanner::MaxBytesPerFrame + 1));
+    EXPECT_FALSE(planner.EndFrame().complete);
+
+    for (u32 i = 0; i < InputAssemblyDeviceIntegrityPlanner::MaxHistoryIdentities; ++i) {
+        planner.BeginFrame(i + 2);
+        planner.Observe(
+            Observation(Semantic(i, InputAssemblySourceKind::Vertex, 0), Buffer(1, 1), 0, 1, 1));
+        EXPECT_TRUE(planner.EndFrame().complete) << i;
+    }
+}
+
 TEST(InputAssemblyDeviceIntegrity, RingReservationsAreNonblockingAndAtomDisjoint) {
     InputAssemblyReadbackRing ring{/*capacity=*/128, /*non_coherent_atom_size=*/64};
 
@@ -279,6 +382,57 @@ TEST(InputAssemblyDeviceIntegrity, ReportsExactBytewiseChangesAndAbaOnlyWhenCont
         reducer.Observe(Snapshot(26, 22, token, 4, InputAssemblyAuthority::GpuAuthoritative, b));
     EXPECT_TRUE(after_incomplete.baseline_reset);
     EXPECT_FALSE(after_incomplete.exact_aba_return);
+}
+
+TEST(InputAssemblyDeviceIntegrity, BoundsReducerHistorySnapshotBytesAndReleasesState) {
+    InputAssemblyDeviceIntegrityReducer reducer;
+    const std::vector<std::byte> oversized(InputAssemblyDeviceIntegrityReducer::MaxSnapshotBytes +
+                                           1);
+    const auto too_large = reducer.Observe({
+        .sequence = 1,
+        .stable_identity = 1,
+        .source = Buffer(1, 1),
+        .write_serial = 1,
+        .authority = InputAssemblyAuthority::GpuAuthoritative,
+        .bytes = oversized,
+        .complete = true,
+    });
+    EXPECT_TRUE(too_large.capacity_exceeded);
+    EXPECT_EQ(reducer.RetainedBytes(), 0);
+
+    constexpr std::array one{std::byte{0x01}};
+    for (u32 i = 0; i < InputAssemblyDeviceIntegrityReducer::MaxEntries; ++i) {
+        EXPECT_TRUE(reducer
+                        .Observe(Snapshot(2, i, Buffer(i, 1), 1,
+                                          InputAssemblyAuthority::GpuAuthoritative, one))
+                        .first_observation)
+            << i;
+    }
+    const auto history_full =
+        reducer.Observe(Snapshot(2, InputAssemblyDeviceIntegrityReducer::MaxEntries, Buffer(999, 1),
+                                 1, InputAssemblyAuthority::GpuAuthoritative, one));
+    EXPECT_TRUE(history_full.capacity_exceeded);
+    EXPECT_EQ(reducer.EntryCount(), InputAssemblyDeviceIntegrityReducer::MaxEntries);
+    EXPECT_EQ(reducer.RetainedBytes(), InputAssemblyDeviceIntegrityReducer::MaxEntries);
+
+    reducer.Reset();
+    EXPECT_EQ(reducer.EntryCount(), 0);
+    EXPECT_EQ(reducer.RetainedBytes(), 0);
+}
+
+TEST(InputAssemblyDeviceIntegrity, DoesNotTreatSequenceWrapAsContiguous) {
+    InputAssemblyDeviceIntegrityReducer reducer;
+    constexpr std::array a{std::byte{0x01}};
+    constexpr std::array b{std::byte{0x02}};
+    EXPECT_TRUE(reducer
+                    .Observe(Snapshot(std::numeric_limits<u64>::max(), 1, Buffer(1, 1), 1,
+                                      InputAssemblyAuthority::GpuAuthoritative, a))
+                    .first_observation);
+    const auto wrapped = reducer.Observe(
+        Snapshot(0, 1, Buffer(1, 1), 1, InputAssemblyAuthority::GpuAuthoritative, b));
+    EXPECT_TRUE(wrapped.sequence_gap);
+    EXPECT_FALSE(wrapped.changed);
+    EXPECT_FALSE(wrapped.exact_aba_return);
 }
 
 TEST(InputAssemblyDeviceIntegrity, DisabledGateInvokesNoCollectionOrAllocationCallback) {
