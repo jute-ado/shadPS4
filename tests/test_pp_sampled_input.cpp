@@ -462,5 +462,101 @@ TEST(PpSampledInput, SelectedInvalidFramesEmitExplicitLossWhileStartupIsSilent) 
     EXPECT_EQ(valid.status, FinalGuestSurfaceStatus::Complete);
 }
 
+TEST(PpSampledInput, PairedReducerUsesExactOutputAndClassifiesRawBoundaryPerOrdinal) {
+    constexpr u32 Width = 32;
+    constexpr u32 Height = 32;
+    const auto pair = PlanPpSampledInputPairedCapture({
+        .enabled = true,
+        .width = Width,
+        .height = Height,
+        .output_format = FinalGuestSurfaceFormat::Bgra8,
+        .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+        .slot_bytes = 16ull << 20,
+        .alignment = 256,
+    });
+    ASSERT_EQ(pair.status, FinalGuestSurfaceStatus::Complete);
+    const auto output_plan = PlanFinalGuestSurfaceTiles({
+        .width = Width,
+        .height = Height,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSampledInput,
+        .logical_width = Width,
+        .logical_height = Height,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    const auto plan = MakePpSampledInputPairedTilePlan(output_plan, pair);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(plan.sample_bytes, pair.total_bytes);
+    EXPECT_EQ(plan.paired_sampled_offset, pair.sampled_offset);
+    EXPECT_EQ(plan.paired_sampled_format, FinalGuestSurfaceFormat::Rgba16Float);
+
+    std::vector<std::byte> a(plan.sample_bytes, std::byte{0x20});
+    auto b = a;
+    auto c = a;
+    for (u32 pixel = 0; pixel < Width * Height / 4; ++pixel) {
+        const size_t output = static_cast<size_t>(pixel) * 4;
+        b[output] = b[output + 1] = b[output + 2] = std::byte{0xff};
+    }
+    const auto write_raw = [&](std::vector<std::byte>& bytes, u32 pixel, u16 value) {
+        const std::array values{value, value, value, u16{0x3c00}};
+        std::memcpy(bytes.data() + pair.sampled_offset +
+                        static_cast<size_t>(pixel) * sizeof(values),
+                    values.data(), sizeof(values));
+    };
+    for (u32 pixel = 0; pixel < Width * Height; ++pixel) {
+        write_raw(a, pixel, 0x3400);
+        write_raw(b, pixel, 0x3400);
+        write_raw(c, pixel, 0x3400);
+    }
+    const auto selector = ParseFinalGuestSurfaceWatchOrdinals("1");
+    const auto transport = FinalGuestSurfaceTransport{
+        .surface_identity = 1,
+        .backing_generation = 1,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .width = Width,
+        .height = Height,
+    };
+    const auto evaluate = [&](const std::vector<std::byte>& middle) {
+        FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(), selector};
+        (void)reducer.Observe(10, 1'000'000, transport, plan, a);
+        (void)reducer.Observe(11, 1'100'000, transport, plan, middle);
+        (void)reducer.Observe(12, 1'200'000, transport, plan, c);
+        return reducer.EvaluateCalibratedTriplet({1, 10, 1'000'000, true}, {2, 11, 1'100'000, true},
+                                                 {3, 12, 1'200'000, true}, true);
+    };
+
+    const auto post_sample = evaluate(b);
+    ASSERT_TRUE(post_sample.has_value());
+    EXPECT_EQ(post_sample->matched_ordinal_count, 1u);
+    EXPECT_EQ(post_sample->post_sample_ordinal_count, 1u);
+    EXPECT_EQ(post_sample->post_sample_ordinals[0], 1u);
+    EXPECT_EQ(post_sample->pre_or_at_sample_ordinal_count, 0u);
+    EXPECT_EQ(post_sample->ambiguous_boundary_ordinal_count, 0u);
+
+    auto raw_return = b;
+    for (u32 pixel = 0; pixel < Width * Height / 4; ++pixel) {
+        write_raw(raw_return, pixel, 0x3c00);
+    }
+    const auto pre_sample = evaluate(raw_return);
+    ASSERT_TRUE(pre_sample.has_value());
+    EXPECT_EQ(pre_sample->pre_or_at_sample_ordinal_count, 1u);
+    EXPECT_EQ(pre_sample->pre_or_at_sample_ordinals[0], 1u);
+    EXPECT_EQ(pre_sample->post_sample_ordinal_count, 0u);
+
+    const std::string compact = FormatFinalGuestSurfaceCalibratedReport(*pre_sample);
+    EXPECT_NE(compact.find(" pre=1"), std::string::npos);
+    EXPECT_NE(compact.find(" post="), std::string::npos);
+    EXPECT_NE(compact.find(" amb="), std::string::npos);
+}
+
 } // namespace
 } // namespace Vulkan
