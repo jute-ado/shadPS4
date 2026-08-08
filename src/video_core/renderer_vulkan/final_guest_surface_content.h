@@ -803,6 +803,8 @@ struct FinalGuestSurfaceReport {
            " d=" + std::to_string(report.changed_tiles) + " a=" + std::to_string(report.aba_tiles) +
            " u=" + std::to_string(report.unselected_aba_tiles) +
            " q=" + FormatFinalGuestSurfaceTileOrdinals(report) +
+           " v=" + std::to_string(report.stable_transport) +
+           " ws=" + std::to_string(report.whole_sample_aba) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(FinalGuestSurfaceLossMask(report.loss, report.selector_loss)) +
            " sel=" + std::to_string(report.selector_count) + '/' +
