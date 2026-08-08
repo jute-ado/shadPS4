@@ -148,6 +148,18 @@ public:
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
+    [[nodiscard]] std::pair<u32, u32> BdaFallbackTokens(u64 frame, u32 operation) noexcept {
+        return fault_manager.BdaFallbackTokens(frame, operation);
+    }
+
+    void ObserveBdaFallbackFrameBoundary(u64 frame, u64 process_time_us) noexcept {
+        fault_manager.ObserveBdaFallbackFrameBoundary(frame, process_time_us);
+    }
+
+    [[nodiscard]] bool NeedsBdaFallbackReadback(u64 frame) const noexcept {
+        return fault_manager.NeedsBdaFallbackReadback(frame);
+    }
+
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 

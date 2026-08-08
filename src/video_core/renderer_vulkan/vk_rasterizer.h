@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <limits>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "video_core/buffer_cache/bda_fallback_consumption.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -69,6 +72,7 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+    void ObserveBdaFallbackFrameBoundary(u64 frame, u64 process_time_us) noexcept;
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -84,6 +88,7 @@ public:
     }
 
 private:
+    void BeginBdaFallbackOperation();
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
@@ -140,6 +145,11 @@ private:
     Pipeline::DescriptorWrites set_writes;
     Pipeline::BufferBarriers buffer_barriers;
     Shader::PushData push_data;
+    bool bda_fallback_requested{VideoCore::BdaFallbackConsumptionDiagnosticEnabled()};
+    u64 bda_fallback_frame{std::numeric_limits<u64>::max()};
+    u32 bda_fallback_next_operation{};
+    u32 bda_fallback_bit_base{};
+    u32 bda_fallback_enable{};
 
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;

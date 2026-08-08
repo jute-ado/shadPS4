@@ -13,6 +13,7 @@
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/bda_fallback_consumption.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -614,7 +615,9 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     vk::ShaderModule module;
 
     auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
-    const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+    const bool is_patched = VideoCore::ShouldApplyShaderPatchForBdaFallbackDiagnostic(
+        patch.has_value(), EmulatorSettings.IsPatchShaders(),
+        VideoCore::BdaFallbackConsumptionDiagnosticEnabled());
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());

@@ -6,6 +6,7 @@
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/runtime_info.h"
+#include "video_core/buffer_cache/bda_fallback_consumption.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 
 #include <boost/container/static_vector.hpp>
@@ -16,6 +17,9 @@
 
 namespace Shader::Backend::SPIRV {
 namespace {
+
+static_assert(static_cast<u32>(LogicalStage::NumLogicalStages) ==
+              VideoCore::NumBdaFallbackLogicalStages);
 
 std::string_view StageName(Stage stage) {
     switch (stage) {
@@ -725,7 +729,7 @@ void EmitContext::DefineOutputs() {
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
     const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2]),
+                                         U32[4], U32[4], U32[4], U32[4]),
                               "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -1190,6 +1194,41 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
     OpStore(fault_ptr, fault_value_masked);
 
+    Id fallback_parent{fault_label};
+    if (VideoCore::BdaFallbackConsumptionDiagnosticEnabled()) {
+        const auto diagnostic_label{OpLabel()};
+        const auto diagnostic_merge_label{OpLabel()};
+        const auto bit_base_ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
+                                              push_data_block,
+                                              ConstU32(PushData::BdaFallbackTokenMemberIndex),
+                                              ConstU32(PushData::BdaFallbackBitBaseComponent))};
+        const auto enable_ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
+                                            push_data_block,
+                                            ConstU32(PushData::BdaFallbackTokenMemberIndex),
+                                            ConstU32(PushData::BdaFallbackEnableComponent))};
+        const auto bit_base{OpLoad(U32[1], bit_base_ptr)};
+        const auto enabled{OpLoad(U32[1], enable_ptr)};
+        const auto is_enabled{OpINotEqual(U1[1], enabled, u32_zero_value)};
+        OpSelectionMerge(diagnostic_merge_label, spv::SelectionControlMask::MaskNone);
+        OpBranchConditional(is_enabled, diagnostic_label, diagnostic_merge_label);
+
+        AddLabel(diagnostic_label);
+        const auto stage_bit{OpIAdd(U32[1], bit_base, ConstU32(static_cast<u32>(l_stage)))};
+        const auto relative_word{OpShiftRightLogical(U32[1], stage_bit, ConstU32(5U))};
+        const auto first_diagnostic_word{
+            ConstU32(static_cast<u32>(VideoCore::BufferCache::CACHING_NUMPAGES / 32))};
+        const auto diagnostic_word{OpIAdd(U32[1], first_diagnostic_word, relative_word)};
+        const auto diagnostic_bit{OpBitwiseAnd(U32[1], stage_bit, ConstU32(31U))};
+        const auto diagnostic_mask{OpShiftLeftLogical(U32[1], u32_one_value, diagnostic_bit)};
+        const auto diagnostic_ptr{
+            OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, diagnostic_word)};
+        const auto scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
+        OpAtomicOr(U32[1], diagnostic_ptr, scope, u32_zero_value, diagnostic_mask);
+        OpBranch(diagnostic_merge_label);
+        AddLabel(diagnostic_merge_label);
+        fallback_parent = diagnostic_merge_label;
+    }
+
     // Return null pointer
     const auto fallback_result{u64_zero_value};
     OpBranch(merge_label);
@@ -1202,7 +1241,7 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Merge
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    const auto result{OpPhi(U64, addr, available_label, fallback_result, fallback_parent)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;
