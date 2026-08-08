@@ -18,6 +18,25 @@ enum class InputAssemblyHostUsage : u8 {
     DeviceLocal,
 };
 
+struct InputAssemblyCaptureWindow {
+    u64 frame_start{};
+    u64 frame_count{};
+    u32 draw_start{};
+    u32 draw_count{};
+
+    [[nodiscard]] static constexpr InputAssemblyCaptureWindow Defaults() noexcept {
+        return {.frame_start = 4000, .frame_count = 1000, .draw_start = 0, .draw_count = 1152};
+    }
+
+    [[nodiscard]] constexpr bool ContainsFrame(u64 frame) const noexcept {
+        return frame >= frame_start && frame - frame_start < frame_count;
+    }
+
+    [[nodiscard]] constexpr bool ContainsDraw(u32 draw) const noexcept {
+        return draw >= draw_start && draw - draw_start < draw_count;
+    }
+};
+
 struct BoundInputAssemblySource {
     InputAssemblyBufferToken token{};
     InputAssemblyHostUsage usage{};
