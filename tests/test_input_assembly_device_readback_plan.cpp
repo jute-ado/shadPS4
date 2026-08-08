@@ -304,6 +304,25 @@ TEST(InputAssemblyDeviceReadbackPlan, ImmediateReducerComparesAcrossStreamReserv
     EXPECT_TRUE(returned.source_changed);
     EXPECT_TRUE(returned.write_serial_changed);
     EXPECT_TRUE(returned.exact_aba_return);
+    EXPECT_FALSE(returned.stable_transport_aba);
+
+    InputAssemblyImmediateReadbackReducer stable_reducer;
+    const auto stable_observe = [&](u64 sequence, const auto& bytes) {
+        return stable_reducer.Observe(InputAssemblyImmediateSnapshot{
+            .sequence = sequence,
+            .semantic = semantic,
+            .source = Buffer(9, 4),
+            .write_serial = 12,
+            .authority = InputAssemblyAuthority::GpuAuthoritative,
+            .bytes = std::span<const std::byte>{bytes},
+            .complete = true,
+        });
+    };
+    EXPECT_TRUE(stable_observe(200, a).first_observation);
+    EXPECT_TRUE(stable_observe(201, b).changed);
+    const auto stable_return = stable_observe(202, a);
+    EXPECT_TRUE(stable_return.exact_aba_return);
+    EXPECT_TRUE(stable_return.stable_transport_aba);
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, ImmediateReducerSuppressesUnknownIncompleteAndGappedEvidence) {
