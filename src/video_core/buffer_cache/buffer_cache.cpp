@@ -213,10 +213,11 @@ void BufferCache::BindVertexBuffers(
     // Map buffers for merged ranges
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
-        const bool gpu_modified = IsRegionGpuModified(range.base_address, size);
         BufferId buffer_id{};
         const auto [buffer, offset] =
             ObtainBuffer(range.base_address, size, false, false, {}, &buffer_id);
+        const auto post_obtain = AmdGpu::ResolveInputAssemblyPostObtainState(
+            IsRegionGpuModified(range.base_address, size));
         range.vk_buffer = buffer->buffer;
         range.buffer = buffer;
         range.offset = offset;
@@ -233,11 +234,10 @@ void BufferCache::BindVertexBuffers(
                 .host_size = buffer->SizeBytes(),
                 .write_serial = is_stream ? stream_buffer.CurrentReservationGeneration()
                                           : buffer->DiagnosticWriteSerial(),
-                .authority = gpu_modified ? AmdGpu::InputAssemblyAuthority::GpuAuthoritative
-                                          : AmdGpu::InputAssemblyAuthority::CpuAuthoritative,
+                .authority = post_obtain.authority,
             };
         }
-        if (gpu_modified) {
+        if (post_obtain.needs_input_barrier) {
             if (auto barrier =
                     buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
                                        vk::PipelineStageFlagBits2::eVertexAttributeInput)) {
@@ -305,10 +305,11 @@ void BufferCache::BindIndexBuffer(
 
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
-    const bool gpu_modified = IsRegionGpuModified(index_address, index_buffer_size);
     BufferId buffer_id{};
     const auto [vk_buffer, offset] =
         ObtainBuffer(index_address, index_buffer_size, false, false, {}, &buffer_id);
+    const auto post_obtain = AmdGpu::ResolveInputAssemblyPostObtainState(
+        IsRegionGpuModified(index_address, index_buffer_size));
     if (collector != nullptr &&
         (vk_buffer->usage == MemoryUsage::Stream || vk_buffer->usage == MemoryUsage::DeviceLocal)) {
         const bool is_stream = vk_buffer->usage == MemoryUsage::Stream;
@@ -322,8 +323,7 @@ void BufferCache::BindIndexBuffer(
             .host_size = vk_buffer->SizeBytes(),
             .write_serial = is_stream ? stream_buffer.CurrentReservationGeneration()
                                       : vk_buffer->DiagnosticWriteSerial(),
-            .authority = gpu_modified ? AmdGpu::InputAssemblyAuthority::GpuAuthoritative
-                                      : AmdGpu::InputAssemblyAuthority::CpuAuthoritative,
+            .authority = post_obtain.authority,
         };
         if (const auto normalized = AmdGpu::NormalizeIndexInputRange(
                 source, 0, index_size, regs.num_indices,
@@ -331,7 +331,7 @@ void BufferCache::BindIndexBuffer(
             collector->push_back({.buffer = vk_buffer, .range = *normalized});
         }
     }
-    if (gpu_modified) {
+    if (post_obtain.needs_input_barrier) {
         if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
                                                  vk::PipelineStageFlagBits2::eIndexInput)) {
             barriers.emplace_back(*barrier);

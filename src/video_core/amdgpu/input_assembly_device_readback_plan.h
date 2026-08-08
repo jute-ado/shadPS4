@@ -46,6 +46,20 @@ struct BoundInputAssemblySource {
     InputAssemblyAuthority authority{InputAssemblyAuthority::Unknown};
 };
 
+struct InputAssemblyPostObtainState {
+    bool needs_input_barrier{};
+    InputAssemblyAuthority authority{InputAssemblyAuthority::CpuAuthoritative};
+};
+
+[[nodiscard]] constexpr InputAssemblyPostObtainState ResolveInputAssemblyPostObtainState(
+    bool gpu_modified_after_obtain) noexcept {
+    return {
+        .needs_input_barrier = gpu_modified_after_obtain,
+        .authority = gpu_modified_after_obtain ? InputAssemblyAuthority::GpuAuthoritative
+                                              : InputAssemblyAuthority::CpuAuthoritative,
+    };
+}
+
 struct NormalizedInputAssemblyRange {
     InputAssemblySemanticOrdinal semantic{};
     InputAssemblyBufferToken source{};
