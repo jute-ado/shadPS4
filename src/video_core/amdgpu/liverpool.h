@@ -19,6 +19,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/input_assembly_device_readback_plan.h"
 #include "video_core/amdgpu/regs.h"
 
 namespace Vulkan {
@@ -96,6 +97,30 @@ public:
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
     }
+
+    [[nodiscard]] bool IsInputAssemblyDeviceIntegrityEnabled() const noexcept {
+        return input_assembly_integrity_enabled;
+    }
+
+    [[nodiscard]] bool IsInputAssemblyDeviceIntegrityCollecting() const noexcept {
+        return input_assembly_integrity_enabled &&
+               input_assembly_capture_window.ContainsFrame(input_assembly_frame_sequence);
+    }
+
+    [[nodiscard]] bool ShouldCaptureInputAssemblyDraw(u32 draw) const noexcept {
+        return input_assembly_capture_window.ContainsDraw(draw);
+    }
+
+    [[nodiscard]] u64 CurrentInputAssemblyFrameSequence() const noexcept {
+        return input_assembly_frame_sequence;
+    }
+
+    [[nodiscard]] const InputAssemblyCaptureWindow& InputAssemblyDeviceIntegrityWindow() const
+        noexcept {
+        return input_assembly_capture_window;
+    }
+
+    void ReportInputAssemblyDeviceIntegrityFrame(u64 process_time_us);
 
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
@@ -203,6 +228,9 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    u64 input_assembly_frame_sequence{};
+    InputAssemblyCaptureWindow input_assembly_capture_window{InputAssemblyCaptureWindow::Defaults()};
+    bool input_assembly_integrity_enabled{};
     EopFlipTracker eop_flip_tracker;
 
     struct ConstantEngine {

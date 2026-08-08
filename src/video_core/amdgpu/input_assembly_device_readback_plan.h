@@ -436,6 +436,58 @@ private:
     bool claimed{};
 };
 
+class InputAssemblyReadbackSlotPool {
+public:
+    static constexpr u32 MaxSlots = 8;
+
+    struct Token {
+        u32 slot{MaxSlots};
+        u32 generation{};
+
+        auto operator<=>(const Token&) const = default;
+
+        [[nodiscard]] constexpr explicit operator bool() const noexcept {
+            return slot < MaxSlots && generation != 0;
+        }
+    };
+
+    [[nodiscard]] std::optional<Token> TryAcquire() noexcept {
+        for (u32 slot = 0; slot < MaxSlots; ++slot) {
+            auto& entry = entries[slot];
+            if (entry.acquired) {
+                continue;
+            }
+            ++entry.generation;
+            if (entry.generation == 0) {
+                ++entry.generation;
+            }
+            entry.acquired = true;
+            return Token{.slot = slot, .generation = entry.generation};
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] bool ReleaseAfterCpuConsume(Token token) noexcept {
+        if (!token) {
+            return false;
+        }
+        auto& entry = entries[token.slot];
+        if (!entry.acquired || entry.generation != token.generation) {
+            return false;
+        }
+        entry.acquired = false;
+        return true;
+    }
+
+private:
+    struct Entry {
+        u32 generation{};
+        bool acquired{};
+    };
+
+    std::array<Entry, MaxSlots> entries{};
+};
+
 struct InputAssemblyImmediateSnapshot {
     u64 sequence{};
     InputAssemblySemanticOrdinal semantic{};
@@ -450,6 +502,7 @@ struct InputAssemblyImmediateChange {
     bool first_observation{};
     bool changed{};
     bool exact_aba_return{};
+    bool stable_transport_aba{};
     bool source_changed{};
     bool write_serial_changed{};
     bool authority_ambiguous{};
@@ -468,16 +521,22 @@ public:
 
     [[nodiscard]] InputAssemblyImmediateChange Observe(
         const InputAssemblyImmediateSnapshot& snapshot) noexcept {
-        if (snapshot.bytes.empty() || snapshot.bytes.size() > MaxSnapshotBytes) {
-            return {.capacity_exceeded = true};
-        }
-
         Entry* entry{};
         for (u32 i = 0; i < count; ++i) {
             if (entries[i].semantic == snapshot.semantic) {
                 entry = &entries[i];
                 break;
             }
+        }
+        if (!snapshot.complete) {
+            if (entry != nullptr) {
+                ClearBaseline(*entry);
+                entry->observed = true;
+            }
+            return {.incomplete = true};
+        }
+        if (snapshot.bytes.empty() || snapshot.bytes.size() > MaxSnapshotBytes) {
+            return {.capacity_exceeded = true};
         }
         if (entry == nullptr) {
             if (count >= MaxEntries) {
@@ -487,11 +546,6 @@ public:
             entry->semantic = snapshot.semantic;
         }
 
-        if (!snapshot.complete) {
-            ClearBaseline(*entry);
-            entry->observed = true;
-            return {.incomplete = true};
-        }
         if (snapshot.authority == InputAssemblyAuthority::Unknown) {
             ClearBaseline(*entry);
             entry->observed = true;
@@ -525,6 +579,11 @@ public:
             entry->previous_previous_sequence <= std::numeric_limits<u64>::max() - 2 &&
             entry->previous_previous_sequence + 2 == snapshot.sequence &&
             std::ranges::equal(previous_previous, snapshot.bytes);
+        const bool stable_transport_aba =
+            exact_aba && entry->source == snapshot.source &&
+            entry->previous_previous_source == snapshot.source &&
+            entry->write_serial == snapshot.write_serial &&
+            entry->previous_previous_write_serial == snapshot.write_serial;
         const bool source_changed = entry->source != snapshot.source;
         const bool write_serial_changed = entry->write_serial != snapshot.write_serial;
 
@@ -532,6 +591,8 @@ public:
         std::copy_n(entry->previous.begin(), entry->previous_size,
                     entry->previous_previous.begin());
         entry->previous_previous_sequence = entry->last_sequence;
+        entry->previous_previous_source = entry->source;
+        entry->previous_previous_write_serial = entry->write_serial;
         entry->has_previous_previous = true;
         entry->previous_size = static_cast<u32>(snapshot.bytes.size());
         std::ranges::copy(snapshot.bytes, entry->previous.begin());
@@ -541,6 +602,7 @@ public:
         return {
             .changed = changed,
             .exact_aba_return = exact_aba,
+            .stable_transport_aba = stable_transport_aba,
             .source_changed = source_changed,
             .write_serial_changed = write_serial_changed,
         };
@@ -557,7 +619,9 @@ private:
     struct Entry {
         InputAssemblySemanticOrdinal semantic{};
         InputAssemblyBufferToken source{};
+        InputAssemblyBufferToken previous_previous_source{};
         u64 write_serial{};
+        u64 previous_previous_write_serial{};
         u64 previous_previous_sequence{};
         u64 last_sequence{};
         InputAssemblyAuthority authority{InputAssemblyAuthority::Unknown};

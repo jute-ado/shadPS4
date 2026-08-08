@@ -3,6 +3,11 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <charconv>
+#include <cstdlib>
+#include <limits>
+#include <string_view>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -68,12 +73,60 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    const char* input_integrity = std::getenv("SHADPS4_INPUT_ASSEMBLY_DEVICE_INTEGRITY");
+    input_assembly_integrity_enabled =
+        input_integrity != nullptr && std::string_view{input_integrity} == "1";
+    if (input_assembly_integrity_enabled) {
+        const auto parse_bound = [](const char* name, u64 fallback, u64 maximum) {
+            const char* value = std::getenv(name);
+            if (value == nullptr) {
+                return fallback;
+            }
+            const std::string_view text{value};
+            u64 parsed{};
+            const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+            if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
+                return fallback;
+            }
+            return std::min(parsed, maximum);
+        };
+        const auto defaults = InputAssemblyCaptureWindow::Defaults();
+        input_assembly_capture_window.frame_start = parse_bound(
+            "SHADPS4_INPUT_ASSEMBLY_FRAME_START", defaults.frame_start,
+            std::numeric_limits<u64>::max());
+        input_assembly_capture_window.frame_count = parse_bound(
+            "SHADPS4_INPUT_ASSEMBLY_FRAME_COUNT", defaults.frame_count, 4096);
+        input_assembly_capture_window.draw_start = static_cast<u32>(parse_bound(
+            "SHADPS4_INPUT_ASSEMBLY_DRAW_START", defaults.draw_start,
+            std::numeric_limits<u32>::max()));
+        input_assembly_capture_window.draw_count = static_cast<u32>(parse_bound(
+            "SHADPS4_INPUT_ASSEMBLY_DRAW_COUNT", defaults.draw_count,
+            InputAssemblyDeviceReadbackPlanner::MaxSemanticsPerFrame));
+        LOG_INFO(Render,
+                 "InputAssemblyDeviceIntegrityConfig enabled=1 frame_start={} frame_count={} "
+                 "draw_start={} draw_count={} samples_per_frame={} bytes_per_frame={}",
+                 input_assembly_capture_window.frame_start,
+                 input_assembly_capture_window.frame_count,
+                 input_assembly_capture_window.draw_start,
+                 input_assembly_capture_window.draw_count,
+                 InputAssemblyDeviceReadbackPlanner::MaxSamplesPerFrame,
+                 InputAssemblyDeviceReadbackPlanner::MaxSampleBytesPerFrame);
+    }
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+}
+
+void Liverpool::ReportInputAssemblyDeviceIntegrityFrame(u64 process_time_us) {
+    if (!input_assembly_integrity_enabled || rasterizer == nullptr) {
+        return;
+    }
+    const u64 sequence = input_assembly_frame_sequence++;
+    rasterizer->CloseInputAssemblyDeviceIntegrityFrame(
+        sequence, process_time_us, input_assembly_capture_window.ContainsFrame(sequence));
 }
 
 void Liverpool::ProcessCommands() {

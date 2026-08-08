@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <cstddef>
+#include <cstring>
+#include <string>
+
+#include "common/alignment.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
@@ -21,6 +28,416 @@
 
 namespace Vulkan {
 
+class InputAssemblyDeviceIntegrityState {
+public:
+    static constexpr u32 RingFrameSlots = AmdGpu::InputAssemblyReadbackSlotPool::MaxSlots;
+    static constexpr u64 FrameSlotBytes =
+        AmdGpu::InputAssemblyDeviceReadbackPlanner::MaxSampleBytesPerFrame;
+
+    [[nodiscard]] static u64 SlotStride(const Instance& instance) noexcept {
+        return Common::AlignUp(FrameSlotBytes, instance.NonCoherentAtomSize());
+    }
+
+    InputAssemblyDeviceIntegrityState(const Instance& instance_, Scheduler& scheduler_,
+                                      AmdGpu::InputAssemblyCaptureWindow window_)
+        : instance{instance_}, scheduler{scheduler_},
+          download{instance, scheduler, VideoCore::MemoryUsage::Download, 0,
+                   vk::BufferUsageFlagBits::eTransferDst, SlotStride(instance) * RingFrameSlots},
+          window{window_}, slot_stride{SlotStride(instance)} {
+        ASSERT(download.mapped_data.size() >= slot_stride * RingFrameSlots);
+    }
+
+    void Capture(u64 sequence, const VideoCore::InputAssemblyBufferBindings& bindings) {
+        if (!frame_active) {
+            planner.BeginFrame(sequence);
+            frame_active = true;
+            open_sequence = sequence;
+        }
+        if (sequence != open_sequence || busy) {
+            busy = true;
+            return;
+        }
+
+        for (const auto& binding : bindings) {
+            const auto decision = planner.Plan(binding.range);
+            if (!decision.accepted || decision.new_copy_count == 0) {
+                continue;
+            }
+            if (!EnsureFrameSlot()) {
+                busy = true;
+                return;
+            }
+            CopySamples(binding.buffer, binding.range, decision, bindings);
+        }
+    }
+
+    void Close(u64 sequence, u64 process_time_us, bool selected) {
+        if (!selected) {
+            if (!frame_active || copied_samples == 0) {
+                if (slot_active) {
+                    ReleaseSlotAfterCpuConsume();
+                }
+                ResetFrame();
+                return;
+            }
+            busy = true;
+        }
+        if (!frame_active) {
+            LOG_INFO(Render,
+                     "InputAssemblyDeviceIntegrity sequence={} process_time_us={} draws={} "
+                     "semantics=0 samples=0 "
+                     "bytes=0 first=0 unchanged=0 changed=0 content_aba=0 "
+                     "stable_transport_aba=0 source_changed=0 "
+                     "serial_changed=0 authority_ambiguous=0 gap=0 incomplete=0 busy=0 "
+                     "invalidation_failed=0 complete=1 frame_start={} frame_count={} draw_start={} "
+                     "draw_count={} invalid=0 source_conflict=0 sample_loss=0 byte_loss=0 "
+                     "semantic_loss=0",
+                     sequence, process_time_us, last_draw_count, window.frame_start,
+                     window.frame_count, window.draw_start, window.draw_count);
+            return;
+        }
+
+        auto plan = planner.EndFrame();
+        plan.complete &= !busy && sequence == open_sequence;
+        const bool has_copies = slot_active && copied_samples != 0;
+        if (has_copies) {
+            scheduler.EndRendering();
+            const auto cmdbuf = scheduler.CommandBuffer();
+            const vk::BufferMemoryBarrier2 barrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+                .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+                .buffer = download.Handle(),
+                .offset = slot_offset,
+                .size = slot_stride,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &barrier,
+            });
+            auto* const mapped = slot_mapping;
+            const u64 mapped_offset = slot_offset;
+            const auto slot_token = active_slot;
+            scheduler.DeferOperation(
+                [this, mapped, mapped_offset, plan = std::move(plan), process_time_us, busy = busy,
+                 copied_samples = copied_samples, draw_count = last_draw_count,
+                 slot_token]() mutable {
+                    const bool invalidation_failed =
+                        !download.InvalidateMappedRange(mapped_offset, slot_stride);
+                    if (invalidation_failed) {
+                        plan.complete = false;
+                    }
+                    ReduceAndReport(mapped, plan, process_time_us, draw_count, busy,
+                                    invalidation_failed, copied_samples);
+                    if (!slot_pool.ReleaseAfterCpuConsume(slot_token)) {
+                        LOG_ERROR(Render,
+                                  "InputAssemblyDeviceIntegrity slot_release_failed=1 sequence={}",
+                                  plan.sequence);
+                    }
+                });
+        } else {
+            if (slot_active) {
+                ReleaseSlotAfterCpuConsume();
+            }
+            ReduceAndReport(nullptr, plan, process_time_us, last_draw_count, busy, false, 0);
+        }
+        ResetFrame();
+    }
+
+private:
+    [[nodiscard]] bool EnsureFrameSlot() {
+        if (slot_active) {
+            return true;
+        }
+        const auto token = slot_pool.TryAcquire();
+        if (!token.has_value()) {
+            return false;
+        }
+        active_slot = *token;
+        slot_offset = u64{active_slot.slot} * slot_stride;
+        slot_mapping = download.mapped_data.data() + slot_offset;
+        slot_active = true;
+        return true;
+    }
+
+    void ReleaseSlotAfterCpuConsume() noexcept {
+        if (slot_active && !slot_pool.ReleaseAfterCpuConsume(active_slot)) {
+            LOG_ERROR(Render, "InputAssemblyDeviceIntegrity slot_release_failed=1 sequence={}",
+                      open_sequence);
+        }
+    }
+
+    void CopySamples(VideoCore::Buffer* source,
+                     const AmdGpu::NormalizedInputAssemblyRange& range,
+                     const AmdGpu::InputAssemblyCaptureDecision& decision,
+                     const VideoCore::InputAssemblyBufferBindings& bindings) {
+        if (source == nullptr) {
+            busy = true;
+            return;
+        }
+        bool vertex{};
+        bool index{};
+        for (const auto& binding : bindings) {
+            if (binding.buffer != source) {
+                continue;
+            }
+            vertex |= binding.range.semantic.kind == AmdGpu::InputAssemblySourceKind::Vertex;
+            index |= binding.range.semantic.kind == AmdGpu::InputAssemblySourceKind::Index;
+        }
+
+        const auto original_access = source->access_mask;
+        const auto original_stage = source->stage;
+        const auto barrier_plan = AmdGpu::MakeInputAssemblyCopyBarrierPlan(
+            range.usage, vertex, index);
+        ASSERT(barrier_plan.copy_reads_source);
+        vk::PipelineStageFlags2 pre_stage = original_stage;
+        vk::AccessFlags2 pre_access = original_access;
+        if (barrier_plan.PreSourceHas(AmdGpu::InputAssemblyCopyAccess::MemoryWrite)) {
+            pre_access |= vk::AccessFlagBits2::eMemoryWrite;
+        }
+        if (barrier_plan.PreSourceHas(AmdGpu::InputAssemblyCopyAccess::TransferWrite)) {
+            pre_stage |= vk::PipelineStageFlagBits2::eTransfer;
+            pre_access |= vk::AccessFlagBits2::eTransferWrite;
+        }
+        if (barrier_plan.PreSourceHas(AmdGpu::InputAssemblyCopyAccess::HostWrite)) {
+            pre_stage |= vk::PipelineStageFlagBits2::eHost;
+            pre_access |= vk::AccessFlagBits2::eHostWrite;
+        }
+        if (barrier_plan.PreSourceHas(AmdGpu::InputAssemblyCopyAccess::ShaderWrite)) {
+            pre_stage |= vk::PipelineStageFlagBits2::eAllCommands;
+            pre_access |= vk::AccessFlagBits2::eShaderWrite;
+        }
+
+        scheduler.EndRendering();
+        const auto cmdbuf = scheduler.CommandBuffer();
+        boost::container::static_vector<vk::BufferMemoryBarrier2, 2> pre_barriers;
+        pre_barriers.push_back({
+            .srcStageMask = pre_stage,
+            .srcAccessMask = pre_access,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .buffer = source->Handle(),
+            .offset = 0,
+            .size = source->SizeBytes(),
+        });
+        source->stage = vk::PipelineStageFlagBits2::eTransfer;
+        source->access_mask = vk::AccessFlagBits2::eTransferRead;
+        if (!destination_started) {
+            pre_barriers.push_back({
+                .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+                .srcAccessMask = vk::AccessFlagBits2::eHostRead,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .buffer = download.Handle(),
+                .offset = slot_offset,
+                .size = slot_stride,
+            });
+            destination_started = true;
+        }
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+            .pBufferMemoryBarriers = pre_barriers.data(),
+        });
+
+        boost::container::static_vector<vk::BufferCopy, 3> copies;
+        const auto& plan = planner.CurrentFrame();
+        for (u32 i = 0; i < decision.new_copy_count; ++i) {
+            const auto& sample = plan.samples[decision.new_copy_indices[i]];
+            copies.push_back({
+                .srcOffset = sample.source_offset,
+                .dstOffset = slot_offset + sample.destination_offset,
+                .size = sample.size,
+            });
+        }
+        cmdbuf.copyBuffer(source->Handle(), download.Handle(), copies);
+        copied_samples += decision.new_copy_count;
+
+        vk::AccessFlags2 restore_access = original_access;
+        vk::PipelineStageFlags2 restore_stage = original_stage;
+        if (barrier_plan.PostSourceHas(AmdGpu::InputAssemblyCopyAccess::VertexRead)) {
+            restore_access |= vk::AccessFlagBits2::eVertexAttributeRead;
+            restore_stage |= vk::PipelineStageFlagBits2::eVertexAttributeInput;
+        }
+        if (barrier_plan.PostSourceHas(AmdGpu::InputAssemblyCopyAccess::IndexRead)) {
+            restore_access |= vk::AccessFlagBits2::eIndexRead;
+            restore_stage |= vk::PipelineStageFlagBits2::eIndexInput;
+        }
+        const vk::BufferMemoryBarrier2 post_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = restore_stage,
+            .dstAccessMask = restore_access,
+            .buffer = source->Handle(),
+            .offset = 0,
+            .size = source->SizeBytes(),
+        };
+        source->stage = restore_stage;
+        source->access_mask = restore_access;
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &post_barrier,
+        });
+    }
+
+    void ReduceAndReport(const u8* mapped, const AmdGpu::InputAssemblyReadbackFramePlan& plan,
+                         u64 process_time_us, u32 draw_count, bool was_busy,
+                         bool invalidation_failed, u32 completed_samples) {
+        u32 first{};
+        u32 unchanged{};
+        u32 changed{};
+        u32 aba{};
+        u32 stable_transport_aba{};
+        u32 source_changed{};
+        u32 serial_changed{};
+        u32 authority_ambiguous{};
+        u32 gap{};
+        u32 incomplete{};
+        std::string changed_ordinals;
+        std::string aba_ordinals;
+        std::string stable_transport_aba_ordinals;
+        const auto append_ordinal = [](std::string& text,
+                                       const AmdGpu::InputAssemblySemanticOrdinal& semantic) {
+            if (text.size() >= 160) {
+                return;
+            }
+            if (!text.empty()) {
+                text += ',';
+            }
+            text += std::to_string(semantic.draw) + ':' +
+                    std::to_string(static_cast<u32>(semantic.kind)) + ':' +
+                    std::to_string(semantic.binding);
+        };
+
+        for (const auto& semantic : plan.semantics) {
+            std::array<std::byte, AmdGpu::InputAssemblyImmediateReadbackReducer::MaxSnapshotBytes>
+                bytes{};
+            u32 byte_count{};
+            bool valid = mapped != nullptr && plan.complete;
+            const AmdGpu::InputAssemblyReadbackSample* metadata{};
+            for (u32 i = 0; i < semantic.reference_count; ++i) {
+                const auto& reference = semantic.references[i];
+                if (reference.sample_index >= plan.sample_count ||
+                    reference.size > bytes.size() - byte_count) {
+                    valid = false;
+                    break;
+                }
+                const auto& sample = plan.samples[reference.sample_index];
+                metadata = metadata == nullptr ? &sample : metadata;
+                if (sample.source != metadata->source || sample.write_serial != metadata->write_serial ||
+                    sample.authority != metadata->authority ||
+                    reference.destination_offset > plan.sample_bytes ||
+                    reference.size > plan.sample_bytes - reference.destination_offset) {
+                    valid = false;
+                    break;
+                }
+                if (mapped != nullptr && plan.complete) {
+                    std::memcpy(bytes.data() + byte_count, mapped + reference.destination_offset,
+                                reference.size);
+                }
+                byte_count += reference.size;
+            }
+            if (metadata == nullptr) {
+                valid = false;
+                static constexpr AmdGpu::InputAssemblyReadbackSample empty_metadata{};
+                metadata = &empty_metadata;
+            }
+            const auto result = reducer.Observe({
+                .sequence = plan.sequence,
+                .semantic = semantic.semantic,
+                .source = metadata->source,
+                .write_serial = metadata->write_serial,
+                .authority = metadata->authority,
+                .bytes = std::span<const std::byte>{bytes.data(), byte_count},
+                .complete = valid,
+            });
+            first += result.first_observation;
+            changed += result.changed;
+            aba += result.exact_aba_return;
+            stable_transport_aba += result.stable_transport_aba;
+            source_changed += result.source_changed;
+            serial_changed += result.write_serial_changed;
+            authority_ambiguous += result.authority_ambiguous;
+            gap += result.sequence_gap;
+            incomplete += result.incomplete || result.capacity_exceeded || result.baseline_reset;
+            const bool comparable = !result.first_observation && !result.authority_ambiguous &&
+                                    !result.sequence_gap && !result.incomplete &&
+                                    !result.capacity_exceeded && !result.baseline_reset;
+            unchanged += comparable && !result.changed;
+            if (result.changed) {
+                append_ordinal(changed_ordinals, semantic.semantic);
+            }
+            if (result.exact_aba_return) {
+                append_ordinal(aba_ordinals, semantic.semantic);
+            }
+            if (result.stable_transport_aba) {
+                append_ordinal(stable_transport_aba_ordinals, semantic.semantic);
+            }
+        }
+        LOG_INFO(Render,
+                 "InputAssemblyDeviceIntegrity sequence={} process_time_us={} draws={} "
+                 "semantics={} samples={} "
+                 "bytes={} completed_samples={} first={} unchanged={} changed={} "
+                 "changed_ordinals={} content_aba={} content_aba_ordinals={} "
+                 "stable_transport_aba={} stable_transport_aba_ordinals={} source_changed={} "
+                 "serial_changed={} authority_ambiguous={} gap={} incomplete={} busy={} "
+                 "invalidation_failed={} complete={} frame_start={} frame_count={} draw_start={} "
+                 "draw_count={} invalid={} source_conflict={} sample_loss={} byte_loss={} "
+                 "semantic_loss={}",
+                 plan.sequence, process_time_us, draw_count, plan.semantic_count,
+                 plan.sample_count,
+                 plan.sample_bytes, completed_samples, first, unchanged, changed, changed_ordinals,
+                 aba, aba_ordinals, stable_transport_aba, stable_transport_aba_ordinals,
+                 source_changed, serial_changed, authority_ambiguous, gap,
+                 incomplete, was_busy, invalidation_failed,
+                 plan.complete && !was_busy && !invalidation_failed &&
+                     completed_samples == plan.sample_count,
+                 window.frame_start, window.frame_count, window.draw_start, window.draw_count,
+                 plan.loss.invalid_range, plan.loss.source_conflict, plan.loss.sample_capacity,
+                 plan.loss.byte_capacity, plan.loss.semantic_capacity);
+    }
+
+    void ResetFrame() noexcept {
+        frame_active = false;
+        busy = false;
+        slot_active = false;
+        destination_started = false;
+        slot_mapping = nullptr;
+        slot_offset = 0;
+        active_slot = {};
+        copied_samples = 0;
+        last_draw_count = 0;
+    }
+
+public:
+    void SetDrawCount(u32 count) noexcept {
+        last_draw_count = count;
+    }
+
+private:
+    const Instance& instance;
+    Scheduler& scheduler;
+    VideoCore::Buffer download;
+    AmdGpu::InputAssemblyDeviceReadbackPlanner planner;
+    AmdGpu::InputAssemblyImmediateReadbackReducer reducer;
+    AmdGpu::InputAssemblyCaptureWindow window{};
+    AmdGpu::InputAssemblyReadbackSlotPool slot_pool{};
+    AmdGpu::InputAssemblyReadbackSlotPool::Token active_slot{};
+    u64 slot_stride{};
+    u8* slot_mapping{};
+    u64 slot_offset{};
+    u64 open_sequence{};
+    u32 copied_samples{};
+    u32 last_draw_count{};
+    bool frame_active{};
+    bool busy{};
+    bool slot_active{};
+    bool destination_started{};
+};
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -39,6 +456,11 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
+    if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+        input_assembly_integrity =
+            std::make_unique<InputAssemblyDeviceIntegrityState>(
+                instance, scheduler, liverpool->InputAssemblyDeviceIntegrityWindow());
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -207,12 +629,23 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    VideoCore::InputAssemblyBufferBindings input_bindings;
+    const bool capture_input = input_assembly_integrity != nullptr &&
+                               liverpool->IsInputAssemblyDeviceIntegrityCollecting() &&
+                               liverpool->ShouldCaptureInputAssemblyDraw(input_assembly_draw_ordinal);
+    auto* const input_collector = capture_input ? &input_bindings : nullptr;
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, input_collector,
+                                   input_assembly_draw_ordinal);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers, input_collector,
+                                     input_assembly_draw_ordinal);
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
+    if (capture_input) {
+        input_assembly_integrity->Capture(liverpool->CurrentInputAssemblyFrameSequence(),
+                                          input_bindings);
+    }
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
@@ -231,6 +664,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
+    ++input_assembly_draw_ordinal;
     ResetBindings();
 }
 
@@ -255,9 +689,16 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    VideoCore::InputAssemblyBufferBindings input_bindings;
+    const bool capture_input = input_assembly_integrity != nullptr &&
+                               liverpool->IsInputAssemblyDeviceIntegrityCollecting() &&
+                               liverpool->ShouldCaptureInputAssemblyDraw(input_assembly_draw_ordinal);
+    auto* const input_collector = capture_input ? &input_bindings : nullptr;
+    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers, input_collector,
+                                   input_assembly_draw_ordinal);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
+        buffer_cache.BindIndexBuffer(0, buffer_barriers, input_collector,
+                                     input_assembly_draw_ordinal);
     }
 
     const auto& [buffer, base] =
@@ -281,6 +722,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
+    if (capture_input) {
+        input_assembly_integrity->Capture(liverpool->CurrentInputAssemblyFrameSequence(),
+                                          input_bindings);
+    }
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
@@ -310,7 +755,17 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
+    ++input_assembly_draw_ordinal;
     ResetBindings();
+}
+
+void Rasterizer::CloseInputAssemblyDeviceIntegrityFrame(u64 sequence, u64 process_time_us,
+                                                        bool selected) {
+    if (input_assembly_integrity != nullptr) {
+        input_assembly_integrity->SetDrawCount(input_assembly_draw_ordinal);
+        input_assembly_integrity->Close(sequence, process_time_us, selected);
+    }
+    input_assembly_draw_ordinal = 0;
 }
 
 void Rasterizer::DispatchDirect() {

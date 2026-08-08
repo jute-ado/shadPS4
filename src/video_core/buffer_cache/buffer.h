@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <optional>
 #include <utility>
@@ -126,7 +127,7 @@ public:
     }
 
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
-                                                       vk::PipelineStageFlagBits2 dst_stage,
+                                                       vk::PipelineStageFlags2 dst_stage,
                                                        u32 offset = 0) {
         if (dst_acess_mask == access_mask && stage == dst_stage) {
             return {};
@@ -149,6 +150,19 @@ public:
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
+    [[nodiscard]] bool InvalidateMappedRange(u64 offset, u64 size);
+
+    void MarkDiagnosticWrite() noexcept {
+        ++diagnostic_write_serial;
+    }
+
+    [[nodiscard]] u64 DiagnosticWriteSerial() const noexcept {
+        return diagnostic_write_serial;
+    }
+
+    [[nodiscard]] u32 DiagnosticLifetimeGeneration() const noexcept {
+        return diagnostic_lifetime_generation;
+    }
 
 public:
     VAddr cpu_addr = 0;
@@ -166,7 +180,9 @@ public:
     vk::Flags<vk::AccessFlagBits2> access_mask{
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
         vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
-    vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    vk::PipelineStageFlags2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    u64 diagnostic_write_serial{1};
+    u32 diagnostic_lifetime_generation{};
 };
 
 class StreamBuffer : public Buffer {
@@ -179,6 +195,10 @@ public:
 
     /// Ensures that reserved bytes of memory are available to the GPU.
     void Commit();
+
+    [[nodiscard]] u32 CurrentReservationGeneration() const noexcept {
+        return reservation_generation;
+    }
 
     /// Maps and commits a memory region with user provided data
     u64 Copy(auto src, size_t size, size_t alignment = 0) {
@@ -215,6 +235,7 @@ private:
     std::vector<Watch> previous_watches;
     std::size_t wait_cursor{};
     u64 wait_bound{};
+    u32 reservation_generation{};
 };
 
 } // namespace VideoCore

@@ -13,6 +13,18 @@
 
 namespace VideoCore {
 
+namespace {
+std::atomic<u32> next_diagnostic_buffer_generation{1};
+
+u32 AllocateDiagnosticBufferGeneration() noexcept {
+    u32 generation = next_diagnostic_buffer_generation.fetch_add(1, std::memory_order_relaxed);
+    if (generation == 0) {
+        generation = next_diagnostic_buffer_generation.fetch_add(1, std::memory_order_relaxed);
+    }
+    return generation;
+}
+} // namespace
+
 std::string_view BufferTypeName(MemoryUsage type) {
     switch (type) {
     case MemoryUsage::Upload:
@@ -103,7 +115,8 @@ void UniqueBuffer::Create(const vk::BufferCreateInfo& buffer_ci, MemoryUsage usa
 Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_, MemoryUsage usage_,
                VAddr cpu_addr_, vk::BufferUsageFlags flags, u64 size_bytes_)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, instance{&instance_}, scheduler{&scheduler_},
-      usage{usage_}, buffer{instance->GetDevice(), instance->GetAllocator()} {
+      usage{usage_}, buffer{instance->GetDevice(), instance->GetAllocator()},
+      diagnostic_lifetime_generation{AllocateDiagnosticBufferGeneration()} {
     // Create buffer object.
     const vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
@@ -125,6 +138,7 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 }
 
 void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
+    MarkDiagnosticWrite();
     scheduler->EndRendering();
     ASSERT_MSG(offset % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer size must be a multiple of 4 bytes");
@@ -158,6 +172,12 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &post_barrier,
     });
+}
+
+bool Buffer::InvalidateMappedRange(u64 offset, u64 size) {
+    return is_coherent ||
+           vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset, size) ==
+               VK_SUCCESS;
 }
 
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
@@ -203,6 +223,11 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
     const u64 mapped_upper_bound = offset + size;
     if (!WaitPendingOperations(mapped_upper_bound, allow_wait)) {
         return {nullptr, 0};
+    }
+
+    ++reservation_generation;
+    if (reservation_generation == 0) {
+        ++reservation_generation;
     }
 
     return {mapped_data.data() + offset, offset};

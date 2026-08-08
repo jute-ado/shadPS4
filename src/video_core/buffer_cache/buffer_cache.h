@@ -4,6 +4,7 @@
 #pragma once
 
 #include <boost/container/small_vector.hpp>
+#include <boost/container/static_vector.hpp>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
@@ -12,6 +13,7 @@
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/amdgpu/input_assembly_device_readback_plan.h"
 #include "video_core/multi_level_page_table.h"
 
 namespace AmdGpu {
@@ -33,6 +35,13 @@ using BufferId = Common::SlotId;
 class TextureCache;
 class MemoryTracker;
 class PageManager;
+
+struct InputAssemblyBufferBinding {
+    Buffer* buffer{};
+    AmdGpu::NormalizedInputAssemblyRange range{};
+};
+
+using InputAssemblyBufferBindings = boost::container::static_vector<InputAssemblyBufferBinding, 33>;
 
 class BufferCache {
 public:
@@ -113,11 +122,13 @@ public:
 
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
-                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+                           InputAssemblyBufferBindings* collector = nullptr, u32 draw = 0);
 
     /// Bind host index buffer for the current draw.
     void BindIndexBuffer(u32 index_offset,
-                         boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+                         boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+                         InputAssemblyBufferBindings* collector = nullptr, u32 draw = 0);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
@@ -128,7 +139,8 @@ public:
     /// Obtains a buffer for the specified region.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
-                                                       BufferId buffer_id = {});
+                                                       BufferId buffer_id = {},
+                                                       BufferId* resolved_id = nullptr);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBufferForImage(VAddr gpu_addr, u32 size);

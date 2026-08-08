@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -23,6 +24,7 @@ namespace Vulkan {
 class Scheduler;
 class RenderState;
 class GraphicsPipeline;
+class InputAssemblyDeviceIntegrityState;
 
 class Rasterizer {
 public:
@@ -45,6 +47,7 @@ public:
     void Draw(bool is_indexed, u32 index_offset = 0);
     void DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 size, u32 max_count,
                       VAddr count_address);
+    void CloseInputAssemblyDeviceIntegrityFrame(u64 sequence, u64 process_time_us, bool selected);
 
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
@@ -147,6 +150,8 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+    std::unique_ptr<InputAssemblyDeviceIntegrityState> input_assembly_integrity;
+    u32 input_assembly_draw_ordinal{};
 };
 
 } // namespace Vulkan

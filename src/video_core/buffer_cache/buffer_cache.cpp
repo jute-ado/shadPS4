@@ -151,7 +151,8 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 
 void BufferCache::BindVertexBuffers(
     const Vulkan::GraphicsPipeline& pipeline,
-    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    InputAssemblyBufferBindings* collector, u32 draw) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -175,7 +176,9 @@ void BufferCache::BindVertexBuffers(
         VAddr base_address;
         VAddr end_address;
         vk::Buffer vk_buffer;
+        Buffer* buffer{};
         u64 offset;
+        AmdGpu::BoundInputAssemblySource diagnostic_source{};
 
         [[nodiscard]] size_t GetSize() const {
             return end_address - base_address;
@@ -210,10 +213,31 @@ void BufferCache::BindVertexBuffers(
     // Map buffers for merged ranges
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
-        const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
+        const bool gpu_modified = IsRegionGpuModified(range.base_address, size);
+        BufferId buffer_id{};
+        const auto [buffer, offset] =
+            ObtainBuffer(range.base_address, size, false, false, {}, &buffer_id);
         range.vk_buffer = buffer->buffer;
+        range.buffer = buffer;
         range.offset = offset;
-        if (IsRegionGpuModified(range.base_address, size)) {
+        if (collector != nullptr &&
+            (buffer->usage == MemoryUsage::Stream || buffer->usage == MemoryUsage::DeviceLocal)) {
+            const bool is_stream = buffer->usage == MemoryUsage::Stream;
+            range.diagnostic_source = {
+                .token = {.slot = is_stream ? Common::SlotId::INVALID_INDEX : buffer_id.index,
+                          .generation = is_stream ? stream_buffer.CurrentReservationGeneration()
+                                                  : buffer->DiagnosticLifetimeGeneration()},
+                .usage = is_stream ? AmdGpu::InputAssemblyHostUsage::Stream
+                                   : AmdGpu::InputAssemblyHostUsage::DeviceLocal,
+                .host_offset = offset,
+                .host_size = buffer->SizeBytes(),
+                .write_serial = is_stream ? stream_buffer.CurrentReservationGeneration()
+                                          : buffer->DiagnosticWriteSerial(),
+                .authority = gpu_modified ? AmdGpu::InputAssemblyAuthority::GpuAuthoritative
+                                          : AmdGpu::InputAssemblyAuthority::CpuAuthoritative,
+            };
+        }
+        if (gpu_modified) {
             if (auto barrier =
                     buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
                                        vk::PipelineStageFlagBits2::eVertexAttributeInput)) {
@@ -227,7 +251,8 @@ void BufferCache::BindVertexBuffers(
     Vulkan::VertexInputs<vk::DeviceSize> host_offsets;
     Vulkan::VertexInputs<vk::DeviceSize> host_sizes;
     Vulkan::VertexInputs<vk::DeviceSize> host_strides;
-    for (const auto& buffer : guest_buffers) {
+    for (u32 binding = 0; binding < guest_buffers.size(); ++binding) {
+        const auto& buffer = guest_buffers[binding];
         if (buffer.base_address != 0 && buffer.GetSize() > 0) {
             const auto host_buffer_info =
                 std::ranges::find_if(ranges_merged, [&](const BufferRange& range) {
@@ -238,6 +263,16 @@ void BufferCache::BindVertexBuffers(
             host_buffers.emplace_back(host_buffer_info->vk_buffer);
             host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
                                    host_buffer_info->base_address);
+            if (collector != nullptr && host_buffer_info->diagnostic_source.token) {
+                if (const auto normalized = AmdGpu::NormalizeVertexInputRange(
+                        host_buffer_info->diagnostic_source, host_buffer_info->base_address,
+                        buffer.base_address, buffer.GetSize(),
+                        {.draw = draw,
+                         .kind = AmdGpu::InputAssemblySourceKind::Vertex,
+                         .binding = binding})) {
+                    collector->push_back({.buffer = host_buffer_info->buffer, .range = *normalized});
+                }
+            }
         } else {
             host_buffers.emplace_back(VK_NULL_HANDLE);
             host_offsets.push_back(0);
@@ -257,7 +292,8 @@ void BufferCache::BindVertexBuffers(
 }
 
 void BufferCache::BindIndexBuffer(
-    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
+    u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+    InputAssemblyBufferBindings* collector, u32 draw) {
     const auto& regs = liverpool->regs;
 
     // Figure out index type and size.
@@ -269,8 +305,33 @@ void BufferCache::BindIndexBuffer(
 
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
-    const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
-    if (IsRegionGpuModified(index_address, index_buffer_size)) {
+    const bool gpu_modified = IsRegionGpuModified(index_address, index_buffer_size);
+    BufferId buffer_id{};
+    const auto [vk_buffer, offset] =
+        ObtainBuffer(index_address, index_buffer_size, false, false, {}, &buffer_id);
+    if (collector != nullptr &&
+        (vk_buffer->usage == MemoryUsage::Stream || vk_buffer->usage == MemoryUsage::DeviceLocal)) {
+        const bool is_stream = vk_buffer->usage == MemoryUsage::Stream;
+        const AmdGpu::BoundInputAssemblySource source{
+            .token = {.slot = is_stream ? Common::SlotId::INVALID_INDEX : buffer_id.index,
+                      .generation = is_stream ? stream_buffer.CurrentReservationGeneration()
+                                              : vk_buffer->DiagnosticLifetimeGeneration()},
+            .usage = is_stream ? AmdGpu::InputAssemblyHostUsage::Stream
+                               : AmdGpu::InputAssemblyHostUsage::DeviceLocal,
+            .host_offset = offset,
+            .host_size = vk_buffer->SizeBytes(),
+            .write_serial = is_stream ? stream_buffer.CurrentReservationGeneration()
+                                      : vk_buffer->DiagnosticWriteSerial(),
+            .authority = gpu_modified ? AmdGpu::InputAssemblyAuthority::GpuAuthoritative
+                                      : AmdGpu::InputAssemblyAuthority::CpuAuthoritative,
+        };
+        if (const auto normalized = AmdGpu::NormalizeIndexInputRange(
+                source, 0, index_size, regs.num_indices,
+                {.draw = draw, .kind = AmdGpu::InputAssemblySourceKind::Index, .binding = 0})) {
+            collector->push_back({.buffer = vk_buffer, .range = *normalized});
+        }
+    }
+    if (gpu_modified) {
         if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
                                                  vk::PipelineStageFlagBits2::eIndexInput)) {
             barriers.emplace_back(*barrier);
@@ -321,13 +382,16 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         SynchronizeBuffer(buffer, src, num_bytes, false, true);
         return buffer;
     }();
-    auto& dst_buffer = [&] -> const Buffer& {
+    auto& dst_buffer = [&] -> Buffer& {
         if (dst_gds) {
             return gds_buffer;
         }
         const auto buffer_id = FindBuffer(dst, num_bytes);
         auto& buffer = slot_buffers[buffer_id];
         SynchronizeBuffer(buffer, dst, num_bytes, true, true);
+        if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+            buffer.MarkDiagnosticWrite();
+        }
         gpu_modified_ranges.Add(dst, num_bytes);
         return buffer;
     }();
@@ -392,7 +456,11 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
-                                                  bool is_texel_buffer, BufferId buffer_id) {
+                                                  bool is_texel_buffer, BufferId buffer_id,
+                                                  BufferId* resolved_id) {
+    if (resolved_id != nullptr) {
+        *resolved_id = {};
+    }
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
@@ -403,7 +471,13 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     }
     Buffer& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
+    if (resolved_id != nullptr) {
+        *resolved_id = buffer_id;
+    }
     if (is_written) {
+        if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+            buffer.MarkDiagnosticWrite();
+        }
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {&buffer, buffer.Offset(device_addr)};
@@ -536,6 +610,9 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
                               bool accumulate_stream_score) {
     Buffer& new_buffer = slot_buffers[new_buffer_id];
     Buffer& overlap = slot_buffers[overlap_id];
+    if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+        new_buffer.MarkDiagnosticWrite();
+    }
     if (accumulate_stream_score) {
         new_buffer.IncreaseStreamScore(overlap.StreamScore() + 1);
     }
@@ -713,6 +790,9 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
     }
 
     if (src_buffer) {
+        if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+            buffer.MarkDiagnosticWrite();
+        }
         scheduler.EndRendering();
         const auto cmdbuf = scheduler.CommandBuffer();
         const vk::BufferMemoryBarrier2 pre_barrier = {
@@ -826,6 +906,9 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         return false;
     }
     auto& tile_manager = texture_cache.GetTileManager();
+    if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+        buffer.MarkDiagnosticWrite();
+    }
     tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
     return true;
 }
@@ -848,6 +931,9 @@ void BufferCache::SynchronizeDmaBuffers() {
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {
+    if (liverpool->IsInputAssemblyDeviceIntegrityEnabled()) {
+        buffer.MarkDiagnosticWrite();
+    }
     vk::BufferCopy copy = {
         .srcOffset = 0,
         .dstOffset = buffer.Offset(address),
