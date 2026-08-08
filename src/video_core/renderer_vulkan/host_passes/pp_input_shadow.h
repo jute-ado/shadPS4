@@ -10,6 +10,37 @@
 
 namespace Vulkan {
 
+enum class FinalGuestSurfaceDeferredScheduler : u8 {
+    None,
+    Present,
+};
+
+struct FinalGuestSurfacePpInputPresentHandoffPlan {
+    FinalGuestSurfaceDeferredScheduler scheduler{FinalGuestSurfaceDeferredScheduler::None};
+    u32 content_callback_order{};
+    u32 calibration_callback_order{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    bool copy{};
+    bool defer_on_draw_scheduler{};
+    bool callback_payload_is_scalar_only{};
+};
+
+[[nodiscard]] constexpr FinalGuestSurfacePpInputPresentHandoffPlan PlanPpInputShadowPresentHandoff(
+    bool enabled, bool reused, bool frame_valid, bool slot_available) noexcept {
+    if (!enabled || reused || !frame_valid) {
+        return {};
+    }
+    return {
+        .scheduler = FinalGuestSurfaceDeferredScheduler::Present,
+        .content_callback_order = 1,
+        .calibration_callback_order = 2,
+        .status =
+            slot_available ? FinalGuestSurfaceStatus::Complete : FinalGuestSurfaceStatus::BusyLoss,
+        .copy = slot_available,
+        .callback_payload_is_scalar_only = true,
+    };
+}
+
 struct FinalGuestSurfacePpInputDescriptor {
     bool fsr_enabled{};
     u32 input_width{};
@@ -128,6 +159,7 @@ public:
 
     [[nodiscard]] FinalGuestSurfacePpInputTakeResult TakeForPresent(bool reused) noexcept {
         if (poisoned) {
+            Clear();
             return {.status = FinalGuestSurfaceStatus::GapLoss};
         }
         if (!pending) {
@@ -186,6 +218,47 @@ struct FinalGuestSurfacePpInputTransferPlan {
 } // namespace Vulkan
 
 namespace Vulkan::HostPasses {
+
+enum class PpPipelineSelection : u8 {
+    Normal,
+    ShadowDualOutput,
+};
+
+struct PostProcessingInvocationPlan {
+    std::array<FinalGuestSurfaceFormat, 2> attachment_formats{};
+    PpPipelineSelection pipeline{PpPipelineSelection::Normal};
+    u32 fragment_output_count{1};
+    u32 color_attachment_count{1};
+    u32 draw_count{1};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    bool draw_normal_output{true};
+    bool draw_shadow_output{};
+    bool identical_computed_color{};
+};
+
+[[nodiscard]] constexpr PostProcessingInvocationPlan PlanPostProcessingInvocation(
+    bool shadow_enabled, bool shadow_available, FinalGuestSurfaceFormat normal_format,
+    FinalGuestSurfaceFormat shadow_format) noexcept {
+    PostProcessingInvocationPlan plan{.attachment_formats = {normal_format}};
+    if (!shadow_enabled) {
+        return plan;
+    }
+    if (!shadow_available) {
+        plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        return plan;
+    }
+    if (normal_format == FinalGuestSurfaceFormat::Unsupported || normal_format != shadow_format) {
+        plan.status = FinalGuestSurfaceStatus::Unsupported;
+        return plan;
+    }
+    plan.attachment_formats[1] = shadow_format;
+    plan.pipeline = PpPipelineSelection::ShadowDualOutput;
+    plan.fragment_output_count = 2;
+    plan.color_attachment_count = 2;
+    plan.draw_shadow_output = true;
+    plan.identical_computed_color = true;
+    return plan;
+}
 
 struct PpInputShadowPlan {
     u32 shadow_pipeline_count{};

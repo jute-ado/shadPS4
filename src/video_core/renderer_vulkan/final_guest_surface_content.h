@@ -674,6 +674,26 @@ template <typename ReadValue>
            stage == FinalGuestSurfaceStage::PpInputShadow;
 }
 
+struct FinalGuestSurfaceLogPolicyConfig {
+    bool verbose_frame_reports{true};
+    bool calibrated_triplet_reports{};
+    bool stage_content_coverage{true};
+    bool calibrated_coverage{};
+};
+
+[[nodiscard]] constexpr FinalGuestSurfaceLogPolicyConfig FinalGuestSurfaceLogPolicy(
+    FinalGuestSurfaceStage stage) noexcept {
+    if (stage == FinalGuestSurfaceStage::PpInputShadow) {
+        return {
+            .verbose_frame_reports = false,
+            .calibrated_triplet_reports = true,
+            .stage_content_coverage = true,
+            .calibrated_coverage = true,
+        };
+    }
+    return {};
+}
+
 struct FinalGuestSurfaceFrameDiagnosticStamp {
     u64 surface_sequence{};
     u64 surface_process_time_us{};

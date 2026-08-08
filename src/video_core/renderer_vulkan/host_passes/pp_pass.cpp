@@ -7,6 +7,7 @@
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
 #include "video_core/host_shaders/post_process_frag.h"
+#include "video_core/host_shaders/post_process_shadow_frag.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -15,7 +16,8 @@
 
 namespace Vulkan::HostPasses {
 
-void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format) {
+void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format,
+                                const bool enable_input_shadow) {
     static const std::array pp_shaders{
         HostShaders::FS_TRI_VERT,
         HostShaders::POST_PROCESS_FRAG,
@@ -52,6 +54,14 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
     const auto& fs_module = Compile(pp_shaders[1], vk::ShaderStageFlagBits::eFragment, device);
     ASSERT(fs_module);
     SetObjectName(device, fs_module, "post_process.frag");
+
+    vk::ShaderModule shadow_fs_module{};
+    if (enable_input_shadow) {
+        shadow_fs_module = Compile(HostShaders::POST_PROCESS_SHADOW_FRAG,
+                                   vk::ShaderStageFlagBits::eFragment, device);
+        ASSERT(shadow_fs_module);
+        SetObjectName(device, shadow_fs_module, "post_process_shadow.frag");
+    }
 
     const std::array shaders_ci{
         vk::PipelineShaderStageCreateInfo{
@@ -171,9 +181,38 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
     pipeline = Check<"create post process pipeline">(device.createGraphicsPipelineUnique(
         /*pipeline_cache*/ {}, pipeline_info));
 
+    if (enable_input_shadow) {
+        const std::array shadow_shaders_ci{
+            shaders_ci[0],
+            vk::PipelineShaderStageCreateInfo{
+                .stage = vk::ShaderStageFlagBits::eFragment,
+                .module = shadow_fs_module,
+                .pName = "main",
+            },
+        };
+        const std::array shadow_color_formats{surface_format, surface_format};
+        const vk::PipelineRenderingCreateInfo shadow_rendering_ci{
+            .colorAttachmentCount = shadow_color_formats.size(),
+            .pColorAttachmentFormats = shadow_color_formats.data(),
+        };
+        const std::array shadow_attachments{attachments[0], attachments[0]};
+        auto shadow_color_blending = color_blending;
+        shadow_color_blending.attachmentCount = shadow_attachments.size();
+        shadow_color_blending.pAttachments = shadow_attachments.data();
+        auto shadow_pipeline_info = pipeline_info;
+        shadow_pipeline_info.pNext = &shadow_rendering_ci;
+        shadow_pipeline_info.pStages = shadow_shaders_ci.data();
+        shadow_pipeline_info.pColorBlendState = &shadow_color_blending;
+        input_shadow_pipeline = Check<"create post process input shadow pipeline">(
+            device.createGraphicsPipelineUnique({}, shadow_pipeline_info));
+    }
+
     // Once pipeline is compiled, we don't need the shader module anymore
     device.destroyShaderModule(vs_module);
     device.destroyShaderModule(fs_module);
+    if (shadow_fs_module) {
+        device.destroyShaderModule(shadow_fs_module);
+    }
 
     // Create sampler resource
     const vk::SamplerCreateInfo sampler_ci{
@@ -186,8 +225,9 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
     sampler = Check<"create pp sampler">(device.createSamplerUnique(sampler_ci));
 }
 
-void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
-                                vk::Extent2D input_size, Frame& frame, Settings settings) {
+bool PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
+                                vk::Extent2D input_size, Frame& frame, Settings settings,
+                                vk::ImageView input_shadow) {
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
             .pLabelName = "Host/Post processing",
@@ -199,9 +239,16 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
         .levelCount = 1,
         .layerCount = 1,
     };
-    const std::array<vk::RenderingAttachmentInfo, 1> attachments{{
+    const bool write_shadow = input_shadow && input_shadow_pipeline;
+    const std::array<vk::RenderingAttachmentInfo, 2> attachments{{
         {
             .imageView = frame.image_view,
+            .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+        },
+        {
+            .imageView = input_shadow,
             .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
             .loadOp = vk::AttachmentLoadOp::eClear,
             .storeOp = vk::AttachmentStoreOp::eStore,
@@ -215,7 +262,7 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
             },
         },
         .layerCount = 1,
-        .colorAttachmentCount = attachments.size(),
+        .colorAttachmentCount = write_shadow ? 2u : 1u,
         .pColorAttachments = attachments.data(),
     };
 
@@ -236,7 +283,8 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
         },
     };
 
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics,
+                        write_shadow ? *input_shadow_pipeline : *pipeline);
 
     const std::array viewports = {
         vk::Viewport{
@@ -282,6 +330,7 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
+    return write_shadow;
 }
 
 } // namespace Vulkan::HostPasses

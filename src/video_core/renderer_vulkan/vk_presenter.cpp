@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -291,6 +292,14 @@ public:
         return config.stage == FinalGuestSurfaceStage::PostPp;
     }
 
+    [[nodiscard]] bool IsPpInputShadowStage() const noexcept {
+        return config.stage == FinalGuestSurfaceStage::PpInputShadow;
+    }
+
+    [[nodiscard]] bool IsPresentStage() const noexcept {
+        return IsPresentFinalGuestSurfaceStage(config.stage);
+    }
+
     [[nodiscard]] FinalGuestSurfaceStage Stage() const noexcept {
         return config.stage;
     }
@@ -373,6 +382,68 @@ public:
             .logical_top_left = true,
             .logical_no_y_flip = true,
         });
+        if (pending.plan.status != FinalGuestSurfaceStatus::Complete) {
+            return pending;
+        }
+        const auto slot = slots.TryAcquire();
+        if (!slot) {
+            pending.plan.status = FinalGuestSurfaceStatus::BusyLoss;
+            pending.plan.loss.busy = 1;
+            return pending;
+        }
+        pending.slot = *slot;
+        pending.slot_offset = static_cast<u64>(slot->slot) * slot_stride;
+        return pending;
+    }
+
+    [[nodiscard]] PendingCapture PreparePpInputShadow(
+        FinalGuestSurfaceFrameStamp stamp, const FinalGuestSurfacePpInputMetadata& metadata) {
+        ++selected_frames;
+        PendingCapture pending{
+            .stamp = stamp,
+            .transport =
+                {
+                    .surface_identity = 1,
+                    .backing_generation = metadata.config_generation,
+                    .format = metadata.output_format,
+                    .width = metadata.output_width,
+                    .height = metadata.output_height,
+                },
+        };
+        pending.plan = PlanFinalGuestSurfaceTiles({
+            .width = metadata.output_width,
+            .height = metadata.output_height,
+            .depth = 1,
+            .mip_level = 0,
+            .mip_levels = 1,
+            .base_array_layer = 0,
+            .array_layers = 1,
+            .samples = 1,
+            .type = FinalGuestSurfaceImageType::Color2D,
+            .aspect = FinalGuestSurfaceAspect::Color,
+            .format = metadata.output_format,
+            .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+            .stage = FinalGuestSurfaceStage::PpInputShadow,
+            .logical_width = metadata.output_width,
+            .logical_height = metadata.output_height,
+            .logical_full_fit = true,
+            .logical_top_left = true,
+            .logical_no_y_flip = true,
+        });
+        if (!metadata.valid) {
+            pending.plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            pending.plan.loss.invalidation = 1;
+            return pending;
+        }
+        if (metadata.config_generation != last_metadata_generation) {
+            last_metadata_generation = metadata.config_generation;
+            LOG_INFO(Render, "FGSCM g={} fb={} sf={} sw={} sh={} of={} ow={} oh={} gm={} hdr={}",
+                     metadata.config_generation, metadata.fsr_bypassed,
+                     static_cast<u32>(metadata.source_format), metadata.source_width,
+                     metadata.source_height, static_cast<u32>(metadata.output_format),
+                     metadata.output_width, metadata.output_height, metadata.gamma_bits,
+                     metadata.hdr);
+        }
         if (pending.plan.status != FinalGuestSurfaceStatus::Complete) {
             return pending;
         }
@@ -517,7 +588,9 @@ private:
         ++emitted_frames;
         complete_frames += report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
         loss_frames += report.loss.Any() || report.selector_loss != 0;
-        LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactReport(report));
+        if (FinalGuestSurfaceLogPolicy(config.stage).verbose_frame_reports) {
+            LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactReport(report));
+        }
 
         if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
             LOG_ERROR(Render,
@@ -555,6 +628,7 @@ private:
     u32 emitted_frames{};
     u32 complete_frames{};
     u32 loss_frames{};
+    u64 last_metadata_generation{};
     bool calibrated_coverage_logged{};
 };
 
@@ -918,7 +992,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       texture_cache{rasterizer->GetTextureCache()} {
     if (const auto config = ReadFinalGuestSurfaceContentConfig()) {
         auto& content_scheduler =
-            config->stage == FinalGuestSurfaceStage::PostPp ? present_scheduler : draw_scheduler;
+            IsPresentFinalGuestSurfaceStage(config->stage) ? present_scheduler : draw_scheduler;
         final_guest_surface_content =
             std::make_unique<FinalGuestSurfaceContentState>(instance, content_scheduler, *config);
     }
@@ -942,7 +1016,9 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
-    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    pp_pass.Create(device, swapchain.GetSurfaceFormat().format,
+                   final_guest_surface_content &&
+                       final_guest_surface_content->IsPpInputShadowStage());
 
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
     ImGui::Friends::Register();
@@ -956,14 +1032,14 @@ Presenter::~Presenter() {
     ImGui::Friends::Unregister();
     ImGui::Layer::RemoveLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
 
-    const bool post_pp_surface =
-        final_guest_surface_content && final_guest_surface_content->IsPostPpStage();
+    const bool present_surface =
+        final_guest_surface_content && final_guest_surface_content->IsPresentStage();
     draw_scheduler.Finish();
-    if (final_guest_surface_content && !post_pp_surface) {
+    if (final_guest_surface_content && !present_surface) {
         draw_scheduler.PopPendingOperations();
     }
     present_scheduler.Finish();
-    if (post_pp_surface) {
+    if (present_surface) {
         present_scheduler.PopPendingOperations();
     }
     Check(draw_scheduler.CommandBuffer().reset());
@@ -973,6 +1049,11 @@ Presenter::~Presenter() {
     for (auto& frame : present_frames) {
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
         device.destroyImageView(frame.image_view);
+        if (frame.pp_input_shadow_image) {
+            device.destroyImageView(frame.pp_input_shadow_view);
+            vmaDestroyImage(instance.GetAllocator(), frame.pp_input_shadow_image,
+                            frame.pp_input_shadow_allocation);
+        }
         device.destroyFence(frame.present_done);
     }
 }
@@ -983,6 +1064,17 @@ bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const
 
 void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     const vk::Device device = instance.GetDevice();
+    frame->pp_input_shadow_state.Clear();
+    if (frame->pp_input_shadow_view) {
+        device.destroyImageView(frame->pp_input_shadow_view);
+        frame->pp_input_shadow_view = nullptr;
+    }
+    if (frame->pp_input_shadow_image) {
+        vmaDestroyImage(instance.GetAllocator(), frame->pp_input_shadow_image,
+                        frame->pp_input_shadow_allocation);
+        frame->pp_input_shadow_image = nullptr;
+        frame->pp_input_shadow_allocation = {};
+    }
     if (frame->imgui_texture) {
         ImGui::Vulkan::RemoveTexture(frame->imgui_texture);
     }
@@ -1042,6 +1134,29 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     };
     auto view = Check<"create frame image view">(device.createImageView(view_info));
     frame->image_view = view;
+
+    if (final_guest_surface_content && final_guest_surface_content->IsPpInputShadowStage()) {
+        auto shadow_image_info = image_info;
+        shadow_image_info.flags = {};
+        shadow_image_info.usage =
+            vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc;
+        VkImage unsafe_shadow_image{};
+        VkImageCreateInfo unsafe_shadow_image_info =
+            static_cast<VkImageCreateInfo>(shadow_image_info);
+        result = vmaCreateImage(instance.GetAllocator(), &unsafe_shadow_image_info, &alloc_info,
+                                &unsafe_shadow_image, &frame->pp_input_shadow_allocation, nullptr);
+        if (result != VK_SUCCESS) [[unlikely]] {
+            LOG_CRITICAL(Render_Vulkan, "Failed allocating PP input shadow with error {}",
+                         vk::to_string(vk::Result{result}));
+            UNREACHABLE();
+        }
+        frame->pp_input_shadow_image = vk::Image{unsafe_shadow_image};
+        SetObjectName(device, frame->pp_input_shadow_image, "PP input shadow #{}", frame->id);
+        auto shadow_view_info = view_info;
+        shadow_view_info.image = frame->pp_input_shadow_image;
+        frame->pp_input_shadow_view =
+            Check<"create PP input shadow image view">(device.createImageView(shadow_view_info));
+    }
     frame->width = width;
     frame->height = height;
 
@@ -1105,7 +1220,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
 
-    const auto pre_barrier = vk::ImageMemoryBarrier2{
+    std::array<vk::ImageMemoryBarrier2, 2> pre_barriers{};
+    u32 pre_barrier_count = 1;
+    pre_barriers[0] = vk::ImageMemoryBarrier2{
         .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
         .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentRead,
         .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
@@ -1115,12 +1232,26 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         .image = frame->image,
         .subresourceRange{frame_subresources},
     };
+    const bool pp_input_shadow_stage =
+        final_guest_surface_content && final_guest_surface_content->IsPpInputShadowStage();
+    if (pp_input_shadow_stage && frame->pp_input_shadow_image) {
+        pre_barriers[pre_barrier_count++] = vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .image = frame->pp_input_shadow_image,
+            .subresourceRange{frame_subresources},
+        };
+    }
 
     draw_scheduler.EndRendering();
     const auto cmdbuf = draw_scheduler.CommandBuffer();
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &pre_barrier,
+        .imageMemoryBarrierCount = pre_barrier_count,
+        .pImageMemoryBarriers = pre_barriers.data(),
     });
 
     VideoCore::ImageViewInfo view_info{};
@@ -1131,16 +1262,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
-    const bool post_pp_surface =
-        final_guest_surface_content && final_guest_surface_content->IsPostPpStage();
+    const bool present_surface =
+        final_guest_surface_content && final_guest_surface_content->IsPresentStage();
     frame->final_surface_diagnostic.Assign(final_guest_surface_content != nullptr, stamp.sequence,
                                            stamp.process_time_us,
-                                           post_pp_surface ? frame->width : image_size.width,
-                                           post_pp_surface ? frame->height : image_size.height);
+                                           present_surface ? frame->width : image_size.width,
+                                           present_surface ? frame->height : image_size.height);
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     std::optional<FinalGuestSurfaceContentState::PendingCapture> final_surface_capture;
-    if (final_guest_surface_content && !post_pp_surface &&
+    if (final_guest_surface_content && !present_surface &&
         final_guest_surface_content->ShouldCapture(stamp.sequence)) {
         final_surface_capture =
             final_guest_surface_content->PrepareGuest(stamp, image, frame->width, frame->height);
@@ -1184,7 +1315,36 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
-    pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    FinalGuestSurfacePpInputMetadata pp_input_metadata{};
+    if (pp_input_shadow_stage) {
+        pp_input_metadata = pp_input_shadow_config.Observe({
+            .fsr_enabled = fsr_settings.enable,
+            .input_width = image_size.width,
+            .input_height = image_size.height,
+            .output_width = frame->width,
+            .output_height = frame->height,
+            .source_format = ToFinalGuestSurfaceFormat(view_info.format),
+            .output_format = ToFinalGuestSurfaceFormat(swapchain.GetSurfaceFormat().format),
+            .gamma_bits = std::bit_cast<u32>(pp_settings.gamma),
+            .pp_hdr = pp_settings.hdr != 0,
+            .frame_hdr = frame->is_hdr,
+        });
+    }
+    const bool shadow_written =
+        pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings,
+                       pp_input_metadata.valid ? frame->pp_input_shadow_view : vk::ImageView{});
+    if (pp_input_shadow_stage) {
+        if (!shadow_written) {
+            pp_input_metadata.valid = false;
+        }
+        const u64 token = next_pp_input_shadow_token++;
+        const auto status = frame->pp_input_shadow_state.Assign(
+            {stamp.sequence, stamp.process_time_us, token, pp_input_metadata});
+        if (status != FinalGuestSurfaceStatus::Complete) {
+            LOG_INFO(Render, "PPInputShadowFrameState seq={} st={}", stamp.sequence,
+                     static_cast<u32>(status));
+        }
+    }
 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};
@@ -1209,6 +1369,11 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
     frame->final_surface_diagnostic.Clear();
+    const auto discarded_shadow = frame->pp_input_shadow_state.TakeForPresent(true);
+    if (discarded_shadow.status == FinalGuestSurfaceStatus::GapLoss) {
+        LOG_INFO(Render, "PPInputShadowFrameState blank_discard=1 st={}",
+                 static_cast<u32>(discarded_shadow.status));
+    }
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -1292,6 +1457,19 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         }
     };
 
+    const bool pp_input_shadow_stage =
+        final_guest_surface_content && final_guest_surface_content->IsPpInputShadowStage();
+    FinalGuestSurfacePpInputTakeResult pp_input_shadow_frame{};
+    if (pp_input_shadow_stage) {
+        pp_input_shadow_frame = frame->pp_input_shadow_state.TakeForPresent(is_reusing_frame);
+        if (pp_input_shadow_frame.status != FinalGuestSurfaceStatus::Complete &&
+            !(is_reusing_frame &&
+              pp_input_shadow_frame.status == FinalGuestSurfaceStatus::AlreadyConsumed)) {
+            LOG_INFO(Render, "PPInputShadowFrameState present_take=1 reused={} st={}",
+                     is_reusing_frame, static_cast<u32>(pp_input_shadow_frame.status));
+        }
+    }
+
     // Recreate the swapchain if the window was resized.
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
@@ -1341,7 +1519,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
 
         const vk::Extent2D extent = swapchain.GetExtent();
         std::optional<FinalGuestSurfaceContentState::PendingCapture> post_pp_surface_capture;
-        if (final_guest_surface_content) {
+        std::optional<FinalGuestSurfaceContentState::PendingCapture> pp_input_shadow_capture;
+        if (final_guest_surface_content && final_guest_surface_content->IsPostPpStage()) {
             const auto& diagnostic = frame->final_surface_diagnostic;
             const bool in_window = diagnostic.valid && final_guest_surface_content->ShouldCapture(
                                                            diagnostic.surface_sequence);
@@ -1352,6 +1531,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                     {diagnostic.surface_sequence, diagnostic.surface_process_time_us}, frame->width,
                     frame->height, swapchain.GetSurfaceFormat().format, frame->is_hdr);
             }
+        }
+        if (pp_input_shadow_stage && pp_input_shadow_frame.emit &&
+            final_guest_surface_content->ShouldCapture(pp_input_shadow_frame.payload.sequence)) {
+            pp_input_shadow_capture = final_guest_surface_content->PreparePpInputShadow(
+                {pp_input_shadow_frame.payload.sequence,
+                 pp_input_shadow_frame.payload.process_time_us},
+                pp_input_shadow_frame.payload.metadata);
         }
         const auto frame_transitions = GetPresentFrameTransitions(
             is_reusing_frame, post_pp_surface_capture && post_pp_surface_capture->HasCopy());
@@ -1405,6 +1591,41 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             .pImageMemoryBarriers = pre_barriers.data(),
         });
 
+        if (pp_input_shadow_capture) {
+            const auto handoff =
+                PlanPpInputShadowPresentHandoff(true, is_reusing_frame, pp_input_shadow_frame.emit,
+                                                pp_input_shadow_capture->HasCopy());
+            ASSERT(handoff.scheduler == FinalGuestSurfaceDeferredScheduler::Present);
+            ASSERT(!handoff.defer_on_draw_scheduler && handoff.callback_payload_is_scalar_only);
+            const auto transition = GetPpInputShadowCaptureTransition(handoff.copy);
+            if (transition.required) {
+                const vk::ImageMemoryBarrier2 shadow_to_transfer{
+                    .srcStageMask = transition.src_stage,
+                    .srcAccessMask = transition.src_access,
+                    .dstStageMask = transition.dst_stage,
+                    .dstAccessMask = transition.dst_access,
+                    .oldLayout = transition.old_layout,
+                    .newLayout = transition.new_layout,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = frame->pp_input_shadow_image,
+                    .subresourceRange{
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                };
+                cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                    .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+                    .imageMemoryBarrierCount = 1,
+                    .pImageMemoryBarriers = &shadow_to_transfer,
+                });
+            }
+            final_guest_surface_content->Record(std::move(*pp_input_shadow_capture),
+                                                frame->pp_input_shadow_image, cmdbuf);
+        }
         if (post_pp_surface_capture) {
             final_guest_surface_content->Record(std::move(*post_pp_surface_capture), frame->image,
                                                 cmdbuf);
@@ -1597,7 +1818,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
 
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
-    info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    info.AddWait(frame->ready_semaphore, frame->ready_tick,
+                 FrameReadyWaitStage(pp_input_shadow_stage));
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     void* const vulkan_instance =

@@ -79,4 +79,19 @@ constexpr PresentFrameTransitions GetPresentFrameTransitions(const bool is_reusi
     };
 }
 
+constexpr PresentFrameTransition GetPpInputShadowCaptureTransition(const bool capture_requested) {
+    if (!capture_requested) {
+        return {.required = false};
+    }
+    return {
+        .required = true,
+        .src_stage = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .src_access = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .dst_stage = vk::PipelineStageFlagBits2::eTransfer,
+        .dst_access = vk::AccessFlagBits2::eTransferRead,
+        .old_layout = vk::ImageLayout::eColorAttachmentOptimal,
+        .new_layout = vk::ImageLayout::eTransferSrcOptimal,
+    };
+}
+
 } // namespace Vulkan

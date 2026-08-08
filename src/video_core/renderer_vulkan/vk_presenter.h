@@ -37,6 +37,10 @@ struct Frame {
     bool is_hdr{false};
     u8 id{};
     FinalGuestSurfaceFrameDiagnosticStamp final_surface_diagnostic{};
+    VmaAllocation pp_input_shadow_allocation{};
+    vk::Image pp_input_shadow_image{};
+    vk::ImageView pp_input_shadow_view{};
+    FinalGuestSurfacePpInputFrameState pp_input_shadow_state{};
 
     ImTextureID imgui_texture;
 };
@@ -136,6 +140,8 @@ private:
     Swapchain swapchain;
     std::unique_ptr<Rasterizer> rasterizer;
     std::unique_ptr<FinalGuestSurfaceContentState> final_guest_surface_content;
+    FinalGuestSurfacePpInputConfigTracker pp_input_shadow_config;
+    u64 next_pp_input_shadow_token{1};
     VideoCore::TextureCache& texture_cache;
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;

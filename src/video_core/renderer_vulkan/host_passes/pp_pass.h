@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "video_core/renderer_vulkan/host_passes/pp_input_shadow.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -19,13 +20,15 @@ public:
         u32 hdr = 0;
     };
 
-    void Create(vk::Device device, vk::Format surface_format);
+    void Create(vk::Device device, vk::Format surface_format, bool enable_input_shadow);
 
-    void Render(vk::CommandBuffer cmdbuf, vk::ImageView input, vk::Extent2D input_size,
-                Frame& output, Settings settings);
+    [[nodiscard]] bool Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
+                              vk::Extent2D input_size, Frame& output, Settings settings,
+                              vk::ImageView input_shadow = {});
 
 private:
     vk::UniquePipeline pipeline{};
+    vk::UniquePipeline input_shadow_pipeline{};
     vk::UniquePipelineLayout pipeline_layout{};
     vk::UniqueDescriptorSetLayout desc_set_layout{};
     vk::UniqueSampler sampler{};

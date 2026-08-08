@@ -56,15 +56,18 @@ static_assert(std::has_unique_object_representations_v<RenderState>);
 struct SubmitInfo {
     std::array<vk::Semaphore, 3> wait_semas;
     std::array<u64, 3> wait_ticks;
+    std::array<vk::PipelineStageFlags, 3> wait_stages;
     std::array<vk::Semaphore, 3> signal_semas;
     std::array<u64, 3> signal_ticks;
     vk::Fence fence;
     u32 num_wait_semas;
     u32 num_signal_semas;
 
-    void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
+    void AddWait(vk::Semaphore semaphore, u64 tick = 1,
+                 vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eAllCommands) {
         wait_semas[num_wait_semas] = semaphore;
-        wait_ticks[num_wait_semas++] = tick;
+        wait_ticks[num_wait_semas] = tick;
+        wait_stages[num_wait_semas++] = stage;
     }
 
     void AddSignal(vk::Semaphore semaphore, u64 tick = 1) {
@@ -76,6 +79,13 @@ struct SubmitInfo {
         this->fence = fence;
     }
 };
+
+[[nodiscard]] constexpr vk::PipelineStageFlags FrameReadyWaitStage(
+    const bool pp_input_shadow) noexcept {
+    return pp_input_shadow
+               ? vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eTransfer
+               : vk::PipelineStageFlagBits::eColorAttachmentOutput;
+}
 
 using Viewports = boost::container::static_vector<vk::Viewport, AmdGpu::NUM_VIEWPORTS>;
 using Scissors = boost::container::static_vector<vk::Rect2D, AmdGpu::NUM_VIEWPORTS>;
