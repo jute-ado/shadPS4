@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/fault_frame_correlation.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
@@ -58,7 +59,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
     memory->SetRasterizer(this);
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    // Presenter finishes the draw scheduler before releasing the rasterizer.
+    ReportFaultFrameCorrelation();
+}
 
 void Rasterizer::CpSync() {
     scheduler.EndRendering();
@@ -407,6 +411,18 @@ void Rasterizer::OnSubmit() {
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
     buffer_cache.RunGarbageCollector();
+}
+
+void Rasterizer::ReportFaultFrameCorrelation() {
+    auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
+    if (!diagnostic.GetConfiguration().enabled) {
+        return;
+    }
+    // Presenter has already waited for the last submitted tick. Pop the now-ready callbacks before
+    // freezing the reducer so no downloaded fault batch can race the final report.
+    scheduler.PopPendingOperations();
+    diagnostic.MarkDeferredCallbacksDrained();
+    buffer_cache.ReportFaultFrameCorrelation();
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

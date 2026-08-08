@@ -163,6 +163,9 @@ public:
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
+    /// Reports the fault-frame diagnostic after its deferred callbacks have drained.
+    void ReportFaultFrameCorrelation();
+
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 

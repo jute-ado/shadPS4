@@ -10,6 +10,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -17,6 +18,7 @@
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/buffer_cache/fault_frame_correlation.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -305,6 +307,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
+                    VideoCore::GetFaultFrameCorrelationRuntime().RecordPatchedFlip(
+                        Libraries::Kernel::sceKernelGetProcessTime());
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,

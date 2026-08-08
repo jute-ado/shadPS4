@@ -4,6 +4,7 @@
 #include "common/div_ceil.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/fault_download.h"
+#include "video_core/buffer_cache/fault_frame_correlation.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/fault_range.h"
 #include "video_core/page_manager.h"
@@ -17,6 +18,20 @@
 namespace VideoCore {
 
 static constexpr size_t PageFaultAreaSize = FaultDownloadSlotCount * sizeof(u64);
+
+static constexpr std::string_view StatusName(FaultFrameCorrelationStatus status) {
+    switch (status) {
+    case FaultFrameCorrelationStatus::Complete:
+        return "complete";
+    case FaultFrameCorrelationStatus::NoBatches:
+        return "no-batches";
+    case FaultFrameCorrelationStatus::Incomplete:
+        return "incomplete";
+    case FaultFrameCorrelationStatus::Gap:
+        return "gap";
+    }
+    return "unknown";
+}
 
 FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
                            BufferCache& buffer_cache_, PageManager& page_manager_,
@@ -81,7 +96,42 @@ FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& 
     device.destroyShaderModule(module);
 }
 
+void FaultManager::ReportFaultFrameCorrelation() {
+    auto& diagnostic = GetFaultFrameCorrelationRuntime();
+    const auto config = diagnostic.GetConfiguration();
+    if (!config.enabled) {
+        return;
+    }
+    const auto observations = diagnostic.FinishAfterDeferredCallbacksDrained();
+    if (!observations) {
+        return;
+    }
+    for (const auto& observation : *observations) {
+        LOG_INFO(Render_Vulkan,
+                 "Fault frame correlation: frame={} process_time_us={} page_count={} "
+                 "batch_count={} stable={} change={} exact_aba={} status={} loss={}",
+                 observation.frame_sequence, observation.process_time_us, observation.page_count,
+                 observation.batch_count, observation.stable, observation.changed,
+                 observation.exact_aba, StatusName(observation.status),
+                 static_cast<u32>(observation.loss));
+    }
+    const auto coverage = diagnostic.GetCoverage();
+    LOG_INFO(Render_Vulkan,
+             "Fault frame correlation coverage: first_frame={} frame_count={} page_cap={} "
+             "selected_frames={} emitted_frames={} complete_frames={} no_batch_frames={} "
+             "incomplete_frames={} gap_frames={} stable_frames={} changed_frames={} "
+             "exact_aba_frames={} total_batches={} total_unique_pages={} dropped_pages={}",
+             config.first_frame, config.frame_count, config.page_cap, coverage.selected_frames,
+             observations->size(), coverage.complete_frames, coverage.no_batch_frames,
+             coverage.incomplete_frames, coverage.gap_frames, coverage.stable_frames,
+             coverage.changed_frames, coverage.exact_aba_frames, coverage.total_batches,
+             coverage.total_unique_pages, coverage.dropped_pages);
+}
+
 void FaultManager::ProcessFaultBuffer() {
+    // Capture the parsed-flip attribution before scheduling any work. The deferred callback may
+    // execute after later flips have already been parsed.
+    const auto correlation_stamp = GetFaultFrameCorrelationRuntime().CaptureStamp();
     if (u64 wait_tick = fault_areas[current_area]) {
         scheduler.Wait(wait_tick);
         scheduler.PopPendingOperations();
@@ -158,7 +208,7 @@ void FaultManager::ProcessFaultBuffer() {
         .pBufferMemoryBarriers = &post_barrier,
     });
 
-    scheduler.DeferOperation([this, mapped, area = current_area] {
+    scheduler.DeferOperation([this, mapped, area = current_area, correlation_stamp] {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
         const u32 reported_fault_count = fault_buf[0];
@@ -169,6 +219,15 @@ void FaultManager::ProcessFaultBuffer() {
                         "GPU fault download overflow: reported {} page(s), retained first {} "
                         "address slot(s)",
                         reported_fault_count, fault_count.address_count);
+        }
+        if (correlation_stamp.selected) {
+            std::vector<u64> private_page_ids;
+            private_page_ids.reserve(fault_count.address_count);
+            for (size_t i = 1; i <= fault_count.address_count; ++i) {
+                private_page_ids.push_back(fault_buf[i] / caching_pagesize);
+            }
+            GetFaultFrameCorrelationRuntime().ObserveBatch(
+                correlation_stamp, private_page_ids, fault_count.overflowed);
         }
         const VAddr address_space_size = caching_num_pages * caching_pagesize;
         u32 invalid_fault_count = 0;

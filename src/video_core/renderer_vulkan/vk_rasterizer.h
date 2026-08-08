@@ -81,6 +81,7 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+    void ReportFaultFrameCorrelation();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;

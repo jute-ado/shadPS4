@@ -701,6 +701,10 @@ void BufferCache::ProcessFaultBuffer() {
     fault_manager.ProcessFaultBuffer();
 }
 
+void BufferCache::ReportFaultFrameCorrelation() {
+    fault_manager.ReportFaultFrameCorrelation();
+}
+
 void BufferCache::Register(BufferId buffer_id) {
     ChangeRegister<true>(buffer_id);
 }

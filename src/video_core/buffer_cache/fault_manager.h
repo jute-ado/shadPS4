@@ -24,6 +24,7 @@ public:
     }
 
     void ProcessFaultBuffer();
+    void ReportFaultFrameCorrelation();
 
 private:
     Vulkan::Scheduler& scheduler;
