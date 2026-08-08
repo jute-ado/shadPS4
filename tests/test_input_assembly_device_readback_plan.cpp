@@ -108,6 +108,33 @@ TEST(InputAssemblyDeviceReadbackPlan, DeduplicatesSamplesWhileRetainingBothSeman
     EXPECT_EQ(planner.EndFrame().semantic_count, 2);
 }
 
+TEST(InputAssemblyDeviceReadbackPlan, RepeatsPhysicalSamplesForEachCaptureDraw) {
+    InputAssemblyDeviceReadbackPlanner planner;
+    planner.BeginFrame(61);
+    const auto first = AmdGpu::NormalizeVertexInputRange(
+        Source(InputAssemblyHostUsage::DeviceLocal, 100, 512), 0, 0, 64,
+        Semantic(5, InputAssemblySourceKind::Vertex, 0));
+    const auto later = AmdGpu::NormalizeVertexInputRange(
+        Source(InputAssemblyHostUsage::DeviceLocal, 100, 512), 0, 0, 64,
+        Semantic(6, InputAssemblySourceKind::Vertex, 0));
+    ASSERT_TRUE(first && later);
+
+    const auto first_decision = planner.Plan(*first);
+    const auto later_decision = planner.Plan(*later);
+    ASSERT_TRUE(first_decision.accepted);
+    ASSERT_TRUE(later_decision.accepted);
+    EXPECT_EQ(first_decision.new_copy_count, 3);
+    EXPECT_EQ(later_decision.new_copy_count, 3);
+
+    const auto& plan = planner.EndFrame();
+    ASSERT_EQ(plan.sample_count, 6);
+    for (u32 i = 0; i < 3; ++i) {
+        EXPECT_EQ(plan.samples[i].capture_draw, 5);
+        EXPECT_EQ(plan.samples[i + 3].capture_draw, 6);
+        EXPECT_EQ(plan.samples[i].source_offset, plan.samples[i + 3].source_offset);
+    }
+}
+
 TEST(InputAssemblyDeviceReadbackPlan, AlignsPhysicalCopiesButRetainsExactSemanticSlice) {
     InputAssemblyDeviceReadbackPlanner planner;
     planner.BeginFrame(62);
