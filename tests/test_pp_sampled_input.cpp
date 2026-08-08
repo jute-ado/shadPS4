@@ -345,5 +345,122 @@ TEST(PpSampledInput, PresentTransferIsOneFloatCopyWithScalarCallbackAndNoWait) {
     EXPECT_FALSE(PlanPpSampledInputTransfer(true, true, true, true).copy);
 }
 
+TEST(PpSampledInput, DiagnosticPreservesBaselineViewAndFailsClosedOnResolvedMismatch) {
+    const auto baseline = AssessPpSampledInputSourceView({
+        .resolved_base_mip = 0,
+        .resolved_mip_count = 1,
+        .resolved_base_layer = 0,
+        .resolved_layer_count = 1,
+        .bound_base_mip = 0,
+        .bound_mip_count = 1,
+        .bound_base_layer = 0,
+        .bound_layer_count = 1,
+    });
+    EXPECT_EQ(baseline.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(baseline.same_view_as_baseline);
+    EXPECT_FALSE(baseline.diagnostic_changes_bound_view);
+    EXPECT_FALSE(baseline.resolved_range_mismatch);
+
+    const auto mismatch = AssessPpSampledInputSourceView({
+        .resolved_base_mip = 2,
+        .resolved_mip_count = 1,
+        .resolved_base_layer = 3,
+        .resolved_layer_count = 1,
+        .bound_base_mip = 0,
+        .bound_mip_count = 1,
+        .bound_base_layer = 0,
+        .bound_layer_count = 1,
+    });
+    EXPECT_EQ(mismatch.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(mismatch.same_view_as_baseline);
+    EXPECT_FALSE(mismatch.diagnostic_changes_bound_view);
+    EXPECT_TRUE(mismatch.resolved_range_mismatch);
+}
+
+TEST(PpSampledInput, PairedCaptureUsesOneSlotForExactOutputAndRawSamplePlanes) {
+    constexpr u64 SlotBytes = 16ull * 1024 * 1024;
+    const auto plan = PlanPpSampledInputPairedCapture({
+        .enabled = true,
+        .width = 1280,
+        .height = 720,
+        .output_format = FinalGuestSurfaceFormat::Bgra8,
+        .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+        .slot_bytes = SlotBytes,
+        .alignment = 256,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(plan.slot_count, 1u);
+    EXPECT_EQ(plan.copy_region_count, 2u);
+    EXPECT_EQ(plan.output_offset, 0u);
+    EXPECT_EQ(plan.output_bytes, 1280u * 720u * 4u);
+    EXPECT_EQ(plan.sampled_bytes, 1280u * 720u * 8u);
+    EXPECT_GE(plan.sampled_offset, plan.output_bytes);
+    EXPECT_LE(plan.total_bytes, SlotBytes);
+    EXPECT_EQ(plan.output_comparison, FinalGuestSurfaceComparison::LocalizedVisualReturn);
+    EXPECT_TRUE(plan.output_is_authoritative);
+    EXPECT_FALSE(plan.cpu_gamma_reconstruction_is_authoritative);
+    EXPECT_TRUE(plan.callback_payload_is_scalar_only);
+    EXPECT_FALSE(plan.cpu_wait);
+    EXPECT_FALSE(plan.finish);
+
+    EXPECT_EQ(
+        PlanPpSampledInputPairedCapture({
+                                            .enabled = true,
+                                            .width = 1920,
+                                            .height = 1080,
+                                            .output_format = FinalGuestSurfaceFormat::Bgra8,
+                                            .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+                                            .slot_bytes = SlotBytes,
+                                            .alignment = 256,
+                                        })
+            .status,
+        FinalGuestSurfaceStatus::CapacityLoss);
+}
+
+TEST(PpSampledInput, PairClassificationNeverSubstitutesCpuGammaForExactOutput) {
+    EXPECT_EQ(ClassifyPpSampledInputPair({.output_visual_return = false,
+                                          .raw_sample_return = true,
+                                          .raw_sample_stable = false,
+                                          .complete = true}),
+              PpSampledInputBoundary::OutputClean);
+    EXPECT_EQ(ClassifyPpSampledInputPair({.output_visual_return = true,
+                                          .raw_sample_return = true,
+                                          .raw_sample_stable = false,
+                                          .complete = true}),
+              PpSampledInputBoundary::AtOrBeforeSample);
+    EXPECT_EQ(ClassifyPpSampledInputPair({.output_visual_return = true,
+                                          .raw_sample_return = false,
+                                          .raw_sample_stable = true,
+                                          .complete = true}),
+              PpSampledInputBoundary::AfterSample);
+    EXPECT_EQ(ClassifyPpSampledInputPair({.output_visual_return = true,
+                                          .raw_sample_return = false,
+                                          .raw_sample_stable = false,
+                                          .complete = false}),
+              PpSampledInputBoundary::Ambiguous);
+}
+
+TEST(PpSampledInput, SelectedInvalidFramesEmitExplicitLossWhileStartupIsSilent) {
+    const auto startup = PlanPpSampledInputObservation(
+        {.in_window = false, .stamp_valid = false, .metadata_valid = false});
+    EXPECT_FALSE(startup.emit);
+    EXPECT_EQ(startup.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    const auto missing_stamp = PlanPpSampledInputObservation(
+        {.in_window = true, .stamp_valid = false, .metadata_valid = true});
+    EXPECT_TRUE(missing_stamp.emit);
+    EXPECT_EQ(missing_stamp.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    const auto invalid_metadata = PlanPpSampledInputObservation(
+        {.in_window = true, .stamp_valid = true, .metadata_valid = false});
+    EXPECT_TRUE(invalid_metadata.emit);
+    EXPECT_EQ(invalid_metadata.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    const auto valid = PlanPpSampledInputObservation(
+        {.in_window = true, .stamp_valid = true, .metadata_valid = true});
+    EXPECT_TRUE(valid.emit);
+    EXPECT_EQ(valid.status, FinalGuestSurfaceStatus::Complete);
+}
+
 } // namespace
 } // namespace Vulkan
