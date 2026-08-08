@@ -29,5 +29,11 @@ TEST(SubmitInfo, DefaultWaitStageIsConservativeForExistingCallers) {
     EXPECT_EQ(info.wait_stages[0], vk::PipelineStageFlagBits::eAllCommands);
 }
 
+TEST(SubmitInfo, PresenterFrameReadyWaitPreservesNormalStageAndCoversShadowTransfer) {
+    EXPECT_EQ(FrameReadyWaitStage(false), vk::PipelineStageFlagBits::eColorAttachmentOutput);
+    EXPECT_EQ(FrameReadyWaitStage(true),
+              vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eTransfer);
+}
+
 } // namespace
 } // namespace Vulkan
