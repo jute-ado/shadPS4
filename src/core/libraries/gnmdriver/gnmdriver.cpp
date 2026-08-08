@@ -2871,6 +2871,9 @@ void FinalizeFaultFrameCorrelationBeforeQuickExit() {
     if (liverpool->IsGpuThread()) {
         return;
     }
+    // Enter waits for a pending SubmitDone boundary to finish OnSubmit/Flush, then holds the gate
+    // so no guest submission or new boundary can overtake this exit-only finalizer.
+    auto submission = submission_gate.Enter();
     liverpool->WaitGpuIdle();
     liverpool->SendCommand<true>([] {
         if (presenter) {

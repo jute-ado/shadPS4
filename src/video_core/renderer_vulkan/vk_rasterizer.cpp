@@ -429,16 +429,15 @@ void Rasterizer::FinalizeFaultFrameCorrelationFromDeferredCallback() {
     auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
     // This callback is itself running from PopPendingOperations. Its FIFO predecessors have
     // already completed, and recursively popping would deadlock the pending-operation mutex.
-    if (auto observations = diagnostic.Finalize([] {})) {
-        EmitFaultFrameCorrelation(*observations);
-    }
+    static_cast<void>(diagnostic.Finalize(
+        [] {}, [this](auto observations) { EmitFaultFrameCorrelation(observations); }));
 }
 
 void Rasterizer::FinalizeFaultFrameCorrelationAfterSchedulerFinish() {
     auto& diagnostic = VideoCore::GetFaultFrameCorrelationRuntime();
-    if (auto observations = diagnostic.Finalize([this] { scheduler.PopPendingOperations(); })) {
-        EmitFaultFrameCorrelation(*observations);
-    }
+    static_cast<void>(diagnostic.Finalize(
+        [this] { scheduler.PopPendingOperations(); },
+        [this](auto observations) { EmitFaultFrameCorrelation(observations); }));
 }
 
 void Rasterizer::FinalizeFaultFrameCorrelationBeforeQuickExit() {
@@ -448,12 +447,12 @@ void Rasterizer::FinalizeFaultFrameCorrelationBeforeQuickExit() {
     }
     // This method is dispatched to Liverpool's GPU command-processor thread, the owner of the
     // draw scheduler. No rendering thread mutates the scheduler concurrently here.
-    if (auto observations = diagnostic.Finalize([this] {
+    static_cast<void>(diagnostic.Finalize(
+        [this] {
             scheduler.Finish();
             scheduler.PopPendingOperations();
-        })) {
-        EmitFaultFrameCorrelation(*observations);
-    }
+        },
+        [this](auto observations) { EmitFaultFrameCorrelation(observations); }));
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

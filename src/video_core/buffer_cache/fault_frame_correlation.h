@@ -7,7 +7,6 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
-#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -309,6 +308,8 @@ private:
 class FaultFrameCorrelationRuntime {
 public:
     FaultFrameCorrelationRuntime() : reducer{ReadConfiguration()} {}
+    explicit FaultFrameCorrelationRuntime(FaultFrameCorrelationConfiguration config)
+        : reducer{config} {}
 
     void RecordPatchedFlip(u64 process_time_us) {
         if (!reducer.GetConfiguration().enabled) {
@@ -338,13 +339,13 @@ public:
         return finalization_gate.ClaimWindowEndSchedule(window_complete);
     }
 
-    template <typename Drain>
-    [[nodiscard]] std::optional<std::vector<FaultFrameCorrelationObservation>> Finalize(
-        Drain&& drain) {
-        std::optional<std::vector<FaultFrameCorrelationObservation>> result;
-        finalization_gate.Finalize(std::forward<Drain>(drain),
-                                   [&] { result.emplace(reducer.Finish()); });
-        return result;
+    template <typename Drain, typename Emit>
+    [[nodiscard]] bool Finalize(Drain&& drain, Emit&& emit) {
+        return finalization_gate.Finalize(std::forward<Drain>(drain), [&] {
+            const auto observations = reducer.Finish();
+            std::forward<Emit>(emit)(
+                std::span<const FaultFrameCorrelationObservation>{observations});
+        });
     }
 
     [[nodiscard]] bool NeedsFinalization() const noexcept {
