@@ -343,6 +343,16 @@ target_compile_features(shadps4_cpu_writable_backing_publication_state_test PRIV
 target_link_libraries(shadps4_cpu_writable_backing_publication_state_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_cpu_writable_backing_publication_state_test)
 
+add_executable(shadps4_cpu_writable_backing_oracle_test
+    test_cpu_writable_backing_oracle.cpp
+)
+target_include_directories(shadps4_cpu_writable_backing_oracle_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_cpu_writable_backing_oracle_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_cpu_writable_backing_oracle_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_cpu_writable_backing_oracle_test)
+
 add_executable(shadps4_physical_backing_publication_coordinator_test
     test_physical_backing_publication_coordinator.cpp
 )
