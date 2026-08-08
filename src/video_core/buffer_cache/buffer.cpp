@@ -160,6 +160,19 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
     });
 }
 
+void Buffer::InvalidateMappedRange(u64 offset, u64 size) {
+    ASSERT_MSG(usage == MemoryUsage::Download && !mapped_data.empty(),
+               "Only mapped download buffers may be invalidated");
+    ASSERT_MSG(offset <= size_bytes && size <= size_bytes - offset,
+               "Mapped invalidation range is outside the buffer");
+    if (!is_coherent && size != 0) {
+        const VkResult result =
+            vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset, size);
+        ASSERT_MSG(result == VK_SUCCESS, "Failed to invalidate mapped download range: {}",
+                   vk::to_string(vk::Result{result}));
+    }
+}
+
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x1000;
 
