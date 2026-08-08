@@ -333,10 +333,10 @@ TEST(FinalGuestSurfaceContent, ReportsBoundedPrivacySafeSurfaceOrdinalCapacity) 
         EXPECT_EQ(report.surface_ordinal, ordinal);
         EXPECT_EQ(report.loss.ordinal_capacity, 0u);
     }
-    const auto overflow = reducer.Observe(
-        FinalGuestSurfaceReducer::MaxSurfaceOrdinals + 1,
-        3'000'000 + (FinalGuestSurfaceReducer::MaxSurfaceOrdinals + 1) * 20'000,
-        Transport(99, 99), plan, content);
+    const auto overflow =
+        reducer.Observe(FinalGuestSurfaceReducer::MaxSurfaceOrdinals + 1,
+                        3'000'000 + (FinalGuestSurfaceReducer::MaxSurfaceOrdinals + 1) * 20'000,
+                        Transport(99, 99), plan, content);
     EXPECT_EQ(overflow.surface_ordinal, 0u);
     EXPECT_EQ(overflow.status, FinalGuestSurfaceStatus::CapacityLoss);
     EXPECT_EQ(overflow.loss.ordinal_capacity, 1u);
