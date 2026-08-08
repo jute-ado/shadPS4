@@ -95,6 +95,7 @@ struct NormalizedInputAssemblyRange {
 
 struct InputAssemblyReadbackSample {
     InputAssemblyBufferToken source{};
+    u32 capture_draw{};
     u64 source_offset{};
     u64 write_serial{};
     u32 destination_offset{};
@@ -251,6 +252,7 @@ public:
             for (u32 sample = 0; sample < plan.sample_count; ++sample) {
                 const auto& existing = plan.samples[sample];
                 if (existing.source == range.source &&
+                    existing.capture_draw == range.semantic.draw &&
                     existing.source_offset == logical_samples[logical].physical_offset &&
                     existing.size == logical_samples[logical].physical_size &&
                     existing.write_serial == range.write_serial) {
@@ -303,6 +305,7 @@ public:
                     resolved = plan.sample_count++;
                     plan.samples.push_back({
                         .source = range.source,
+                        .capture_draw = range.semantic.draw,
                         .source_offset = logical_samples[logical].physical_offset,
                         .write_serial = range.write_serial,
                         .destination_offset = plan.sample_bytes,
