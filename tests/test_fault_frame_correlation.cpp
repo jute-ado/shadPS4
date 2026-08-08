@@ -155,5 +155,23 @@ TEST(FaultFrameCorrelation, WindowAndPreQuickExitFinalizersShareOneDrainThenRepo
     EXPECT_EQ(events, (std::vector<std::string_view>{"drain", "report"}));
 }
 
+TEST(FaultFrameCorrelation, RuntimePublishesReportedOnlyAfterActualEmissionReturns) {
+    FaultFrameCorrelationRuntime runtime{
+        {.enabled = true, .first_frame = 1, .frame_count = 1, .page_cap = 8}};
+    runtime.RecordPatchedFlip(100);
+    runtime.ObserveBatch(runtime.CaptureStamp(), std::array<u64, 1>{7}, false);
+
+    std::vector<std::string_view> events;
+    EXPECT_TRUE(runtime.Finalize(
+        [&] { events.push_back("drain"); },
+        [&](std::span<const FaultFrameCorrelationObservation> observations) {
+            EXPECT_TRUE(runtime.NeedsFinalization());
+            ASSERT_EQ(observations.size(), 1);
+            events.push_back("emit");
+        }));
+    EXPECT_EQ(events, (std::vector<std::string_view>{"drain", "emit"}));
+    EXPECT_FALSE(runtime.NeedsFinalization());
+}
+
 } // namespace
 } // namespace VideoCore
