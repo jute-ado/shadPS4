@@ -44,7 +44,7 @@ TEST(FaultFrameCorrelation, AggregatesBatchesAndSortsAndDeduplicatesPrivatePageI
     const auto observations = diagnostic.Finish();
     ASSERT_EQ(observations.size(), 1);
     EXPECT_EQ(observations[0].frame_sequence, 10);
-    EXPECT_EQ(observations[0].process_time_ms, 1000);
+    EXPECT_EQ(observations[0].process_time_us, 1000);
     EXPECT_EQ(observations[0].page_count, 3);
     EXPECT_EQ(observations[0].batch_count, 2);
     EXPECT_EQ(observations[0].status, FaultFrameCorrelationStatus::Complete);
@@ -134,6 +134,14 @@ TEST(FaultFrameCorrelation, EmitsSelectedFramesWithoutBatchesAndBoundsConfigurat
     EXPECT_EQ(diagnostic.GetConfiguration().frame_count, FaultFrameCorrelation::HardMaxFrames);
     EXPECT_EQ(diagnostic.GetConfiguration().page_cap,
               FaultFrameCorrelation::HardMaxPagesPerFrame);
+}
+
+TEST(FaultFrameCorrelation, ReportingCannotFreezeBeforeDeferredCallbacksDrain) {
+    FaultFrameCorrelationReportGate gate;
+    EXPECT_FALSE(gate.ClaimAfterDrain());
+    gate.MarkDeferredCallbacksDrained();
+    EXPECT_TRUE(gate.ClaimAfterDrain());
+    EXPECT_FALSE(gate.ClaimAfterDrain());
 }
 
 } // namespace
