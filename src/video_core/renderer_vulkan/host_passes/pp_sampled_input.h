@@ -39,9 +39,38 @@ struct PpSampledInputSourceViewDescriptor {
     u32 resolved_mip_count{};
     u32 resolved_base_layer{};
     u32 resolved_layer_count{};
+    u32 bound_base_mip{};
+    u32 bound_mip_count{};
+    u32 bound_base_layer{};
+    u32 bound_layer_count{};
     FinalGuestSurfaceFormat requested_format{FinalGuestSurfaceFormat::Unsupported};
     bool force_alpha_one{};
 };
+
+struct PpSampledInputSourceViewAssessment {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    bool same_view_as_baseline{true};
+    bool diagnostic_changes_bound_view{};
+    bool resolved_range_mismatch{};
+};
+
+[[nodiscard]] constexpr PpSampledInputSourceViewAssessment AssessPpSampledInputSourceView(
+    PpSampledInputSourceViewDescriptor descriptor) noexcept {
+    const bool valid = descriptor.resolved_mip_count == 1 && descriptor.resolved_layer_count == 1 &&
+                       descriptor.bound_mip_count == 1 && descriptor.bound_layer_count == 1;
+    if (!valid) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss};
+    }
+    const bool mismatch = descriptor.resolved_base_mip != descriptor.bound_base_mip ||
+                          descriptor.resolved_mip_count != descriptor.bound_mip_count ||
+                          descriptor.resolved_base_layer != descriptor.bound_base_layer ||
+                          descriptor.resolved_layer_count != descriptor.bound_layer_count;
+    return {
+        .status = mismatch ? FinalGuestSurfaceStatus::InvalidationLoss
+                           : FinalGuestSurfaceStatus::Complete,
+        .resolved_range_mismatch = mismatch,
+    };
+}
 
 struct PpSampledInputSourceViewPlan {
     u32 base_mip{};
@@ -307,6 +336,130 @@ struct PpSampledInputTransferPlan {
         .copy = true,
         .callback_payload_is_scalar_only = true,
     };
+}
+
+struct PpSampledInputPairedCaptureDescriptor {
+    bool enabled{};
+    u32 width{};
+    u32 height{};
+    FinalGuestSurfaceFormat output_format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceFormat sampled_format{FinalGuestSurfaceFormat::Unsupported};
+    u64 slot_bytes{};
+    u64 alignment{};
+};
+
+struct PpSampledInputPairedCapturePlan {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceComparison output_comparison{FinalGuestSurfaceComparison::ExactVisible};
+    u64 output_offset{};
+    u64 output_bytes{};
+    u64 sampled_offset{};
+    u64 sampled_bytes{};
+    u64 total_bytes{};
+    u32 slot_count{};
+    u32 copy_region_count{};
+    bool output_is_authoritative{};
+    bool cpu_gamma_reconstruction_is_authoritative{};
+    bool callback_payload_is_scalar_only{};
+    bool cpu_wait{};
+    bool finish{};
+};
+
+[[nodiscard]] constexpr PpSampledInputPairedCapturePlan PlanPpSampledInputPairedCapture(
+    PpSampledInputPairedCaptureDescriptor descriptor) noexcept {
+    if (!descriptor.enabled) {
+        return {};
+    }
+    if (descriptor.width == 0 || descriptor.height == 0 || descriptor.alignment == 0 ||
+        (descriptor.output_format != FinalGuestSurfaceFormat::Rgba8 &&
+         descriptor.output_format != FinalGuestSurfaceFormat::Bgra8) ||
+        descriptor.sampled_format != FinalGuestSurfaceFormat::Rgba16Float) {
+        return {.status = FinalGuestSurfaceStatus::Unsupported};
+    }
+    constexpr u64 OutputBytesPerPixel = 4;
+    constexpr u64 SampledBytesPerPixel = 8;
+    const u64 pixels = static_cast<u64>(descriptor.width) * descriptor.height;
+    if (pixels > std::numeric_limits<u64>::max() / SampledBytesPerPixel) {
+        return {.status = FinalGuestSurfaceStatus::CapacityLoss};
+    }
+    const u64 output_bytes = pixels * OutputBytesPerPixel;
+    const u64 sampled_bytes = pixels * SampledBytesPerPixel;
+    const u64 remainder = output_bytes % descriptor.alignment;
+    const u64 padding = remainder == 0 ? 0 : descriptor.alignment - remainder;
+    if (output_bytes > std::numeric_limits<u64>::max() - padding ||
+        output_bytes + padding > std::numeric_limits<u64>::max() - sampled_bytes) {
+        return {.status = FinalGuestSurfaceStatus::CapacityLoss};
+    }
+    const u64 sampled_offset = output_bytes + padding;
+    const u64 total_bytes = sampled_offset + sampled_bytes;
+    if (total_bytes > descriptor.slot_bytes) {
+        return {.status = FinalGuestSurfaceStatus::CapacityLoss};
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::Complete,
+        .output_comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .output_bytes = output_bytes,
+        .sampled_offset = sampled_offset,
+        .sampled_bytes = sampled_bytes,
+        .total_bytes = total_bytes,
+        .slot_count = 1,
+        .copy_region_count = 2,
+        .output_is_authoritative = true,
+        .callback_payload_is_scalar_only = true,
+    };
+}
+
+enum class PpSampledInputBoundary : u8 {
+    Ambiguous,
+    OutputClean,
+    AtOrBeforeSample,
+    AfterSample,
+};
+
+struct PpSampledInputPairClassification {
+    bool output_visual_return{};
+    bool raw_sample_return{};
+    bool raw_sample_stable{};
+    bool complete{};
+};
+
+[[nodiscard]] constexpr PpSampledInputBoundary ClassifyPpSampledInputPair(
+    PpSampledInputPairClassification classification) noexcept {
+    if (!classification.complete) {
+        return PpSampledInputBoundary::Ambiguous;
+    }
+    if (!classification.output_visual_return) {
+        return PpSampledInputBoundary::OutputClean;
+    }
+    if (classification.raw_sample_return) {
+        return PpSampledInputBoundary::AtOrBeforeSample;
+    }
+    if (classification.raw_sample_stable) {
+        return PpSampledInputBoundary::AfterSample;
+    }
+    return PpSampledInputBoundary::Ambiguous;
+}
+
+struct PpSampledInputObservationDescriptor {
+    bool in_window{};
+    bool stamp_valid{};
+    bool metadata_valid{};
+};
+
+struct PpSampledInputObservationPlan {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    bool emit{};
+};
+
+[[nodiscard]] constexpr PpSampledInputObservationPlan PlanPpSampledInputObservation(
+    PpSampledInputObservationDescriptor descriptor) noexcept {
+    if (!descriptor.in_window) {
+        return {};
+    }
+    if (!descriptor.stamp_valid || !descriptor.metadata_valid) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .emit = true};
+    }
+    return {.status = FinalGuestSurfaceStatus::Complete, .emit = true};
 }
 
 } // namespace Vulkan
