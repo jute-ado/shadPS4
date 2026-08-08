@@ -477,10 +477,10 @@ TEST(FinalGuestSurfaceContent, ReportsLocalizedTileAbaWhenWholeSampleDoesNotRetu
     EXPECT_EQ(report.loss.tile_detail, 0u);
 }
 
-TEST(FinalGuestSurfaceContent, BoundsNormalizedTileOrdinalDetailsWithExplicitLoss) {
+TEST(FinalGuestSurfaceContent, RetainsAllValidNormalizedTileOrdinalsWithoutDetailLoss) {
     FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults()};
     FinalGuestSurfaceTilePlan plan{};
-    constexpr u32 tile_count = FinalGuestSurfaceReport::MaxTileDetails + 4;
+    constexpr u32 tile_count = FinalGuestSurfaceTilePlan::MaxTiles;
     plan.tile_count = tile_count;
     plan.sample_bytes = tile_count * 4;
     for (u32 tile = 0; tile < tile_count; ++tile) {
@@ -496,14 +496,15 @@ TEST(FinalGuestSurfaceContent, BoundsNormalizedTileOrdinalDetailsWithExplicitLos
         202, 2'200'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, a);
 
     EXPECT_EQ(report.aba_tiles, tile_count);
-    EXPECT_EQ(report.aba_tile_ordinal_count, FinalGuestSurfaceReport::MaxTileDetails);
-    EXPECT_EQ(report.loss.tile_detail, 4u);
+    EXPECT_EQ(report.aba_tile_ordinal_count, tile_count);
+    EXPECT_EQ(report.loss.tile_detail, 0u);
     for (u32 i = 0; i < report.aba_tile_ordinal_count; ++i) {
         EXPECT_EQ(report.aba_tile_ordinals[i], i + 1);
     }
     const std::string text = Vulkan::FormatFinalGuestSurfaceReport(report);
     EXPECT_NE(text.find("aba_tile_ordinals=1,2,3"), std::string::npos);
-    EXPECT_NE(text.find("tile_detail_loss=4"), std::string::npos);
+    EXPECT_NE(text.find(",142,143,144 status="), std::string::npos);
+    EXPECT_NE(text.find("tile_detail_loss=0"), std::string::npos);
     EXPECT_EQ(text.find("x="), std::string::npos);
     EXPECT_EQ(text.find("y="), std::string::npos);
 }
