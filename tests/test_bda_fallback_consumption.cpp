@@ -64,6 +64,30 @@ TEST(BdaFallbackConsumption, DisabledAndOutsideWindowDoNotTouchStorage) {
     EXPECT_EQ(ReadWords(words), std::vector<u32>(words.size(), 0));
 }
 
+TEST(BdaFallbackConsumption, DiagnosticDisablesSerializedPipelinePreload) {
+    EXPECT_TRUE(ShouldPreloadPipelineCacheForBdaFallbackDiagnostic(true, false));
+    EXPECT_FALSE(ShouldPreloadPipelineCacheForBdaFallbackDiagnostic(true, true));
+    EXPECT_FALSE(ShouldPreloadPipelineCacheForBdaFallbackDiagnostic(false, true));
+}
+
+TEST(BdaFallbackConsumption, DiagnosticDisablesShaderPatchReplacement) {
+    EXPECT_TRUE(ShouldApplyShaderPatchForBdaFallbackDiagnostic(true, true, false));
+    EXPECT_FALSE(ShouldApplyShaderPatchForBdaFallbackDiagnostic(true, true, true));
+    EXPECT_FALSE(ShouldApplyShaderPatchForBdaFallbackDiagnostic(false, true, false));
+}
+
+TEST(BdaFallbackConsumption, ParsedFlipSequencePublishesOrdinalAndProcessTimeTogether) {
+    BdaFallbackParsedFrameSequence sequence;
+    EXPECT_EQ(sequence.Read().sequence, 1);
+    EXPECT_EQ(sequence.ObserveFlip(1234), 1);
+    EXPECT_EQ(sequence.Read().sequence, 2);
+    EXPECT_EQ(sequence.Read().process_time_us, 1234);
+    EXPECT_EQ(sequence.ObserveFlip(5678), 2);
+    const auto second = sequence.Read();
+    EXPECT_EQ(second.sequence, 3);
+    EXPECT_EQ(second.process_time_us, 5678);
+}
+
 TEST(BdaFallbackConsumption, DuplicateLaneMarksAreIdempotent) {
     auto words = MakeAtomicWords(TestConfig);
     const auto mark = PlanBdaFallbackMark(TestConfig, true, 100, 3, 2);
@@ -157,6 +181,8 @@ TEST(BdaFallbackConsumption, ReducerDetectsStableChangeAndExactAbaReturn) {
 
     const auto changed =
         reducer.Observe(101, generation_b, BdaFallbackFrameAvailability::Complete, false);
+    EXPECT_EQ(changed.frame, 101);
+    EXPECT_EQ(changed.previous_frame, 100);
     EXPECT_TRUE(changed.has_previous);
     EXPECT_TRUE(changed.changed_from_previous);
     EXPECT_FALSE(changed.exact_aba_return);
@@ -165,6 +191,8 @@ TEST(BdaFallbackConsumption, ReducerDetectsStableChangeAndExactAbaReturn) {
         reducer.Observe(102, generation_a, BdaFallbackFrameAvailability::Complete, false);
     EXPECT_TRUE(returned.changed_from_previous);
     EXPECT_TRUE(returned.exact_aba_return);
+    EXPECT_EQ(returned.frame, 102);
+    EXPECT_EQ(returned.previous_frame, 101);
     EXPECT_EQ(returned.aba_middle_frame, 101);
 
     BdaFallbackFrameReducer stable_reducer(TestConfig);

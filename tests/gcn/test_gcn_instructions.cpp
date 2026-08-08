@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <cstdlib>
+#include <optional>
 #include <ranges>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -34,7 +38,42 @@ struct F32x2 {
 struct BdaFallbackSpirvStructure {
     u32 atomic_or_count{};
     bool atomic_is_on_conditional_true_path{};
+    bool atomic_is_on_nested_missing_bda_true_path{};
     bool atomic_path_returns_zero_fallback{};
+};
+
+class ScopedEnvironmentValue {
+public:
+    ScopedEnvironmentValue(std::string name_, std::string value) : name{std::move(name_)} {
+        if (const char* existing = std::getenv(name.c_str())) {
+            previous = existing;
+        }
+        Set(value.c_str());
+    }
+
+    ~ScopedEnvironmentValue() {
+        if (previous) {
+            Set(previous->c_str());
+        } else {
+#ifdef _WIN32
+            _putenv_s(name.c_str(), "");
+#else
+            unsetenv(name.c_str());
+#endif
+        }
+    }
+
+private:
+    void Set(const char* value) {
+#ifdef _WIN32
+        _putenv_s(name.c_str(), value);
+#else
+        setenv(name.c_str(), value, 1);
+#endif
+    }
+
+    std::string name;
+    std::optional<std::string> previous;
 };
 
 static BdaFallbackSpirvStructure InspectBdaFallbackStructure(std::span<const u32> spirv) {
@@ -70,29 +109,57 @@ static BdaFallbackSpirvStructure InspectBdaFallbackStructure(std::span<const u32
     }
 
     BdaFallbackSpirvStructure result{};
+    std::unordered_map<u32, std::vector<u32>> successors;
+    for (const auto& instruction : instructions) {
+        if (instruction.opcode == spv::Op::OpBranch && instruction.words.size() >= 2) {
+            successors[instruction.block].push_back(instruction.words[1]);
+        } else if (instruction.opcode == spv::Op::OpBranchConditional &&
+                   instruction.words.size() >= 4) {
+            successors[instruction.block].push_back(instruction.words[2]);
+            successors[instruction.block].push_back(instruction.words[3]);
+        }
+    }
+    const auto reachable = [&](u32 start, u32 target) {
+        std::vector<u32> pending{start};
+        std::unordered_set<u32> visited;
+        while (!pending.empty()) {
+            const u32 block = pending.back();
+            pending.pop_back();
+            if (block == target) {
+                return true;
+            }
+            if (!visited.insert(block).second) {
+                continue;
+            }
+            if (const auto found = successors.find(block); found != successors.end()) {
+                pending.insert(pending.end(), found->second.begin(), found->second.end());
+            }
+        }
+        return false;
+    };
     for (const auto& atomic : instructions) {
         if (atomic.opcode != spv::Op::OpAtomicOr) {
             continue;
         }
         ++result.atomic_or_count;
-        u32 merge_block{};
+        u32 true_path_count{};
         for (const auto& instruction : instructions) {
             if (instruction.opcode == spv::Op::OpBranchConditional &&
-                instruction.words.size() >= 4 && instruction.words[2] == atomic.block) {
-                result.atomic_is_on_conditional_true_path = true;
-            }
-            if (instruction.block == atomic.block && instruction.opcode == spv::Op::OpBranch &&
-                instruction.words.size() >= 2) {
-                merge_block = instruction.words[1];
+                instruction.words.size() >= 4 &&
+                reachable(instruction.words[2], atomic.block)) {
+                ++true_path_count;
             }
         }
+        result.atomic_is_on_conditional_true_path = true_path_count >= 1;
+        result.atomic_is_on_nested_missing_bda_true_path = true_path_count >= 2;
+
         for (const auto& instruction : instructions) {
-            if (instruction.block != merge_block || instruction.opcode != spv::Op::OpPhi ||
-                instruction.words.size() < 5) {
+            if (instruction.opcode != spv::Op::OpPhi || instruction.words.size() < 5) {
                 continue;
             }
             for (size_t incoming = 3; incoming + 1 < instruction.words.size(); incoming += 2) {
-                if (instruction.words[incoming + 1] == atomic.block &&
+                const u32 incoming_block = instruction.words[incoming + 1];
+                if (reachable(atomic.block, incoming_block) &&
                     zero_constants.contains(instruction.words[incoming])) {
                     result.atomic_path_returns_zero_fallback = true;
                 }
@@ -128,6 +195,8 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
 TEST_F(GcnTest, direct_memory_fallback_attribution_is_atomic_and_preserves_zero) {
     constexpr u64 addr64_load = 0x80010000e030800cULL;
 
+    const ScopedEnvironmentValue diagnostic{"SHADPS4_DIAGNOSTIC_BDA_FALLBACK_CONSUMPTION", "1"};
+
     const auto direct = TranslateToSpirvWithInfo(addr64_load, true);
     const auto descriptor_relative = TranslateToSpirvWithInfo(addr64_load, false);
     const auto structure = InspectBdaFallbackStructure(direct.spirv);
@@ -135,6 +204,7 @@ TEST_F(GcnTest, direct_memory_fallback_attribution_is_atomic_and_preserves_zero)
 
     EXPECT_EQ(structure.atomic_or_count, 1);
     EXPECT_TRUE(structure.atomic_is_on_conditional_true_path);
+    EXPECT_TRUE(structure.atomic_is_on_nested_missing_bda_true_path);
     EXPECT_TRUE(structure.atomic_path_returns_zero_fallback);
     EXPECT_EQ(control.atomic_or_count, 0);
 }
