@@ -95,9 +95,55 @@ TEST(InputAssemblyDeviceReadbackPlan, DeduplicatesSamplesWhileRetainingBothSeman
     ASSERT_TRUE(index_decision.accepted);
     EXPECT_EQ(vertex_decision.reference_count, 3);
     EXPECT_EQ(index_decision.reference_count, 3);
+    EXPECT_EQ(vertex_decision.new_copy_count, 3);
+    EXPECT_EQ(index_decision.new_copy_count, 2);
     EXPECT_LT(planner.EndFrame().sample_count,
               vertex_decision.reference_count + index_decision.reference_count);
     EXPECT_EQ(planner.EndFrame().semantic_count, 2);
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, AlignsPhysicalCopiesButRetainsExactSemanticSlice) {
+    InputAssemblyDeviceReadbackPlanner planner;
+    planner.BeginFrame(62);
+    const auto normalized =
+        AmdGpu::NormalizeVertexInputRange(Source(InputAssemblyHostUsage::Stream, 3, 64), 0, 0, 16,
+                                          Semantic(1, InputAssemblySourceKind::Vertex, 0));
+    ASSERT_TRUE(normalized);
+
+    const auto decision = planner.Plan(*normalized);
+    ASSERT_TRUE(decision.accepted);
+    ASSERT_EQ(decision.reference_count, 1);
+    ASSERT_EQ(decision.new_copy_count, 1);
+    const auto& plan = planner.EndFrame();
+    ASSERT_EQ(plan.sample_count, 1);
+    EXPECT_EQ(plan.samples[0].source_offset, 0);
+    EXPECT_EQ(plan.samples[0].destination_offset, 0);
+    EXPECT_EQ(plan.samples[0].size, 20);
+    EXPECT_EQ(plan.samples[0].source_offset % 4, 0);
+    EXPECT_EQ(plan.samples[0].destination_offset % 4, 0);
+    EXPECT_EQ(plan.samples[0].size % 4, 0);
+    EXPECT_EQ(decision.references[0].destination_offset, 3);
+    EXPECT_EQ(decision.references[0].size, 16);
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, RejectsConflictingMetadataForOneSourceGeneration) {
+    InputAssemblyDeviceReadbackPlanner planner;
+    planner.BeginFrame(63);
+    const auto first =
+        AmdGpu::NormalizeVertexInputRange(Source(InputAssemblyHostUsage::Stream), 0, 0, 16,
+                                          Semantic(1, InputAssemblySourceKind::Vertex, 0));
+    auto conflicting_source = Source(InputAssemblyHostUsage::DeviceLocal);
+    conflicting_source.authority = InputAssemblyAuthority::CpuAuthoritative;
+    const auto conflicting = AmdGpu::NormalizeVertexInputRange(
+        conflicting_source, 0, 0, 16, Semantic(2, InputAssemblySourceKind::Vertex, 0));
+    ASSERT_TRUE(first && conflicting);
+    EXPECT_TRUE(planner.Plan(*first).accepted);
+    EXPECT_FALSE(planner.Plan(*conflicting).accepted);
+    const auto& plan = planner.EndFrame();
+    EXPECT_FALSE(plan.complete);
+    EXPECT_EQ(plan.sample_count, 1);
+    EXPECT_EQ(plan.semantic_count, 1);
+    EXPECT_EQ(plan.loss.source_conflict, 1);
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, RejectsInvalidZeroAndOutOfBoundsSources) {
