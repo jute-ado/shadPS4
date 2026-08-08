@@ -160,7 +160,7 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
     });
 }
 
-bool Buffer::InvalidateMappedRange(u64 offset, u64 size) {
+bool Buffer::InvalidateMappedRange(const u64 offset, const u64 size) const {
     return is_coherent || vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation,
                                                   offset, size) == VK_SUCCESS;
 }
