@@ -10,7 +10,64 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
 
+namespace Vulkan::HostPasses {
+
+enum class PpDiagnosticMode : u8 {
+    None,
+    ComputedShadow,
+    SampledInput,
+};
+
+} // namespace Vulkan::HostPasses
+
 namespace Vulkan {
+
+[[nodiscard]] constexpr HostPasses::PpDiagnosticMode PpDiagnosticModeForStage(
+    FinalGuestSurfaceStage stage) noexcept {
+    switch (stage) {
+    case FinalGuestSurfaceStage::PpInputShadow:
+        return HostPasses::PpDiagnosticMode::ComputedShadow;
+    case FinalGuestSurfaceStage::PpSampledInput:
+        return HostPasses::PpDiagnosticMode::SampledInput;
+    default:
+        return HostPasses::PpDiagnosticMode::None;
+    }
+}
+
+struct PpSampledInputSourceViewDescriptor {
+    u32 resolved_base_mip{};
+    u32 resolved_mip_count{};
+    u32 resolved_base_layer{};
+    u32 resolved_layer_count{};
+    FinalGuestSurfaceFormat requested_format{FinalGuestSurfaceFormat::Unsupported};
+    bool force_alpha_one{};
+};
+
+struct PpSampledInputSourceViewPlan {
+    u32 base_mip{};
+    u32 mip_count{};
+    u32 base_layer{};
+    u32 layer_count{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    bool force_alpha_one{};
+};
+
+[[nodiscard]] constexpr PpSampledInputSourceViewPlan PlanPpSampledInputSourceView(
+    PpSampledInputSourceViewDescriptor descriptor) noexcept {
+    if (descriptor.resolved_mip_count != 1 || descriptor.resolved_layer_count != 1 ||
+        descriptor.requested_format == FinalGuestSurfaceFormat::Unsupported) {
+        return {.status = FinalGuestSurfaceStatus::Unsupported};
+    }
+    return {
+        .base_mip = descriptor.resolved_base_mip,
+        .mip_count = descriptor.resolved_mip_count,
+        .base_layer = descriptor.resolved_base_layer,
+        .layer_count = descriptor.resolved_layer_count,
+        .format = descriptor.requested_format,
+        .force_alpha_one = descriptor.force_alpha_one,
+    };
+}
 
 struct FinalGuestSurfaceSampledInputDescriptor {
     bool fsr_enabled{};
@@ -151,6 +208,105 @@ private:
 [[nodiscard]] constexpr bool ShouldAssignPpSampledInputFrame(bool enabled, bool stamp_valid,
                                                              bool metadata_valid) noexcept {
     return enabled && stamp_valid && metadata_valid;
+}
+
+struct FinalGuestSurfaceSampledInputPayload {
+    u64 sequence{};
+    u64 process_time_us{};
+    u64 token{};
+    FinalGuestSurfaceSampledInputMetadata metadata{};
+};
+
+struct FinalGuestSurfaceSampledInputTakeResult {
+    FinalGuestSurfaceSampledInputPayload payload{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    bool emit{};
+};
+
+class FinalGuestSurfaceSampledInputFrameState {
+public:
+    [[nodiscard]] FinalGuestSurfaceStatus AssignIfValid(
+        bool eligible, FinalGuestSurfaceSampledInputPayload next) noexcept {
+        if (!eligible) {
+            return FinalGuestSurfaceStatus::AlreadyConsumed;
+        }
+        if (pending || poisoned) {
+            ClearPending();
+            poisoned = true;
+            return FinalGuestSurfaceStatus::GapLoss;
+        }
+        if (next.sequence == 0 || next.process_time_us == 0 || next.token == 0 ||
+            !next.metadata.valid) {
+            poisoned = true;
+            return FinalGuestSurfaceStatus::InvalidationLoss;
+        }
+        payload = next;
+        pending = true;
+        return FinalGuestSurfaceStatus::Complete;
+    }
+
+    [[nodiscard]] FinalGuestSurfaceSampledInputTakeResult TakeForPresent(bool reused) noexcept {
+        if (poisoned) {
+            Clear();
+            return {.status = FinalGuestSurfaceStatus::GapLoss};
+        }
+        if (!pending) {
+            return {};
+        }
+        if (reused) {
+            ClearPending();
+            return {.status = FinalGuestSurfaceStatus::GapLoss};
+        }
+        const auto result = FinalGuestSurfaceSampledInputTakeResult{
+            .payload = payload,
+            .status = FinalGuestSurfaceStatus::Complete,
+            .emit = true,
+        };
+        ClearPending();
+        return result;
+    }
+
+    void Clear() noexcept {
+        ClearPending();
+        poisoned = false;
+    }
+
+private:
+    void ClearPending() noexcept {
+        payload = {};
+        pending = false;
+    }
+
+    FinalGuestSurfaceSampledInputPayload payload{};
+    bool pending{};
+    bool poisoned{};
+};
+
+struct PpSampledInputTransferPlan {
+    u32 color_write_to_transfer_barriers{};
+    u32 copy_regions{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    bool copy{};
+    bool callback_payload_is_scalar_only{};
+    bool cpu_wait{};
+    bool finish{};
+    bool callback_retains_frame{};
+    bool callback_retains_image{};
+    bool callback_retains_vk_image{};
+};
+
+[[nodiscard]] constexpr PpSampledInputTransferPlan PlanPpSampledInputTransfer(
+    bool enabled, bool reused, bool frame_valid, bool metadata_valid) noexcept {
+    if (!enabled || reused || !frame_valid || !metadata_valid) {
+        return {};
+    }
+    return {
+        .color_write_to_transfer_barriers = 1,
+        .copy_regions = 1,
+        .format = FinalGuestSurfaceFormat::Rgba16Float,
+        .copy = true,
+        .callback_payload_is_scalar_only = true,
+    };
 }
 
 } // namespace Vulkan

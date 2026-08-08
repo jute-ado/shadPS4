@@ -41,6 +41,7 @@ struct Frame {
     vk::Image pp_input_shadow_image{};
     vk::ImageView pp_input_shadow_view{};
     FinalGuestSurfacePpInputFrameState pp_input_shadow_state{};
+    FinalGuestSurfaceSampledInputFrameState pp_sampled_input_state{};
 
     ImTextureID imgui_texture;
 };
@@ -141,6 +142,7 @@ private:
     std::unique_ptr<Rasterizer> rasterizer;
     std::unique_ptr<FinalGuestSurfaceContentState> final_guest_surface_content;
     FinalGuestSurfacePpInputConfigTracker pp_input_shadow_config;
+    FinalGuestSurfaceSampledInputConfigTracker pp_sampled_input_config;
     u64 next_pp_input_shadow_token{1};
     VideoCore::TextureCache& texture_cache;
     vk::UniqueCommandPool command_pool;
