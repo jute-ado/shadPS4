@@ -592,8 +592,12 @@ TEST(InputAssemblyDeviceReadbackPlan, LagReducerFindsMultiObservationEpisodeRetu
     const auto first_return = observe(4, 300'000, a);
     EXPECT_TRUE(first_return.lag_episode_return);
     EXPECT_TRUE(first_return.lag_stable_transport_episode_return);
-    EXPECT_EQ(first_return.lag_baseline_sequence, 1);
-    EXPECT_EQ(first_return.lag_baseline_process_time_us, 0);
+    EXPECT_EQ(first_return.lag_episode_baseline_sequence, 1);
+    EXPECT_EQ(first_return.lag_episode_baseline_process_time_us, 0);
+    EXPECT_EQ(first_return.lag_episode_departure_sequence, 2);
+    EXPECT_EQ(first_return.lag_episode_departure_process_time_us, 100'000);
+    EXPECT_EQ(first_return.lag_episode_return_sequence, 4);
+    EXPECT_EQ(first_return.lag_episode_return_process_time_us, 300'000);
     EXPECT_EQ(first_return.lag_departure_sequence, 2);
     EXPECT_EQ(first_return.lag_departure_process_time_us, 100'000);
     EXPECT_EQ(first_return.lag_return_sequence, 4);
@@ -677,12 +681,12 @@ TEST(InputAssemblyDeviceReadbackPlan, LagEventDetailsAreBoundedAndExposeTimingOn
     InputAssemblyImmediateChange change{
         .lag_episode_return = true,
         .lag_stable_transport_episode_return = true,
-        .lag_baseline_sequence = 84,
-        .lag_baseline_process_time_us = 1'400'000,
-        .lag_departure_sequence = 90,
-        .lag_departure_process_time_us = 1'500'000,
-        .lag_return_sequence = 96,
-        .lag_return_process_time_us = 1'600'000,
+        .lag_episode_baseline_sequence = 84,
+        .lag_episode_baseline_process_time_us = 1'400'000,
+        .lag_episode_departure_sequence = 90,
+        .lag_episode_departure_process_time_us = 1'500'000,
+        .lag_episode_return_sequence = 96,
+        .lag_episode_return_process_time_us = 1'600'000,
     };
     for (u32 i = 0; i < InputAssemblyLagEventDetails::MaxEvents; ++i) {
         EXPECT_TRUE(details.Append(Semantic(i, InputAssemblySourceKind::Vertex, i), change));

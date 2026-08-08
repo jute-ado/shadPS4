@@ -108,9 +108,11 @@ Liverpool::Liverpool() {
         if (input_assembly_lag_config.cadence_us == 0) {
             input_assembly_lag_config.cadence_us = InputAssemblyLagConfig::Defaults().cadence_us;
         }
-        input_assembly_lag_config.tolerance_us = parse_bound(
-            "SHADPS4_INPUT_ASSEMBLY_LAG_TOLERANCE_US",
-            InputAssemblyLagConfig::Defaults().tolerance_us, input_assembly_lag_config.cadence_us);
+        input_assembly_lag_config.tolerance_us =
+            parse_bound("SHADPS4_INPUT_ASSEMBLY_LAG_TOLERANCE_US",
+                        InputAssemblyLagConfig::Defaults().tolerance_us,
+                        (input_assembly_lag_config.cadence_us - 1) / 2);
+        input_assembly_lag_config = input_assembly_lag_config.Normalized();
         LOG_INFO(Render,
                  "InputAssemblyDeviceIntegrityConfig enabled=1 frame_start={} frame_count={} "
                  "draw_start={} draw_count={} samples_per_frame={} bytes_per_frame={} "

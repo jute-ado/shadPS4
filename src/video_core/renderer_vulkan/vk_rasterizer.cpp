@@ -96,7 +96,8 @@ public:
                      "serial_changed=0 lag_content_aba=0 lag_stable_transport_aba=0 "
                      "lag_episode_return=0 lag_stable_transport_episode_return=0 "
                      "lag_content_aba_events= lag_stable_transport_aba_events= "
-                     "lag_episode_events= lag_source_changed=0 lag_serial_changed=0 "
+                     "lag_episode_events= lag_stable_transport_episode_events= "
+                     "lag_source_changed=0 lag_serial_changed=0 "
                      "lag_unavailable=0 lag_ambiguous=0 lag_history_loss=0 lag_detail_loss=0 "
                      "time_gap=0 "
                      "authority_ambiguous=0 gap=0 incomplete=0 busy=0 "
@@ -321,6 +322,7 @@ private:
         AmdGpu::InputAssemblyLagEventDetails lag_content_aba_details;
         AmdGpu::InputAssemblyLagEventDetails lag_stable_transport_aba_details;
         AmdGpu::InputAssemblyLagEventDetails lag_episode_details;
+        AmdGpu::InputAssemblyLagEventDetails lag_stable_transport_episode_details;
         const auto append_ordinal = [](std::string& text,
                                        const AmdGpu::InputAssemblySemanticOrdinal& semantic) {
             if (text.size() >= 160) {
@@ -408,6 +410,13 @@ private:
                 episode_result.lag_exact_aba_return = false;
                 (void)lag_episode_details.Append(semantic.semantic, episode_result);
             }
+            if (result.lag_stable_transport_episode_return) {
+                auto stable_episode_result = result;
+                stable_episode_result.lag_exact_aba_return = false;
+                stable_episode_result.lag_episode_return = true;
+                (void)lag_stable_transport_episode_details.Append(semantic.semantic,
+                                                                  stable_episode_result);
+            }
             source_changed += result.source_changed;
             serial_changed += result.write_serial_changed;
             authority_ambiguous += result.authority_ambiguous;
@@ -436,6 +445,8 @@ private:
                 text += std::to_string(event.semantic.draw) + ':' +
                         std::to_string(static_cast<u32>(event.semantic.kind)) + ':' +
                         std::to_string(event.semantic.binding) + '@' +
+                        std::to_string(event.baseline_sequence) + '/' +
+                        std::to_string(event.baseline_process_time_us) + '~' +
                         std::to_string(event.departure_sequence) + '/' +
                         std::to_string(event.departure_process_time_us) + "->" +
                         std::to_string(event.return_sequence) + '/' +
@@ -447,9 +458,11 @@ private:
         const auto lag_stable_transport_aba_events =
             format_lag_events(lag_stable_transport_aba_details);
         const auto lag_episode_events = format_lag_events(lag_episode_details);
-        const u32 lag_detail_loss = lag_content_aba_details.LostEvents() +
-                                    lag_stable_transport_aba_details.LostEvents() +
-                                    lag_episode_details.LostEvents();
+        const auto lag_stable_transport_episode_events =
+            format_lag_events(lag_stable_transport_episode_details);
+        const u32 lag_detail_loss =
+            lag_content_aba_details.LostEvents() + lag_stable_transport_aba_details.LostEvents() +
+            lag_episode_details.LostEvents() + lag_stable_transport_episode_details.LostEvents();
         LOG_INFO(Render,
                  "InputAssemblyDeviceIntegrity sequence={} process_time_us={} draws={} "
                  "semantics={} samples={} "
@@ -459,7 +472,8 @@ private:
                  "serial_changed={} lag_content_aba={} lag_stable_transport_aba={} "
                  "lag_episode_return={} lag_stable_transport_episode_return={} "
                  "lag_content_aba_events={} lag_stable_transport_aba_events={} "
-                 "lag_episode_events={} lag_source_changed={} lag_serial_changed={} "
+                 "lag_episode_events={} lag_stable_transport_episode_events={} "
+                 "lag_source_changed={} lag_serial_changed={} "
                  "lag_unavailable={} lag_ambiguous={} lag_history_loss={} lag_detail_loss={} "
                  "time_gap={} "
                  "authority_ambiguous={} gap={} incomplete={} busy={} "
@@ -471,10 +485,10 @@ private:
                  aba, aba_ordinals, stable_transport_aba, stable_transport_aba_ordinals,
                  source_changed, serial_changed, lag_content_aba, lag_stable_transport_aba,
                  lag_episode_return, lag_stable_transport_episode_return, lag_content_aba_events,
-                 lag_stable_transport_aba_events, lag_episode_events, lag_source_changed,
-                 lag_serial_changed, lag_unavailable, lag_ambiguous, lag_history_loss,
-                 lag_detail_loss, time_gap, authority_ambiguous, gap, incomplete, was_busy,
-                 invalidation_failed,
+                 lag_stable_transport_aba_events, lag_episode_events,
+                 lag_stable_transport_episode_events, lag_source_changed, lag_serial_changed,
+                 lag_unavailable, lag_ambiguous, lag_history_loss, lag_detail_loss, time_gap,
+                 authority_ambiguous, gap, incomplete, was_busy, invalidation_failed,
                  plan.complete && !was_busy && !invalidation_failed &&
                      completed_samples == plan.sample_count,
                  window.frame_start, window.frame_count, window.draw_start, window.draw_count,

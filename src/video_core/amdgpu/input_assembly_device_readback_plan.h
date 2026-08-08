@@ -522,6 +522,21 @@ struct InputAssemblyLagConfig {
         return {};
     }
 
+    [[nodiscard]] constexpr bool HasDisjointTargets() const noexcept {
+        return cadence_us != 0 && tolerance_us <= (cadence_us - 1) / 2;
+    }
+
+    [[nodiscard]] constexpr InputAssemblyLagConfig Normalized() const noexcept {
+        auto normalized = *this;
+        if (cadence_us == 0) {
+            normalized.enabled = false;
+            normalized.tolerance_us = 0;
+            return normalized;
+        }
+        normalized.tolerance_us = std::min(tolerance_us, (cadence_us - 1) / 2);
+        return normalized;
+    }
+
     [[nodiscard]] constexpr u64 HistoryHorizonUs() const noexcept {
         if (cadence_us > (std::numeric_limits<u64>::max() - tolerance_us) / 3) {
             return std::numeric_limits<u64>::max();
@@ -546,10 +561,18 @@ struct InputAssemblyImmediateChange {
     bool lag_history_loss{};
     bool time_gap{};
     bool disabled{};
+    u64 lag_baseline_sequence{};
+    u64 lag_baseline_process_time_us{};
     u64 lag_departure_sequence{};
     u64 lag_departure_process_time_us{};
     u64 lag_return_sequence{};
     u64 lag_return_process_time_us{};
+    u64 lag_episode_baseline_sequence{};
+    u64 lag_episode_baseline_process_time_us{};
+    u64 lag_episode_departure_sequence{};
+    u64 lag_episode_departure_process_time_us{};
+    u64 lag_episode_return_sequence{};
+    u64 lag_episode_return_process_time_us{};
     bool source_changed{};
     bool write_serial_changed{};
     bool authority_ambiguous{};
@@ -561,10 +584,13 @@ struct InputAssemblyImmediateChange {
 
 struct InputAssemblyLagEvent {
     InputAssemblySemanticOrdinal semantic{};
+    u64 baseline_sequence{};
+    u64 baseline_process_time_us{};
     u64 departure_sequence{};
     u64 departure_process_time_us{};
     u64 return_sequence{};
     u64 return_process_time_us{};
+    bool stable_transport{};
 };
 
 class InputAssemblyLagEventDetails {
@@ -580,12 +606,23 @@ public:
             ++lost_events;
             return false;
         }
+        const bool exact = change.lag_exact_aba_return;
         events[count++] = {
             .semantic = semantic,
-            .departure_sequence = change.lag_departure_sequence,
-            .departure_process_time_us = change.lag_departure_process_time_us,
-            .return_sequence = change.lag_return_sequence,
-            .return_process_time_us = change.lag_return_process_time_us,
+            .baseline_sequence =
+                exact ? change.lag_baseline_sequence : change.lag_episode_baseline_sequence,
+            .baseline_process_time_us = exact ? change.lag_baseline_process_time_us
+                                              : change.lag_episode_baseline_process_time_us,
+            .departure_sequence =
+                exact ? change.lag_departure_sequence : change.lag_episode_departure_sequence,
+            .departure_process_time_us = exact ? change.lag_departure_process_time_us
+                                               : change.lag_episode_departure_process_time_us,
+            .return_sequence =
+                exact ? change.lag_return_sequence : change.lag_episode_return_sequence,
+            .return_process_time_us = exact ? change.lag_return_process_time_us
+                                            : change.lag_episode_return_process_time_us,
+            .stable_transport = exact ? change.lag_stable_transport_aba
+                                      : change.lag_stable_transport_episode_return,
         };
         return true;
     }
@@ -612,7 +649,7 @@ public:
 
     explicit InputAssemblyImmediateReadbackReducer(
         InputAssemblyLagConfig config_ = InputAssemblyLagConfig::Defaults())
-        : config{config_},
+        : config{config_.Normalized()},
           entries{config.enabled && config.cadence_us != 0 ? std::make_unique<Entry[]>(MaxEntries)
                                                            : nullptr} {}
 
@@ -881,6 +918,8 @@ private:
                                                   !result.lag_source_changed &&
                                                   !result.lag_write_serial_changed;
                 if (result.lag_exact_aba_return) {
+                    result.lag_baseline_sequence = prior_previous->sequence;
+                    result.lag_baseline_process_time_us = prior_previous->process_time_us;
                     result.lag_departure_sequence = prior->sequence;
                     result.lag_departure_process_time_us = prior->process_time_us;
                     result.lag_return_sequence = snapshot.sequence;
@@ -914,16 +953,26 @@ private:
             const auto& baseline_observation = entry.lag_history[*baseline];
             const auto& departure_observation = entry.lag_history[*baseline + 1];
             result.lag_episode_return = true;
-            const bool episode_source_changed = baseline_observation.source != snapshot.source ||
-                                                departure_observation.source != snapshot.source;
-            const bool episode_serial_changed =
-                baseline_observation.write_serial != snapshot.write_serial ||
-                departure_observation.write_serial != snapshot.write_serial;
+            bool episode_source_changed{};
+            bool episode_serial_changed{};
+            for (u32 i = *baseline; i < entry.lag_history_count; ++i) {
+                episode_source_changed |= entry.lag_history[i].source != snapshot.source;
+                episode_serial_changed |=
+                    entry.lag_history[i].write_serial != snapshot.write_serial;
+            }
             result.lag_source_changed |= episode_source_changed;
             result.lag_write_serial_changed |= episode_serial_changed;
             result.lag_stable_transport_episode_return =
                 !episode_source_changed && !episode_serial_changed;
+            result.lag_episode_baseline_sequence = baseline_observation.sequence;
+            result.lag_episode_baseline_process_time_us = baseline_observation.process_time_us;
+            result.lag_episode_departure_sequence = departure_observation.sequence;
+            result.lag_episode_departure_process_time_us = departure_observation.process_time_us;
+            result.lag_episode_return_sequence = snapshot.sequence;
+            result.lag_episode_return_process_time_us = snapshot.process_time_us;
             if (!result.lag_exact_aba_return) {
+                result.lag_baseline_sequence = baseline_observation.sequence;
+                result.lag_baseline_process_time_us = baseline_observation.process_time_us;
                 result.lag_departure_sequence = departure_observation.sequence;
                 result.lag_departure_process_time_us = departure_observation.process_time_us;
                 result.lag_return_sequence = snapshot.sequence;
