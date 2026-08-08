@@ -58,5 +58,18 @@ TEST(PresentFrameTransition, NeverResamplesAReusedPresentation) {
     EXPECT_EQ(transitions.before.new_layout, vk::ImageLayout::eShaderReadOnlyOptimal);
 }
 
+TEST(PresentFrameTransition, CapturesPpInputShadowAfterItsColorWriteWithoutRestore) {
+    const auto transition = GetPpInputShadowCaptureTransition(true);
+    EXPECT_TRUE(transition.required);
+    EXPECT_EQ(transition.src_stage, vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+    EXPECT_EQ(transition.src_access, vk::AccessFlagBits2::eColorAttachmentWrite);
+    EXPECT_EQ(transition.dst_stage, vk::PipelineStageFlagBits2::eTransfer);
+    EXPECT_EQ(transition.dst_access, vk::AccessFlagBits2::eTransferRead);
+    EXPECT_EQ(transition.old_layout, vk::ImageLayout::eColorAttachmentOptimal);
+    EXPECT_EQ(transition.new_layout, vk::ImageLayout::eTransferSrcOptimal);
+
+    EXPECT_FALSE(GetPpInputShadowCaptureTransition(false).required);
+}
+
 } // namespace
 } // namespace Vulkan
