@@ -435,7 +435,7 @@ template <typename ReadValue>
 }
 
 struct FinalGuestSurfaceReport {
-    static constexpr u32 MaxTileDetails = 16;
+    static constexpr u32 MaxTileDetails = FinalGuestSurfaceTilePlan::MaxTiles;
 
     u64 sequence{};
     u64 process_time_us{};
