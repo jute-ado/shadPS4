@@ -776,6 +776,35 @@ TEST(FinalGuestSurfaceContent, ProductionConfigSelectsExactlyOneStrictCaptureSta
     EXPECT_FALSE(invalid.has_value());
 }
 
+TEST(FinalGuestSurfaceContent, CalibratedTripletsAreStrictlyOptIn) {
+    const auto defaults = Vulkan::ResolveFinalGuestSurfaceContentConfig(
+        [](std::string_view name) -> std::optional<std::string_view> {
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT") {
+                return "1";
+            }
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_STAGE") {
+                return "post_pp";
+            }
+            return std::nullopt;
+        });
+    ASSERT_TRUE(defaults.has_value());
+    EXPECT_FALSE(defaults->calibrated_triplets);
+
+    const auto enabled = Vulkan::ResolveFinalGuestSurfaceContentConfig(
+        [](std::string_view name) -> std::optional<std::string_view> {
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT" ||
+                name == "SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS") {
+                return "1";
+            }
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_STAGE") {
+                return "post_pp";
+            }
+            return std::nullopt;
+        });
+    ASSERT_TRUE(enabled.has_value());
+    EXPECT_TRUE(enabled->calibrated_triplets);
+}
+
 TEST(FinalGuestSurfaceContent, PostPpLogicalTransportIgnoresPhysicalFrameRing) {
     Vulkan::FinalGuestSurfacePostPpTransportTracker tracker;
     const auto first = tracker.Observe(FinalGuestSurfaceFormat::Bgra8, 1280, 720, false);
@@ -902,6 +931,133 @@ TEST(FinalGuestSurfaceContent, LocalizedVisualPredicateUsesMeanRgbAndExactFracti
     EXPECT_EQ(observe(267, 11, 48, false).aba_tiles, 0u);
     EXPECT_EQ(observe(1024, 0, 47, false).aba_tiles, 0u);
     EXPECT_EQ(observe(1024, 0, 0xFF, true).aba_tiles, 0u);
+}
+
+TEST(FinalGuestSurfaceContent, CalibratedTripletJoinsExactScreenshotEndpointsOutOfOrder) {
+    auto descriptor = Rgba8Surface(32, 32);
+    descriptor.comparison = Vulkan::FinalGuestSurfaceComparison::LocalizedVisualReturn;
+    descriptor.stage = Vulkan::FinalGuestSurfaceStage::PostPp;
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(descriptor);
+    const auto selector = Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1");
+    Vulkan::FinalGuestSurfaceCalibratedTriplets reducer{true, selector};
+    const auto transport = TransportForFormat(FinalGuestSurfaceFormat::Rgba8);
+    std::vector<std::byte> a(plan.sample_bytes);
+    auto b = a;
+    auto c = a;
+    for (u32 pixel = 0; pixel < 876; ++pixel) {
+        const size_t offset = static_cast<size_t>(pixel) * 4;
+        b[offset] = b[offset + 1] = b[offset + 2] = std::byte{48};
+    }
+    for (u32 pixel = 0; pixel < 1024; ++pixel) {
+        const size_t offset = static_cast<size_t>(pixel) * 4;
+        c[offset] = c[offset + 1] = c[offset + 2] = std::byte{9};
+    }
+
+    reducer.ObserveCalibration({3, 4267, 84'900'000, true});
+    reducer.ObserveContent(4259, 84'700'000, transport, plan, a);
+    for (u64 sequence = 4260; sequence < 4263; ++sequence) {
+        reducer.ObserveContent(sequence, 84'700'000 + (sequence - 4259) * 25'000, transport,
+                               plan, a);
+    }
+    reducer.ObserveCalibration({1, 4259, 84'700'000, true});
+    reducer.ObserveContent(4263, 84'800'000, transport, plan, b);
+    for (u64 sequence = 4264; sequence < 4267; ++sequence) {
+        reducer.ObserveContent(sequence, 84'800'000 + (sequence - 4263) * 25'000, transport,
+                               plan, b);
+    }
+    reducer.ObserveContent(4267, 84'900'000, transport, plan, c);
+    EXPECT_TRUE(reducer.TakeReports().empty());
+    reducer.ObserveCalibration({2, 4263, 84'800'000, true});
+
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = reports[0];
+    EXPECT_EQ(report.request_ordinal, 3u);
+    EXPECT_EQ(report.a_sequence, 4259u);
+    EXPECT_EQ(report.b_sequence, 4263u);
+    EXPECT_EQ(report.c_sequence, 4267u);
+    EXPECT_EQ(report.a_process_time_us, 84'700'000u);
+    EXPECT_EQ(report.b_process_time_us, 84'800'000u);
+    EXPECT_EQ(report.c_process_time_us, 84'900'000u);
+    EXPECT_EQ(report.matched_ordinal_count, 1u);
+    EXPECT_EQ(report.matched_ordinals[0], 1u);
+    EXPECT_EQ(report.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(report.loss.Any());
+    EXPECT_FALSE(report.exact_aba);
+}
+
+TEST(FinalGuestSurfaceContent, CalibratedTripletLossesFailClosed) {
+    auto descriptor = Rgba8Surface(32, 32);
+    descriptor.comparison = Vulkan::FinalGuestSurfaceComparison::LocalizedVisualReturn;
+    descriptor.stage = Vulkan::FinalGuestSurfaceStage::PostPp;
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(descriptor);
+    const auto selector = Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1");
+    const auto transport = TransportForFormat(FinalGuestSurfaceFormat::Rgba8);
+    std::vector<std::byte> bytes(plan.sample_bytes);
+
+    Vulkan::FinalGuestSurfaceCalibratedTriplets duplicate{true, selector};
+    duplicate.ObserveCalibration({1, 10, 1'000'000, true});
+    duplicate.ObserveCalibration({1, 10, 1'000'000, true});
+    duplicate.Finish();
+    EXPECT_TRUE(duplicate.TakeReports().empty());
+    EXPECT_EQ(duplicate.GetCoverage().loss.duplicate, 1u);
+
+    Vulkan::FinalGuestSurfaceCalibratedTriplets gap{true, selector};
+    gap.ObserveCalibration({1, 20, 2'000'000, true});
+    gap.ObserveCalibration({2, 22, 2'100'000, true});
+    gap.ObserveCalibration({3, 24, 2'200'000, true});
+    gap.ObserveContent(20, 2'000'000, transport, plan, bytes);
+    gap.ObserveContent(22, 2'100'000, transport, plan, bytes);
+    gap.ObserveContent(23, 2'150'000, transport, plan, bytes);
+    gap.ObserveContent(24, 2'200'000, transport, plan, bytes);
+    gap.Finish();
+    const auto gap_reports = gap.TakeReports();
+    ASSERT_EQ(gap_reports.size(), 1u);
+    EXPECT_EQ(gap_reports[0].status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(gap_reports[0].matched_ordinal_count, 0u);
+    EXPECT_EQ(gap_reports[0].loss.gap, 1u);
+
+    Vulkan::FinalGuestSurfaceCalibratedTriplets overflow{true, selector};
+    for (u32 request = 1;
+         request <= Vulkan::FinalGuestSurfaceCalibratedTriplets::MaxCalibrations + 1;
+         ++request) {
+        overflow.ObserveCalibration({request, request, request * 100'000ull, true});
+    }
+    EXPECT_EQ(overflow.GetCoverage().loss.overflow, 1u);
+    EXPECT_TRUE(overflow.TakeReports().empty());
+}
+
+TEST(FinalGuestSurfaceContent, DisabledCalibratedTripletsRetainNoStateOrReports) {
+    Vulkan::FinalGuestSurfaceCalibratedTriplets reducer{
+        false, Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1")};
+    reducer.ObserveCalibration({1, 1, 1, true});
+    reducer.Finish();
+    EXPECT_TRUE(reducer.TakeReports().empty());
+    EXPECT_EQ(reducer.GetCoverage(), Vulkan::FinalGuestSurfaceCalibratedCoverage{});
+}
+
+TEST(FinalGuestSurfaceContent, CalibratedTripletLogIsBoundedAndPrivacySafe) {
+    Vulkan::FinalGuestSurfaceCalibratedReport report{
+        .request_ordinal = 207,
+        .a_sequence = 4259,
+        .a_process_time_us = 84'700'000,
+        .b_sequence = 4263,
+        .b_process_time_us = 84'800'000,
+        .c_sequence = 4267,
+        .c_process_time_us = 84'900'000,
+        .matched_ordinals = {1299},
+        .matched_ordinal_count = 1,
+        .selector_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const std::string text = Vulkan::FormatFinalGuestSurfaceCalibratedReport(report);
+    EXPECT_LT(text.size(), 220u);
+    EXPECT_NE(text.find("q=207"), std::string::npos);
+    EXPECT_NE(text.find("abc=4259/4263/4267"), std::string::npos);
+    EXPECT_NE(text.find("r=1299"), std::string::npos);
+    for (const std::string_view forbidden : {"pixel", "hash", "address", "identity", "generation"}) {
+        EXPECT_EQ(text.find(forbidden), std::string::npos);
+    }
 }
 
 TEST(FinalGuestSurfaceContent, LogsOnlyTaskSelectedMatchingWindowOrdinals) {
