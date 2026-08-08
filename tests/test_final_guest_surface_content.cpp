@@ -149,9 +149,11 @@ TEST(FinalGuestSurfaceContent, RejectsAmbiguousLogicalToGuestMappingsTransaction
     desc.logical_no_y_flip = true;
     desc.logical_full_fit = false;
     reject(desc);
-    desc.logical_full_fit = true;
-    desc.logical_width = 1279;
-    reject(desc);
+    desc = Rgba8Surface(1280, 720);
+    desc.logical_width = 960;
+    desc.logical_height = 540;
+    reject(desc); // Exact 4/3 scale, but 16 logical pixels do not map to an integer bound.
+    desc = Rgba8Surface(1920, 1080);
     desc.logical_width = std::numeric_limits<u32>::max();
     desc.logical_height = std::numeric_limits<u32>::max();
     reject(desc);
@@ -461,6 +463,34 @@ TEST(FinalGuestSurfaceContent, CalibrationReportsExactRationalScaledMappingAndCh
     EXPECT_EQ(changed_report.mapping_ordinal, 2u);
     EXPECT_TRUE(changed_report.emit_mapping);
     EXPECT_FALSE(changed_report.exact_scaled_mapping);
+}
+
+TEST(FinalGuestSurfaceContent, CalibrationMappingOrdinalsAreBoundedTransactionally) {
+    Vulkan::FinalGuestSurfaceFrameDiagnosticStamp stamp;
+    stamp.Assign(true, 1, 1, 1280, 720);
+    Vulkan::FinalGuestSurfaceScreenshotCalibration calibration{true};
+    Vulkan::FinalGuestSurfacePresentationMapping mapping{
+        .guest_width = 1280,
+        .guest_height = 720,
+        .swapchain_width = 1280,
+        .swapchain_height = 720,
+        .output_width = 1280,
+        .output_height = 720,
+        .top_left = true,
+        .no_y_flip = true,
+    };
+    for (u32 index = 0; index < calibration.MaxMappingOrdinals; ++index) {
+        mapping.output_x = static_cast<s32>(index);
+        const auto report = calibration.Observe(stamp, mapping, 0);
+        EXPECT_EQ(report.mapping_ordinal, index + 1);
+        EXPECT_EQ(report.mapping_loss, 0u);
+        EXPECT_TRUE(report.emit_mapping);
+    }
+    mapping.output_x = static_cast<s32>(calibration.MaxMappingOrdinals);
+    const auto overflow = calibration.Observe(stamp, mapping, 0);
+    EXPECT_EQ(overflow.mapping_ordinal, 0u);
+    EXPECT_EQ(overflow.mapping_loss, 1u);
+    EXPECT_FALSE(overflow.emit_mapping);
 }
 
 TEST(FinalGuestSurfaceContent, ScreenshotCalibrationCountsOnlySilentAutomationRequests) {
@@ -881,6 +911,17 @@ TEST(FinalGuestSurfaceContent, CompactFrameAndCalibrationLogsStayWithinConservat
     const auto repeated = calibration.Observe(stamp, mapping, 0);
     EXPECT_FALSE(repeated.emit_mapping);
     EXPECT_LT(Vulkan::FormatFinalGuestSurfaceCompactCalibration(repeated).size(), 100u);
+
+    auto worst_frame = report;
+    worst_frame.aba_tile_ordinal_count = FinalGuestSurfaceReport::MaxTileDetails;
+    worst_frame.aba_tile_ordinals.fill(FinalGuestSurfaceTilePlan::MaxTiles);
+    EXPECT_LT(Vulkan::FormatFinalGuestSurfaceCompactReport(worst_frame).size(), 512u);
+    constexpr size_t conservative_run_bytes =
+        FinalGuestSurfaceCaptureWindow::MaxFrameCount * 512u +
+        Vulkan::FinalGuestSurfaceScreenshotCalibration::MaxRequests * 128u +
+        Vulkan::FinalGuestSurfaceScreenshotCalibration::MaxMappingOrdinals * 256u + 4096u;
+    EXPECT_LT(conservative_run_bytes, 2u << 20);
+    EXPECT_LT(conservative_run_bytes, 16u << 20);
 }
 
 TEST(FinalGuestSurfaceContent, CompactLossMaskPreservesEveryLossClass) {

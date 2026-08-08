@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <deque>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <string>
@@ -92,6 +93,13 @@ struct FinalGuestSurfaceDescriptor {
     FinalGuestSurfaceImageType type{FinalGuestSurfaceImageType::Other};
     FinalGuestSurfaceAspect aspect{FinalGuestSurfaceAspect::Other};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    u32 logical_width{};
+    u32 logical_height{};
+    s32 logical_offset_x{};
+    s32 logical_offset_y{};
+    bool logical_full_fit{};
+    bool logical_top_left{};
+    bool logical_no_y_flip{};
 };
 
 struct FinalGuestSurfaceLoss {
@@ -102,6 +110,7 @@ struct FinalGuestSurfaceLoss {
     u32 unsupported_aspect{};
     u32 unsupported_format{};
     u32 invalid_extent{};
+    u32 logical_mapping{};
     u32 tile_capacity{};
     u32 byte_capacity{};
     u32 ordinal_capacity{};
@@ -114,8 +123,8 @@ struct FinalGuestSurfaceLoss {
     [[nodiscard]] constexpr bool Any() const noexcept {
         return unsupported_type || unsupported_samples || unsupported_mip || unsupported_layer ||
                unsupported_aspect || unsupported_format || invalid_extent || tile_capacity ||
-               byte_capacity || ordinal_capacity || busy || invalidation || gap || history ||
-               tile_detail;
+               logical_mapping || byte_capacity || ordinal_capacity || busy || invalidation ||
+               gap || history || tile_detail;
     }
 
     bool operator==(const FinalGuestSurfaceLoss&) const = default;
@@ -144,6 +153,8 @@ struct FinalGuestSurfaceTilePlan {
 
     u32 surface_width{};
     u32 surface_height{};
+    u32 logical_width{};
+    u32 logical_height{};
     u32 row_bytes{};
     u32 bytes_per_pixel{};
     u32 window_width{};
@@ -153,6 +164,8 @@ struct FinalGuestSurfaceTilePlan {
     u32 tile_count{};
     u32 sample_bytes{};
     u32 copy_region_count{};
+    u32 scale_numerator{};
+    u32 scale_denominator{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -162,15 +175,22 @@ struct FinalGuestSurfaceTilePlan {
         }
         const u32 column = ordinal_index % logical_columns;
         const u32 row = ordinal_index / logical_columns;
-        const u32 x = column * WindowStride;
-        const u32 y = row * WindowStride;
+        const u32 logical_x = column * WindowStride;
+        const u32 logical_y = row * WindowStride;
+        const u32 x = static_cast<u32>(static_cast<u64>(logical_x) * surface_width / logical_width);
+        const u32 y =
+            static_cast<u32>(static_cast<u64>(logical_y) * surface_height / logical_height);
+        const u32 end_x = static_cast<u32>(static_cast<u64>(logical_x + window_width) *
+                                           surface_width / logical_width);
+        const u32 end_y = static_cast<u32>(static_cast<u64>(logical_y + window_height) *
+                                           surface_height / logical_height);
         return {
             .x = x,
             .y = y,
-            .width = window_width,
-            .height = window_height,
+            .width = end_x - x,
+            .height = end_y - y,
             .buffer_offset = y * row_bytes + x * bytes_per_pixel,
-            .byte_size = window_width * window_height * bytes_per_pixel,
+            .byte_size = (end_x - x) * (end_y - y) * bytes_per_pixel,
         };
     }
 
@@ -214,23 +234,49 @@ struct FinalGuestSurfaceTilePlan {
         (desc.type == FinalGuestSurfaceImageType::Color1D && desc.height != 1)) {
         return unsupported(&FinalGuestSurfaceLoss::invalid_extent);
     }
+    if (desc.logical_width == 0 || desc.logical_height == 0 || desc.logical_offset_x != 0 ||
+        desc.logical_offset_y != 0 || !desc.logical_full_fit || !desc.logical_top_left ||
+        !desc.logical_no_y_flip ||
+        static_cast<u64>(desc.width) * desc.logical_height !=
+            static_cast<u64>(desc.height) * desc.logical_width) {
+        return unsupported(&FinalGuestSurfaceLoss::logical_mapping);
+    }
 
-    const u32 window_width = std::min(desc.width, FinalGuestSurfaceTilePlan::WindowExtent);
-    const u32 window_height = std::min(desc.height, FinalGuestSurfaceTilePlan::WindowExtent);
+    const u32 window_width = std::min(desc.logical_width, FinalGuestSurfaceTilePlan::WindowExtent);
+    const u32 window_height =
+        std::min(desc.logical_height, FinalGuestSurfaceTilePlan::WindowExtent);
     const u32 columns =
-        desc.width <= window_width
+        desc.logical_width <= window_width
             ? 1
-            : (desc.width - window_width) / FinalGuestSurfaceTilePlan::WindowStride + 1;
+            : (desc.logical_width - window_width) / FinalGuestSurfaceTilePlan::WindowStride + 1;
     const u32 rows =
-        desc.type == FinalGuestSurfaceImageType::Color1D || desc.height <= window_height
+        desc.type == FinalGuestSurfaceImageType::Color1D || desc.logical_height <= window_height
             ? 1
-            : (desc.height - window_height) / FinalGuestSurfaceTilePlan::WindowStride + 1;
+            : (desc.logical_height - window_height) / FinalGuestSurfaceTilePlan::WindowStride + 1;
     const u64 tile_count = static_cast<u64>(columns) * rows;
     if (tile_count > limits.max_tiles || tile_count > FinalGuestSurfaceTilePlan::MaxTiles) {
         FinalGuestSurfaceTilePlan result{};
         result.status = FinalGuestSurfaceStatus::CapacityLoss;
         result.loss.tile_capacity = 1;
         return result;
+    }
+    const auto maps_exactly = [](u32 logical_coordinate, u32 guest_extent,
+                                 u32 logical_extent) noexcept {
+        return static_cast<u64>(logical_coordinate) * guest_extent % logical_extent == 0;
+    };
+    for (u32 column = 0; column < columns; ++column) {
+        const u32 start = column * FinalGuestSurfaceTilePlan::WindowStride;
+        if (!maps_exactly(start, desc.width, desc.logical_width) ||
+            !maps_exactly(start + window_width, desc.width, desc.logical_width)) {
+            return unsupported(&FinalGuestSurfaceLoss::logical_mapping);
+        }
+    }
+    for (u32 row = 0; row < rows; ++row) {
+        const u32 start = row * FinalGuestSurfaceTilePlan::WindowStride;
+        if (!maps_exactly(start, desc.height, desc.logical_height) ||
+            !maps_exactly(start + window_height, desc.height, desc.logical_height)) {
+            return unsupported(&FinalGuestSurfaceLoss::logical_mapping);
+        }
     }
     const u64 row_bytes = static_cast<u64>(desc.width) * block.bytes;
     const u64 sample_bytes = row_bytes * desc.height;
@@ -241,9 +287,12 @@ struct FinalGuestSurfaceTilePlan {
         result.loss.byte_capacity = 1;
         return result;
     }
+    const u32 scale_divisor = std::gcd(desc.width, desc.logical_width);
     return {
         .surface_width = desc.width,
         .surface_height = desc.height,
+        .logical_width = desc.logical_width,
+        .logical_height = desc.logical_height,
         .row_bytes = static_cast<u32>(row_bytes),
         .bytes_per_pixel = block.bytes,
         .window_width = window_width,
@@ -253,6 +302,8 @@ struct FinalGuestSurfaceTilePlan {
         .tile_count = static_cast<u32>(tile_count),
         .sample_bytes = static_cast<u32>(sample_bytes),
         .copy_region_count = 1,
+        .scale_numerator = desc.width / scale_divisor,
+        .scale_denominator = desc.logical_width / scale_divisor,
     };
 }
 
@@ -551,11 +602,22 @@ struct FinalGuestSurfacePresentationMapping {
     bool top_left{};
     bool no_y_flip{};
 
+    bool operator==(const FinalGuestSurfacePresentationMapping&) const = default;
+
+    [[nodiscard]] constexpr std::array<u32, 2> ExactScale() const noexcept {
+        if (guest_width == 0 || guest_height == 0 || output_width == 0 || output_height == 0 ||
+            output_x != 0 || output_y != 0 || output_width != swapchain_width ||
+            output_height != swapchain_height || !top_left || !no_y_flip ||
+            static_cast<u64>(guest_width) * output_height !=
+                static_cast<u64>(guest_height) * output_width) {
+            return {};
+        }
+        const u32 divisor = std::gcd(guest_width, output_width);
+        return {guest_width / divisor, output_width / divisor};
+    }
+
     [[nodiscard]] constexpr bool IsIdentity() const noexcept {
-        return guest_width != 0 && guest_height != 0 && guest_width == swapchain_width &&
-               guest_height == swapchain_height && output_x == 0 && output_y == 0 &&
-               output_width == guest_width && output_height == guest_height && top_left &&
-               no_y_flip;
+        return ExactScale() == std::array<u32, 2>{1, 1};
     }
 };
 
@@ -565,15 +627,22 @@ struct FinalGuestSurfaceCalibrationReport {
     u64 surface_process_time_us{};
     FinalGuestSurfacePresentationMapping mapping{};
     u32 overflow_loss{};
+    u32 mapping_ordinal{};
+    u32 mapping_loss{};
+    u32 scale_numerator{};
+    u32 scale_denominator{};
     bool emit{};
     bool fallback_time{};
     bool identity_mapping{};
+    bool exact_scaled_mapping{};
+    bool emit_mapping{};
     bool overflow_marker{};
 };
 
 class FinalGuestSurfaceScreenshotCalibration {
 public:
     static constexpr u32 MaxRequests = 1000;
+    static constexpr u32 MaxMappingOrdinals = 16;
 
     explicit constexpr FinalGuestSurfaceScreenshotCalibration(bool enabled_) : enabled{enabled_} {}
 
@@ -600,15 +669,23 @@ public:
             mapping.guest_width = stamp.guest_width;
             mapping.guest_height = stamp.guest_height;
         }
+        const auto [mapping_ordinal, emit_mapping, mapping_loss] = MappingFor(mapping);
+        const auto scale = mapping.ExactScale();
         return {
             .request_ordinal = observed_requests,
             .surface_sequence = stamp.valid ? stamp.surface_sequence : 0,
             .surface_process_time_us =
                 stamp.valid ? stamp.surface_process_time_us : fallback_process_time_us,
             .mapping = mapping,
+            .mapping_ordinal = mapping_ordinal,
+            .mapping_loss = mapping_loss,
+            .scale_numerator = scale[0],
+            .scale_denominator = scale[1],
             .emit = true,
             .fallback_time = !stamp.valid,
             .identity_mapping = stamp.valid && mapping.IsIdentity(),
+            .exact_scaled_mapping = stamp.valid && scale[0] != 0,
+            .emit_mapping = emit_mapping,
         };
     }
 
@@ -617,9 +694,39 @@ public:
     }
 
 private:
+    struct MappingResult {
+        u32 ordinal{};
+        bool emit{};
+        u32 loss{};
+    };
+
+    [[nodiscard]] constexpr MappingResult MappingFor(
+        const FinalGuestSurfacePresentationMapping& mapping) noexcept {
+        u32 ordinal{};
+        for (u32 index = 0; index < mapping_count; ++index) {
+            if (mappings[index] == mapping) {
+                ordinal = index + 1;
+                break;
+            }
+        }
+        if (ordinal == 0) {
+            if (mapping_count == mappings.size()) {
+                return {.loss = 1};
+            }
+            mappings[mapping_count++] = mapping;
+            ordinal = mapping_count;
+        }
+        const bool changed = ordinal != last_mapping_ordinal;
+        last_mapping_ordinal = ordinal;
+        return {.ordinal = ordinal, .emit = changed};
+    }
+
     bool enabled{};
     bool overflow_emitted{};
     u32 observed_requests{};
+    std::array<FinalGuestSurfacePresentationMapping, MaxMappingOrdinals> mappings{};
+    u32 mapping_count{};
+    u32 last_mapping_ordinal{};
 };
 
 [[nodiscard]] constexpr u32 FinalGuestSurfaceAutomationCalibrationCount(u32 /*notifying_count*/,
@@ -665,6 +772,73 @@ struct FinalGuestSurfaceReport {
         tile_ordinals += std::to_string(report.aba_tile_ordinals[index]);
     }
     return tile_ordinals;
+}
+
+[[nodiscard]] constexpr u32 FinalGuestSurfaceLossMask(const FinalGuestSurfaceLoss& loss,
+                                                      u32 selector_loss) noexcept {
+    return (static_cast<u32>(loss.unsupported_type != 0) << 0) |
+           (static_cast<u32>(loss.unsupported_samples != 0) << 1) |
+           (static_cast<u32>(loss.unsupported_mip != 0) << 2) |
+           (static_cast<u32>(loss.unsupported_layer != 0) << 3) |
+           (static_cast<u32>(loss.unsupported_aspect != 0) << 4) |
+           (static_cast<u32>(loss.unsupported_format != 0) << 5) |
+           (static_cast<u32>(loss.invalid_extent != 0) << 6) |
+           (static_cast<u32>(loss.logical_mapping != 0) << 7) |
+           (static_cast<u32>(loss.tile_capacity != 0) << 8) |
+           (static_cast<u32>(loss.byte_capacity != 0) << 9) |
+           (static_cast<u32>(loss.ordinal_capacity != 0) << 10) |
+           (static_cast<u32>(loss.busy != 0) << 11) |
+           (static_cast<u32>(loss.invalidation != 0) << 12) |
+           (static_cast<u32>(loss.gap != 0) << 13) | (static_cast<u32>(loss.history != 0) << 14) |
+           (static_cast<u32>(loss.tile_detail != 0) << 15) |
+           (static_cast<u32>(selector_loss != 0) << 16);
+}
+
+[[nodiscard]] inline std::string FormatFinalGuestSurfaceCompactReport(
+    const FinalGuestSurfaceReport& report) {
+    return "FGSC s=" + std::to_string(report.sequence) +
+           " t=" + std::to_string(report.process_time_us) +
+           " o=" + std::to_string(report.surface_ordinal) +
+           " w=" + std::to_string(report.tile_count) +
+           " d=" + std::to_string(report.changed_tiles) + " a=" + std::to_string(report.aba_tiles) +
+           " u=" + std::to_string(report.unselected_aba_tiles) +
+           " q=" + FormatFinalGuestSurfaceTileOrdinals(report) +
+           " st=" + std::to_string(static_cast<u32>(report.status)) +
+           " lm=" + std::to_string(FinalGuestSurfaceLossMask(report.loss, report.selector_loss)) +
+           " sel=" + std::to_string(report.selector_count) + '/' +
+           std::to_string(static_cast<u32>(report.selector_status)) +
+           " abc=" + std::to_string(report.a_sequence) + '/' + std::to_string(report.b_sequence) +
+           '/' + std::to_string(report.c_sequence);
+}
+
+[[nodiscard]] inline std::string FormatFinalGuestSurfaceCompactMapping(
+    const FinalGuestSurfaceCalibrationReport& report) {
+    return "FGSCM m=" + std::to_string(report.mapping_ordinal) +
+           " g=" + std::to_string(report.mapping.guest_width) + 'x' +
+           std::to_string(report.mapping.guest_height) +
+           " s=" + std::to_string(report.mapping.swapchain_width) + 'x' +
+           std::to_string(report.mapping.swapchain_height) +
+           " r=" + std::to_string(report.mapping.output_x) + ',' +
+           std::to_string(report.mapping.output_y) + ',' +
+           std::to_string(report.mapping.output_width) + ',' +
+           std::to_string(report.mapping.output_height) +
+           " tl=" + std::to_string(report.mapping.top_left) +
+           " yf=" + std::to_string(!report.mapping.no_y_flip) +
+           " sc=" + std::to_string(report.scale_numerator) + '/' +
+           std::to_string(report.scale_denominator) +
+           " ex=" + std::to_string(report.exact_scaled_mapping) +
+           " ml=" + std::to_string(report.mapping_loss);
+}
+
+[[nodiscard]] inline std::string FormatFinalGuestSurfaceCompactCalibration(
+    const FinalGuestSurfaceCalibrationReport& report) {
+    return "FGSCC q=" + std::to_string(report.request_ordinal) +
+           " s=" + std::to_string(report.surface_sequence) +
+           " t=" + std::to_string(report.surface_process_time_us) +
+           " m=" + std::to_string(report.mapping_ordinal) +
+           " f=" + std::to_string(report.fallback_time) +
+           " ov=" + std::to_string(report.overflow_loss) +
+           " ml=" + std::to_string(report.mapping_loss);
 }
 
 [[nodiscard]] inline std::string FormatFinalGuestSurfaceReport(

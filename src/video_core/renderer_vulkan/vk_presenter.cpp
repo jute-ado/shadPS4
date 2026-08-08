@@ -281,8 +281,8 @@ public:
         return config.window.Contains(sequence);
     }
 
-    [[nodiscard]] PendingCapture Prepare(FinalGuestSurfaceFrameStamp stamp,
-                                         VideoCore::Image& image) {
+    [[nodiscard]] PendingCapture Prepare(FinalGuestSurfaceFrameStamp stamp, VideoCore::Image& image,
+                                         u32 frame_output_width, u32 frame_output_height) {
         ++selected_frames;
         PendingCapture pending{
             .stamp = stamp,
@@ -309,6 +309,11 @@ public:
                           ? FinalGuestSurfaceAspect::Color
                           : FinalGuestSurfaceAspect::Other,
             .format = pending.transport.format,
+            .logical_width = frame_output_width,
+            .logical_height = frame_output_height,
+            .logical_full_fit = true,
+            .logical_top_left = true,
+            .logical_no_y_flip = true,
         });
         if (pending.plan.status != FinalGuestSurfaceStatus::Complete) {
             return pending;
@@ -387,19 +392,10 @@ public:
             if (!report.emit) {
                 continue;
             }
-            LOG_INFO(
-                Render,
-                "FinalGuestSurfaceScreenshotCalibration request_ordinal={} "
-                "surface_sequence={} surface_process_time_us={} fallback_time={} "
-                "guest_width={} guest_height={} swapchain_width={} swapchain_height={} "
-                "output_x={} output_y={} output_width={} output_height={} top_left={} "
-                "no_y_flip={} identity_mapping={} overflow_loss={} overflow_marker={}",
-                report.request_ordinal, report.surface_sequence, report.surface_process_time_us,
-                report.fallback_time, report.mapping.guest_width, report.mapping.guest_height,
-                report.mapping.swapchain_width, report.mapping.swapchain_height,
-                report.mapping.output_x, report.mapping.output_y, report.mapping.output_width,
-                report.mapping.output_height, report.mapping.top_left, report.mapping.no_y_flip,
-                report.identity_mapping, report.overflow_loss, report.overflow_marker);
+            if (report.emit_mapping) {
+                LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactMapping(report));
+            }
+            LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactCalibration(report));
         }
     }
 
@@ -429,32 +425,8 @@ private:
                                             pending.transport, pending.plan, bytes);
         ++emitted_frames;
         complete_frames += report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
-        loss_frames += report.loss.Any();
-        LOG_INFO(
-            Render,
-            "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
-            "tiles={} changed_tiles={} aba_tiles={} unselected_aba_tiles={} "
-            "aba_tile_ordinals={} selector_count={} selector_status={} selector_loss={} "
-            "stable={} exact_aba={} whole_sample_aba={} "
-            "a_sequence={} a_process_time_us={} b_sequence={} b_process_time_us={} "
-            "c_sequence={} c_process_time_us={} status={} unsupported_type={} "
-            "unsupported_samples={} unsupported_mip={} unsupported_layer={} "
-            "unsupported_aspect={} unsupported_format={} invalid_extent={} "
-            "tile_loss={} byte_loss={} ordinal_loss={} busy={} invalidation_loss={} gap_loss={} "
-            "history_loss={} tile_detail_loss={}",
-            report.sequence, report.process_time_us, report.surface_ordinal, report.tile_count,
-            report.changed_tiles, report.aba_tiles, report.unselected_aba_tiles,
-            FormatFinalGuestSurfaceTileOrdinals(report), report.selector_count,
-            static_cast<u32>(report.selector_status), report.selector_loss, report.stable_transport,
-            report.exact_aba, report.whole_sample_aba, report.a_sequence, report.a_process_time_us,
-            report.b_sequence, report.b_process_time_us, report.c_sequence,
-            report.c_process_time_us, static_cast<u32>(report.status), report.loss.unsupported_type,
-            report.loss.unsupported_samples, report.loss.unsupported_mip,
-            report.loss.unsupported_layer, report.loss.unsupported_aspect,
-            report.loss.unsupported_format, report.loss.invalid_extent, report.loss.tile_capacity,
-            report.loss.byte_capacity, report.loss.ordinal_capacity, report.loss.busy,
-            report.loss.invalidation, report.loss.gap, report.loss.history,
-            report.loss.tile_detail);
+        loss_frames += report.loss.Any() || report.selector_loss != 0;
+        LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactReport(report));
 
         if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
             LOG_ERROR(Render,
@@ -1055,7 +1027,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     std::optional<FinalGuestSurfaceContentState::PendingCapture> final_surface_capture;
     if (final_guest_surface_content && final_guest_surface_content->ShouldCapture(stamp.sequence)) {
-        final_surface_capture = final_guest_surface_content->Prepare(stamp, image);
+        final_surface_capture =
+            final_guest_surface_content->Prepare(stamp, image, frame->width, frame->height);
     }
 
     const auto capture_game_only = VideoCore::ConsumeGameOnlyScreenshotRequests();
