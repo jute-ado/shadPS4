@@ -106,7 +106,7 @@ TEST(FinalGuestSurfaceContent, FullSurfacePlanUsesBoundedSixteenMiBSlotsTransact
 
     const auto too_large = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(3840, 2160));
     EXPECT_EQ(too_large.status, FinalGuestSurfaceStatus::CapacityLoss);
-    EXPECT_EQ(too_large.loss.byte_capacity, 1u);
+    EXPECT_EQ(too_large.loss.tile_capacity, 1u);
     EXPECT_EQ(too_large.tile_count, 0u);
     EXPECT_EQ(too_large.sample_bytes, 0u);
 }
@@ -262,7 +262,7 @@ TEST(FinalGuestSurfaceContent, WatchOrdinalSelectorIsStrictBoundedAndTransaction
     EXPECT_EQ(valid.ordinals[2], 3476u);
     EXPECT_EQ(valid.loss, 0u);
 
-    for (const std::string_view invalid : {"0", "1, 2", "1,,2", "1,1", "4097", "x"}) {
+    for (const std::string_view invalid : {"0", "1, 2", "1,,2", "1,", ",1", "1,1", "4097", "x"}) {
         const auto rejected = Vulkan::ParseFinalGuestSurfaceWatchOrdinals(invalid);
         EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::Unsupported) << invalid;
         EXPECT_EQ(rejected.count, 0u) << invalid;

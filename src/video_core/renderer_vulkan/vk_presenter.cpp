@@ -10,6 +10,7 @@
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/system/systemservice.h"
 #include "imgui/friends_layer.h"
 #include "imgui/invitation_prompt_layer.h"
@@ -254,7 +255,8 @@ public:
 
     FinalGuestSurfaceContentState(const Instance& instance_, Scheduler& scheduler_,
                                   FinalGuestSurfaceContentConfig config_)
-        : scheduler{scheduler_}, config{config_}, reducer{config.lag},
+        : scheduler{scheduler_}, config{config_}, reducer{config.lag, config.watch_ordinals},
+          screenshot_calibration{true},
           slot_stride{Common::AlignUp<u64>(FinalGuestSurfaceTileLimits{}.max_bytes,
                                            std::max<u64>(1, instance_.NonCoherentAtomSize()))},
           download{instance_,
@@ -265,12 +267,14 @@ public:
                    slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
         LOG_INFO(Render,
                  "FinalGuestSurfaceContentConfig enabled=1 frame_start={} frame_count={} "
-                 "grid_columns=16 grid_rows=9 coverage=full_partition max_tiles={} max_bytes={} "
-                 "slots={} lag_cadence_us={} lag_tolerance_us={}",
+                 "logical_window=32 logical_stride=16 max_windows={} copy_regions=1 max_bytes={} "
+                 "slots={} lag_cadence_us={} lag_tolerance_us={} selector_count={} "
+                 "selector_status={} selector_loss={}",
                  config.window.frame_start, config.window.frame_count,
                  FinalGuestSurfaceTilePlan::MaxTiles, FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
-                 config.lag.tolerance_us);
+                 config.lag.tolerance_us, config.watch_ordinals.count,
+                 static_cast<u32>(config.watch_ordinals.status), config.watch_ordinals.loss);
     }
 
     [[nodiscard]] bool ShouldCapture(u64 sequence) const noexcept {
@@ -340,26 +344,22 @@ public:
             .pBufferMemoryBarriers = &pre_barrier,
         });
 
-        std::array<vk::BufferImageCopy, FinalGuestSurfaceTilePlan::MaxTiles> copies{};
-        for (u32 i = 0; i < pending.plan.tile_count; ++i) {
-            const auto& tile = pending.plan.tiles[i];
-            copies[i] = {
-                .bufferOffset = pending.slot_offset + tile.buffer_offset,
-                .bufferRowLength = 0,
-                .bufferImageHeight = 0,
-                .imageSubresource =
-                    {
-                        .aspectMask = vk::ImageAspectFlagBits::eColor,
-                        .mipLevel = 0,
-                        .baseArrayLayer = 0,
-                        .layerCount = 1,
-                    },
-                .imageOffset = {static_cast<s32>(tile.x), static_cast<s32>(tile.y), 0},
-                .imageExtent = {tile.width, tile.height, 1},
-            };
-        }
-        cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, download.Handle(),
-                                 pending.plan.tile_count, copies.data());
+        const vk::BufferImageCopy copy{
+            .bufferOffset = pending.slot_offset,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource =
+                {
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {pending.plan.surface_width, pending.plan.surface_height, 1},
+        };
+        cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, download.Handle(), 1,
+                                 &copy);
 
         const vk::BufferMemoryBarrier2 post_barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -376,6 +376,31 @@ public:
             .pBufferMemoryBarriers = &post_barrier,
         });
         DeferReport(std::move(pending));
+    }
+
+    void CalibrateScreenshots(const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
+                              FinalGuestSurfacePresentationMapping mapping, u32 count,
+                              u64 fallback_process_time_us) {
+        for (u32 request = 0; request < count; ++request) {
+            const auto report =
+                screenshot_calibration.Observe(stamp, mapping, fallback_process_time_us);
+            if (!report.emit) {
+                continue;
+            }
+            LOG_INFO(
+                Render,
+                "FinalGuestSurfaceScreenshotCalibration request_ordinal={} "
+                "surface_sequence={} surface_process_time_us={} fallback_time={} "
+                "guest_width={} guest_height={} swapchain_width={} swapchain_height={} "
+                "output_x={} output_y={} output_width={} output_height={} top_left={} "
+                "no_y_flip={} identity_mapping={} overflow_loss={} overflow_marker={}",
+                report.request_ordinal, report.surface_sequence, report.surface_process_time_us,
+                report.fallback_time, report.mapping.guest_width, report.mapping.guest_height,
+                report.mapping.swapchain_width, report.mapping.swapchain_height,
+                report.mapping.output_x, report.mapping.output_y, report.mapping.output_width,
+                report.mapping.output_height, report.mapping.top_left, report.mapping.no_y_flip,
+                report.identity_mapping, report.overflow_loss, report.overflow_marker);
+        }
     }
 
 private:
@@ -408,8 +433,9 @@ private:
         LOG_INFO(
             Render,
             "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
-            "tiles={} changed_tiles={} aba_tiles={} aba_tile_ordinals={} stable={} exact_aba={} "
-            "whole_sample_aba={} "
+            "tiles={} changed_tiles={} aba_tiles={} unselected_aba_tiles={} "
+            "aba_tile_ordinals={} selector_count={} selector_status={} selector_loss={} "
+            "stable={} exact_aba={} whole_sample_aba={} "
             "a_sequence={} a_process_time_us={} b_sequence={} b_process_time_us={} "
             "c_sequence={} c_process_time_us={} status={} unsupported_type={} "
             "unsupported_samples={} unsupported_mip={} unsupported_layer={} "
@@ -417,16 +443,18 @@ private:
             "tile_loss={} byte_loss={} ordinal_loss={} busy={} invalidation_loss={} gap_loss={} "
             "history_loss={} tile_detail_loss={}",
             report.sequence, report.process_time_us, report.surface_ordinal, report.tile_count,
-            report.changed_tiles, report.aba_tiles, FormatFinalGuestSurfaceTileOrdinals(report),
-            report.stable_transport, report.exact_aba, report.whole_sample_aba, report.a_sequence,
-            report.a_process_time_us, report.b_sequence, report.b_process_time_us,
-            report.c_sequence, report.c_process_time_us, static_cast<u32>(report.status),
-            report.loss.unsupported_type, report.loss.unsupported_samples,
-            report.loss.unsupported_mip, report.loss.unsupported_layer,
-            report.loss.unsupported_aspect, report.loss.unsupported_format,
-            report.loss.invalid_extent, report.loss.tile_capacity, report.loss.byte_capacity,
-            report.loss.ordinal_capacity, report.loss.busy, report.loss.invalidation,
-            report.loss.gap, report.loss.history, report.loss.tile_detail);
+            report.changed_tiles, report.aba_tiles, report.unselected_aba_tiles,
+            FormatFinalGuestSurfaceTileOrdinals(report), report.selector_count,
+            static_cast<u32>(report.selector_status), report.selector_loss, report.stable_transport,
+            report.exact_aba, report.whole_sample_aba, report.a_sequence, report.a_process_time_us,
+            report.b_sequence, report.b_process_time_us, report.c_sequence,
+            report.c_process_time_us, static_cast<u32>(report.status), report.loss.unsupported_type,
+            report.loss.unsupported_samples, report.loss.unsupported_mip,
+            report.loss.unsupported_layer, report.loss.unsupported_aspect,
+            report.loss.unsupported_format, report.loss.invalid_extent, report.loss.tile_capacity,
+            report.loss.byte_capacity, report.loss.ordinal_capacity, report.loss.busy,
+            report.loss.invalidation, report.loss.gap, report.loss.history,
+            report.loss.tile_detail);
 
         if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
             LOG_ERROR(Render,
@@ -441,16 +469,18 @@ private:
             LOG_INFO(Render,
                      "FinalGuestSurfaceContentCoverage sequence={} process_time_us={} "
                      "surface_ordinal={} tiles={} status={} selected={} emitted={} complete={} "
-                     "loss={}",
+                     "loss={} selector_count={} selector_status={} selector_loss={}",
                      report.sequence, report.process_time_us, report.surface_ordinal,
                      report.tile_count, static_cast<u32>(report.status), selected_frames,
-                     emitted_frames, complete_frames, loss_frames);
+                     emitted_frames, complete_frames, loss_frames, report.selector_count,
+                     static_cast<u32>(report.selector_status), report.selector_loss);
         }
     }
 
     Scheduler& scheduler;
     FinalGuestSurfaceContentConfig config{};
     FinalGuestSurfaceReducer reducer;
+    FinalGuestSurfaceScreenshotCalibration screenshot_calibration;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
     VideoCore::Buffer download;
@@ -1018,6 +1048,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+    frame->final_surface_diagnostic.Assign(final_guest_surface_content != nullptr, stamp.sequence,
+                                           stamp.process_time_us, image_size.width,
+                                           image_size.height);
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     std::optional<FinalGuestSurfaceContentState::PendingCapture> final_surface_capture;
@@ -1087,6 +1120,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    frame->final_surface_diagnostic.Clear();
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -1200,6 +1234,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
     const auto capture_with_overlays = VideoCore::ConsumeWithOverlaysScreenshotRequests();
+    FinalGuestSurfacePresentationMapping final_surface_mapping{};
     std::vector<ScreenshotReadback> pending_screenshots;
     if (capture_with_overlays.Total() > 0) {
         pending_screenshots.reserve(2);
@@ -1277,6 +1312,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                 auto game_texture = frame->imgui_texture;
                 auto game_width = frame->width;
                 auto game_height = frame->height;
+                bool displaying_guest_frame = true;
 
                 if (Libraries::SystemService::IsSplashVisible()) { // draw splash
                     if (!splash_img.has_value()) {
@@ -1291,6 +1327,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                         game_texture = im_id;
                         game_width = width;
                         game_height = height;
+                        displaying_guest_frame = false;
                     }
                 }
 
@@ -1309,7 +1346,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                 };
 
                 ImGui::SetCursorPos(ImGui::GetCursorStartPos() + offset);
+                const ImVec2 output_position = ImGui::GetCursorScreenPos();
                 ImGui::Image(game_texture, size);
+                final_surface_mapping = {
+                    .guest_width = frame->final_surface_diagnostic.guest_width,
+                    .guest_height = frame->final_surface_diagnostic.guest_height,
+                    .swapchain_width = extent.width,
+                    .swapchain_height = extent.height,
+                    .output_x = static_cast<s32>(output_position.x),
+                    .output_y = static_cast<s32>(output_position.y),
+                    .output_width = imgRect.extent.width,
+                    .output_height = imgRect.extent.height,
+                    .top_left = displaying_guest_frame,
+                    .no_y_flip = displaying_guest_frame,
+                };
 
                 if (EmulatorSettings.IsNullGPU()) {
                     Core::Devtools::Layer::DrawNullGpuNotice();
@@ -1322,6 +1372,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
 
         if (capture_with_overlays.Total() > 0) {
+            if (final_guest_surface_content) {
+                final_guest_surface_content->CalibrateScreenshots(
+                    frame->final_surface_diagnostic, final_surface_mapping,
+                    capture_with_overlays.Total(), Libraries::Kernel::sceKernelGetProcessTime());
+            }
             const vk::ImageMemoryBarrier to_transfer{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eTransferRead,

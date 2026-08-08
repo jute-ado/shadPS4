@@ -117,6 +117,8 @@ struct FinalGuestSurfaceLoss {
                byte_capacity || ordinal_capacity || busy || invalidation || gap || history ||
                tile_detail;
     }
+
+    bool operator==(const FinalGuestSurfaceLoss&) const = default;
 };
 
 struct FinalGuestSurfaceTile {
@@ -131,34 +133,49 @@ struct FinalGuestSurfaceTile {
 };
 
 struct FinalGuestSurfaceTileLimits {
-    u32 max_tiles{16 * 9};
+    u32 max_tiles{4096};
     u32 max_bytes{16u << 20};
 };
 
 struct FinalGuestSurfaceTilePlan {
-    static constexpr u32 MaxTiles = 16 * 9;
+    static constexpr u32 MaxTiles = 4096;
+    static constexpr u32 WindowExtent = 32;
+    static constexpr u32 WindowStride = 16;
 
-    std::array<FinalGuestSurfaceTile, MaxTiles> tiles{};
+    u32 surface_width{};
+    u32 surface_height{};
+    u32 row_bytes{};
+    u32 bytes_per_pixel{};
+    u32 window_width{};
+    u32 window_height{};
+    u32 logical_columns{};
+    u32 logical_rows{};
     u32 tile_count{};
     u32 sample_bytes{};
+    u32 copy_region_count{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
-};
 
-namespace Detail {
-
-[[nodiscard]] constexpr u32 AlignDown(u32 value, u32 alignment) noexcept {
-    return value / alignment * alignment;
-}
-
-[[nodiscard]] constexpr std::optional<u32> AlignUpChecked(u32 value, u32 alignment) noexcept {
-    if (alignment == 0 || value > std::numeric_limits<u32>::max() - (alignment - 1)) {
-        return std::nullopt;
+    [[nodiscard]] constexpr FinalGuestSurfaceTile TileAt(u32 ordinal_index) const noexcept {
+        if (ordinal_index >= tile_count || logical_columns == 0) {
+            return {};
+        }
+        const u32 column = ordinal_index % logical_columns;
+        const u32 row = ordinal_index / logical_columns;
+        const u32 x = column * WindowStride;
+        const u32 y = row * WindowStride;
+        return {
+            .x = x,
+            .y = y,
+            .width = window_width,
+            .height = window_height,
+            .buffer_offset = y * row_bytes + x * bytes_per_pixel,
+            .byte_size = window_width * window_height * bytes_per_pixel,
+        };
     }
-    return (value + alignment - 1) / alignment * alignment;
-}
 
-} // namespace Detail
+    bool operator==(const FinalGuestSurfaceTilePlan&) const = default;
+};
 
 [[nodiscard]] inline FinalGuestSurfaceTilePlan PlanFinalGuestSurfaceTiles(
     const FinalGuestSurfaceDescriptor& desc, FinalGuestSurfaceTileLimits limits = {}) noexcept {
@@ -198,60 +215,45 @@ namespace Detail {
         return unsupported(&FinalGuestSurfaceLoss::invalid_extent);
     }
 
-    FinalGuestSurfaceTilePlan candidate{};
-    const u32 block_columns = (desc.width + block.width - 1) / block.width;
-    const u32 block_rows = (desc.height + block.height - 1) / block.height;
-    const u32 columns = std::min(16u, block_columns);
+    const u32 window_width = std::min(desc.width, FinalGuestSurfaceTilePlan::WindowExtent);
+    const u32 window_height = std::min(desc.height, FinalGuestSurfaceTilePlan::WindowExtent);
+    const u32 columns =
+        desc.width <= window_width
+            ? 1
+            : (desc.width - window_width) / FinalGuestSurfaceTilePlan::WindowStride + 1;
     const u32 rows =
-        desc.type == FinalGuestSurfaceImageType::Color1D ? 1 : std::min(9u, block_rows);
-    for (u32 row = 0; row < rows; ++row) {
-        for (u32 column = 0; column < columns; ++column) {
-            const u32 start_block_x =
-                static_cast<u32>(static_cast<u64>(column) * block_columns / columns);
-            const u32 end_block_x =
-                static_cast<u32>(static_cast<u64>(column + 1) * block_columns / columns);
-            const u32 start_block_y = static_cast<u32>(static_cast<u64>(row) * block_rows / rows);
-            const u32 end_block_y = static_cast<u32>(static_cast<u64>(row + 1) * block_rows / rows);
-            const u32 x = start_block_x * block.width;
-            const u32 y = start_block_y * block.height;
-            const u32 end_x = std::min(desc.width, end_block_x * block.width);
-            const u32 end_y = std::min(desc.height, end_block_y * block.height);
-            const u32 width = end_x - x;
-            const u32 height = end_y - y;
-
-            if (candidate.tile_count >= limits.max_tiles ||
-                candidate.tile_count >= candidate.tiles.size()) {
-                FinalGuestSurfaceTilePlan result{};
-                result.status = FinalGuestSurfaceStatus::CapacityLoss;
-                result.loss.tile_capacity = 1;
-                return result;
-            }
-            const u64 blocks_x = (static_cast<u64>(width) + block.width - 1) / block.width;
-            const u64 blocks_y = (static_cast<u64>(height) + block.height - 1) / block.height;
-            const u64 byte_size = blocks_x * blocks_y * block.bytes;
-            const u32 buffer_alignment = std::max(4u, block.bytes);
-            const auto aligned_offset =
-                Detail::AlignUpChecked(candidate.sample_bytes, buffer_alignment);
-            if (!aligned_offset || byte_size > std::numeric_limits<u32>::max() ||
-                *aligned_offset > limits.max_bytes ||
-                byte_size > limits.max_bytes - *aligned_offset) {
-                FinalGuestSurfaceTilePlan result{};
-                result.status = FinalGuestSurfaceStatus::CapacityLoss;
-                result.loss.byte_capacity = 1;
-                return result;
-            }
-            candidate.tiles[candidate.tile_count++] = {
-                .x = x,
-                .y = y,
-                .width = width,
-                .height = height,
-                .buffer_offset = *aligned_offset,
-                .byte_size = static_cast<u32>(byte_size),
-            };
-            candidate.sample_bytes = static_cast<u32>(*aligned_offset + byte_size);
-        }
+        desc.type == FinalGuestSurfaceImageType::Color1D || desc.height <= window_height
+            ? 1
+            : (desc.height - window_height) / FinalGuestSurfaceTilePlan::WindowStride + 1;
+    const u64 tile_count = static_cast<u64>(columns) * rows;
+    if (tile_count > limits.max_tiles || tile_count > FinalGuestSurfaceTilePlan::MaxTiles) {
+        FinalGuestSurfaceTilePlan result{};
+        result.status = FinalGuestSurfaceStatus::CapacityLoss;
+        result.loss.tile_capacity = 1;
+        return result;
     }
-    return candidate;
+    const u64 row_bytes = static_cast<u64>(desc.width) * block.bytes;
+    const u64 sample_bytes = row_bytes * desc.height;
+    if (row_bytes > std::numeric_limits<u32>::max() || sample_bytes > limits.max_bytes ||
+        sample_bytes > std::numeric_limits<u32>::max()) {
+        FinalGuestSurfaceTilePlan result{};
+        result.status = FinalGuestSurfaceStatus::CapacityLoss;
+        result.loss.byte_capacity = 1;
+        return result;
+    }
+    return {
+        .surface_width = desc.width,
+        .surface_height = desc.height,
+        .row_bytes = static_cast<u32>(row_bytes),
+        .bytes_per_pixel = block.bytes,
+        .window_width = window_width,
+        .window_height = window_height,
+        .logical_columns = columns,
+        .logical_rows = rows,
+        .tile_count = static_cast<u32>(tile_count),
+        .sample_bytes = static_cast<u32>(sample_bytes),
+        .copy_region_count = 1,
+    };
 }
 
 struct FinalGuestSurfaceCaptureWindow {
@@ -390,9 +392,70 @@ struct FinalGuestSurfaceLagConfig {
     }
 };
 
+struct FinalGuestSurfaceWatchOrdinals {
+    static constexpr u32 MaxOrdinals = 32;
+
+    std::array<u32, MaxOrdinals> ordinals{};
+    u32 count{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    u32 loss{};
+
+    [[nodiscard]] constexpr bool Contains(u32 ordinal) const noexcept {
+        return std::binary_search(ordinals.begin(), ordinals.begin() + count, ordinal);
+    }
+};
+
+[[nodiscard]] inline FinalGuestSurfaceWatchOrdinals ParseFinalGuestSurfaceWatchOrdinals(
+    std::string_view text) noexcept {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    if (text.empty()) {
+        return selector;
+    }
+    while (!text.empty()) {
+        const size_t comma = text.find(',');
+        const std::string_view token = text.substr(0, comma);
+        u32 ordinal{};
+        const auto parsed = std::from_chars(token.data(), token.data() + token.size(), ordinal);
+        if (token.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != token.data() + token.size() || ordinal == 0 ||
+            ordinal > FinalGuestSurfaceTilePlan::MaxTiles) {
+            selector = {};
+            selector.status = FinalGuestSurfaceStatus::Unsupported;
+            selector.loss = 1;
+            return selector;
+        }
+        if (selector.count == selector.ordinals.size()) {
+            selector = {};
+            selector.status = FinalGuestSurfaceStatus::CapacityLoss;
+            selector.loss = 1;
+            return selector;
+        }
+        selector.ordinals[selector.count++] = ordinal;
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        if (comma + 1 == text.size()) {
+            selector = {};
+            selector.status = FinalGuestSurfaceStatus::Unsupported;
+            selector.loss = 1;
+            return selector;
+        }
+        text.remove_prefix(comma + 1);
+    }
+    std::sort(selector.ordinals.begin(), selector.ordinals.begin() + selector.count);
+    if (std::adjacent_find(selector.ordinals.begin(), selector.ordinals.begin() + selector.count) !=
+        selector.ordinals.begin() + selector.count) {
+        selector = {};
+        selector.status = FinalGuestSurfaceStatus::Unsupported;
+        selector.loss = 1;
+    }
+    return selector;
+}
+
 struct FinalGuestSurfaceContentConfig {
     FinalGuestSurfaceCaptureWindow window{FinalGuestSurfaceCaptureWindow::Defaults()};
     FinalGuestSurfaceLagConfig lag{FinalGuestSurfaceLagConfig::Defaults()};
+    FinalGuestSurfaceWatchOrdinals watch_ordinals{};
 };
 
 template <typename ReadValue>
@@ -431,11 +494,121 @@ template <typename ReadValue>
     }
     config.lag.tolerance_us = parse("SHADPS4_FINAL_GUEST_SURFACE_LAG_TOLERANCE_US",
                                     config.lag.tolerance_us, (config.lag.cadence_us - 1) / 2);
+    if (const auto watch = read_value("SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS")) {
+        config.watch_ordinals = ParseFinalGuestSurfaceWatchOrdinals(*watch);
+    }
     return config;
 }
 
+struct FinalGuestSurfaceFrameDiagnosticStamp {
+    u64 surface_sequence{};
+    u64 surface_process_time_us{};
+    u32 guest_width{};
+    u32 guest_height{};
+    bool valid{};
+
+    constexpr void Assign(bool enabled, u64 sequence, u64 process_time_us, u32 width,
+                          u32 height) noexcept {
+        Clear();
+        if (enabled) {
+            surface_sequence = sequence;
+            surface_process_time_us = process_time_us;
+            guest_width = width;
+            guest_height = height;
+            valid = true;
+        }
+    }
+
+    constexpr void Clear() noexcept {
+        *this = {};
+    }
+};
+
+struct FinalGuestSurfacePresentationMapping {
+    u32 guest_width{};
+    u32 guest_height{};
+    u32 swapchain_width{};
+    u32 swapchain_height{};
+    s32 output_x{};
+    s32 output_y{};
+    u32 output_width{};
+    u32 output_height{};
+    bool top_left{};
+    bool no_y_flip{};
+
+    [[nodiscard]] constexpr bool IsIdentity() const noexcept {
+        return guest_width != 0 && guest_height != 0 && guest_width == swapchain_width &&
+               guest_height == swapchain_height && output_x == 0 && output_y == 0 &&
+               output_width == guest_width && output_height == guest_height && top_left &&
+               no_y_flip;
+    }
+};
+
+struct FinalGuestSurfaceCalibrationReport {
+    u32 request_ordinal{};
+    u64 surface_sequence{};
+    u64 surface_process_time_us{};
+    FinalGuestSurfacePresentationMapping mapping{};
+    u32 overflow_loss{};
+    bool emit{};
+    bool fallback_time{};
+    bool identity_mapping{};
+    bool overflow_marker{};
+};
+
+class FinalGuestSurfaceScreenshotCalibration {
+public:
+    static constexpr u32 MaxRequests = 1000;
+
+    explicit constexpr FinalGuestSurfaceScreenshotCalibration(bool enabled_) : enabled{enabled_} {}
+
+    [[nodiscard]] constexpr FinalGuestSurfaceCalibrationReport Observe(
+        const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
+        FinalGuestSurfacePresentationMapping mapping, u64 fallback_process_time_us) noexcept {
+        if (!enabled) {
+            return {};
+        }
+        if (observed_requests == MaxRequests) {
+            if (overflow_emitted) {
+                return {};
+            }
+            overflow_emitted = true;
+            return {
+                .mapping = mapping,
+                .overflow_loss = 1,
+                .emit = true,
+                .overflow_marker = true,
+            };
+        }
+        ++observed_requests;
+        if (stamp.valid) {
+            mapping.guest_width = stamp.guest_width;
+            mapping.guest_height = stamp.guest_height;
+        }
+        return {
+            .request_ordinal = observed_requests,
+            .surface_sequence = stamp.valid ? stamp.surface_sequence : 0,
+            .surface_process_time_us =
+                stamp.valid ? stamp.surface_process_time_us : fallback_process_time_us,
+            .mapping = mapping,
+            .emit = true,
+            .fallback_time = !stamp.valid,
+            .identity_mapping = stamp.valid && mapping.IsIdentity(),
+        };
+    }
+
+    [[nodiscard]] constexpr u32 ObservedRequests() const noexcept {
+        return observed_requests;
+    }
+
+private:
+    bool enabled{};
+    bool overflow_emitted{};
+    u32 observed_requests{};
+};
+
 struct FinalGuestSurfaceReport {
-    static constexpr u32 MaxTileDetails = FinalGuestSurfaceTilePlan::MaxTiles;
+    static constexpr u32 MaxTileDetails = FinalGuestSurfaceWatchOrdinals::MaxOrdinals;
 
     u64 sequence{};
     u64 process_time_us{};
@@ -449,8 +622,12 @@ struct FinalGuestSurfaceReport {
     u32 tile_count{};
     u32 changed_tiles{};
     u32 aba_tiles{};
+    u32 unselected_aba_tiles{};
     std::array<u32, MaxTileDetails> aba_tile_ordinals{};
     u32 aba_tile_ordinal_count{};
+    u32 selector_count{};
+    u32 selector_loss{};
+    FinalGuestSurfaceStatus selector_status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
     bool stable_transport{};
@@ -479,7 +656,11 @@ struct FinalGuestSurfaceReport {
            " tiles=" + std::to_string(report.tile_count) +
            " changed_tiles=" + std::to_string(report.changed_tiles) +
            " aba_tiles=" + std::to_string(report.aba_tiles) +
+           " unselected_aba_tiles=" + std::to_string(report.unselected_aba_tiles) +
            " aba_tile_ordinals=" + tile_ordinals +
+           " selector_count=" + std::to_string(report.selector_count) +
+           " selector_status=" + std::to_string(static_cast<u32>(report.selector_status)) +
+           " selector_loss=" + std::to_string(report.selector_loss) +
            " status=" + std::to_string(static_cast<u32>(report.status)) +
            " stable=" + std::to_string(report.stable_transport) +
            " exact_aba=" + std::to_string(report.exact_aba) +
@@ -495,7 +676,9 @@ public:
     static constexpr u32 MaxHistory = 32;
     static constexpr u32 MaxSurfaceOrdinals = 16;
 
-    explicit FinalGuestSurfaceReducer(FinalGuestSurfaceLagConfig config_) : config{config_} {}
+    explicit FinalGuestSurfaceReducer(FinalGuestSurfaceLagConfig config_,
+                                      FinalGuestSurfaceWatchOrdinals selector_ = {})
+        : config{config_}, selector{selector_} {}
 
     [[nodiscard]] FinalGuestSurfaceReport Observe(u64 sequence, u64 process_time_us,
                                                   FinalGuestSurfaceTransport transport,
@@ -506,6 +689,9 @@ public:
             .process_time_us = process_time_us,
             .surface_ordinal = OrdinalFor(transport.surface_identity),
             .tile_count = plan.tile_count,
+            .selector_count = selector.count,
+            .selector_loss = selector.loss,
+            .selector_status = selector.status,
             .status = plan.status,
             .loss = plan.loss,
         };
@@ -615,12 +801,7 @@ private:
 
     [[nodiscard]] static bool SameLayout(const Observation& observation,
                                          const FinalGuestSurfaceTilePlan& plan) noexcept {
-        if (observation.plan.tile_count != plan.tile_count ||
-            observation.plan.sample_bytes != plan.sample_bytes) {
-            return false;
-        }
-        return std::equal(observation.plan.tiles.begin(),
-                          observation.plan.tiles.begin() + plan.tile_count, plan.tiles.begin());
+        return observation.plan == plan;
     }
 
     [[nodiscard]] static bool EqualContent(const Observation& observation,
@@ -631,12 +812,7 @@ private:
             observation.bytes.size() != bytes.size()) {
             return false;
         }
-        for (u32 i = 0; i < plan.tile_count; ++i) {
-            if (!EqualTile(observation, i, format, plan, bytes)) {
-                return false;
-            }
-        }
-        return true;
+        return EqualVisibleBytes(format, observation.bytes, bytes);
     }
 
     [[nodiscard]] static bool EqualVisibleBytes(FinalGuestSurfaceFormat format,
@@ -695,11 +871,25 @@ private:
         if (!SameLayout(observation, plan) || observation.transport.format != format) {
             return false;
         }
-        const auto& tile = plan.tiles[index];
-        return EqualVisibleBytes(format,
-                                 std::span<const std::byte>{observation.bytes}.subspan(
-                                     tile.buffer_offset, tile.byte_size),
-                                 bytes.subspan(tile.buffer_offset, tile.byte_size));
+        const auto tile = plan.TileAt(index);
+        const u32 row_visible_bytes = tile.width * plan.bytes_per_pixel;
+        if (tile.width == 0 || tile.height == 0 ||
+            tile.buffer_offset + static_cast<u64>(tile.height - 1) * plan.row_bytes +
+                    row_visible_bytes >
+                bytes.size() ||
+            observation.bytes.size() != bytes.size()) {
+            return false;
+        }
+        for (u32 row = 0; row < tile.height; ++row) {
+            const size_t offset = tile.buffer_offset + static_cast<size_t>(row) * plan.row_bytes;
+            if (!EqualVisibleBytes(format,
+                                   std::span<const std::byte>{observation.bytes}.subspan(
+                                       offset, row_visible_bytes),
+                                   bytes.subspan(offset, row_visible_bytes))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     [[nodiscard]] static u32 ChangedTiles(const Observation& previous,
@@ -716,11 +906,10 @@ private:
         return changed;
     }
 
-    static void PopulateAbaDetails(const Observation& baseline, const Observation& departure,
-                                   FinalGuestSurfaceFormat format,
-                                   const FinalGuestSurfaceTilePlan& plan,
-                                   std::span<const std::byte> bytes,
-                                   FinalGuestSurfaceReport& report) noexcept {
+    void PopulateAbaDetails(const Observation& baseline, const Observation& departure,
+                            FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
+                            std::span<const std::byte> bytes,
+                            FinalGuestSurfaceReport& report) const noexcept {
         if (!SameLayout(baseline, plan) || !SameLayout(departure, plan) ||
             baseline.transport.format != format || departure.transport.format != format) {
             return;
@@ -734,7 +923,9 @@ private:
                 continue;
             }
             ++report.aba_tiles;
-            if (report.aba_tile_ordinal_count < report.aba_tile_ordinals.size()) {
+            if (!selector.Contains(i + 1)) {
+                ++report.unselected_aba_tiles;
+            } else if (report.aba_tile_ordinal_count < report.aba_tile_ordinals.size()) {
                 report.aba_tile_ordinals[report.aba_tile_ordinal_count++] = i + 1;
             } else {
                 ++report.loss.tile_detail;
@@ -760,6 +951,7 @@ private:
     }
 
     FinalGuestSurfaceLagConfig config{};
+    FinalGuestSurfaceWatchOrdinals selector{};
     std::deque<Observation> history{};
     std::array<u64, MaxSurfaceOrdinals> identities{};
     u32 identity_count{};
