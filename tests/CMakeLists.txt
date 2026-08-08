@@ -148,6 +148,16 @@ target_compile_features(shadps4_fault_download_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_fault_download_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_fault_download_test)
 
+add_executable(shadps4_fault_frame_correlation_test
+    test_fault_frame_correlation.cpp
+)
+target_include_directories(shadps4_fault_frame_correlation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_fault_frame_correlation_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_fault_frame_correlation_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_fault_frame_correlation_test)
+
 add_executable(shadps4_address_space_operation_gate_test
     test_address_space_operation_gate.cpp
 )
