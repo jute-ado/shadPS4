@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <deque>
 #include <limits>
@@ -41,6 +43,7 @@ enum class FinalGuestSurfaceFormat : u8 {
     A2R10G10B10,
     A2B10G10R10,
     Rgba16,
+    Rgba16Float,
     Block8,
     Block16,
 };
@@ -48,12 +51,14 @@ enum class FinalGuestSurfaceFormat : u8 {
 enum class FinalGuestSurfaceComparison : u8 {
     ExactVisible,
     LocalizedVisualReturn,
+    SampledLinearVisualReturn,
 };
 
 enum class FinalGuestSurfaceStage : u8 {
     GuestPreFsr,
     PostPp,
     PpInputShadow,
+    PpSampledInput,
 };
 
 enum class FinalGuestSurfaceStatus : u8 {
@@ -82,6 +87,7 @@ struct FinalGuestSurfaceFormatBlock {
     case FinalGuestSurfaceFormat::A2B10G10R10:
         return {1, 1, 4};
     case FinalGuestSurfaceFormat::Rgba16:
+    case FinalGuestSurfaceFormat::Rgba16Float:
         return {1, 1, 8};
     case FinalGuestSurfaceFormat::Block8:
         return {4, 4, 8};
@@ -113,6 +119,7 @@ struct FinalGuestSurfaceDescriptor {
     bool logical_full_fit{};
     bool logical_top_left{};
     bool logical_no_y_flip{};
+    u32 comparison_gamma_bits{};
 };
 
 struct FinalGuestSurfaceLoss {
@@ -181,6 +188,7 @@ struct FinalGuestSurfaceTilePlan {
     u32 scale_denominator{};
     FinalGuestSurfaceComparison comparison{FinalGuestSurfaceComparison::ExactVisible};
     FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
+    u32 comparison_gamma_bits{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -248,6 +256,13 @@ struct FinalGuestSurfaceTilePlan {
     if (desc.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn &&
         desc.format != FinalGuestSurfaceFormat::Rgba8 &&
         desc.format != FinalGuestSurfaceFormat::Bgra8) {
+        return unsupported(&FinalGuestSurfaceLoss::unsupported_format);
+    }
+    if (desc.comparison == FinalGuestSurfaceComparison::SampledLinearVisualReturn &&
+        (desc.format != FinalGuestSurfaceFormat::Rgba16Float ||
+         !std::isfinite(std::bit_cast<float>(desc.comparison_gamma_bits)) ||
+         std::bit_cast<float>(desc.comparison_gamma_bits) < 0.1f ||
+         std::bit_cast<float>(desc.comparison_gamma_bits) > 2.0f)) {
         return unsupported(&FinalGuestSurfaceLoss::unsupported_format);
     }
     if (desc.width == 0 || desc.height == 0 || desc.depth != 1 ||
@@ -326,6 +341,7 @@ struct FinalGuestSurfaceTilePlan {
         .scale_denominator = desc.logical_width / scale_divisor,
         .comparison = desc.comparison,
         .stage = desc.stage,
+        .comparison_gamma_bits = desc.comparison_gamma_bits,
     };
 }
 
@@ -613,13 +629,16 @@ template <typename ReadValue>
             config.stage = FinalGuestSurfaceStage::PostPp;
         } else if (*stage == "pp_input_shadow") {
             config.stage = FinalGuestSurfaceStage::PpInputShadow;
+        } else if (*stage == "pp_sampled_input") {
+            config.stage = FinalGuestSurfaceStage::PpSampledInput;
         } else if (*stage != "guest_pre_fsr") {
             return std::nullopt;
         }
     }
     if (const auto calibrated = read_value("SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS")) {
         if (*calibrated != "1" || (config.stage != FinalGuestSurfaceStage::PostPp &&
-                                   config.stage != FinalGuestSurfaceStage::PpInputShadow)) {
+                                   config.stage != FinalGuestSurfaceStage::PpInputShadow &&
+                                   config.stage != FinalGuestSurfaceStage::PpSampledInput)) {
             return std::nullopt;
         }
         config.calibrated_triplets = true;
@@ -636,7 +655,9 @@ template <typename ReadValue>
         }
         config.expected_calibrations = parsed;
     }
-    if (config.stage == FinalGuestSurfaceStage::PpInputShadow && !config.calibrated_triplets) {
+    if ((config.stage == FinalGuestSurfaceStage::PpInputShadow ||
+         config.stage == FinalGuestSurfaceStage::PpSampledInput) &&
+        !config.calibrated_triplets) {
         return std::nullopt;
     }
     config.window.frame_start = parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_START",
@@ -664,14 +685,16 @@ template <typename ReadValue>
     FinalGuestSurfaceStage stage, bool is_reusing_frame, bool stamp_valid,
     bool in_capture_window) noexcept {
     return (stage == FinalGuestSurfaceStage::PostPp ||
-            stage == FinalGuestSurfaceStage::PpInputShadow) &&
+            stage == FinalGuestSurfaceStage::PpInputShadow ||
+            stage == FinalGuestSurfaceStage::PpSampledInput) &&
            !is_reusing_frame && stamp_valid && in_capture_window;
 }
 
 [[nodiscard]] constexpr bool IsPresentFinalGuestSurfaceStage(
     FinalGuestSurfaceStage stage) noexcept {
     return stage == FinalGuestSurfaceStage::PostPp ||
-           stage == FinalGuestSurfaceStage::PpInputShadow;
+           stage == FinalGuestSurfaceStage::PpInputShadow ||
+           stage == FinalGuestSurfaceStage::PpSampledInput;
 }
 
 struct FinalGuestSurfaceLogPolicyConfig {
@@ -683,7 +706,8 @@ struct FinalGuestSurfaceLogPolicyConfig {
 
 [[nodiscard]] constexpr FinalGuestSurfaceLogPolicyConfig FinalGuestSurfaceLogPolicy(
     FinalGuestSurfaceStage stage) noexcept {
-    if (stage == FinalGuestSurfaceStage::PpInputShadow) {
+    if (stage == FinalGuestSurfaceStage::PpInputShadow ||
+        stage == FinalGuestSurfaceStage::PpSampledInput) {
         return {
             .verbose_frame_reports = false,
             .calibrated_triplet_reports = true,
@@ -1271,7 +1295,8 @@ public:
             const bool departed =
                 !EqualTile(*endpoints[0], index, format, plan, endpoints[1]->bytes);
             report.exact_aba |= returned && departed;
-            if (plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn &&
+            if ((plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn ||
+                 plan.comparison == FinalGuestSurfaceComparison::SampledLinearVisualReturn) &&
                 IsLocalizedVisualReturn(*endpoints[0], *endpoints[1], format, plan,
                                         endpoints[2]->bytes, index)) {
                 report.matched_ordinals[report.matched_ordinal_count++] = index + 1;
@@ -1368,6 +1393,7 @@ private:
             mask_packed_alpha = true;
             break;
         case FinalGuestSurfaceFormat::Rgba16:
+        case FinalGuestSurfaceFormat::Rgba16Float:
             texel_bytes = 8;
             visible_bytes = 6;
             break;
@@ -1437,15 +1463,63 @@ private:
         return changed;
     }
 
+    [[nodiscard]] static u16 ReadU16(std::span<const std::byte> bytes) noexcept {
+        return static_cast<u16>(std::to_integer<u8>(bytes[0])) |
+               static_cast<u16>(std::to_integer<u8>(bytes[1]) << 8);
+    }
+
+    [[nodiscard]] static float HalfToFloat(u16 value) noexcept {
+        const u32 sign = static_cast<u32>(value & 0x8000u) << 16;
+        u32 exponent = (value >> 10) & 0x1fu;
+        u32 mantissa = value & 0x03ffu;
+        u32 bits{};
+        if (exponent == 0) {
+            if (mantissa == 0) {
+                bits = sign;
+            } else {
+                s32 adjusted_exponent = 1;
+                while ((mantissa & 0x0400u) == 0) {
+                    mantissa <<= 1;
+                    --adjusted_exponent;
+                }
+                mantissa &= 0x03ffu;
+                bits = sign | (static_cast<u32>(adjusted_exponent + 112) << 23) | (mantissa << 13);
+            }
+        } else if (exponent == 0x1fu) {
+            bits = sign | 0x7f80'0000u | (mantissa << 13);
+        } else {
+            bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+        }
+        return std::bit_cast<float>(bits);
+    }
+
+    [[nodiscard]] static std::optional<float> EncodePpSample(float linear, float gamma) noexcept {
+        if (!std::isfinite(linear) || !std::isfinite(gamma) || gamma < 0.1f || gamma > 2.0f) {
+            return std::nullopt;
+        }
+        constexpr float cutoff = 0.0031308f;
+        constexpr float a = 1.055f;
+        constexpr float b = 0.055f;
+        constexpr float d = 12.92f;
+        const float encoded =
+            linear < cutoff ? d * linear / gamma : a * std::pow(linear, 1.0f / (3.4f - gamma)) - b;
+        if (!std::isfinite(encoded)) {
+            return std::nullopt;
+        }
+        return std::clamp(encoded, 0.0f, 1.0f);
+    }
+
     [[nodiscard]] static std::optional<u32> ChangedVisualPixels(
         FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
         std::span<const std::byte> left, std::span<const std::byte> right, u32 index) noexcept {
-        if (format != FinalGuestSurfaceFormat::Rgba8 && format != FinalGuestSurfaceFormat::Bgra8) {
+        if (format != FinalGuestSurfaceFormat::Rgba8 && format != FinalGuestSurfaceFormat::Bgra8 &&
+            format != FinalGuestSurfaceFormat::Rgba16Float) {
             return std::nullopt;
         }
         const auto tile = plan.TileAt(index);
+        const u32 texel_bytes = format == FinalGuestSurfaceFormat::Rgba16Float ? 8u : 4u;
         const u32 row_bytes = tile.width * plan.bytes_per_pixel;
-        if (tile.width == 0 || tile.height == 0 || plan.bytes_per_pixel != 4 ||
+        if (tile.width == 0 || tile.height == 0 || plan.bytes_per_pixel != texel_bytes ||
             left.size() != right.size() ||
             tile.buffer_offset + static_cast<u64>(tile.height - 1) * plan.row_bytes + row_bytes >
                 left.size()) {
@@ -1456,14 +1530,30 @@ private:
             const size_t row_offset =
                 tile.buffer_offset + static_cast<size_t>(row) * plan.row_bytes;
             for (u32 column = 0; column < tile.width; ++column) {
-                const size_t offset = row_offset + static_cast<size_t>(column) * 4;
-                u32 difference{};
-                for (u32 channel = 0; channel < 3; ++channel) {
-                    const u8 first = std::to_integer<u8>(left[offset + channel]);
-                    const u8 second = std::to_integer<u8>(right[offset + channel]);
-                    difference += first > second ? first - second : second - first;
+                const size_t offset = row_offset + static_cast<size_t>(column) * texel_bytes;
+                if (format == FinalGuestSurfaceFormat::Rgba16Float) {
+                    const float gamma = std::bit_cast<float>(plan.comparison_gamma_bits);
+                    float difference{};
+                    for (u32 channel = 0; channel < 3; ++channel) {
+                        const auto first = EncodePpSample(
+                            HalfToFloat(ReadU16(left.subspan(offset + channel * 2, 2))), gamma);
+                        const auto second = EncodePpSample(
+                            HalfToFloat(ReadU16(right.subspan(offset + channel * 2, 2))), gamma);
+                        if (!first || !second) {
+                            return std::nullopt;
+                        }
+                        difference += std::abs(*first - *second);
+                    }
+                    changed += difference >= 48.0f / 255.0f;
+                } else {
+                    u32 difference{};
+                    for (u32 channel = 0; channel < 3; ++channel) {
+                        const u8 first = std::to_integer<u8>(left[offset + channel]);
+                        const u8 second = std::to_integer<u8>(right[offset + channel]);
+                        difference += first > second ? first - second : second - first;
+                    }
+                    changed += difference >= 48;
                 }
-                changed += difference >= 48; // Mean visible RGB difference is at least 16/255.
             }
         }
         return changed;
@@ -1510,10 +1600,12 @@ private:
             const bool returned = EqualTile(baseline, i, format, plan, bytes);
             const bool departed = !EqualTile(baseline, i, format, departure.plan, departure.bytes);
             any_exact_tile |= returned && departed;
+            const bool localized =
+                plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn ||
+                plan.comparison == FinalGuestSurfaceComparison::SampledLinearVisualReturn;
             const bool matched =
-                plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn
-                    ? IsLocalizedVisualReturn(baseline, departure, format, plan, bytes, i)
-                    : returned && departed;
+                localized ? IsLocalizedVisualReturn(baseline, departure, format, plan, bytes, i)
+                          : returned && departed;
             if (!matched) {
                 continue;
             }
@@ -1528,7 +1620,8 @@ private:
         }
         report.exact_aba = any_exact_tile;
         report.localized_aba =
-            plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn &&
+            (plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn ||
+             plan.comparison == FinalGuestSurfaceComparison::SampledLinearVisualReturn) &&
             report.aba_tiles != 0;
         report.whole_sample_aba = all_returned && any_departed;
     }
