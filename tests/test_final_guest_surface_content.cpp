@@ -323,6 +323,26 @@ TEST(FinalGuestSurfaceContent, StableTransportRequiresEveryIntermediateBackingGe
     EXPECT_EQ(returned.loss.gap, 0u);
 }
 
+TEST(FinalGuestSurfaceContent, ReportsBoundedPrivacySafeSurfaceOrdinalCapacity) {
+    FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults()};
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(32, 32));
+    std::vector<std::byte> content(plan.sample_bytes, std::byte{0x33});
+    for (u32 ordinal = 1; ordinal <= FinalGuestSurfaceReducer::MaxSurfaceOrdinals; ++ordinal) {
+        const auto report = reducer.Observe(ordinal, 3'000'000 + ordinal * 20'000,
+                                            Transport(ordinal, ordinal), plan, content);
+        EXPECT_EQ(report.surface_ordinal, ordinal);
+        EXPECT_EQ(report.loss.ordinal_capacity, 0u);
+    }
+    const auto overflow = reducer.Observe(
+        FinalGuestSurfaceReducer::MaxSurfaceOrdinals + 1,
+        3'000'000 + (FinalGuestSurfaceReducer::MaxSurfaceOrdinals + 1) * 20'000,
+        Transport(99, 99), plan, content);
+    EXPECT_EQ(overflow.surface_ordinal, 0u);
+    EXPECT_EQ(overflow.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(overflow.loss.ordinal_capacity, 1u);
+    EXPECT_FALSE(overflow.exact_aba);
+}
+
 TEST(FinalGuestSurfaceContent, PrivacySafeReportContainsNoIdentityGenerationDigestOrAddress) {
     Vulkan::FinalGuestSurfaceReport report{
         .sequence = 77,
