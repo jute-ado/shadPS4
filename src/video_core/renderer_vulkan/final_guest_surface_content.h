@@ -45,6 +45,11 @@ enum class FinalGuestSurfaceFormat : u8 {
     Block16,
 };
 
+enum class FinalGuestSurfaceComparison : u8 {
+    ExactVisible,
+    LocalizedVisualReturn,
+};
+
 enum class FinalGuestSurfaceStatus : u8 {
     Complete,
     Unsupported,
@@ -93,6 +98,7 @@ struct FinalGuestSurfaceDescriptor {
     FinalGuestSurfaceImageType type{FinalGuestSurfaceImageType::Other};
     FinalGuestSurfaceAspect aspect{FinalGuestSurfaceAspect::Other};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceComparison comparison{FinalGuestSurfaceComparison::ExactVisible};
     u32 logical_width{};
     u32 logical_height{};
     s32 logical_offset_x{};
@@ -166,6 +172,7 @@ struct FinalGuestSurfaceTilePlan {
     u32 copy_region_count{};
     u32 scale_numerator{};
     u32 scale_denominator{};
+    FinalGuestSurfaceComparison comparison{FinalGuestSurfaceComparison::ExactVisible};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -228,6 +235,11 @@ struct FinalGuestSurfaceTilePlan {
     }
     const auto block = DescribeFinalGuestSurfaceFormat(desc.format);
     if (block.width == 0 || block.height == 0 || block.bytes == 0) {
+        return unsupported(&FinalGuestSurfaceLoss::unsupported_format);
+    }
+    if (desc.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn &&
+        desc.format != FinalGuestSurfaceFormat::Rgba8 &&
+        desc.format != FinalGuestSurfaceFormat::Bgra8) {
         return unsupported(&FinalGuestSurfaceLoss::unsupported_format);
     }
     if (desc.width == 0 || desc.height == 0 || desc.depth != 1 ||
@@ -304,6 +316,7 @@ struct FinalGuestSurfaceTilePlan {
         .copy_region_count = 1,
         .scale_numerator = desc.width / scale_divisor,
         .scale_denominator = desc.logical_width / scale_divisor,
+        .comparison = desc.comparison,
     };
 }
 
@@ -1114,6 +1127,64 @@ private:
         return changed;
     }
 
+    [[nodiscard]] static std::optional<u32> ChangedVisualPixels(
+        FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
+        std::span<const std::byte> left, std::span<const std::byte> right,
+        u32 index) noexcept {
+        if (format != FinalGuestSurfaceFormat::Rgba8 &&
+            format != FinalGuestSurfaceFormat::Bgra8) {
+            return std::nullopt;
+        }
+        const auto tile = plan.TileAt(index);
+        const u32 row_bytes = tile.width * plan.bytes_per_pixel;
+        if (tile.width == 0 || tile.height == 0 || plan.bytes_per_pixel != 4 ||
+            left.size() != right.size() ||
+            tile.buffer_offset + static_cast<u64>(tile.height - 1) * plan.row_bytes + row_bytes >
+                left.size()) {
+            return std::nullopt;
+        }
+        u32 changed{};
+        for (u32 row = 0; row < tile.height; ++row) {
+            const size_t row_offset =
+                tile.buffer_offset + static_cast<size_t>(row) * plan.row_bytes;
+            for (u32 column = 0; column < tile.width; ++column) {
+                const size_t offset = row_offset + static_cast<size_t>(column) * 4;
+                u32 difference{};
+                for (u32 channel = 0; channel < 3; ++channel) {
+                    const u8 first = std::to_integer<u8>(left[offset + channel]);
+                    const u8 second = std::to_integer<u8>(right[offset + channel]);
+                    difference += first > second ? first - second : second - first;
+                }
+                changed += difference >= 48; // Mean visible RGB difference is at least 16/255.
+            }
+        }
+        return changed;
+    }
+
+    [[nodiscard]] static bool IsLocalizedVisualReturn(
+        const Observation& baseline, const Observation& departure,
+        FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
+        std::span<const std::byte> bytes, u32 index) noexcept {
+        if (!SameLayout(baseline, plan) || !SameLayout(departure, plan) ||
+            baseline.transport.format != format || departure.transport.format != format) {
+            return false;
+        }
+        const auto baseline_to_departure = ChangedVisualPixels(
+            format, plan, baseline.bytes, departure.bytes, index);
+        const auto departure_to_current =
+            ChangedVisualPixels(format, plan, departure.bytes, bytes, index);
+        const auto baseline_to_current =
+            ChangedVisualPixels(format, plan, baseline.bytes, bytes, index);
+        if (!baseline_to_departure || !departure_to_current || !baseline_to_current) {
+            return false;
+        }
+        const auto tile = plan.TileAt(index);
+        const u64 pixels = static_cast<u64>(tile.width) * tile.height;
+        return static_cast<u64>(*baseline_to_departure) * 4 >= pixels &&
+               static_cast<u64>(*departure_to_current) * 4 >= pixels &&
+               static_cast<u64>(*baseline_to_current) * 100 <= pixels;
+    }
+
     void PopulateAbaDetails(const Observation& baseline, const Observation& departure,
                             FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
                             std::span<const std::byte> bytes,
@@ -1124,10 +1195,16 @@ private:
         }
         const bool all_returned = EqualContent(baseline, format, plan, bytes);
         const bool any_departed = !EqualContent(baseline, format, departure.plan, departure.bytes);
+        bool any_exact_tile{};
         for (u32 i = 0; i < plan.tile_count; ++i) {
             const bool returned = EqualTile(baseline, i, format, plan, bytes);
             const bool departed = !EqualTile(baseline, i, format, departure.plan, departure.bytes);
-            if (!returned || !departed) {
+            any_exact_tile |= returned && departed;
+            const bool matched =
+                plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn
+                    ? IsLocalizedVisualReturn(baseline, departure, format, plan, bytes, i)
+                    : returned && departed;
+            if (!matched) {
                 continue;
             }
             ++report.aba_tiles;
@@ -1139,7 +1216,7 @@ private:
                 ++report.loss.tile_detail;
             }
         }
-        report.exact_aba = report.aba_tiles != 0;
+        report.exact_aba = any_exact_tile;
         report.whole_sample_aba = all_returned && any_departed;
     }
 

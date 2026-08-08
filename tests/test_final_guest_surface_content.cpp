@@ -743,7 +743,9 @@ TEST(FinalGuestSurfaceContent, ReportsLocalizedTileAbaWhenWholeSampleDoesNotRetu
 TEST(FinalGuestSurfaceContent, MatchesLocalizedVisualOracleWhenReturnIsNotByteExact) {
     FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(),
                                      Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1")};
-    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(32, 32));
+    auto descriptor = Rgba8Surface(32, 32);
+    descriptor.comparison = Vulkan::FinalGuestSurfaceComparison::LocalizedVisualReturn;
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(descriptor);
     std::vector<std::byte> a(plan.sample_bytes, std::byte{0});
     auto b = a;
     auto c = a;
