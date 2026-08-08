@@ -1104,6 +1104,7 @@ TEST(FinalGuestSurfaceContent, CalibratedTripletsIgnorePreWindowAndFinalizeExpec
         calibrated.ObserveCalibration({request, sequence, process_time, true}, content);
         (void)calibrated.TakeReports();
     }
+    calibrated.Finish(content);
 
     const auto& coverage = calibrated.GetCoverage();
     EXPECT_TRUE(calibrated.CoverageReady());
@@ -1135,6 +1136,7 @@ TEST(FinalGuestSurfaceContent, FirstEligibleCalibratedTripletMayHaveNonOneReques
         }
         calibrated.ObserveCalibration({request, sequence, time, true}, content);
     }
+    calibrated.Finish(content);
     const auto reports = calibrated.TakeReports();
     ASSERT_EQ(reports.size(), 1u);
     EXPECT_EQ(reports[0].request_ordinal, 6u);
