@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <bit>
+#include <fstream>
+#include <sstream>
 #include <string_view>
 
 #include <gtest/gtest.h>
@@ -244,6 +246,22 @@ TEST(PpInputShadow, SelectedShadowInvocationUsesDualPipelineAndSameFormatTwice) 
     EXPECT_FALSE(absent.draw_shadow_output);
     EXPECT_EQ(absent.pipeline, HostPasses::PpPipelineSelection::Normal);
     EXPECT_EQ(absent.status, FinalGuestSurfaceStatus::InvalidationLoss);
+}
+
+TEST(PpInputShadow, ProductionShaderWritesOneComputedColorToBothOutputLocations) {
+    std::ifstream shader{PP_INPUT_SHADOW_SHADER_PATH, std::ios::binary};
+    ASSERT_TRUE(shader) << PP_INPUT_SHADOW_SHADER_PATH;
+    const std::string source{std::istreambuf_iterator<char>{shader},
+                             std::istreambuf_iterator<char>{}};
+    EXPECT_NE(source.find("layout (location = 0) out vec4 color;"), std::string::npos);
+    EXPECT_NE(source.find("layout (location = 1) out vec4 shadow_color;"), std::string::npos);
+    EXPECT_NE(source.find("vec4 computed_color"), std::string::npos);
+    EXPECT_NE(source.find("color = computed_color;"), std::string::npos);
+    EXPECT_NE(source.find("shadow_color = computed_color;"), std::string::npos);
+    const auto sample = source.find("texture(texSampler, uv)");
+    ASSERT_NE(sample, std::string::npos);
+    EXPECT_EQ(source.find("texture(texSampler, uv)", sample + 1), std::string::npos)
+        << "diagnostic shader must sample once";
 }
 
 TEST(PpInputShadow, PresentHandoffQueuesContentBeforeCalibrationWithoutDrawSchedulerCallback) {

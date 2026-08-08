@@ -99,6 +99,9 @@ target_include_directories(shadps4_pp_input_shadow_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_pp_input_shadow_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_pp_input_shadow_test PRIVATE
+    PP_INPUT_SHADOW_SHADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/host_shaders/post_process_shadow.frag"
+)
 target_link_libraries(shadps4_pp_input_shadow_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pp_input_shadow_test)
 
