@@ -71,13 +71,13 @@ TEST(FinalGuestSurfaceContent, PlansDeterministicNormalizedSixteenByNineColorTil
         EXPECT_LE(tile.y + tile.height, 1080u);
         EXPECT_EQ(tile.byte_size, tile.width * tile.height * 4u);
         if (i != 0) {
-            EXPECT_GE(tile.buffer_offset, first.tiles[i - 1].buffer_offset +
-                                              first.tiles[i - 1].byte_size);
+            EXPECT_GE(tile.buffer_offset,
+                      first.tiles[i - 1].buffer_offset + first.tiles[i - 1].byte_size);
         }
     }
 }
 
-TEST(FinalGuestSurfaceContent, ClipsAndDeduplicatesTilesForSmallOneDimensionalSurfaces) {
+TEST(FinalGuestSurfaceContent, ClipsNormalizedColumnsForSmallOneDimensionalSurfaces) {
     auto desc = Rgba8Surface(20, 1);
     desc.type = FinalGuestSurfaceImageType::Color1D;
     const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(desc);
@@ -223,8 +223,7 @@ TEST(FinalGuestSurfaceContent, NoncoherentInvalidationOccursAfterCompletionExact
         return true;
     };
 
-    EXPECT_EQ(completion.TryConsume(false, false, invalidate),
-              FinalGuestSurfaceStatus::Pending);
+    EXPECT_EQ(completion.TryConsume(false, false, invalidate), FinalGuestSurfaceStatus::Pending);
     EXPECT_EQ(invalidations, 0u);
     EXPECT_EQ(completion.TryConsume(true, false, invalidate), FinalGuestSurfaceStatus::Complete);
     EXPECT_EQ(invalidations, 1u);

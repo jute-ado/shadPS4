@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/alignment.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -17,8 +18,10 @@
 #include "imgui/renderer/imgui_impl_vulkan.h"
 #include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
+#include "video_core/amdgpu/resource.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/final_guest_surface_content.h"
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/present_frame_transition.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
@@ -31,9 +34,11 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <csetjmp>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -43,6 +48,7 @@
 #include <memory>
 #include <span>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <vector>
 #include <imgui.h>
@@ -166,6 +172,317 @@ struct ScreenshotReadback {
                  vk::BufferUsageFlagBits::eTransferDst,
                  static_cast<u64>(width_) * static_cast<u64>(height_) * 4},
           width{width_}, height{height_}, format{format_}, hdr_encoded{hdr_encoded_} {}
+};
+
+namespace {
+
+struct FinalGuestSurfaceContentConfig {
+    FinalGuestSurfaceCaptureWindow window{FinalGuestSurfaceCaptureWindow::Defaults()};
+    FinalGuestSurfaceLagConfig lag{FinalGuestSurfaceLagConfig::Defaults()};
+};
+
+[[nodiscard]] std::optional<FinalGuestSurfaceContentConfig> ReadFinalGuestSurfaceContentConfig() {
+    const char* enabled = std::getenv("SHADPS4_FINAL_GUEST_SURFACE_CONTENT");
+    if (enabled == nullptr || std::string_view{enabled} != "1") {
+        return std::nullopt;
+    }
+    const auto parse = [](const char* name, u64 fallback, u64 maximum) {
+        const char* value = std::getenv(name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        const std::string_view text{value};
+        u64 parsed{};
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+        if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
+            return fallback;
+        }
+        return std::min(parsed, maximum);
+    };
+
+    FinalGuestSurfaceContentConfig config{};
+    config.window.frame_start = parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_START",
+                                      config.window.frame_start, std::numeric_limits<u64>::max());
+    config.window.frame_count =
+        static_cast<u32>(parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", config.window.frame_count,
+                               FinalGuestSurfaceCaptureWindow::MaxFrameCount));
+    config.lag.cadence_us =
+        parse("SHADPS4_FINAL_GUEST_SURFACE_LAG_CADENCE_US", config.lag.cadence_us, 1'000'000);
+    if (config.lag.cadence_us == 0) {
+        config.lag.cadence_us = FinalGuestSurfaceLagConfig::Defaults().cadence_us;
+    }
+    config.lag.tolerance_us = parse("SHADPS4_FINAL_GUEST_SURFACE_LAG_TOLERANCE_US",
+                                    config.lag.tolerance_us, (config.lag.cadence_us - 1) / 2);
+    return config;
+}
+
+[[nodiscard]] FinalGuestSurfaceFormat ToFinalGuestSurfaceFormat(vk::Format format) noexcept {
+    switch (format) {
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+    case vk::Format::eA2R10G10B10UnormPack32:
+        return FinalGuestSurfaceFormat::Rgba8;
+    case vk::Format::eR16G16B16A16Sfloat:
+        return FinalGuestSurfaceFormat::Rgba16;
+    case vk::Format::eBc1RgbUnormBlock:
+    case vk::Format::eBc1RgbSrgbBlock:
+    case vk::Format::eBc1RgbaUnormBlock:
+    case vk::Format::eBc1RgbaSrgbBlock:
+    case vk::Format::eBc4UnormBlock:
+    case vk::Format::eBc4SnormBlock:
+        return FinalGuestSurfaceFormat::Block8;
+    case vk::Format::eBc2UnormBlock:
+    case vk::Format::eBc2SrgbBlock:
+    case vk::Format::eBc3UnormBlock:
+    case vk::Format::eBc3SrgbBlock:
+    case vk::Format::eBc5UnormBlock:
+    case vk::Format::eBc5SnormBlock:
+    case vk::Format::eBc6HUfloatBlock:
+    case vk::Format::eBc6HSfloatBlock:
+    case vk::Format::eBc7UnormBlock:
+    case vk::Format::eBc7SrgbBlock:
+        return FinalGuestSurfaceFormat::Block16;
+    default:
+        return FinalGuestSurfaceFormat::Unsupported;
+    }
+}
+
+[[nodiscard]] FinalGuestSurfaceImageType ToFinalGuestSurfaceImageType(
+    AmdGpu::ImageType type) noexcept {
+    switch (type) {
+    case AmdGpu::ImageType::Color1D:
+        return FinalGuestSurfaceImageType::Color1D;
+    case AmdGpu::ImageType::Color2D:
+        return FinalGuestSurfaceImageType::Color2D;
+    case AmdGpu::ImageType::Color3D:
+        return FinalGuestSurfaceImageType::Color3D;
+    default:
+        return FinalGuestSurfaceImageType::Other;
+    }
+}
+
+} // namespace
+
+class FinalGuestSurfaceContentState {
+public:
+    struct PendingCapture {
+        FinalGuestSurfaceFrameStamp stamp{};
+        FinalGuestSurfaceTransport transport{};
+        FinalGuestSurfaceTilePlan plan{};
+        FinalGuestSurfaceReadbackSlotPool::Token slot{};
+        u64 slot_offset{};
+
+        [[nodiscard]] bool HasCopy() const noexcept {
+            return static_cast<bool>(slot) && plan.status == FinalGuestSurfaceStatus::Complete;
+        }
+    };
+
+    FinalGuestSurfaceContentState(const Instance& instance_, Scheduler& scheduler_,
+                                  FinalGuestSurfaceContentConfig config_)
+        : scheduler{scheduler_}, config{config_}, reducer{config.lag},
+          slot_stride{Common::AlignUp<u64>(FinalGuestSurfaceTileLimits{}.max_bytes,
+                                           std::max<u64>(1, instance_.NonCoherentAtomSize()))},
+          download{instance_,
+                   scheduler,
+                   VideoCore::MemoryUsage::Download,
+                   0,
+                   vk::BufferUsageFlagBits::eTransferDst,
+                   slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
+        LOG_INFO(Render,
+                 "FinalGuestSurfaceContentConfig enabled=1 frame_start={} frame_count={} "
+                 "grid_columns=16 grid_rows=9 tile_extent=32 max_tiles={} max_bytes={} slots={} "
+                 "lag_cadence_us={} lag_tolerance_us={}",
+                 config.window.frame_start, config.window.frame_count,
+                 FinalGuestSurfaceTilePlan::MaxTiles, FinalGuestSurfaceTileLimits{}.max_bytes,
+                 FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
+                 config.lag.tolerance_us);
+    }
+
+    [[nodiscard]] bool ShouldCapture(u64 sequence) const noexcept {
+        return config.window.Contains(sequence);
+    }
+
+    [[nodiscard]] PendingCapture Prepare(FinalGuestSurfaceFrameStamp stamp,
+                                         VideoCore::Image& image) {
+        ++selected_frames;
+        PendingCapture pending{
+            .stamp = stamp,
+            .transport =
+                {
+                    .surface_identity = image.image_uid,
+                    .backing_generation = image.EnsureDiagnosticBackingGeneration(),
+                    .format = ToFinalGuestSurfaceFormat(image.backing->image.image_ci.format),
+                    .width = image.info.size.width,
+                    .height = image.info.size.height,
+                },
+        };
+        pending.plan = PlanFinalGuestSurfaceTiles({
+            .width = image.info.size.width,
+            .height = image.info.size.height,
+            .depth = image.info.size.depth,
+            .mip_level = 0,
+            .mip_levels = image.info.resources.levels,
+            .base_array_layer = 0,
+            .array_layers = image.info.resources.layers,
+            .samples = image.backing->num_samples,
+            .type = ToFinalGuestSurfaceImageType(image.info.type),
+            .aspect = image.aspect_mask == vk::ImageAspectFlagBits::eColor
+                          ? FinalGuestSurfaceAspect::Color
+                          : FinalGuestSurfaceAspect::Other,
+            .format = pending.transport.format,
+        });
+        if (pending.plan.status != FinalGuestSurfaceStatus::Complete) {
+            return pending;
+        }
+        const auto slot = slots.TryAcquire();
+        if (!slot) {
+            pending.plan.status = FinalGuestSurfaceStatus::BusyLoss;
+            pending.plan.loss.busy = 1;
+            return pending;
+        }
+        pending.slot = *slot;
+        pending.slot_offset = static_cast<u64>(slot->slot) * slot_stride;
+        return pending;
+    }
+
+    void Record(PendingCapture pending, vk::Image image, vk::CommandBuffer cmdbuf) {
+        if (!pending.HasCopy()) {
+            DeferReport(std::move(pending));
+            return;
+        }
+        const vk::BufferMemoryBarrier2 pre_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+            .srcAccessMask = vk::AccessFlagBits2::eHostRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = download.Handle(),
+            .offset = pending.slot_offset,
+            .size = slot_stride,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &pre_barrier,
+        });
+
+        std::array<vk::BufferImageCopy, FinalGuestSurfaceTilePlan::MaxTiles> copies{};
+        for (u32 i = 0; i < pending.plan.tile_count; ++i) {
+            const auto& tile = pending.plan.tiles[i];
+            copies[i] = {
+                .bufferOffset = pending.slot_offset + tile.buffer_offset,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource =
+                    {
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .mipLevel = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                .imageOffset = {static_cast<s32>(tile.x), static_cast<s32>(tile.y), 0},
+                .imageExtent = {tile.width, tile.height, 1},
+            };
+        }
+        cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, download.Handle(),
+                                 pending.plan.tile_count, copies.data());
+
+        const vk::BufferMemoryBarrier2 post_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            .buffer = download.Handle(),
+            .offset = pending.slot_offset,
+            .size = slot_stride,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &post_barrier,
+        });
+        DeferReport(std::move(pending));
+    }
+
+private:
+    void DeferReport(PendingCapture pending) {
+        scheduler.DeferOperation(
+            [this, pending = std::move(pending)]() mutable { Consume(std::move(pending)); });
+    }
+
+    void Consume(PendingCapture pending) {
+        std::span<const std::byte> bytes{};
+        if (pending.HasCopy()) {
+            FinalGuestSurfaceReadbackCompletion completion;
+            const auto status = completion.TryConsume(true, download.is_coherent, [&] {
+                return download.InvalidateMappedRange(pending.slot_offset, slot_stride);
+            });
+            if (status == FinalGuestSurfaceStatus::InvalidationLoss) {
+                pending.plan.status = status;
+                pending.plan.loss.invalidation = 1;
+            } else {
+                bytes = {reinterpret_cast<const std::byte*>(download.mapped_data.data() +
+                                                            pending.slot_offset),
+                         pending.plan.sample_bytes};
+            }
+        }
+        const auto report = reducer.Observe(pending.stamp.sequence, pending.stamp.process_time_us,
+                                            pending.transport, pending.plan, bytes);
+        ++emitted_frames;
+        complete_frames += report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
+        loss_frames += report.loss.Any();
+        LOG_INFO(Render,
+                 "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
+                 "tiles={} changed_tiles={} aba_tiles={} stable={} exact_aba={} "
+                 "a_sequence={} a_process_time_us={} b_sequence={} b_process_time_us={} "
+                 "c_sequence={} c_process_time_us={} status={} unsupported_type={} "
+                 "unsupported_samples={} unsupported_mip={} unsupported_layer={} "
+                 "unsupported_aspect={} unsupported_format={} invalid_extent={} "
+                 "tile_loss={} byte_loss={} busy={} invalidation_loss={} gap_loss={} "
+                 "history_loss={}",
+                 report.sequence, report.process_time_us, report.surface_ordinal, report.tile_count,
+                 report.changed_tiles, report.aba_tiles, report.stable_transport, report.exact_aba,
+                 report.a_sequence, report.a_process_time_us, report.b_sequence,
+                 report.b_process_time_us, report.c_sequence, report.c_process_time_us,
+                 static_cast<u32>(report.status), report.loss.unsupported_type,
+                 report.loss.unsupported_samples, report.loss.unsupported_mip,
+                 report.loss.unsupported_layer, report.loss.unsupported_aspect,
+                 report.loss.unsupported_format, report.loss.invalid_extent,
+                 report.loss.tile_capacity, report.loss.byte_capacity, report.loss.busy,
+                 report.loss.invalidation, report.loss.gap, report.loss.history);
+
+        if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
+            LOG_ERROR(Render,
+                      "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
+                      "tiles={} status={} slot_release_loss=1",
+                      report.sequence, report.process_time_us, report.surface_ordinal,
+                      report.tile_count,
+                      static_cast<u32>(FinalGuestSurfaceStatus::AlreadyConsumed));
+            ++loss_frames;
+        }
+        if (pending.stamp.sequence >= config.window.frame_start &&
+            pending.stamp.sequence - config.window.frame_start + 1 == config.window.frame_count) {
+            LOG_INFO(Render,
+                     "FinalGuestSurfaceContentCoverage sequence={} process_time_us={} "
+                     "surface_ordinal={} tiles={} status={} selected={} emitted={} complete={} "
+                     "loss={}",
+                     report.sequence, report.process_time_us, report.surface_ordinal,
+                     report.tile_count, static_cast<u32>(report.status), selected_frames,
+                     emitted_frames, complete_frames, loss_frames);
+        }
+    }
+
+    Scheduler& scheduler;
+    FinalGuestSurfaceContentConfig config{};
+    FinalGuestSurfaceReducer reducer;
+    FinalGuestSurfaceReadbackSlotPool slots{};
+    u64 slot_stride{};
+    VideoCore::Buffer download;
+    u32 selected_frames{};
+    u32 emitted_frames{};
+    u32 complete_frames{};
+    u32 loss_frames{};
 };
 
 static std::string SanitizeFilenameComponent(std::string value) {
@@ -518,6 +835,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       draw_scheduler{instance}, present_scheduler{instance}, swapchain{instance, window},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+    if (const auto config = ReadFinalGuestSurfaceContentConfig()) {
+        final_guest_surface_content =
+            std::make_unique<FinalGuestSurfaceContentState>(instance, draw_scheduler, *config);
+    }
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 
@@ -553,6 +874,9 @@ Presenter::~Presenter() {
     ImGui::Layer::RemoveLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
 
     draw_scheduler.Finish();
+    if (final_guest_surface_content) {
+        draw_scheduler.PopPendingOperations();
+    }
     present_scheduler.Finish();
     Check(draw_scheduler.CommandBuffer().reset());
     Check(present_scheduler.CommandBuffer().reset());
@@ -678,7 +1002,7 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 }
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
-                               VAddr cpu_address) {
+                               VAddr cpu_address, FinalGuestSurfaceFrameStamp stamp) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
@@ -721,16 +1045,24 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
+    std::optional<FinalGuestSurfaceContentState::PendingCapture> final_surface_capture;
+    if (final_guest_surface_content && final_guest_surface_content->ShouldCapture(stamp.sequence)) {
+        final_surface_capture = final_guest_surface_content->Prepare(stamp, image);
+    }
+
     const auto capture_game_only = VideoCore::ConsumeGameOnlyScreenshotRequests();
     std::vector<ScreenshotReadback> pending_screenshots;
+    if (capture_game_only.Total() > 0 ||
+        (final_surface_capture && final_surface_capture->HasCopy())) {
+        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+                      cmdbuf);
+    }
     if (capture_game_only.Total() > 0) {
         pending_screenshots.reserve(2);
         const bool hdr_encoded =
             attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Bt2020Pq;
 
         // Capture the guest output before any host-side scaling (FSR/PP) is applied.
-        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
-                      cmdbuf);
         const auto append_readback = [&](const u32 count, const bool notify) {
             if (count == 0) {
                 return;
@@ -744,6 +1076,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         };
         append_readback(capture_game_only.notifying_count, true);
         append_readback(capture_game_only.silent_count, false);
+    }
+    if (final_surface_capture) {
+        final_guest_surface_content->Record(std::move(*final_surface_capture), image.GetImage(),
+                                            cmdbuf);
     }
 
     // Continue with host-side passes that draw the displayed (scaled) frame.

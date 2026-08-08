@@ -115,6 +115,7 @@ private:
     VideoOutPort main_port{};
     std::jthread present_thread;
     std::queue<Request> requests;
+    u64 final_guest_surface_sequence{};
 };
 
 } // namespace Libraries::VideoOut

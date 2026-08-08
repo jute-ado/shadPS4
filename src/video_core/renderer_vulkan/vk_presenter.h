@@ -46,6 +46,12 @@ enum SchedulerType {
 };
 
 class Rasterizer;
+class FinalGuestSurfaceContentState;
+
+struct FinalGuestSurfaceFrameStamp {
+    u64 sequence{};
+    u64 process_time_us{};
+};
 
 class Presenter {
 public:
@@ -93,7 +99,11 @@ public:
     bool IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const;
 
     Frame* PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
-                        VAddr cpu_address);
+                        VAddr cpu_address, FinalGuestSurfaceFrameStamp stamp);
+
+    [[nodiscard]] bool IsFinalGuestSurfaceContentEnabled() const noexcept {
+        return final_guest_surface_content != nullptr;
+    }
 
     Frame* PrepareBlankFrame(bool present_thread);
 
@@ -123,6 +133,7 @@ private:
     Scheduler present_scheduler;
     Swapchain swapchain;
     std::unique_ptr<Rasterizer> rasterizer;
+    std::unique_ptr<FinalGuestSurfaceContentState> final_guest_surface_content;
     VideoCore::TextureCache& texture_cache;
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;

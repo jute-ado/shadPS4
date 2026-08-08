@@ -316,6 +316,11 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    Vulkan::FinalGuestSurfaceFrameStamp final_surface_stamp{};
+    if (presenter->IsFinalGuestSurfaceContentEnabled()) {
+        final_surface_stamp.sequence = final_guest_surface_sequence++;
+        final_surface_stamp.process_time_us = Libraries::Kernel::sceKernelGetProcessTime();
+    }
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
@@ -323,7 +328,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         const auto& buffer = port->buffer_slots[index];
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
         const auto& group = port->groups[buffer.group_index];
-        frame = presenter->PrepareFrame(group, buffer.address_left);
+        frame = presenter->PrepareFrame(group, buffer.address_left, final_surface_stamp);
     }
 
     std::scoped_lock lock{mutex};

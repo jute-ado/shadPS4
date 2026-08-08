@@ -142,6 +142,13 @@ struct Image {
 
     void SetBackingSamples(u32 num_samples, bool copy_backing = true);
 
+    [[nodiscard]] u64 EnsureDiagnosticBackingGeneration() noexcept {
+        if (backing->diagnostic_generation == 0) {
+            backing->diagnostic_generation = global_backing_generation.Next();
+        }
+        return backing->diagnostic_generation;
+    }
+
 public:
     const Vulkan::Instance* instance;
     Vulkan::Scheduler* scheduler;
@@ -171,6 +178,7 @@ public:
         boost::container::small_vector<ImageViewInfo, 4> image_view_infos;
         boost::container::small_vector<ImageViewId, 4> image_view_ids;
         u32 num_samples;
+        u64 diagnostic_generation{};
     };
     std::deque<BackingImage> backing_images;
     BackingImage* backing{};
@@ -197,6 +205,7 @@ public:
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;
+    static Common::IncrementalIdProvider<u64> global_backing_generation;
 };
 
 } // namespace VideoCore
