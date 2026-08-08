@@ -204,5 +204,80 @@ TEST(PpInputShadow, TilePlanUsesCalibratedLocalizedOutputLattice) {
     EXPECT_EQ(plan.copy_region_count, 1u);
 }
 
+TEST(PpInputShadow, NormalPostProcessInvocationRemainsSingleOutputAndAttachment) {
+    const auto invocation = HostPasses::PlanPostProcessingInvocation(
+        false, false, FinalGuestSurfaceFormat::Bgra8, FinalGuestSurfaceFormat::Unsupported);
+    EXPECT_TRUE(invocation.draw_normal_output);
+    EXPECT_FALSE(invocation.draw_shadow_output);
+    EXPECT_EQ(invocation.pipeline, HostPasses::PpPipelineSelection::Normal);
+    EXPECT_EQ(invocation.fragment_output_count, 1u);
+    EXPECT_EQ(invocation.color_attachment_count, 1u);
+    EXPECT_EQ(invocation.attachment_formats[0], FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(invocation.draw_count, 1u);
+    EXPECT_EQ(invocation.status, FinalGuestSurfaceStatus::Complete);
+}
+
+TEST(PpInputShadow, SelectedShadowInvocationUsesDualPipelineAndSameFormatTwice) {
+    const auto invocation = HostPasses::PlanPostProcessingInvocation(
+        true, true, FinalGuestSurfaceFormat::Bgra8, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_TRUE(invocation.draw_normal_output);
+    EXPECT_TRUE(invocation.draw_shadow_output);
+    EXPECT_EQ(invocation.pipeline, HostPasses::PpPipelineSelection::ShadowDualOutput);
+    EXPECT_EQ(invocation.fragment_output_count, 2u);
+    EXPECT_EQ(invocation.color_attachment_count, 2u);
+    EXPECT_EQ(invocation.attachment_formats[0], FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(invocation.attachment_formats[1], FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(invocation.draw_count, 1u);
+    EXPECT_TRUE(invocation.identical_computed_color);
+    EXPECT_EQ(invocation.status, FinalGuestSurfaceStatus::Complete);
+
+    const auto mismatch = HostPasses::PlanPostProcessingInvocation(
+        true, true, FinalGuestSurfaceFormat::Bgra8, FinalGuestSurfaceFormat::Rgba8);
+    EXPECT_TRUE(mismatch.draw_normal_output);
+    EXPECT_FALSE(mismatch.draw_shadow_output);
+    EXPECT_EQ(mismatch.pipeline, HostPasses::PpPipelineSelection::Normal);
+    EXPECT_EQ(mismatch.status, FinalGuestSurfaceStatus::Unsupported);
+
+    const auto absent = HostPasses::PlanPostProcessingInvocation(
+        true, false, FinalGuestSurfaceFormat::Bgra8, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_TRUE(absent.draw_normal_output);
+    EXPECT_FALSE(absent.draw_shadow_output);
+    EXPECT_EQ(absent.pipeline, HostPasses::PpPipelineSelection::Normal);
+    EXPECT_EQ(absent.status, FinalGuestSurfaceStatus::InvalidationLoss);
+}
+
+TEST(PpInputShadow, PresentHandoffQueuesContentBeforeCalibrationWithoutDrawSchedulerCallback) {
+    const auto plan = PlanPpInputShadowPresentHandoff(true, false, true, true);
+    EXPECT_TRUE(plan.copy);
+    EXPECT_EQ(plan.scheduler, FinalGuestSurfaceDeferredScheduler::Present);
+    EXPECT_EQ(plan.content_callback_order, 1u);
+    EXPECT_EQ(plan.calibration_callback_order, 2u);
+    EXPECT_LT(plan.content_callback_order, plan.calibration_callback_order);
+    EXPECT_FALSE(plan.defer_on_draw_scheduler);
+    EXPECT_TRUE(plan.callback_payload_is_scalar_only);
+    EXPECT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+
+    const auto busy = PlanPpInputShadowPresentHandoff(true, false, true, false);
+    EXPECT_FALSE(busy.copy);
+    EXPECT_EQ(busy.scheduler, FinalGuestSurfaceDeferredScheduler::Present);
+    EXPECT_EQ(busy.content_callback_order, 1u);
+    EXPECT_EQ(busy.calibration_callback_order, 2u);
+    EXPECT_EQ(busy.status, FinalGuestSurfaceStatus::BusyLoss);
+
+    EXPECT_FALSE(PlanPpInputShadowPresentHandoff(true, true, true, true).copy);
+    EXPECT_FALSE(PlanPpInputShadowPresentHandoff(true, false, false, true).copy);
+}
+
+TEST(PpInputShadow, StageUsesCalibratedOnlyCompactOutputWithExplicitCoverage) {
+    const auto shadow = FinalGuestSurfaceLogPolicy(FinalGuestSurfaceStage::PpInputShadow);
+    EXPECT_FALSE(shadow.verbose_frame_reports);
+    EXPECT_TRUE(shadow.calibrated_triplet_reports);
+    EXPECT_TRUE(shadow.stage_content_coverage);
+    EXPECT_TRUE(shadow.calibrated_coverage);
+
+    const auto post_pp = FinalGuestSurfaceLogPolicy(FinalGuestSurfaceStage::PostPp);
+    EXPECT_TRUE(post_pp.verbose_frame_reports);
+}
+
 } // namespace
 } // namespace Vulkan
