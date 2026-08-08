@@ -97,6 +97,12 @@ TEST(InputAssemblyDeviceReadbackPlan, DeduplicatesSamplesWhileRetainingBothSeman
     EXPECT_EQ(index_decision.reference_count, 3);
     EXPECT_EQ(vertex_decision.new_copy_count, 3);
     EXPECT_EQ(index_decision.new_copy_count, 2);
+    for (u32 i = 0; i < vertex_decision.new_copy_count; ++i) {
+        EXPECT_LT(vertex_decision.new_copy_indices[i], planner.CurrentFrame().sample_count);
+    }
+    for (u32 i = 0; i < index_decision.new_copy_count; ++i) {
+        EXPECT_LT(index_decision.new_copy_indices[i], planner.CurrentFrame().sample_count);
+    }
     EXPECT_LT(planner.EndFrame().sample_count,
               vertex_decision.reference_count + index_decision.reference_count);
     EXPECT_EQ(planner.EndFrame().semantic_count, 2);
