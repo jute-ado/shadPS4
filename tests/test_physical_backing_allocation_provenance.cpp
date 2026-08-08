@@ -167,8 +167,7 @@ TEST(PhysicalBackingAllocationProvenance, VirtualMemoryAreaCollectsOnlyEligibleB
     EXPECT_FALSE(area.CollectPhysicalBackingSpans());
 }
 
-TEST(PhysicalBackingAllocationProvenance,
-     UntrackedCpuWritableMappingCannotPublishImportedBacking) {
+TEST(PhysicalBackingAllocationProvenance, UntrackedCpuWritableMappingCannotPublishImportedBacking) {
     Core::VirtualMemoryArea area{};
     area.base = GuestBase;
     area.size = PageSize;
@@ -180,8 +179,7 @@ TEST(PhysicalBackingAllocationProvenance,
     EXPECT_FALSE(area.CollectPhysicalBackingSpans());
 }
 
-TEST(PhysicalBackingAllocationProvenance,
-     CpuWritableOracleBypassesOnlyOneOtherwiseValidMapping) {
+TEST(PhysicalBackingAllocationProvenance, CpuWritableOracleBypassesOnlyOneOtherwiseValidMapping) {
     Core::CpuWritableBackingOracle oracle({.enabled = true, .selector = 2});
     Core::VirtualMemoryArea area{};
     area.base = GuestBase;
@@ -190,6 +188,10 @@ TEST(PhysicalBackingAllocationProvenance,
     area.prot = Core::MemoryProt::CpuReadWrite | Core::MemoryProt::GpuReadWrite;
     area.physical_backing_eligible = true;
     area.phys_areas.emplace(0, MakeMappedArea(6 * PageSize, PageSize, 4));
+
+    Core::CpuWritableBackingOracle disabled({.enabled = false, .selector = 2});
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&disabled));
+    EXPECT_EQ(disabled.GetCoverage(), Core::CpuWritableBackingOracleCoverage{});
 
     EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
     const auto selected = area.CollectPhysicalBackingSpans(&oracle);

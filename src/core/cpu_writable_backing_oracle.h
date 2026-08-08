@@ -21,15 +21,13 @@ enum class CpuWritableBackingOracleLoss : u32 {
 };
 
 [[nodiscard]] constexpr CpuWritableBackingOracleLoss operator|(CpuWritableBackingOracleLoss lhs,
-                                                                CpuWritableBackingOracleLoss rhs) {
-    return static_cast<CpuWritableBackingOracleLoss>(static_cast<u32>(lhs) |
-                                                       static_cast<u32>(rhs));
+                                                               CpuWritableBackingOracleLoss rhs) {
+    return static_cast<CpuWritableBackingOracleLoss>(static_cast<u32>(lhs) | static_cast<u32>(rhs));
 }
 
 [[nodiscard]] constexpr CpuWritableBackingOracleLoss operator&(CpuWritableBackingOracleLoss lhs,
-                                                                CpuWritableBackingOracleLoss rhs) {
-    return static_cast<CpuWritableBackingOracleLoss>(static_cast<u32>(lhs) &
-                                                       static_cast<u32>(rhs));
+                                                               CpuWritableBackingOracleLoss rhs) {
+    return static_cast<CpuWritableBackingOracleLoss>(static_cast<u32>(lhs) & static_cast<u32>(rhs));
 }
 
 struct CpuWritableBackingOracleConfiguration {
@@ -171,7 +169,7 @@ private:
 
 [[nodiscard]] inline CpuWritableBackingOracleConfiguration
 ParseCpuWritableBackingOracleConfiguration(const char* enabled_value,
-                                            const char* selector_value) noexcept {
+                                           const char* selector_value) noexcept {
     if (enabled_value == nullptr || std::string_view{enabled_value} != "1" ||
         selector_value == nullptr || *selector_value == '\0') {
         return {};

@@ -12,6 +12,7 @@
 #include "common/singleton.h"
 #include "common/types.h"
 #include "core/address_space.h"
+#include "core/cpu_writable_backing_oracle.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/physical_backing_provenance.h"
 
@@ -133,8 +134,8 @@ struct VirtualMemoryArea {
         return true;
     }
 
-    [[nodiscard]] std::optional<std::vector<PhysicalBackingSpan>> CollectPhysicalBackingSpans()
-        const {
+    [[nodiscard]] std::optional<std::vector<PhysicalBackingSpan>> CollectPhysicalBackingSpans(
+        CpuWritableBackingOracle* cpu_writable_oracle = nullptr) const {
         const auto mapping_class =
             type == VMAType::Direct     ? PhysicalBackingMappingClass::Direct
             : type == VMAType::Pooled   ? PhysicalBackingMappingClass::Pooled
@@ -144,10 +145,34 @@ struct VirtualMemoryArea {
         // Imported backing is coherent memory, but publication still needs an ordered
         // notification before a host write can replace bytes already visible through BDA.
         // CPU-writable mappings do not have that contract yet, so keep them fail-closed.
-        const bool can_publish =
-            physical_backing_eligible && !True(prot & MemoryProt::CpuWrite);
-        return Core::CollectPhysicalBackingSpans(base, size, mapping_class, can_publish,
-                                                 phys_areas);
+        const bool cpu_write = True(prot & MemoryProt::CpuWrite);
+        const bool can_publish = physical_backing_eligible && !cpu_write;
+        auto spans =
+            Core::CollectPhysicalBackingSpans(base, size, mapping_class, can_publish, phys_areas);
+        if (spans || cpu_writable_oracle == nullptr ||
+            !cpu_writable_oracle->GetConfiguration().enabled || !cpu_write ||
+            !True(prot & MemoryProt::CpuRead)) {
+            return spans;
+        }
+
+        // Diagnostic-only causal oracle: run the exact ordinary provenance collector again while
+        // bypassing only the missing CPU-write publication contract. Every class, eligibility,
+        // ownership generation, completeness, alignment, and overflow rejection remains active.
+        spans = Core::CollectPhysicalBackingSpans(base, size, mapping_class,
+                                                  physical_backing_eligible, phys_areas);
+        if (!spans) {
+            return std::nullopt;
+        }
+        const auto decision = cpu_writable_oracle->Consider({
+            .mapping_class = mapping_class,
+            .cpu_read = true,
+            .cpu_write = true,
+            .physical_backing_eligible = true,
+            .complete_provenance = true,
+            .owned_allocation = true,
+            .page_count = size / 16_KB,
+        });
+        return decision.selected ? std::move(spans) : std::nullopt;
     }
 };
 

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -14,6 +16,30 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace Core {
+namespace {
+
+CpuWritableBackingOracle& GetCpuWritableBackingOracle() {
+    static CpuWritableBackingOracle oracle{ParseCpuWritableBackingOracleConfiguration(
+        std::getenv("SHADPS4_DIAGNOSTIC_CPU_WRITABLE_BACKING_ORACLE"),
+        std::getenv("SHADPS4_DIAGNOSTIC_CPU_WRITABLE_BACKING_ORACLE_SELECTOR"))};
+    return oracle;
+}
+
+std::vector<PhysicalBackingSpan> CollectPhysicalBackingSpansForGpu(const VirtualMemoryArea& area) {
+    auto& oracle = GetCpuWritableBackingOracle();
+    auto spans =
+        area.CollectPhysicalBackingSpans(&oracle).value_or(std::vector<PhysicalBackingSpan>{});
+    if (const auto event = oracle.TakeSelectionEvent()) {
+        LOG_CRITICAL(Kernel_Vmm,
+                     "UNSAFE CPU-writable backing oracle selected: selector={} class={} "
+                     "page_count={} selected_count={}",
+                     event->selector, CpuWritableBackingOracleClassName(event->mapping_class),
+                     event->page_count, event->selected_count);
+    }
+    return spans;
+}
+
+} // namespace
 
 MemoryManager::MemoryManager() {
     LOG_INFO(Kernel_Vmm, "Virtual memory space initialized with regions:");
@@ -458,8 +484,7 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
     }
     ASSERT_MSG(remaining_size == 0, "Failed to commit pooled memory");
 
-    auto physical_spans = new_vma.CollectPhysicalBackingSpans().value_or(
-        std::vector<PhysicalBackingSpan>{});
+    auto physical_spans = CollectPhysicalBackingSpansForGpu(new_vma);
 
     // Merge this VMA with similar nearby areas
     MergeAdjacent(vma_map, new_vma_handle);
@@ -670,8 +695,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         ASSERT_MSG(remaining_size == 0, "Failed to map physical memory");
     }
 
-    auto physical_spans = new_vma.CollectPhysicalBackingSpans().value_or(
-        std::vector<PhysicalBackingSpan>{});
+    auto physical_spans = CollectPhysicalBackingSpansForGpu(new_vma);
     if (new_vma.type != VMAType::Direct || sdk_version >= Common::ElfInfo::FW_200) {
         // Merge this VMA with similar nearby areas
         // Direct memory mappings only coalesce on SDK version 2.00 or later.
