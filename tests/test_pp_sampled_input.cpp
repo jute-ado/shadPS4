@@ -271,5 +271,79 @@ TEST(PpSampledInput, ProductionShaderWritesOneRawSampleBeforeGamma) {
     EXPECT_EQ(source.find("texture(texSampler, uv)", sample + 1), std::string::npos);
 }
 
+TEST(PpSampledInput, ProductionStageSelectionIsExclusive) {
+    EXPECT_EQ(PpDiagnosticModeForStage(FinalGuestSurfaceStage::GuestPreFsr),
+              HostPasses::PpDiagnosticMode::None);
+    EXPECT_EQ(PpDiagnosticModeForStage(FinalGuestSurfaceStage::PostPp),
+              HostPasses::PpDiagnosticMode::None);
+    EXPECT_EQ(PpDiagnosticModeForStage(FinalGuestSurfaceStage::PpInputShadow),
+              HostPasses::PpDiagnosticMode::ComputedShadow);
+    EXPECT_EQ(PpDiagnosticModeForStage(FinalGuestSurfaceStage::PpSampledInput),
+              HostPasses::PpDiagnosticMode::SampledInput);
+}
+
+TEST(PpSampledInput, PresenterPreservesResolvedMipAndLayerWhileOverridingViewFormat) {
+    const auto plan = PlanPpSampledInputSourceView({
+        .resolved_base_mip = 2,
+        .resolved_mip_count = 1,
+        .resolved_base_layer = 3,
+        .resolved_layer_count = 1,
+        .requested_format = FinalGuestSurfaceFormat::Bgra8,
+        .force_alpha_one = true,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(plan.base_mip, 2u);
+    EXPECT_EQ(plan.mip_count, 1u);
+    EXPECT_EQ(plan.base_layer, 3u);
+    EXPECT_EQ(plan.layer_count, 1u);
+    EXPECT_EQ(plan.format, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_TRUE(plan.force_alpha_one);
+
+    EXPECT_EQ(PlanPpSampledInputSourceView({.resolved_mip_count = 0,
+                                            .resolved_layer_count = 1,
+                                            .requested_format = FinalGuestSurfaceFormat::Bgra8})
+                  .status,
+              FinalGuestSurfaceStatus::Unsupported);
+}
+
+TEST(PpSampledInput, ValidStampedFrameTransfersOnceWithoutStartupPoisoning) {
+    FinalGuestSurfaceSampledInputFrameState state;
+    FinalGuestSurfaceSampledInputMetadata metadata{
+        .config_generation = 1,
+        .valid = true,
+    };
+    EXPECT_EQ(state.AssignIfValid(false, {0, 0, 0, metadata}),
+              FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_EQ(state.TakeForPresent(false).status, FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    EXPECT_EQ(state.AssignIfValid(true, {100, 2'000'000, 7, metadata}),
+              FinalGuestSurfaceStatus::Complete);
+    const auto first = state.TakeForPresent(false);
+    ASSERT_TRUE(first.emit);
+    EXPECT_EQ(first.payload.sequence, 100u);
+    EXPECT_EQ(first.payload.token, 7u);
+    EXPECT_EQ(first.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(state.TakeForPresent(false).status, FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    EXPECT_EQ(state.AssignIfValid(true, {101, 2'100'000, 8, metadata}),
+              FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(state.TakeForPresent(true).status, FinalGuestSurfaceStatus::GapLoss);
+}
+
+TEST(PpSampledInput, PresentTransferIsOneFloatCopyWithScalarCallbackAndNoWait) {
+    const auto plan = PlanPpSampledInputTransfer(true, false, true, true);
+    EXPECT_TRUE(plan.copy);
+    EXPECT_EQ(plan.color_write_to_transfer_barriers, 1u);
+    EXPECT_EQ(plan.copy_regions, 1u);
+    EXPECT_EQ(plan.format, FinalGuestSurfaceFormat::Rgba16Float);
+    EXPECT_TRUE(plan.callback_payload_is_scalar_only);
+    EXPECT_FALSE(plan.cpu_wait);
+    EXPECT_FALSE(plan.finish);
+    EXPECT_FALSE(plan.callback_retains_frame);
+    EXPECT_FALSE(plan.callback_retains_image);
+    EXPECT_FALSE(plan.callback_retains_vk_image);
+    EXPECT_FALSE(PlanPpSampledInputTransfer(true, true, true, true).copy);
+}
+
 } // namespace
 } // namespace Vulkan
