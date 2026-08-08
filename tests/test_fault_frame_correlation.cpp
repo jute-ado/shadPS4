@@ -136,12 +136,21 @@ TEST(FaultFrameCorrelation, EmitsSelectedFramesWithoutBatchesAndBoundsConfigurat
               FaultFrameCorrelation::HardMaxPagesPerFrame);
 }
 
-TEST(FaultFrameCorrelation, ReportingCannotFreezeBeforeDeferredCallbacksDrain) {
-    FaultFrameCorrelationReportGate gate;
-    EXPECT_FALSE(gate.ClaimAfterDrain());
-    gate.MarkDeferredCallbacksDrained();
-    EXPECT_TRUE(gate.ClaimAfterDrain());
-    EXPECT_FALSE(gate.ClaimAfterDrain());
+TEST(FaultFrameCorrelation, WindowAndPreQuickExitFinalizersShareOneDrainThenReportContract) {
+    FaultFrameCorrelationFinalizationGate gate;
+    EXPECT_FALSE(gate.ClaimWindowEndSchedule(false));
+    EXPECT_TRUE(gate.ClaimWindowEndSchedule(true));
+    EXPECT_FALSE(gate.ClaimWindowEndSchedule(true));
+
+    std::vector<std::string_view> events;
+    EXPECT_TRUE(gate.Finalize([&] { events.push_back("drain"); },
+                              [&] { events.push_back("report"); }));
+    EXPECT_EQ(events, (std::vector<std::string_view>{"drain", "report"}));
+    EXPECT_FALSE(gate.NeedsFinalization());
+
+    EXPECT_FALSE(gate.Finalize([&] { events.push_back("late-drain"); },
+                               [&] { events.push_back("late-report"); }));
+    EXPECT_EQ(events, (std::vector<std::string_view>{"drain", "report"}));
 }
 
 } // namespace
