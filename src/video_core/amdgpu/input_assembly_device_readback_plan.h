@@ -154,7 +154,7 @@ class InputAssemblyDeviceReadbackPlanner {
 public:
     static constexpr u32 SampleBytes = 32;
     static constexpr u32 MaxPhysicalSampleBytes = SampleBytes + 4;
-    static constexpr u32 MaxSamplesPerFrame = 2048;
+    static constexpr u32 MaxSamplesPerFrame = 8192;
     static constexpr u32 MaxSemanticsPerFrame = 8192;
     static constexpr u32 MaxSampleBytesPerFrame = MaxSamplesPerFrame * MaxPhysicalSampleBytes;
 
@@ -184,11 +184,6 @@ public:
             Reject(plan.loss.invalid_range);
             return decision;
         }
-        if (plan.semantic_count >= MaxSemanticsPerFrame) {
-            Reject(plan.loss.semantic_capacity);
-            return decision;
-        }
-
         for (const auto& existing : plan.samples) {
             if (existing.source == range.source &&
                 (existing.usage != range.usage || existing.authority != range.authority)) {
@@ -282,6 +277,10 @@ public:
         }
         if (new_bytes > MaxSampleBytesPerFrame - plan.sample_bytes) {
             Reject(plan.loss.byte_capacity);
+            return decision;
+        }
+        if (plan.semantic_count >= MaxSemanticsPerFrame) {
+            Reject(plan.loss.semantic_capacity);
             return decision;
         }
 
@@ -416,6 +415,165 @@ public:
 private:
     u64 completion_tick{};
     bool claimed{};
+};
+
+struct InputAssemblyImmediateSnapshot {
+    u64 sequence{};
+    InputAssemblySemanticOrdinal semantic{};
+    InputAssemblyBufferToken source{};
+    u64 write_serial{};
+    InputAssemblyAuthority authority{InputAssemblyAuthority::Unknown};
+    std::span<const std::byte> bytes{};
+    bool complete{};
+};
+
+struct InputAssemblyImmediateChange {
+    bool first_observation{};
+    bool changed{};
+    bool exact_aba_return{};
+    bool source_changed{};
+    bool write_serial_changed{};
+    bool authority_ambiguous{};
+    bool sequence_gap{};
+    bool incomplete{};
+    bool baseline_reset{};
+    bool capacity_exceeded{};
+};
+
+class InputAssemblyImmediateReadbackReducer {
+public:
+    static constexpr u32 MaxEntries = InputAssemblyDeviceIntegrityPlanner::MaxHistoryIdentities;
+    static constexpr u32 MaxSnapshotBytes = InputAssemblyDeviceIntegrityReducer::MaxSnapshotBytes;
+
+    InputAssemblyImmediateReadbackReducer() : entries{std::make_unique<Entry[]>(MaxEntries)} {}
+
+    [[nodiscard]] InputAssemblyImmediateChange Observe(
+        const InputAssemblyImmediateSnapshot& snapshot) noexcept {
+        if (snapshot.bytes.empty() || snapshot.bytes.size() > MaxSnapshotBytes) {
+            return {.capacity_exceeded = true};
+        }
+
+        Entry* entry{};
+        for (u32 i = 0; i < count; ++i) {
+            if (entries[i].semantic == snapshot.semantic) {
+                entry = &entries[i];
+                break;
+            }
+        }
+        if (entry == nullptr) {
+            if (count >= MaxEntries) {
+                return {.capacity_exceeded = true};
+            }
+            entry = &entries[count++];
+            entry->semantic = snapshot.semantic;
+        }
+
+        if (!snapshot.complete) {
+            ClearBaseline(*entry);
+            entry->observed = true;
+            return {.incomplete = true};
+        }
+        if (snapshot.authority == InputAssemblyAuthority::Unknown) {
+            ClearBaseline(*entry);
+            entry->observed = true;
+            entry->authority = snapshot.authority;
+            return {.authority_ambiguous = true};
+        }
+        if (!entry->has_baseline) {
+            const bool prior_observation = entry->observed;
+            SetBaseline(*entry, snapshot);
+            return prior_observation ? InputAssemblyImmediateChange{.baseline_reset = true}
+                                     : InputAssemblyImmediateChange{.first_observation = true};
+        }
+        if (entry->authority != snapshot.authority) {
+            SetBaseline(*entry, snapshot);
+            return {.authority_ambiguous = true};
+        }
+        const bool contiguous = entry->last_sequence != std::numeric_limits<u64>::max() &&
+                                snapshot.sequence == entry->last_sequence + 1;
+        if (!contiguous) {
+            SetBaseline(*entry, snapshot);
+            return {.sequence_gap = true};
+        }
+
+        const auto previous =
+            std::span<const std::byte>{entry->previous.data(), entry->previous_size};
+        const bool changed = !std::ranges::equal(previous, snapshot.bytes);
+        const auto previous_previous = std::span<const std::byte>{entry->previous_previous.data(),
+                                                                  entry->previous_previous_size};
+        const bool exact_aba =
+            changed && entry->has_previous_previous &&
+            entry->previous_previous_sequence <= std::numeric_limits<u64>::max() - 2 &&
+            entry->previous_previous_sequence + 2 == snapshot.sequence &&
+            std::ranges::equal(previous_previous, snapshot.bytes);
+        const bool source_changed = entry->source != snapshot.source;
+        const bool write_serial_changed = entry->write_serial != snapshot.write_serial;
+
+        entry->previous_previous_size = entry->previous_size;
+        std::copy_n(entry->previous.begin(), entry->previous_size,
+                    entry->previous_previous.begin());
+        entry->previous_previous_sequence = entry->last_sequence;
+        entry->has_previous_previous = true;
+        entry->previous_size = static_cast<u32>(snapshot.bytes.size());
+        std::ranges::copy(snapshot.bytes, entry->previous.begin());
+        entry->source = snapshot.source;
+        entry->write_serial = snapshot.write_serial;
+        entry->last_sequence = snapshot.sequence;
+        return {
+            .changed = changed,
+            .exact_aba_return = exact_aba,
+            .source_changed = source_changed,
+            .write_serial_changed = write_serial_changed,
+        };
+    }
+
+    void Reset() noexcept {
+        for (u32 i = 0; i < count; ++i) {
+            entries[i] = {};
+        }
+        count = 0;
+    }
+
+private:
+    struct Entry {
+        InputAssemblySemanticOrdinal semantic{};
+        InputAssemblyBufferToken source{};
+        u64 write_serial{};
+        u64 previous_previous_sequence{};
+        u64 last_sequence{};
+        InputAssemblyAuthority authority{InputAssemblyAuthority::Unknown};
+        std::array<std::byte, MaxSnapshotBytes> previous_previous{};
+        std::array<std::byte, MaxSnapshotBytes> previous{};
+        u32 previous_previous_size{};
+        u32 previous_size{};
+        bool observed{};
+        bool has_baseline{};
+        bool has_previous_previous{};
+    };
+
+    static void ClearBaseline(Entry& entry) noexcept {
+        entry.previous_previous_size = 0;
+        entry.previous_size = 0;
+        entry.has_baseline = false;
+        entry.has_previous_previous = false;
+    }
+
+    static void SetBaseline(Entry& entry,
+                            const InputAssemblyImmediateSnapshot& snapshot) noexcept {
+        entry.source = snapshot.source;
+        entry.write_serial = snapshot.write_serial;
+        entry.authority = snapshot.authority;
+        entry.previous_size = static_cast<u32>(snapshot.bytes.size());
+        std::ranges::copy(snapshot.bytes, entry.previous.begin());
+        entry.previous_previous_size = 0;
+        entry.last_sequence = snapshot.sequence;
+        entry.observed = true;
+        entry.has_baseline = true;
+        entry.has_previous_previous = false;
+    }
+
+    std::unique_ptr<Entry[]> entries;
+    u32 count{};
 };
 
 } // namespace AmdGpu
