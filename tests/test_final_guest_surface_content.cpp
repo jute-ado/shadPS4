@@ -1053,6 +1053,7 @@ TEST(FinalGuestSurfaceContent, DisabledCalibratedTripletsRetainNoStateOrReports)
     reducer.Finish(content);
     EXPECT_TRUE(reducer.TakeReports().empty());
     EXPECT_EQ(reducer.GetCoverage(), Vulkan::FinalGuestSurfaceCalibratedCoverage{});
+    EXPECT_EQ(reducer.RetainedCalibrationCapacity(), 0u);
 }
 
 TEST(FinalGuestSurfaceContent, CalibratedTripletLogIsBoundedAndPrivacySafe) {

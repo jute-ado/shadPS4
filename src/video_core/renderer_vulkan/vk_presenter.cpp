@@ -256,6 +256,8 @@ public:
     FinalGuestSurfaceContentState(const Instance& instance_, Scheduler& scheduler_,
                                   FinalGuestSurfaceContentConfig config_)
         : scheduler{scheduler_}, config{config_}, reducer{config.lag, config.watch_ordinals},
+          calibrated_triplets{config.calibrated_triplets, config.watch_ordinals, config.window,
+                              config.expected_calibrations},
           screenshot_calibration{true},
           slot_stride{Common::AlignUp<u64>(FinalGuestSurfaceTileLimits{}.max_bytes,
                                            std::max<u64>(1, instance_.NonCoherentAtomSize()))},
@@ -269,13 +271,15 @@ public:
                  "FinalGuestSurfaceContentConfig enabled=1 stage={} frame_start={} frame_count={} "
                  "logical_window=32 logical_stride=16 max_windows={} copy_regions=1 max_bytes={} "
                  "slots={} lag_cadence_us={} lag_tolerance_us={} selector_count={} "
-                 "selector_status={} selector_loss={}",
+                 "selector_status={} selector_loss={} calibrated_triplets={} "
+                 "expected_calibrations={}",
                  static_cast<u32>(config.stage), config.window.frame_start,
                  config.window.frame_count, FinalGuestSurfaceTilePlan::MaxTiles,
                  FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
                  config.lag.tolerance_us, config.watch_ordinals.count,
-                 static_cast<u32>(config.watch_ordinals.status), config.watch_ordinals.loss);
+                 static_cast<u32>(config.watch_ordinals.status), config.watch_ordinals.loss,
+                 config.calibrated_triplets, config.expected_calibrations);
     }
 
     [[nodiscard]] bool ShouldCapture(u64 sequence) const noexcept {
@@ -449,6 +453,18 @@ public:
                 LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactMapping(report));
             }
             LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCompactCalibration(report));
+            if (config.calibrated_triplets) {
+                const FinalGuestSurfaceCalibratedStamp calibrated{
+                    .request_ordinal = report.request_ordinal,
+                    .sequence = report.surface_sequence,
+                    .process_time_us = report.surface_process_time_us,
+                    .valid = stamp.valid && report.surface_sequence != 0 &&
+                             report.surface_process_time_us != 0 && !report.fallback_time &&
+                             report.exact_scaled_mapping && report.mapping_loss == 0 &&
+                             report.overflow_loss == 0 && !report.overflow_marker,
+                };
+                scheduler.DeferOperation([this, calibrated] { ConsumeCalibration(calibrated); });
+            }
         }
     }
 
@@ -456,6 +472,25 @@ private:
     void DeferReport(PendingCapture pending) {
         scheduler.DeferOperation(
             [this, pending = std::move(pending)]() mutable { Consume(std::move(pending)); });
+    }
+
+    void LogCalibratedReports() {
+        for (const auto& report : calibrated_triplets.TakeReports()) {
+            LOG_INFO(Render, "{}", FormatFinalGuestSurfaceCalibratedReport(report));
+        }
+    }
+
+    void ConsumeCalibration(FinalGuestSurfaceCalibratedStamp stamp) {
+        calibrated_triplets.ObserveCalibration(stamp, reducer);
+        if (stamp.request_ordinal == config.expected_calibrations) {
+            calibrated_triplets.Finish(reducer);
+        }
+        LogCalibratedReports();
+        if (calibrated_triplets.CoverageReady() && !calibrated_coverage_logged) {
+            LOG_INFO(Render, "{}",
+                     FormatFinalGuestSurfaceCalibratedCoverage(calibrated_triplets.GetCoverage()));
+            calibrated_coverage_logged = true;
+        }
     }
 
     void Consume(PendingCapture pending) {
@@ -476,6 +511,8 @@ private:
         }
         const auto report = reducer.Observe(pending.stamp.sequence, pending.stamp.process_time_us,
                                             pending.transport, pending.plan, bytes);
+        calibrated_triplets.Reconcile(reducer);
+        LogCalibratedReports();
         ++emitted_frames;
         complete_frames += report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
         loss_frames += report.loss.Any() || report.selector_loss != 0;
@@ -507,6 +544,7 @@ private:
     Scheduler& scheduler;
     FinalGuestSurfaceContentConfig config{};
     FinalGuestSurfaceReducer reducer;
+    FinalGuestSurfaceCalibratedTriplets calibrated_triplets;
     FinalGuestSurfaceScreenshotCalibration screenshot_calibration;
     FinalGuestSurfacePostPpTransportTracker post_pp_transport;
     FinalGuestSurfaceReadbackSlotPool slots{};
@@ -516,6 +554,7 @@ private:
     u32 emitted_frames{};
     u32 complete_frames{};
     u32 loss_frames{};
+    bool calibrated_coverage_logged{};
 };
 
 static std::string SanitizeFilenameComponent(std::string value) {

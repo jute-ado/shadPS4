@@ -575,11 +575,15 @@ struct FinalGuestSurfaceWatchOrdinals {
     return selector;
 }
 
+inline constexpr u32 FinalGuestSurfaceMaxScreenshotRequests = 1000;
+
 struct FinalGuestSurfaceContentConfig {
     FinalGuestSurfaceCaptureWindow window{FinalGuestSurfaceCaptureWindow::Defaults()};
     FinalGuestSurfaceLagConfig lag{FinalGuestSurfaceLagConfig::Defaults()};
     FinalGuestSurfaceWatchOrdinals watch_ordinals{};
     FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
+    u32 expected_calibrations{};
+    bool calibrated_triplets{};
 };
 
 template <typename ReadValue>
@@ -609,6 +613,24 @@ template <typename ReadValue>
         } else if (*stage != "guest_pre_fsr") {
             return std::nullopt;
         }
+    }
+    if (const auto calibrated = read_value("SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS")) {
+        if (*calibrated != "1" || config.stage != FinalGuestSurfaceStage::PostPp) {
+            return std::nullopt;
+        }
+        config.calibrated_triplets = true;
+        const auto expected = read_value("SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS");
+        if (!expected) {
+            return std::nullopt;
+        }
+        u32 parsed{};
+        const auto result =
+            std::from_chars(expected->data(), expected->data() + expected->size(), parsed);
+        if (result.ec != std::errc{} || result.ptr != expected->data() + expected->size() ||
+            parsed == 0 || parsed > FinalGuestSurfaceMaxScreenshotRequests) {
+            return std::nullopt;
+        }
+        config.expected_calibrations = parsed;
     }
     config.window.frame_start = parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_START",
                                       config.window.frame_start, std::numeric_limits<u64>::max());
@@ -713,7 +735,7 @@ struct FinalGuestSurfaceCalibrationReport {
 
 class FinalGuestSurfaceScreenshotCalibration {
 public:
-    static constexpr u32 MaxRequests = 1000;
+    static constexpr u32 MaxRequests = FinalGuestSurfaceMaxScreenshotRequests;
     static constexpr u32 MaxMappingOrdinals = 16;
 
     explicit constexpr FinalGuestSurfaceScreenshotCalibration(bool enabled_) : enabled{enabled_} {}
@@ -943,6 +965,98 @@ struct FinalGuestSurfaceReport {
            " tile_detail_loss=" + std::to_string(report.loss.tile_detail);
 }
 
+struct FinalGuestSurfaceCalibratedStamp {
+    u32 request_ordinal{};
+    u64 sequence{};
+    u64 process_time_us{};
+    bool valid{};
+};
+
+struct FinalGuestSurfaceCalibratedLoss {
+    u32 gap{};
+    u32 history{};
+    u32 duplicate{};
+    u32 overflow{};
+    u32 invalid{};
+    u32 transport{};
+    u32 time{};
+    u32 selector{};
+
+    [[nodiscard]] constexpr bool Any() const noexcept {
+        return gap || history || duplicate || overflow || invalid || transport || time || selector;
+    }
+
+    bool operator==(const FinalGuestSurfaceCalibratedLoss&) const = default;
+};
+
+struct FinalGuestSurfaceCalibratedReport {
+    u32 request_ordinal{};
+    u64 a_sequence{};
+    u64 a_process_time_us{};
+    u64 b_sequence{};
+    u64 b_process_time_us{};
+    u64 c_sequence{};
+    u64 c_process_time_us{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> matched_ordinals{};
+    u32 matched_ordinal_count{};
+    u32 selector_count{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    FinalGuestSurfaceCalibratedLoss loss{};
+    bool stable_transport{};
+    bool exact_aba{};
+};
+
+struct FinalGuestSurfaceCalibratedCoverage {
+    u32 calibrations{};
+    u32 outside{};
+    u32 eligible{};
+    u32 emitted{};
+    u32 complete{};
+    FinalGuestSurfaceCalibratedLoss loss{};
+
+    bool operator==(const FinalGuestSurfaceCalibratedCoverage&) const = default;
+};
+
+[[nodiscard]] constexpr u32 FinalGuestSurfaceCalibratedLossMask(
+    const FinalGuestSurfaceCalibratedLoss& loss) noexcept {
+    return (static_cast<u32>(loss.gap != 0) << 0) | (static_cast<u32>(loss.history != 0) << 1) |
+           (static_cast<u32>(loss.duplicate != 0) << 2) |
+           (static_cast<u32>(loss.overflow != 0) << 3) |
+           (static_cast<u32>(loss.invalid != 0) << 4) |
+           (static_cast<u32>(loss.transport != 0) << 5) | (static_cast<u32>(loss.time != 0) << 6) |
+           (static_cast<u32>(loss.selector != 0) << 7);
+}
+
+[[nodiscard]] inline std::string FormatFinalGuestSurfaceCalibratedReport(
+    const FinalGuestSurfaceCalibratedReport& report) {
+    std::string ordinals;
+    for (u32 index = 0; index < report.matched_ordinal_count; ++index) {
+        if (!ordinals.empty()) {
+            ordinals += ',';
+        }
+        ordinals += std::to_string(report.matched_ordinals[index]);
+    }
+    return "FGSCT q=" + std::to_string(report.request_ordinal) +
+           " abc=" + std::to_string(report.a_sequence) + '/' + std::to_string(report.b_sequence) +
+           '/' + std::to_string(report.c_sequence) +
+           " t=" + std::to_string(report.a_process_time_us) + '/' +
+           std::to_string(report.b_process_time_us) + '/' +
+           std::to_string(report.c_process_time_us) + " r=" + ordinals +
+           " n=" + std::to_string(report.matched_ordinal_count) + '/' +
+           std::to_string(report.selector_count) + " ex=" + std::to_string(report.exact_aba) +
+           " v=" + std::to_string(report.stable_transport) +
+           " st=" + std::to_string(static_cast<u32>(report.status)) +
+           " lm=" + std::to_string(FinalGuestSurfaceCalibratedLossMask(report.loss));
+}
+
+[[nodiscard]] inline std::string FormatFinalGuestSurfaceCalibratedCoverage(
+    const FinalGuestSurfaceCalibratedCoverage& coverage) {
+    return "FGSCTC c=" + std::to_string(coverage.calibrations) +
+           " o=" + std::to_string(coverage.outside) + " e=" + std::to_string(coverage.eligible) +
+           '/' + std::to_string(coverage.emitted) + '/' + std::to_string(coverage.complete) +
+           " lm=" + std::to_string(FinalGuestSurfaceCalibratedLossMask(coverage.loss));
+}
+
 class FinalGuestSurfaceReducer {
 public:
     static constexpr u32 MaxHistory = 32;
@@ -1039,6 +1153,99 @@ public:
         return report;
     }
 
+    [[nodiscard]] size_t RetainedContentObservationCount() const noexcept {
+        return history.size();
+    }
+
+    [[nodiscard]] std::optional<FinalGuestSurfaceCalibratedReport> EvaluateCalibratedTriplet(
+        FinalGuestSurfaceCalibratedStamp a_stamp, FinalGuestSurfaceCalibratedStamp b_stamp,
+        FinalGuestSurfaceCalibratedStamp c_stamp, bool finish) const noexcept {
+        FinalGuestSurfaceCalibratedReport report{
+            .request_ordinal = c_stamp.request_ordinal,
+            .a_sequence = a_stamp.sequence,
+            .a_process_time_us = a_stamp.process_time_us,
+            .b_sequence = b_stamp.sequence,
+            .b_process_time_us = b_stamp.process_time_us,
+            .c_sequence = c_stamp.sequence,
+            .c_process_time_us = c_stamp.process_time_us,
+            .selector_count = selector.count,
+        };
+        const auto fail = [&](FinalGuestSurfaceStatus status,
+                              u32 FinalGuestSurfaceCalibratedLoss::* loss) {
+            report.status = status;
+            ++(report.loss.*loss);
+            return std::optional{report};
+        };
+        if (!a_stamp.valid || !b_stamp.valid || !c_stamp.valid) {
+            return fail(FinalGuestSurfaceStatus::InvalidationLoss,
+                        &FinalGuestSurfaceCalibratedLoss::invalid);
+        }
+        if (a_stamp.sequence >= b_stamp.sequence || b_stamp.sequence >= c_stamp.sequence) {
+            return fail(FinalGuestSurfaceStatus::GapLoss, &FinalGuestSurfaceCalibratedLoss::gap);
+        }
+        if (a_stamp.process_time_us >= b_stamp.process_time_us ||
+            b_stamp.process_time_us >= c_stamp.process_time_us) {
+            return fail(FinalGuestSurfaceStatus::InvalidationLoss,
+                        &FinalGuestSurfaceCalibratedLoss::time);
+        }
+        const auto runtime_selector =
+            history.empty()
+                ? selector
+                : ValidateFinalGuestSurfaceWatchOrdinals(selector, history.back().plan.tile_count);
+        if (runtime_selector.status != FinalGuestSurfaceStatus::Complete ||
+            runtime_selector.loss != 0 || runtime_selector.count == 0) {
+            return fail(FinalGuestSurfaceStatus::Unsupported,
+                        &FinalGuestSurfaceCalibratedLoss::selector);
+        }
+        if (!history.empty() && a_stamp.sequence < history.front().sequence) {
+            return history_evicted ? fail(FinalGuestSurfaceStatus::CapacityLoss,
+                                          &FinalGuestSurfaceCalibratedLoss::history)
+                                   : fail(FinalGuestSurfaceStatus::GapLoss,
+                                          &FinalGuestSurfaceCalibratedLoss::gap);
+        }
+        std::array<const Observation*, 3> endpoints{FindObservation(a_stamp.sequence),
+                                                    FindObservation(b_stamp.sequence),
+                                                    FindObservation(c_stamp.sequence)};
+        if (std::ranges::find(endpoints, nullptr) != endpoints.end()) {
+            return finish ? fail(FinalGuestSurfaceStatus::GapLoss,
+                                 &FinalGuestSurfaceCalibratedLoss::gap)
+                          : std::nullopt;
+        }
+        if (endpoints[0]->process_time_us != a_stamp.process_time_us ||
+            endpoints[1]->process_time_us != b_stamp.process_time_us ||
+            endpoints[2]->process_time_us != c_stamp.process_time_us) {
+            return fail(FinalGuestSurfaceStatus::InvalidationLoss,
+                        &FinalGuestSurfaceCalibratedLoss::time);
+        }
+        const auto& plan = endpoints[2]->plan;
+        const auto format = endpoints[2]->transport.format;
+        for (const auto& observation : history) {
+            if (observation.sequence < a_stamp.sequence ||
+                observation.sequence > c_stamp.sequence) {
+                continue;
+            }
+            if (observation.transport != endpoints[2]->transport || observation.plan != plan) {
+                return fail(FinalGuestSurfaceStatus::Unsupported,
+                            &FinalGuestSurfaceCalibratedLoss::transport);
+            }
+        }
+        report.stable_transport = true;
+        for (u32 selected = 0; selected < runtime_selector.count; ++selected) {
+            const u32 index = runtime_selector.ordinals[selected] - 1;
+            const bool returned =
+                EqualTile(*endpoints[0], index, format, plan, endpoints[2]->bytes);
+            const bool departed =
+                !EqualTile(*endpoints[0], index, format, plan, endpoints[1]->bytes);
+            report.exact_aba |= returned && departed;
+            if (plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn &&
+                IsLocalizedVisualReturn(*endpoints[0], *endpoints[1], format, plan,
+                                        endpoints[2]->bytes, index)) {
+                report.matched_ordinals[report.matched_ordinal_count++] = index + 1;
+            }
+        }
+        return report;
+    }
+
 private:
     struct Observation {
         u64 sequence{};
@@ -1052,6 +1259,11 @@ private:
         u32 index{};
         u64 distance{};
     };
+
+    [[nodiscard]] const Observation* FindObservation(u64 sequence) const noexcept {
+        const auto observation = std::ranges::find(history, sequence, &Observation::sequence);
+        return observation != history.end() ? &*observation : nullptr;
+    }
 
     [[nodiscard]] u32 OrdinalFor(u64 identity) noexcept {
         for (u32 i = 0; i < identity_count; ++i) {
@@ -1311,6 +1523,207 @@ private:
     u64 last_process_time_us{};
     bool has_last{};
     bool history_evicted{};
+};
+
+class FinalGuestSurfaceCalibratedTriplets {
+public:
+    static constexpr u32 MaxPendingReports = 16;
+
+    explicit FinalGuestSurfaceCalibratedTriplets(bool enabled_,
+                                                 FinalGuestSurfaceWatchOrdinals selector_,
+                                                 FinalGuestSurfaceCaptureWindow window_,
+                                                 u32 expected_calibrations_)
+        : enabled{enabled_}, selector{selector_}, window{window_},
+          expected_calibrations{expected_calibrations_} {
+        if (!enabled) {
+            return;
+        }
+        if (expected_calibrations == 0 ||
+            expected_calibrations > FinalGuestSurfaceMaxScreenshotRequests) {
+            poisoned = true;
+            coverage.loss.overflow = 1;
+            return;
+        }
+        calibrations.resize(expected_calibrations + 1);
+        classified.resize(expected_calibrations + 1);
+        eligible.resize(expected_calibrations + 1);
+    }
+
+    void ObserveCalibration(FinalGuestSurfaceCalibratedStamp stamp,
+                            const FinalGuestSurfaceReducer& reducer) noexcept {
+        if (!enabled || finished || poisoned) {
+            return;
+        }
+        if (selector.status != FinalGuestSurfaceStatus::Complete || selector.loss != 0 ||
+            selector.count == 0) {
+            Poison(&FinalGuestSurfaceCalibratedLoss::selector);
+            return;
+        }
+        if (stamp.request_ordinal == 0 || stamp.request_ordinal > expected_calibrations ||
+            stamp.request_ordinal > FinalGuestSurfaceMaxScreenshotRequests) {
+            Poison(&FinalGuestSurfaceCalibratedLoss::overflow);
+            return;
+        }
+        if (calibrations[stamp.request_ordinal].has_value()) {
+            Poison(&FinalGuestSurfaceCalibratedLoss::duplicate);
+            return;
+        }
+        calibrations[stamp.request_ordinal] = stamp;
+        ++coverage.calibrations;
+        Reconcile(reducer);
+    }
+
+    void Reconcile(const FinalGuestSurfaceReducer& reducer) noexcept {
+        if (!enabled || finished || poisoned) {
+            return;
+        }
+        for (u32 request = 1; request <= expected_calibrations; ++request) {
+            if (classified[request] || !calibrations[request]) {
+                continue;
+            }
+            if (request < 3) {
+                classified[request] = true;
+                ++coverage.outside;
+                continue;
+            }
+            if (!calibrations[request - 2] || !calibrations[request - 1]) {
+                continue;
+            }
+            const auto& a = *calibrations[request - 2];
+            const auto& b = *calibrations[request - 1];
+            const auto& c = *calibrations[request];
+            if (!window.Contains(a.sequence) || !window.Contains(b.sequence) ||
+                !window.Contains(c.sequence)) {
+                classified[request] = true;
+                ++coverage.outside;
+                continue;
+            }
+            if (!eligible[request]) {
+                eligible[request] = true;
+                ++coverage.eligible;
+            }
+            if (auto report = reducer.EvaluateCalibratedTriplet(a, b, c, false)) {
+                Complete(request, std::move(*report));
+            }
+        }
+    }
+
+    void Finish(const FinalGuestSurfaceReducer& reducer) noexcept {
+        if (!enabled || finished) {
+            return;
+        }
+        if (!poisoned) {
+            Reconcile(reducer);
+            for (u32 request = 1; request <= expected_calibrations; ++request) {
+                if (classified[request]) {
+                    continue;
+                }
+                if (!calibrations[request]) {
+                    ++coverage.loss.gap;
+                    continue;
+                }
+                if (request < 3) {
+                    classified[request] = true;
+                    ++coverage.outside;
+                    continue;
+                }
+                if (!calibrations[request - 2] || !calibrations[request - 1]) {
+                    ++coverage.loss.gap;
+                    classified[request] = true;
+                    continue;
+                }
+                const auto& a = *calibrations[request - 2];
+                const auto& b = *calibrations[request - 1];
+                const auto& c = *calibrations[request];
+                if (!window.Contains(a.sequence) || !window.Contains(b.sequence) ||
+                    !window.Contains(c.sequence)) {
+                    classified[request] = true;
+                    ++coverage.outside;
+                    continue;
+                }
+                if (!eligible[request]) {
+                    eligible[request] = true;
+                    ++coverage.eligible;
+                }
+                if (auto report = reducer.EvaluateCalibratedTriplet(a, b, c, true)) {
+                    Complete(request, std::move(*report));
+                }
+            }
+        }
+        finished = true;
+    }
+
+    [[nodiscard]] std::vector<FinalGuestSurfaceCalibratedReport> TakeReports() {
+        std::vector<FinalGuestSurfaceCalibratedReport> result;
+        result.reserve(reports.size());
+        while (!reports.empty()) {
+            result.push_back(std::move(reports.front()));
+            reports.pop_front();
+        }
+        return result;
+    }
+
+    [[nodiscard]] constexpr const FinalGuestSurfaceCalibratedCoverage& GetCoverage()
+        const noexcept {
+        return coverage;
+    }
+
+    [[nodiscard]] constexpr bool CoverageReady() const noexcept {
+        return enabled && finished;
+    }
+
+    [[nodiscard]] static constexpr size_t RetainedContentObservationCount() noexcept {
+        return 0;
+    }
+
+    [[nodiscard]] size_t RetainedCalibrationCapacity() const noexcept {
+        return calibrations.size();
+    }
+
+private:
+    using LossMember = u32 FinalGuestSurfaceCalibratedLoss::*;
+
+    void Accumulate(const FinalGuestSurfaceCalibratedLoss& loss) noexcept {
+        coverage.loss.gap += loss.gap;
+        coverage.loss.history += loss.history;
+        coverage.loss.duplicate += loss.duplicate;
+        coverage.loss.overflow += loss.overflow;
+        coverage.loss.invalid += loss.invalid;
+        coverage.loss.transport += loss.transport;
+        coverage.loss.time += loss.time;
+        coverage.loss.selector += loss.selector;
+    }
+
+    void Poison(LossMember member) noexcept {
+        ++(coverage.loss.*member);
+        reports.clear();
+        poisoned = true;
+    }
+
+    void Complete(u32 request, FinalGuestSurfaceCalibratedReport report) noexcept {
+        classified[request] = true;
+        if (reports.size() == MaxPendingReports) {
+            Poison(&FinalGuestSurfaceCalibratedLoss::overflow);
+            return;
+        }
+        ++coverage.emitted;
+        coverage.complete +=
+            report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
+        Accumulate(report.loss);
+        reports.push_back(std::move(report));
+    }
+
+    bool enabled{};
+    bool finished{};
+    bool poisoned{};
+    FinalGuestSurfaceWatchOrdinals selector{};
+    FinalGuestSurfaceCaptureWindow window{};
+    u32 expected_calibrations{};
+    std::vector<std::optional<FinalGuestSurfaceCalibratedStamp>> calibrations{};
+    std::vector<bool> classified{};
+    std::vector<bool> eligible{};
+    std::deque<FinalGuestSurfaceCalibratedReport> reports{};
+    FinalGuestSurfaceCalibratedCoverage coverage{};
 };
 
 } // namespace Vulkan
