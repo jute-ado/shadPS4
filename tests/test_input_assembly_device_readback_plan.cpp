@@ -19,6 +19,7 @@ using AmdGpu::InputAssemblyHostUsage;
 using AmdGpu::InputAssemblyImmediateReadbackReducer;
 using AmdGpu::InputAssemblyImmediateSnapshot;
 using AmdGpu::InputAssemblyReadbackCompletion;
+using AmdGpu::InputAssemblyReadbackSlotPool;
 using AmdGpu::InputAssemblySemanticOrdinal;
 using AmdGpu::InputAssemblySourceKind;
 
@@ -272,6 +273,45 @@ TEST(InputAssemblyDeviceReadbackPlan, InvalidatesMappedDestinationOnlyAfterCompl
     EXPECT_FALSE(completion.TryClaimInvalidation(76));
     EXPECT_TRUE(completion.TryClaimInvalidation(77));
     EXPECT_FALSE(completion.TryClaimInvalidation(78));
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, CpuConsumerOwnsFixedReadbackSlotUntilExplicitRelease) {
+    InputAssemblyReadbackSlotPool pool;
+    std::array<InputAssemblyReadbackSlotPool::Token, InputAssemblyReadbackSlotPool::MaxSlots>
+        tokens{};
+    for (auto& token : tokens) {
+        const auto acquired = pool.TryAcquire();
+        ASSERT_TRUE(acquired.has_value());
+        token = *acquired;
+    }
+    EXPECT_FALSE(pool.TryAcquire().has_value());
+
+    // GPU close/completion alone does not transfer CPU-consumer ownership back to the producer.
+    EXPECT_FALSE(pool.TryAcquire().has_value());
+    EXPECT_TRUE(pool.ReleaseAfterCpuConsume(tokens[3]));
+    const auto recycled = pool.TryAcquire();
+    ASSERT_TRUE(recycled.has_value());
+    EXPECT_EQ(recycled->slot, tokens[3].slot);
+    EXPECT_NE(recycled->generation, tokens[3].generation);
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, RejectsDoubleStaleAndAbaSlotRelease) {
+    InputAssemblyReadbackSlotPool pool;
+    const auto first = pool.TryAcquire();
+    ASSERT_TRUE(first.has_value());
+    EXPECT_TRUE(pool.ReleaseAfterCpuConsume(*first));
+    EXPECT_FALSE(pool.ReleaseAfterCpuConsume(*first));
+
+    const auto replacement = pool.TryAcquire();
+    ASSERT_TRUE(replacement.has_value());
+    EXPECT_EQ(replacement->slot, first->slot);
+    EXPECT_NE(replacement->generation, first->generation);
+    EXPECT_FALSE(pool.ReleaseAfterCpuConsume(*first));
+    EXPECT_TRUE(pool.ReleaseAfterCpuConsume(*replacement));
+
+    EXPECT_FALSE(pool.ReleaseAfterCpuConsume({.slot = InputAssemblyReadbackSlotPool::MaxSlots,
+                                             .generation = 1}));
+    EXPECT_FALSE(pool.ReleaseAfterCpuConsume({}));
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, ImmediateReducerComparesAcrossStreamReservations) {
