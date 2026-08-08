@@ -740,6 +740,71 @@ TEST(FinalGuestSurfaceContent, ReportsLocalizedTileAbaWhenWholeSampleDoesNotRetu
     EXPECT_EQ(report.loss.tile_detail, 0u);
 }
 
+TEST(FinalGuestSurfaceContent, ProductionConfigSelectsExactlyOneStrictCaptureStage) {
+    const auto post = Vulkan::ResolveFinalGuestSurfaceContentConfig(
+        [](std::string_view name) -> std::optional<std::string_view> {
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT") {
+                return "1";
+            }
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_STAGE") {
+                return "post_pp";
+            }
+            return std::nullopt;
+        });
+    ASSERT_TRUE(post.has_value());
+    EXPECT_EQ(post->stage, Vulkan::FinalGuestSurfaceStage::PostPp);
+
+    const auto default_stage = Vulkan::ResolveFinalGuestSurfaceContentConfig(
+        [](std::string_view name) -> std::optional<std::string_view> {
+            return name == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT"
+                       ? std::optional<std::string_view>{"1"}
+                       : std::nullopt;
+        });
+    ASSERT_TRUE(default_stage.has_value());
+    EXPECT_EQ(default_stage->stage, Vulkan::FinalGuestSurfaceStage::GuestPreFsr);
+
+    const auto invalid = Vulkan::ResolveFinalGuestSurfaceContentConfig(
+        [](std::string_view name) -> std::optional<std::string_view> {
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT") {
+                return "1";
+            }
+            if (name == "SHADPS4_FINAL_GUEST_SURFACE_STAGE") {
+                return "both";
+            }
+            return std::nullopt;
+        });
+    EXPECT_FALSE(invalid.has_value());
+}
+
+TEST(FinalGuestSurfaceContent, PostPpLogicalTransportIgnoresPhysicalFrameRing) {
+    Vulkan::FinalGuestSurfacePostPpTransportTracker tracker;
+    const auto first = tracker.Observe(FinalGuestSurfaceFormat::Bgra8, 1280, 720, false);
+    const auto second = tracker.Observe(FinalGuestSurfaceFormat::Bgra8, 1280, 720, false);
+    const auto third = tracker.Observe(FinalGuestSurfaceFormat::Bgra8, 1280, 720, false);
+    EXPECT_EQ(first, second);
+    EXPECT_EQ(second, third);
+    EXPECT_EQ(first.surface_identity, 1u);
+    EXPECT_EQ(first.backing_generation, 1u);
+
+    const auto changed = tracker.Observe(FinalGuestSurfaceFormat::Bgra8, 1280, 720, true);
+    EXPECT_EQ(changed.surface_identity, 1u);
+    EXPECT_EQ(changed.backing_generation, 2u);
+    EXPECT_NE(changed, third);
+}
+
+TEST(FinalGuestSurfaceContent, PostPpStageSkipsReusedAndUnstampedPresentations) {
+    EXPECT_TRUE(Vulkan::ShouldObserveFinalGuestSurfaceAtPresent(
+        Vulkan::FinalGuestSurfaceStage::PostPp, false, true, true));
+    EXPECT_FALSE(Vulkan::ShouldObserveFinalGuestSurfaceAtPresent(
+        Vulkan::FinalGuestSurfaceStage::PostPp, true, true, true));
+    EXPECT_FALSE(Vulkan::ShouldObserveFinalGuestSurfaceAtPresent(
+        Vulkan::FinalGuestSurfaceStage::PostPp, false, false, true));
+    EXPECT_FALSE(Vulkan::ShouldObserveFinalGuestSurfaceAtPresent(
+        Vulkan::FinalGuestSurfaceStage::PostPp, false, true, false));
+    EXPECT_FALSE(Vulkan::ShouldObserveFinalGuestSurfaceAtPresent(
+        Vulkan::FinalGuestSurfaceStage::GuestPreFsr, false, true, true));
+}
+
 TEST(FinalGuestSurfaceContent, MatchesLocalizedVisualOracleWhenReturnIsNotByteExact) {
     FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(),
                                      Vulkan::ParseFinalGuestSurfaceWatchOrdinals("1")};
@@ -931,13 +996,16 @@ TEST(FinalGuestSurfaceContent, CompactFrameAndCalibrationLogsStayWithinConservat
         .selector_count = 2,
         .selector_status = FinalGuestSurfaceStatus::Complete,
         .status = FinalGuestSurfaceStatus::Complete,
+        .stage = Vulkan::FinalGuestSurfaceStage::PostPp,
         .stable_transport = true,
         .exact_aba = true,
+        .localized_aba = true,
     };
     const std::string frame = Vulkan::FormatFinalGuestSurfaceCompactReport(report);
     EXPECT_LT(frame.size(), 250u);
     EXPECT_NE(frame.find("q=7"), std::string::npos);
     EXPECT_NE(frame.find(" v=1 ws=0 "), std::string::npos);
+    EXPECT_NE(frame.find(" p=1 la=1 "), std::string::npos);
     EXPECT_NE(frame.find("abc=4993/4996/4999"), std::string::npos);
 
     report.stable_transport = false;
