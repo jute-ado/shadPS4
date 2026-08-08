@@ -15,6 +15,8 @@ using AmdGpu::InputAssemblyBufferToken;
 using AmdGpu::InputAssemblyCopyAccess;
 using AmdGpu::InputAssemblyDeviceReadbackPlanner;
 using AmdGpu::InputAssemblyHostUsage;
+using AmdGpu::InputAssemblyImmediateReadbackReducer;
+using AmdGpu::InputAssemblyImmediateSnapshot;
 using AmdGpu::InputAssemblyReadbackCompletion;
 using AmdGpu::InputAssemblySemanticOrdinal;
 using AmdGpu::InputAssemblySourceKind;
@@ -193,6 +195,10 @@ TEST(InputAssemblyDeviceReadbackPlan, RejectsInvalidZeroAndOutOfBoundsSources) {
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, EnforcesFixedSampleAndByteCapsTransactionally) {
+    EXPECT_EQ(InputAssemblyDeviceReadbackPlanner::MaxSamplesPerFrame, 8192);
+    EXPECT_EQ(InputAssemblyDeviceReadbackPlanner::MaxSampleBytesPerFrame,
+              8192 * InputAssemblyDeviceReadbackPlanner::MaxPhysicalSampleBytes);
+
     InputAssemblyDeviceReadbackPlanner planner;
     planner.BeginFrame(61);
     for (u32 i = 0; i < InputAssemblyDeviceReadbackPlanner::MaxSamplesPerFrame; ++i) {
@@ -239,6 +245,64 @@ TEST(InputAssemblyDeviceReadbackPlan, InvalidatesMappedDestinationOnlyAfterCompl
     EXPECT_FALSE(completion.TryClaimInvalidation(76));
     EXPECT_TRUE(completion.TryClaimInvalidation(77));
     EXPECT_FALSE(completion.TryClaimInvalidation(78));
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, ImmediateReducerComparesAcrossStreamReservations) {
+    InputAssemblyImmediateReadbackReducer reducer;
+    constexpr std::array a{std::byte{0x10}, std::byte{0x20}};
+    constexpr std::array b{std::byte{0x10}, std::byte{0x30}};
+    const auto semantic = Semantic(17, InputAssemblySourceKind::Vertex, 2);
+    const auto observe = [&](u64 sequence, u32 reservation, u64 serial,
+                             const auto& bytes) {
+        return reducer.Observe(InputAssemblyImmediateSnapshot{
+            .sequence = sequence,
+            .semantic = semantic,
+            .source = Buffer(std::numeric_limits<u32>::max(), reservation),
+            .write_serial = serial,
+            .authority = InputAssemblyAuthority::CpuAuthoritative,
+            .bytes = std::span<const std::byte>{bytes},
+            .complete = true,
+        });
+    };
+
+    EXPECT_TRUE(observe(100, 1, 5, a).first_observation);
+    const auto changed = observe(101, 2, 6, b);
+    EXPECT_TRUE(changed.changed);
+    EXPECT_TRUE(changed.source_changed);
+    EXPECT_TRUE(changed.write_serial_changed);
+    EXPECT_FALSE(changed.exact_aba_return);
+
+    const auto returned = observe(102, 3, 7, a);
+    EXPECT_TRUE(returned.changed);
+    EXPECT_TRUE(returned.source_changed);
+    EXPECT_TRUE(returned.write_serial_changed);
+    EXPECT_TRUE(returned.exact_aba_return);
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, ImmediateReducerSuppressesUnknownIncompleteAndGappedEvidence) {
+    InputAssemblyImmediateReadbackReducer reducer;
+    constexpr std::array bytes{std::byte{0x44}};
+    const auto semantic = Semantic(9, InputAssemblySourceKind::Index, 0);
+    const auto snapshot = [&](u64 sequence, InputAssemblyAuthority authority, bool complete) {
+        return InputAssemblyImmediateSnapshot{
+            .sequence = sequence,
+            .semantic = semantic,
+            .source = Buffer(4, 2),
+            .write_serial = 8,
+            .authority = authority,
+            .bytes = std::span<const std::byte>{bytes},
+            .complete = complete,
+        };
+    };
+
+    EXPECT_TRUE(reducer.Observe(snapshot(10, InputAssemblyAuthority::Unknown, true))
+                    .authority_ambiguous);
+    EXPECT_TRUE(reducer.Observe(snapshot(11, InputAssemblyAuthority::GpuAuthoritative, false))
+                    .incomplete);
+    EXPECT_TRUE(reducer.Observe(snapshot(12, InputAssemblyAuthority::GpuAuthoritative, true))
+                    .baseline_reset);
+    EXPECT_TRUE(reducer.Observe(snapshot(14, InputAssemblyAuthority::GpuAuthoritative, true))
+                    .sequence_gap);
 }
 
 } // namespace
