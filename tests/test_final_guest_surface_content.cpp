@@ -890,7 +890,15 @@ TEST(FinalGuestSurfaceContent, CompactFrameAndCalibrationLogsStayWithinConservat
     const std::string frame = Vulkan::FormatFinalGuestSurfaceCompactReport(report);
     EXPECT_LT(frame.size(), 250u);
     EXPECT_NE(frame.find("q=7"), std::string::npos);
+    EXPECT_NE(frame.find(" v=1 ws=0 "), std::string::npos);
     EXPECT_NE(frame.find("abc=4993/4996/4999"), std::string::npos);
+
+    report.stable_transport = false;
+    report.whole_sample_aba = true;
+    const std::string unstable_whole_sample =
+        Vulkan::FormatFinalGuestSurfaceCompactReport(report);
+    EXPECT_NE(unstable_whole_sample.find(" v=0 ws=1 "), std::string::npos);
+    EXPECT_LT(unstable_whole_sample.size(), 250u);
 
     Vulkan::FinalGuestSurfaceFrameDiagnosticStamp stamp;
     stamp.Assign(true, 4572, 84'900'000, 1920, 1080);
