@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 
+#include "core/cpu_writable_backing_oracle.h"
 #include "core/memory.h"
 
 namespace {
@@ -177,6 +178,59 @@ TEST(PhysicalBackingAllocationProvenance,
     area.phys_areas.emplace(0, MakeMappedArea(6 * PageSize, PageSize, 4));
 
     EXPECT_FALSE(area.CollectPhysicalBackingSpans());
+}
+
+TEST(PhysicalBackingAllocationProvenance,
+     CpuWritableOracleBypassesOnlyOneOtherwiseValidMapping) {
+    Core::CpuWritableBackingOracle oracle({.enabled = true, .selector = 2});
+    Core::VirtualMemoryArea area{};
+    area.base = GuestBase;
+    area.size = PageSize;
+    area.type = Core::VMAType::Direct;
+    area.prot = Core::MemoryProt::CpuReadWrite | Core::MemoryProt::GpuReadWrite;
+    area.physical_backing_eligible = true;
+    area.phys_areas.emplace(0, MakeMappedArea(6 * PageSize, PageSize, 4));
+
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
+    const auto selected = area.CollectPhysicalBackingSpans(&oracle);
+    ASSERT_TRUE(selected.has_value());
+    ASSERT_EQ(selected->size(), 1u);
+    EXPECT_EQ(selected->front().allocation_generation, 4u);
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
+
+    const auto coverage = oracle.GetCoverage();
+    EXPECT_EQ(coverage.valid_candidates, 3u);
+    EXPECT_EQ(coverage.selected_count, 1u);
+}
+
+TEST(PhysicalBackingAllocationProvenance,
+     CpuWritableOraclePreservesEveryOtherPublicationRejection) {
+    Core::CpuWritableBackingOracle oracle({.enabled = true, .selector = 1});
+    Core::VirtualMemoryArea area{};
+    area.base = GuestBase;
+    area.size = PageSize;
+    area.type = Core::VMAType::Direct;
+    area.prot = Core::MemoryProt::CpuReadWrite | Core::MemoryProt::GpuReadWrite;
+    area.physical_backing_eligible = true;
+    area.phys_areas.emplace(0, MakeMappedArea(6 * PageSize, PageSize, 4));
+
+    area.physical_backing_eligible = false;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
+    area.physical_backing_eligible = true;
+    area.type = Core::VMAType::File;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
+    area.type = Core::VMAType::Direct;
+    area.phys_areas.begin()->second.dma_type = PhysicalMemoryType::Committed;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
+    area.phys_areas.begin()->second.dma_type = PhysicalMemoryType::Mapped;
+    area.phys_areas.begin()->second.allocation_generation = 0;
+    EXPECT_FALSE(area.CollectPhysicalBackingSpans(&oracle));
+
+    area.phys_areas.begin()->second.allocation_generation = 4;
+    EXPECT_TRUE(area.CollectPhysicalBackingSpans(&oracle));
+    const auto coverage = oracle.GetCoverage();
+    EXPECT_EQ(coverage.valid_candidates, 1u);
+    EXPECT_EQ(coverage.selected_count, 1u);
 }
 
 TEST(PhysicalBackingAllocationProvenance, MappingClassRejectsEveryMismatchedDmaState) {
