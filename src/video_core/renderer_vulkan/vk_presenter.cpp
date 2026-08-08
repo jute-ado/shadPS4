@@ -266,12 +266,13 @@ public:
                    vk::BufferUsageFlagBits::eTransferDst,
                    slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
         LOG_INFO(Render,
-                 "FinalGuestSurfaceContentConfig enabled=1 frame_start={} frame_count={} "
+                 "FinalGuestSurfaceContentConfig enabled=1 stage={} frame_start={} frame_count={} "
                  "logical_window=32 logical_stride=16 max_windows={} copy_regions=1 max_bytes={} "
                  "slots={} lag_cadence_us={} lag_tolerance_us={} selector_count={} "
                  "selector_status={} selector_loss={}",
-                 config.window.frame_start, config.window.frame_count,
-                 FinalGuestSurfaceTilePlan::MaxTiles, FinalGuestSurfaceTileLimits{}.max_bytes,
+                 static_cast<u32>(config.stage), config.window.frame_start,
+                 config.window.frame_count, FinalGuestSurfaceTilePlan::MaxTiles,
+                 FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
                  config.lag.tolerance_us, config.watch_ordinals.count,
                  static_cast<u32>(config.watch_ordinals.status), config.watch_ordinals.loss);
@@ -281,8 +282,17 @@ public:
         return config.window.Contains(sequence);
     }
 
-    [[nodiscard]] PendingCapture Prepare(FinalGuestSurfaceFrameStamp stamp, VideoCore::Image& image,
-                                         u32 frame_output_width, u32 frame_output_height) {
+    [[nodiscard]] bool IsPostPpStage() const noexcept {
+        return config.stage == FinalGuestSurfaceStage::PostPp;
+    }
+
+    [[nodiscard]] FinalGuestSurfaceStage Stage() const noexcept {
+        return config.stage;
+    }
+
+    [[nodiscard]] PendingCapture PrepareGuest(FinalGuestSurfaceFrameStamp stamp,
+                                              VideoCore::Image& image, u32 frame_output_width,
+                                              u32 frame_output_height) {
         ++selected_frames;
         PendingCapture pending{
             .stamp = stamp,
@@ -309,8 +319,51 @@ public:
                           ? FinalGuestSurfaceAspect::Color
                           : FinalGuestSurfaceAspect::Other,
             .format = pending.transport.format,
+            .stage = FinalGuestSurfaceStage::GuestPreFsr,
             .logical_width = frame_output_width,
             .logical_height = frame_output_height,
+            .logical_full_fit = true,
+            .logical_top_left = true,
+            .logical_no_y_flip = true,
+        });
+        if (pending.plan.status != FinalGuestSurfaceStatus::Complete) {
+            return pending;
+        }
+        const auto slot = slots.TryAcquire();
+        if (!slot) {
+            pending.plan.status = FinalGuestSurfaceStatus::BusyLoss;
+            pending.plan.loss.busy = 1;
+            return pending;
+        }
+        pending.slot = *slot;
+        pending.slot_offset = static_cast<u64>(slot->slot) * slot_stride;
+        return pending;
+    }
+
+    [[nodiscard]] PendingCapture PreparePostPp(FinalGuestSurfaceFrameStamp stamp, u32 width,
+                                               u32 height, vk::Format format, bool hdr) {
+        ++selected_frames;
+        PendingCapture pending{
+            .stamp = stamp,
+            .transport =
+                post_pp_transport.Observe(ToFinalGuestSurfaceFormat(format), width, height, hdr),
+        };
+        pending.plan = PlanFinalGuestSurfaceTiles({
+            .width = width,
+            .height = height,
+            .depth = 1,
+            .mip_level = 0,
+            .mip_levels = 1,
+            .base_array_layer = 0,
+            .array_layers = 1,
+            .samples = 1,
+            .type = FinalGuestSurfaceImageType::Color2D,
+            .aspect = FinalGuestSurfaceAspect::Color,
+            .format = pending.transport.format,
+            .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+            .stage = FinalGuestSurfaceStage::PostPp,
+            .logical_width = width,
+            .logical_height = height,
             .logical_full_fit = true,
             .logical_top_left = true,
             .logical_no_y_flip = true,
@@ -438,14 +491,16 @@ private:
             ++loss_frames;
         }
         if (config.window.IsFinal(pending.stamp.sequence)) {
-            LOG_INFO(Render,
-                     "FinalGuestSurfaceContentCoverage sequence={} process_time_us={} "
-                     "surface_ordinal={} tiles={} status={} selected={} emitted={} complete={} "
-                     "loss={} selector_count={} selector_status={} selector_loss={}",
-                     report.sequence, report.process_time_us, report.surface_ordinal,
-                     report.tile_count, static_cast<u32>(report.status), selected_frames,
-                     emitted_frames, complete_frames, loss_frames, report.selector_count,
-                     static_cast<u32>(report.selector_status), report.selector_loss);
+            LOG_INFO(
+                Render,
+                "FinalGuestSurfaceContentCoverage sequence={} process_time_us={} "
+                "stage={} surface_ordinal={} tiles={} status={} selected={} emitted={} complete={} "
+                "loss={} selector_count={} selector_status={} selector_loss={}",
+                report.sequence, report.process_time_us, static_cast<u32>(report.stage),
+                report.surface_ordinal, report.tile_count, static_cast<u32>(report.status),
+                selected_frames, emitted_frames, complete_frames, loss_frames,
+                report.selector_count, static_cast<u32>(report.selector_status),
+                report.selector_loss);
         }
     }
 
@@ -453,6 +508,7 @@ private:
     FinalGuestSurfaceContentConfig config{};
     FinalGuestSurfaceReducer reducer;
     FinalGuestSurfaceScreenshotCalibration screenshot_calibration;
+    FinalGuestSurfacePostPpTransportTracker post_pp_transport;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
     VideoCore::Buffer download;
@@ -813,8 +869,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
     if (const auto config = ReadFinalGuestSurfaceContentConfig()) {
+        auto& content_scheduler =
+            config->stage == FinalGuestSurfaceStage::PostPp ? present_scheduler : draw_scheduler;
         final_guest_surface_content =
-            std::make_unique<FinalGuestSurfaceContentState>(instance, draw_scheduler, *config);
+            std::make_unique<FinalGuestSurfaceContentState>(instance, content_scheduler, *config);
     }
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
@@ -850,11 +908,16 @@ Presenter::~Presenter() {
     ImGui::Friends::Unregister();
     ImGui::Layer::RemoveLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
 
+    const bool post_pp_surface =
+        final_guest_surface_content && final_guest_surface_content->IsPostPpStage();
     draw_scheduler.Finish();
-    if (final_guest_surface_content) {
+    if (final_guest_surface_content && !post_pp_surface) {
         draw_scheduler.PopPendingOperations();
     }
     present_scheduler.Finish();
+    if (post_pp_surface) {
+        present_scheduler.PopPendingOperations();
+    }
     Check(draw_scheduler.CommandBuffer().reset());
     Check(present_scheduler.CommandBuffer().reset());
 
@@ -1020,15 +1083,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+    const bool post_pp_surface =
+        final_guest_surface_content && final_guest_surface_content->IsPostPpStage();
     frame->final_surface_diagnostic.Assign(final_guest_surface_content != nullptr, stamp.sequence,
-                                           stamp.process_time_us, image_size.width,
-                                           image_size.height);
+                                           stamp.process_time_us,
+                                           post_pp_surface ? frame->width : image_size.width,
+                                           post_pp_surface ? frame->height : image_size.height);
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     std::optional<FinalGuestSurfaceContentState::PendingCapture> final_surface_capture;
-    if (final_guest_surface_content && final_guest_surface_content->ShouldCapture(stamp.sequence)) {
+    if (final_guest_surface_content && !post_pp_surface &&
+        final_guest_surface_content->ShouldCapture(stamp.sequence)) {
         final_surface_capture =
-            final_guest_surface_content->Prepare(stamp, image, frame->width, frame->height);
+            final_guest_surface_content->PrepareGuest(stamp, image, frame->width, frame->height);
     }
 
     const auto capture_game_only = VideoCore::ConsumeGameOnlyScreenshotRequests();
@@ -1225,6 +1292,21 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                           MarkersPalette::GpuMarkerColor, profiler_ctx != nullptr);
 
         const vk::Extent2D extent = swapchain.GetExtent();
+        std::optional<FinalGuestSurfaceContentState::PendingCapture> post_pp_surface_capture;
+        if (final_guest_surface_content) {
+            const auto& diagnostic = frame->final_surface_diagnostic;
+            const bool in_window = diagnostic.valid && final_guest_surface_content->ShouldCapture(
+                                                           diagnostic.surface_sequence);
+            if (ShouldObserveFinalGuestSurfaceAtPresent(final_guest_surface_content->Stage(),
+                                                        is_reusing_frame, diagnostic.valid,
+                                                        in_window)) {
+                post_pp_surface_capture = final_guest_surface_content->PreparePostPp(
+                    {diagnostic.surface_sequence, diagnostic.surface_process_time_us}, frame->width,
+                    frame->height, swapchain.GetSurfaceFormat().format, frame->is_hdr);
+            }
+        }
+        const auto frame_transitions = GetPresentFrameTransitions(
+            is_reusing_frame, post_pp_surface_capture && post_pp_surface_capture->HasCopy());
         std::array<vk::ImageMemoryBarrier2, 2> pre_barriers;
         u32 num_pre_barriers = 1;
         pre_barriers[0] = vk::ImageMemoryBarrier2{
@@ -1245,7 +1327,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                 .layerCount = VK_REMAINING_ARRAY_LAYERS,
             },
         };
-        const auto frame_transition = GetPresentFrameTransition(is_reusing_frame);
+        const auto& frame_transition = frame_transitions.before;
         if (frame_transition.required) {
             pre_barriers[num_pre_barriers++] = vk::ImageMemoryBarrier2{
                 .srcStageMask = frame_transition.src_stage,
@@ -1274,6 +1356,37 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             .imageMemoryBarrierCount = num_pre_barriers,
             .pImageMemoryBarriers = pre_barriers.data(),
         });
+
+        if (post_pp_surface_capture) {
+            final_guest_surface_content->Record(std::move(*post_pp_surface_capture), frame->image,
+                                                cmdbuf);
+        }
+        if (frame_transitions.after.required) {
+            const auto& transition = frame_transitions.after;
+            const vk::ImageMemoryBarrier2 restore_frame{
+                .srcStageMask = transition.src_stage,
+                .srcAccessMask = transition.src_access,
+                .dstStageMask = transition.dst_stage,
+                .dstAccessMask = transition.dst_access,
+                .oldLayout = transition.old_layout,
+                .newLayout = transition.new_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = frame->image,
+                .subresourceRange{
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = VK_REMAINING_ARRAY_LAYERS,
+                },
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &restore_frame,
+            });
+        }
 
         { // Draw the game
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0f});

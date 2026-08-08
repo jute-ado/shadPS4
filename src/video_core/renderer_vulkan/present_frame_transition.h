@@ -17,6 +17,12 @@ struct PresentFrameTransition {
     vk::ImageLayout new_layout;
 };
 
+struct PresentFrameTransitions {
+    PresentFrameTransition before{};
+    PresentFrameTransition after{};
+    bool capture{};
+};
+
 constexpr PresentFrameTransition GetPresentFrameTransition(const bool is_reusing_frame) {
     if (is_reusing_frame) {
         return {
@@ -38,6 +44,38 @@ constexpr PresentFrameTransition GetPresentFrameTransition(const bool is_reusing
         .dst_access = vk::AccessFlagBits2::eShaderRead,
         .old_layout = vk::ImageLayout::eGeneral,
         .new_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
+    };
+}
+
+constexpr PresentFrameTransitions GetPresentFrameTransitions(const bool is_reusing_frame,
+                                                             const bool capture_requested) {
+    if (is_reusing_frame || !capture_requested) {
+        return {
+            .before = GetPresentFrameTransition(is_reusing_frame),
+        };
+    }
+    return {
+        .before =
+            {
+                .required = true,
+                .src_stage = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                .src_access = vk::AccessFlagBits2::eColorAttachmentWrite,
+                .dst_stage = vk::PipelineStageFlagBits2::eTransfer,
+                .dst_access = vk::AccessFlagBits2::eTransferRead,
+                .old_layout = vk::ImageLayout::eGeneral,
+                .new_layout = vk::ImageLayout::eTransferSrcOptimal,
+            },
+        .after =
+            {
+                .required = true,
+                .src_stage = vk::PipelineStageFlagBits2::eTransfer,
+                .src_access = vk::AccessFlagBits2::eTransferRead,
+                .dst_stage = vk::PipelineStageFlagBits2::eFragmentShader,
+                .dst_access = vk::AccessFlagBits2::eShaderRead,
+                .old_layout = vk::ImageLayout::eTransferSrcOptimal,
+                .new_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            },
+        .capture = true,
     };
 }
 

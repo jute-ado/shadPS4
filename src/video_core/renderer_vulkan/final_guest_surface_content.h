@@ -50,6 +50,11 @@ enum class FinalGuestSurfaceComparison : u8 {
     LocalizedVisualReturn,
 };
 
+enum class FinalGuestSurfaceStage : u8 {
+    GuestPreFsr,
+    PostPp,
+};
+
 enum class FinalGuestSurfaceStatus : u8 {
     Complete,
     Unsupported,
@@ -99,6 +104,7 @@ struct FinalGuestSurfaceDescriptor {
     FinalGuestSurfaceAspect aspect{FinalGuestSurfaceAspect::Other};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
     FinalGuestSurfaceComparison comparison{FinalGuestSurfaceComparison::ExactVisible};
+    FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
     u32 logical_width{};
     u32 logical_height{};
     s32 logical_offset_x{};
@@ -173,6 +179,7 @@ struct FinalGuestSurfaceTilePlan {
     u32 scale_numerator{};
     u32 scale_denominator{};
     FinalGuestSurfaceComparison comparison{FinalGuestSurfaceComparison::ExactVisible};
+    FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -317,6 +324,7 @@ struct FinalGuestSurfaceTilePlan {
         .scale_numerator = desc.width / scale_divisor,
         .scale_denominator = desc.logical_width / scale_divisor,
         .comparison = desc.comparison,
+        .stage = desc.stage,
     };
 }
 
@@ -447,6 +455,42 @@ struct FinalGuestSurfaceTransport {
     auto operator<=>(const FinalGuestSurfaceTransport&) const = default;
 };
 
+class FinalGuestSurfacePostPpTransportTracker {
+public:
+    [[nodiscard]] FinalGuestSurfaceTransport Observe(FinalGuestSurfaceFormat format, u32 width,
+                                                     u32 height, bool hdr) noexcept {
+        const Key current{format, width, height, hdr};
+        if (!has_key || current != key) {
+            key = current;
+            has_key = true;
+            if (generation != std::numeric_limits<u64>::max()) {
+                ++generation;
+            }
+        }
+        return {
+            .surface_identity = 1,
+            .backing_generation = generation,
+            .format = format,
+            .width = width,
+            .height = height,
+        };
+    }
+
+private:
+    struct Key {
+        FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+        u32 width{};
+        u32 height{};
+        bool hdr{};
+
+        bool operator==(const Key&) const = default;
+    };
+
+    Key key{};
+    u64 generation{};
+    bool has_key{};
+};
+
 struct FinalGuestSurfaceLagConfig {
     u64 cadence_us{100'000};
     u64 tolerance_us{25'000};
@@ -535,6 +579,7 @@ struct FinalGuestSurfaceContentConfig {
     FinalGuestSurfaceCaptureWindow window{FinalGuestSurfaceCaptureWindow::Defaults()};
     FinalGuestSurfaceLagConfig lag{FinalGuestSurfaceLagConfig::Defaults()};
     FinalGuestSurfaceWatchOrdinals watch_ordinals{};
+    FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
 };
 
 template <typename ReadValue>
@@ -558,6 +603,13 @@ template <typename ReadValue>
     };
 
     FinalGuestSurfaceContentConfig config{};
+    if (const auto stage = read_value("SHADPS4_FINAL_GUEST_SURFACE_STAGE")) {
+        if (*stage == "post_pp") {
+            config.stage = FinalGuestSurfaceStage::PostPp;
+        } else if (*stage != "guest_pre_fsr") {
+            return std::nullopt;
+        }
+    }
     config.window.frame_start = parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_START",
                                       config.window.frame_start, std::numeric_limits<u64>::max());
     config.window.frame_count =
@@ -577,6 +629,13 @@ template <typename ReadValue>
         config.watch_ordinals = ParseFinalGuestSurfaceWatchOrdinals(*watch);
     }
     return config;
+}
+
+[[nodiscard]] constexpr bool ShouldObserveFinalGuestSurfaceAtPresent(
+    FinalGuestSurfaceStage stage, bool is_reusing_frame, bool stamp_valid,
+    bool in_capture_window) noexcept {
+    return stage == FinalGuestSurfaceStage::PostPp && !is_reusing_frame && stamp_valid &&
+           in_capture_window;
 }
 
 struct FinalGuestSurfaceFrameDiagnosticStamp {
@@ -770,8 +829,10 @@ struct FinalGuestSurfaceReport {
     FinalGuestSurfaceStatus selector_status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
+    FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
     bool stable_transport{};
     bool exact_aba{};
+    bool localized_aba{};
     bool whole_sample_aba{};
 };
 
@@ -818,6 +879,8 @@ struct FinalGuestSurfaceReport {
            " q=" + FormatFinalGuestSurfaceTileOrdinals(report) +
            " v=" + std::to_string(report.stable_transport) +
            " ws=" + std::to_string(report.whole_sample_aba) +
+           " p=" + std::to_string(static_cast<u32>(report.stage)) +
+           " la=" + std::to_string(report.localized_aba) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(FinalGuestSurfaceLossMask(report.loss, report.selector_loss)) +
            " sel=" + std::to_string(report.selector_count) + '/' +
@@ -903,6 +966,7 @@ public:
             .selector_status = selector.status,
             .status = plan.status,
             .loss = plan.loss,
+            .stage = plan.stage,
         };
         const bool contiguous = !has_last || sequence == last_sequence + 1;
         const bool time_ordered = !has_last || process_time_us > last_process_time_us;
@@ -1129,10 +1193,8 @@ private:
 
     [[nodiscard]] static std::optional<u32> ChangedVisualPixels(
         FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
-        std::span<const std::byte> left, std::span<const std::byte> right,
-        u32 index) noexcept {
-        if (format != FinalGuestSurfaceFormat::Rgba8 &&
-            format != FinalGuestSurfaceFormat::Bgra8) {
+        std::span<const std::byte> left, std::span<const std::byte> right, u32 index) noexcept {
+        if (format != FinalGuestSurfaceFormat::Rgba8 && format != FinalGuestSurfaceFormat::Bgra8) {
             return std::nullopt;
         }
         const auto tile = plan.TileAt(index);
@@ -1161,16 +1223,18 @@ private:
         return changed;
     }
 
-    [[nodiscard]] static bool IsLocalizedVisualReturn(
-        const Observation& baseline, const Observation& departure,
-        FinalGuestSurfaceFormat format, const FinalGuestSurfaceTilePlan& plan,
-        std::span<const std::byte> bytes, u32 index) noexcept {
+    [[nodiscard]] static bool IsLocalizedVisualReturn(const Observation& baseline,
+                                                      const Observation& departure,
+                                                      FinalGuestSurfaceFormat format,
+                                                      const FinalGuestSurfaceTilePlan& plan,
+                                                      std::span<const std::byte> bytes,
+                                                      u32 index) noexcept {
         if (!SameLayout(baseline, plan) || !SameLayout(departure, plan) ||
             baseline.transport.format != format || departure.transport.format != format) {
             return false;
         }
-        const auto baseline_to_departure = ChangedVisualPixels(
-            format, plan, baseline.bytes, departure.bytes, index);
+        const auto baseline_to_departure =
+            ChangedVisualPixels(format, plan, baseline.bytes, departure.bytes, index);
         const auto departure_to_current =
             ChangedVisualPixels(format, plan, departure.bytes, bytes, index);
         const auto baseline_to_current =
@@ -1217,6 +1281,9 @@ private:
             }
         }
         report.exact_aba = any_exact_tile;
+        report.localized_aba =
+            plan.comparison == FinalGuestSurfaceComparison::LocalizedVisualReturn &&
+            report.aba_tiles != 0;
         report.whole_sample_aba = all_returned && any_departed;
     }
 
