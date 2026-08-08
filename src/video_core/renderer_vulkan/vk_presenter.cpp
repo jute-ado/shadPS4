@@ -18,6 +18,7 @@
 #include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/completed_readback.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/present_frame_transition.h"
@@ -451,62 +452,70 @@ static bool WritePng(const std::filesystem::path& path, const std::span<const u8
     return true;
 }
 
-static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readbacks) {
-    for (const auto& readback : readbacks) {
-        if (readback.paths.empty()) {
-            continue;
+static void SaveCompletedScreenshot(const ScreenshotReadback& readback) {
+    std::vector<u8> rgba;
+    if (!ConvertReadbackToRgba8(readback, rgba)) {
+        return;
+    }
+
+    const auto& primary_path = readback.paths.front();
+    if (!WritePng(primary_path, rgba, readback.width, readback.height)) {
+        LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", primary_path.string());
+        return;
+    }
+
+    LOG_INFO(Render_Vulkan, "Saved screenshot: {}", primary_path.string());
+
+    if (readback.notify) {
+        std::ifstream file(primary_path, std::ios::binary);
+        std::vector<u8> imgdata;
+        if (file) {
+            imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
+                                      std::istreambuf_iterator<char>());
+        }
+        shadNotifications::QueueNotification("Saved screenshot:\n" + primary_path.string(), 3.0f,
+                                             shadNotifications::position::BottomRight, imgdata);
+    }
+
+    for (size_t i = 1; i < readback.paths.size(); ++i) {
+        const auto& path = readback.paths[i];
+        std::error_code ec{};
+        std::filesystem::copy_file(primary_path, path, std::filesystem::copy_options::none, ec);
+        if (ec) {
+            // Fallback for platforms/filesystems where copy_file can fail for transient reasons.
+            if (!WritePng(path, rgba, readback.width, readback.height)) {
+                LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", path.string());
+                continue;
+            }
         }
 
-        std::vector<u8> rgba;
-        if (!ConvertReadbackToRgba8(readback, rgba)) {
-            continue;
-        }
-
-        const auto& primary_path = readback.paths.front();
-        if (!WritePng(primary_path, rgba, readback.width, readback.height)) {
-            LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", primary_path.string());
-            continue;
-        }
-
-        LOG_INFO(Render_Vulkan, "Saved screenshot: {}", primary_path.string());
-
+        LOG_INFO(Render_Vulkan, "Saved screenshot: {}", path.string());
         if (readback.notify) {
-            std::ifstream file(primary_path, std::ios::binary);
+            std::ifstream file(path, std::ios::binary);
             std::vector<u8> imgdata;
             if (file) {
                 imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
                                           std::istreambuf_iterator<char>());
             }
-            shadNotifications::QueueNotification("Saved screenshot:\n" + primary_path.string(),
-                                                 3.0f, shadNotifications::position::BottomRight,
-                                                 imgdata);
+            shadNotifications::QueueNotification("Saved screenshot:\n" + path.string(), 3.0f,
+                                                 shadNotifications::position::BottomRight, imgdata);
+        }
+    }
+}
+
+static void SavePendingScreenshots(std::vector<ScreenshotReadback>& readbacks) {
+    for (auto& readback : readbacks) {
+        if (readback.paths.empty()) {
+            continue;
         }
 
-        for (size_t i = 1; i < readback.paths.size(); ++i) {
-            const auto& path = readback.paths[i];
-            std::error_code ec{};
-            std::filesystem::copy_file(primary_path, path, std::filesystem::copy_options::none, ec);
-            if (ec) {
-                // Fallback for platforms/filesystems where copy_file can fail for transient
-                // reasons.
-                if (!WritePng(path, rgba, readback.width, readback.height)) {
-                    LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", path.string());
-                    continue;
-                }
-            }
-
-            LOG_INFO(Render_Vulkan, "Saved screenshot: {}", path.string());
-            if (readback.notify) {
-                std::ifstream file(path, std::ios::binary);
-                std::vector<u8> imgdata;
-                if (file) {
-                    imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
-                                              std::istreambuf_iterator<char>());
-                }
-                shadNotifications::QueueNotification("Saved screenshot:\n" + path.string(), 3.0f,
-                                                     shadNotifications::position::BottomRight,
-                                                     imgdata);
-            }
+        const auto result = VideoCore::ConsumeCompletedReadback(
+            readback.buffer.is_coherent,
+            [&] { return readback.buffer.InvalidateMappedRange(0, readback.buffer.SizeBytes()); },
+            [&] { SaveCompletedScreenshot(readback); });
+        if (result == VideoCore::CompletedReadbackResult::InvalidationFailed) {
+            LOG_ERROR(Render_Vulkan,
+                      "Screenshot readback invalidation failed; screenshot output suppressed");
         }
     }
 }
