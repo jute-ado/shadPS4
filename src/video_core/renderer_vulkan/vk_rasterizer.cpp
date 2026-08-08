@@ -6,7 +6,6 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
-#include "video_core/buffer_cache/bda_fallback_consumption.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
@@ -60,31 +59,6 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
 }
 
 Rasterizer::~Rasterizer() = default;
-
-void Rasterizer::BeginBdaFallbackOperation() {
-    if (!bda_fallback_requested) {
-        bda_fallback_bit_base = 0;
-        bda_fallback_enable = 0;
-        return;
-    }
-
-    const auto parsed_frame = VideoCore::GetBdaFallbackParsedFrameSequence().Read();
-    const u64 frame = parsed_frame.sequence;
-    if (frame != bda_fallback_frame) {
-        bda_fallback_frame = frame;
-        bda_fallback_next_operation = 0;
-    }
-    const u32 operation = bda_fallback_next_operation;
-    if (bda_fallback_next_operation != std::numeric_limits<u32>::max()) {
-        ++bda_fallback_next_operation;
-    }
-    std::tie(bda_fallback_bit_base, bda_fallback_enable) =
-        buffer_cache.BdaFallbackTokens(frame, operation);
-}
-
-void Rasterizer::ObserveBdaFallbackFrameBoundary(u64 frame, u64 process_time_us) noexcept {
-    buffer_cache.ObserveBdaFallbackFrameBoundary(frame, process_time_us);
-}
 
 void Rasterizer::CpSync() {
     scheduler.EndRendering();
@@ -228,8 +202,6 @@ void Rasterizer::EliminateFastClear() {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
-    BeginBdaFallbackOperation();
-
     scheduler.PopPendingOperations();
 
     if (!FilterDraw()) {
@@ -278,8 +250,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 stride,
                               u32 max_count, VAddr count_address) {
     RENDERER_TRACE;
-
-    BeginBdaFallbackOperation();
 
     scheduler.PopPendingOperations();
 
@@ -359,8 +329,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
-    BeginBdaFallbackOperation();
-
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
@@ -390,8 +358,6 @@ void Rasterizer::DispatchDirect() {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
-
-    BeginBdaFallbackOperation();
 
     scheduler.PopPendingOperations();
 
@@ -434,11 +400,7 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
-    const bool bda_fallback_readback_due =
-        bda_fallback_requested &&
-        buffer_cache.NeedsBdaFallbackReadback(
-            VideoCore::GetBdaFallbackParsedFrameSequence().Read().sequence);
-    if (fault_process_pending || bda_fallback_readback_due) {
+    if (fault_process_pending) {
         fault_process_pending = false;
         buffer_cache.ProcessFaultBuffer();
     }
@@ -464,8 +426,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    push_data.bda_fallback_bit_base = bda_fallback_bit_base;
-    push_data.bda_fallback_enable = bda_fallback_enable;
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;

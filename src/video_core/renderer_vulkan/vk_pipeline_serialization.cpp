@@ -5,7 +5,6 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
-#include "video_core/buffer_cache/bda_fallback_consumption.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -296,15 +295,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 }
 
 void PipelineCache::WarmUp() {
-    const bool diagnostic_enabled = VideoCore::BdaFallbackConsumptionDiagnosticEnabled();
-    if (!VideoCore::ShouldPreloadPipelineCacheForBdaFallbackDiagnostic(
-            EmulatorSettings.IsPipelineCacheEnabled(), diagnostic_enabled)) {
-        if (diagnostic_enabled) {
-            LOG_INFO(Render,
-                     "BDA fallback consumption diagnostic: serialized pipeline preload disabled; "
-                     "shader patch replacement disabled; all participating shaders will be "
-                     "recompiled with attribution");
-        }
+    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
         return;
     }
 

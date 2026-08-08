@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <cstddef>
-
 #include "common/types.h"
 #include "shader_recompiler/buffer_access_range.h"
 #include "shader_recompiler/ir/type.h"
@@ -155,9 +153,6 @@ struct PushData {
     static constexpr u32 YScaleIndex = 3;
     static constexpr u32 UdRegsIndex = 4;
     static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
-    static constexpr u32 BdaFallbackTokenMemberIndex = BufOffsetIndex + 2;
-    static constexpr u32 BdaFallbackBitBaseComponent = 2;
-    static constexpr u32 BdaFallbackEnableComponent = 3;
 
     float xoffset;
     float yoffset;
@@ -165,17 +160,12 @@ struct PushData {
     float yscale;
     std::array<u32, NUM_USER_DATA_REGS> ud_regs;
     std::array<u8, NUM_BUFFERS> buf_offsets;
-    // These occupy the two otherwise-unused dwords in the final uvec4 push-data slot.
-    u32 bda_fallback_bit_base{};
-    u32 bda_fallback_enable{};
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
     }
 };
-static_assert(offsetof(PushData, bda_fallback_bit_base) == 120);
-static_assert(offsetof(PushData, bda_fallback_enable) == 124);
 static_assert(sizeof(PushData) <= 128,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
 

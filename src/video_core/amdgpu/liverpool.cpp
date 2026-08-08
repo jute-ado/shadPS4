@@ -10,7 +10,6 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
-#include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
@@ -18,7 +17,6 @@
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
-#include "video_core/buffer_cache/bda_fallback_consumption.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -307,16 +305,6 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
-                    if (VideoCore::BdaFallbackConsumptionDiagnosticEnabled()) {
-                        const u64 process_time_us = Libraries::Kernel::sceKernelGetProcessTime();
-                        const u64 completed_frame =
-                            VideoCore::GetBdaFallbackParsedFrameSequence().ObserveFlip(
-                                process_time_us);
-                        if (rasterizer) {
-                            rasterizer->ObserveBdaFallbackFrameBoundary(completed_frame,
-                                                                        process_time_us);
-                        }
-                    }
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
