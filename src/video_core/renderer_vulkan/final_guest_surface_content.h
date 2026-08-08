@@ -452,6 +452,21 @@ struct FinalGuestSurfaceWatchOrdinals {
     return selector;
 }
 
+[[nodiscard]] constexpr FinalGuestSurfaceWatchOrdinals ValidateFinalGuestSurfaceWatchOrdinals(
+    FinalGuestSurfaceWatchOrdinals selector, u32 actual_window_count) noexcept {
+    if (selector.status != FinalGuestSurfaceStatus::Complete) {
+        return selector;
+    }
+    for (u32 index = 0; index < selector.count; ++index) {
+        if (selector.ordinals[index] > actual_window_count) {
+            selector.status = FinalGuestSurfaceStatus::Unsupported;
+            selector.loss = 1;
+            return selector;
+        }
+    }
+    return selector;
+}
+
 struct FinalGuestSurfaceContentConfig {
     FinalGuestSurfaceCaptureWindow window{FinalGuestSurfaceCaptureWindow::Defaults()};
     FinalGuestSurfaceLagConfig lag{FinalGuestSurfaceLagConfig::Defaults()};
@@ -607,6 +622,11 @@ private:
     u32 observed_requests{};
 };
 
+[[nodiscard]] constexpr u32 FinalGuestSurfaceAutomationCalibrationCount(u32 /*notifying_count*/,
+                                                                        u32 silent_count) noexcept {
+    return silent_count;
+}
+
 struct FinalGuestSurfaceReport {
     static constexpr u32 MaxTileDetails = FinalGuestSurfaceWatchOrdinals::MaxOrdinals;
 
@@ -719,6 +739,18 @@ public:
                 ++report.loss.invalidation;
                 report.status = FinalGuestSurfaceStatus::InvalidationLoss;
             }
+            history.clear();
+            history_evicted = false;
+            return report;
+        }
+        const auto runtime_selector =
+            ValidateFinalGuestSurfaceWatchOrdinals(selector, plan.tile_count);
+        report.selector_count = runtime_selector.count;
+        report.selector_status = runtime_selector.status;
+        report.selector_loss = runtime_selector.loss;
+        if (runtime_selector.status != FinalGuestSurfaceStatus::Complete ||
+            runtime_selector.loss != 0) {
+            report.status = FinalGuestSurfaceStatus::Unsupported;
             history.clear();
             history_evicted = false;
             return report;

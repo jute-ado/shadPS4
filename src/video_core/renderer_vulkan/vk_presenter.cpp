@@ -1372,10 +1372,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
 
         if (capture_with_overlays.Total() > 0) {
-            if (final_guest_surface_content) {
+            const u32 calibration_count = FinalGuestSurfaceAutomationCalibrationCount(
+                capture_with_overlays.notifying_count, capture_with_overlays.silent_count);
+            if (final_guest_surface_content && calibration_count != 0) {
                 final_guest_surface_content->CalibrateScreenshots(
-                    frame->final_surface_diagnostic, final_surface_mapping,
-                    capture_with_overlays.Total(), Libraries::Kernel::sceKernelGetProcessTime());
+                    frame->final_surface_diagnostic, final_surface_mapping, calibration_count,
+                    Libraries::Kernel::sceKernelGetProcessTime());
             }
             const vk::ImageMemoryBarrier to_transfer{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
