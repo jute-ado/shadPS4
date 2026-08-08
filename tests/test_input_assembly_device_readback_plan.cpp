@@ -332,4 +332,19 @@ TEST(InputAssemblyDeviceReadbackPlan, ImmediateReducerSuppressesUnknownIncomplet
                     .sequence_gap);
 }
 
+TEST(InputAssemblyDeviceReadbackPlan, EmptyIncompleteSnapshotIsLossNotCapacityFailure) {
+    InputAssemblyImmediateReadbackReducer reducer;
+    const auto result = reducer.Observe(InputAssemblyImmediateSnapshot{
+        .sequence = 44,
+        .semantic = Semantic(3, InputAssemblySourceKind::Vertex, 1),
+        .source = Buffer(8, 2),
+        .write_serial = 5,
+        .authority = InputAssemblyAuthority::GpuAuthoritative,
+        .bytes = {},
+        .complete = false,
+    });
+    EXPECT_TRUE(result.incomplete);
+    EXPECT_FALSE(result.capacity_exceeded);
+}
+
 } // namespace
