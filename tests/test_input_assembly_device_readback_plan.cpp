@@ -13,6 +13,7 @@ using AmdGpu::BoundInputAssemblySource;
 using AmdGpu::InputAssemblyAuthority;
 using AmdGpu::InputAssemblyBufferToken;
 using AmdGpu::InputAssemblyCopyAccess;
+using AmdGpu::InputAssemblyCaptureWindow;
 using AmdGpu::InputAssemblyDeviceReadbackPlanner;
 using AmdGpu::InputAssemblyHostUsage;
 using AmdGpu::InputAssemblyImmediateReadbackReducer;
@@ -78,6 +79,32 @@ TEST(InputAssemblyDeviceReadbackPlan, AdmitsStreamAndDeviceLocalSources) {
         ASSERT_TRUE(normalized.has_value());
         EXPECT_EQ(normalized->usage, usage);
     }
+}
+
+TEST(InputAssemblyDeviceReadbackPlan, UsesBoundedGenericFrameAndDrawWindows) {
+    const auto defaults = InputAssemblyCaptureWindow::Defaults();
+    EXPECT_TRUE(defaults.ContainsFrame(4000));
+    EXPECT_TRUE(defaults.ContainsFrame(4999));
+    EXPECT_FALSE(defaults.ContainsFrame(3999));
+    EXPECT_FALSE(defaults.ContainsFrame(5000));
+    EXPECT_TRUE(defaults.ContainsDraw(0));
+    EXPECT_TRUE(defaults.ContainsDraw(1151));
+    EXPECT_FALSE(defaults.ContainsDraw(1152));
+
+    const InputAssemblyCaptureWindow band{/*frame_start=*/10, /*frame_count=*/3,
+                                          /*draw_start=*/192, /*draw_count=*/192};
+    EXPECT_TRUE(band.ContainsFrame(12));
+    EXPECT_FALSE(band.ContainsFrame(13));
+    EXPECT_TRUE(band.ContainsDraw(192));
+    EXPECT_TRUE(band.ContainsDraw(383));
+    EXPECT_FALSE(band.ContainsDraw(384));
+
+    const InputAssemblyCaptureWindow overflow{/*frame_start=*/std::numeric_limits<u64>::max() - 1,
+                                              /*frame_count=*/100,
+                                              /*draw_start=*/std::numeric_limits<u32>::max() - 1,
+                                              /*draw_count=*/100};
+    EXPECT_TRUE(overflow.ContainsFrame(std::numeric_limits<u64>::max()));
+    EXPECT_TRUE(overflow.ContainsDraw(std::numeric_limits<u32>::max()));
 }
 
 TEST(InputAssemblyDeviceReadbackPlan, DeduplicatesSamplesWhileRetainingBothSemantics) {
