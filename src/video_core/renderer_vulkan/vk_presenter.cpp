@@ -34,7 +34,6 @@
 #include <array>
 #include <atomic>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <csetjmp>
@@ -176,55 +175,28 @@ struct ScreenshotReadback {
 
 namespace {
 
-struct FinalGuestSurfaceContentConfig {
-    FinalGuestSurfaceCaptureWindow window{FinalGuestSurfaceCaptureWindow::Defaults()};
-    FinalGuestSurfaceLagConfig lag{FinalGuestSurfaceLagConfig::Defaults()};
-};
-
 [[nodiscard]] std::optional<FinalGuestSurfaceContentConfig> ReadFinalGuestSurfaceContentConfig() {
-    const char* enabled = std::getenv("SHADPS4_FINAL_GUEST_SURFACE_CONTENT");
-    if (enabled == nullptr || std::string_view{enabled} != "1") {
-        return std::nullopt;
-    }
-    const auto parse = [](const char* name, u64 fallback, u64 maximum) {
+    return ResolveFinalGuestSurfaceContentConfig([](const char* name) {
         const char* value = std::getenv(name);
         if (value == nullptr) {
-            return fallback;
+            return std::optional<std::string_view>{};
         }
-        const std::string_view text{value};
-        u64 parsed{};
-        const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
-        if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
-            return fallback;
-        }
-        return std::min(parsed, maximum);
-    };
-
-    FinalGuestSurfaceContentConfig config{};
-    config.window.frame_start = parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_START",
-                                      config.window.frame_start, std::numeric_limits<u64>::max());
-    config.window.frame_count =
-        static_cast<u32>(parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", config.window.frame_count,
-                               FinalGuestSurfaceCaptureWindow::MaxFrameCount));
-    config.lag.cadence_us =
-        parse("SHADPS4_FINAL_GUEST_SURFACE_LAG_CADENCE_US", config.lag.cadence_us, 1'000'000);
-    if (config.lag.cadence_us == 0) {
-        config.lag.cadence_us = FinalGuestSurfaceLagConfig::Defaults().cadence_us;
-    }
-    config.lag.tolerance_us = parse("SHADPS4_FINAL_GUEST_SURFACE_LAG_TOLERANCE_US",
-                                    config.lag.tolerance_us, (config.lag.cadence_us - 1) / 2);
-    return config;
+        return std::optional<std::string_view>{value};
+    });
 }
 
 [[nodiscard]] FinalGuestSurfaceFormat ToFinalGuestSurfaceFormat(vk::Format format) noexcept {
     switch (format) {
     case vk::Format::eR8G8B8A8Unorm:
     case vk::Format::eR8G8B8A8Srgb:
+        return FinalGuestSurfaceFormat::Rgba8;
     case vk::Format::eB8G8R8A8Unorm:
     case vk::Format::eB8G8R8A8Srgb:
+        return FinalGuestSurfaceFormat::Bgra8;
     case vk::Format::eA2R10G10B10UnormPack32:
+        return FinalGuestSurfaceFormat::A2R10G10B10;
     case vk::Format::eA2B10G10R10UnormPack32:
-        return FinalGuestSurfaceFormat::Rgba8;
+        return FinalGuestSurfaceFormat::A2B10G10R10;
     case vk::Format::eR16G16B16A16Sfloat:
         return FinalGuestSurfaceFormat::Rgba16;
     case vk::Format::eBc1RgbUnormBlock:
@@ -293,8 +265,8 @@ public:
                    slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
         LOG_INFO(Render,
                  "FinalGuestSurfaceContentConfig enabled=1 frame_start={} frame_count={} "
-                 "grid_columns=16 grid_rows=9 tile_extent=32 max_tiles={} max_bytes={} slots={} "
-                 "lag_cadence_us={} lag_tolerance_us={}",
+                 "grid_columns=16 grid_rows=9 coverage=full_partition max_tiles={} max_bytes={} "
+                 "slots={} lag_cadence_us={} lag_tolerance_us={}",
                  config.window.frame_start, config.window.frame_count,
                  FinalGuestSurfaceTilePlan::MaxTiles, FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
@@ -436,23 +408,25 @@ private:
         LOG_INFO(
             Render,
             "FinalGuestSurfaceContent sequence={} process_time_us={} surface_ordinal={} "
-            "tiles={} changed_tiles={} aba_tiles={} stable={} exact_aba={} "
+            "tiles={} changed_tiles={} aba_tiles={} aba_tile_ordinals={} stable={} exact_aba={} "
+            "whole_sample_aba={} "
             "a_sequence={} a_process_time_us={} b_sequence={} b_process_time_us={} "
             "c_sequence={} c_process_time_us={} status={} unsupported_type={} "
             "unsupported_samples={} unsupported_mip={} unsupported_layer={} "
             "unsupported_aspect={} unsupported_format={} invalid_extent={} "
             "tile_loss={} byte_loss={} ordinal_loss={} busy={} invalidation_loss={} gap_loss={} "
-            "history_loss={}",
+            "history_loss={} tile_detail_loss={}",
             report.sequence, report.process_time_us, report.surface_ordinal, report.tile_count,
-            report.changed_tiles, report.aba_tiles, report.stable_transport, report.exact_aba,
-            report.a_sequence, report.a_process_time_us, report.b_sequence,
-            report.b_process_time_us, report.c_sequence, report.c_process_time_us,
-            static_cast<u32>(report.status), report.loss.unsupported_type,
-            report.loss.unsupported_samples, report.loss.unsupported_mip,
-            report.loss.unsupported_layer, report.loss.unsupported_aspect,
-            report.loss.unsupported_format, report.loss.invalid_extent, report.loss.tile_capacity,
-            report.loss.byte_capacity, report.loss.ordinal_capacity, report.loss.busy,
-            report.loss.invalidation, report.loss.gap, report.loss.history);
+            report.changed_tiles, report.aba_tiles, FormatFinalGuestSurfaceTileOrdinals(report),
+            report.stable_transport, report.exact_aba, report.whole_sample_aba, report.a_sequence,
+            report.a_process_time_us, report.b_sequence, report.b_process_time_us,
+            report.c_sequence, report.c_process_time_us, static_cast<u32>(report.status),
+            report.loss.unsupported_type, report.loss.unsupported_samples,
+            report.loss.unsupported_mip, report.loss.unsupported_layer,
+            report.loss.unsupported_aspect, report.loss.unsupported_format,
+            report.loss.invalid_extent, report.loss.tile_capacity, report.loss.byte_capacity,
+            report.loss.ordinal_capacity, report.loss.busy, report.loss.invalidation,
+            report.loss.gap, report.loss.history, report.loss.tile_detail);
 
         if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
             LOG_ERROR(Render,
@@ -463,8 +437,7 @@ private:
                       static_cast<u32>(FinalGuestSurfaceStatus::AlreadyConsumed));
             ++loss_frames;
         }
-        if (pending.stamp.sequence >= config.window.frame_start &&
-            pending.stamp.sequence - config.window.frame_start + 1 == config.window.frame_count) {
+        if (config.window.IsFinal(pending.stamp.sequence)) {
             LOG_INFO(Render,
                      "FinalGuestSurfaceContentCoverage sequence={} process_time_us={} "
                      "surface_ordinal={} tiles={} status={} selected={} emitted={} complete={} "
