@@ -53,6 +53,7 @@ enum class FinalGuestSurfaceComparison : u8 {
 enum class FinalGuestSurfaceStage : u8 {
     GuestPreFsr,
     PostPp,
+    PpInputShadow,
 };
 
 enum class FinalGuestSurfaceStatus : u8 {
@@ -610,12 +611,15 @@ template <typename ReadValue>
     if (const auto stage = read_value("SHADPS4_FINAL_GUEST_SURFACE_STAGE")) {
         if (*stage == "post_pp") {
             config.stage = FinalGuestSurfaceStage::PostPp;
+        } else if (*stage == "pp_input_shadow") {
+            config.stage = FinalGuestSurfaceStage::PpInputShadow;
         } else if (*stage != "guest_pre_fsr") {
             return std::nullopt;
         }
     }
     if (const auto calibrated = read_value("SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS")) {
-        if (*calibrated != "1" || config.stage != FinalGuestSurfaceStage::PostPp) {
+        if (*calibrated != "1" || (config.stage != FinalGuestSurfaceStage::PostPp &&
+                                   config.stage != FinalGuestSurfaceStage::PpInputShadow)) {
             return std::nullopt;
         }
         config.calibrated_triplets = true;
@@ -631,6 +635,9 @@ template <typename ReadValue>
             return std::nullopt;
         }
         config.expected_calibrations = parsed;
+    }
+    if (config.stage == FinalGuestSurfaceStage::PpInputShadow && !config.calibrated_triplets) {
+        return std::nullopt;
     }
     config.window.frame_start = parse("SHADPS4_FINAL_GUEST_SURFACE_FRAME_START",
                                       config.window.frame_start, std::numeric_limits<u64>::max());
@@ -656,8 +663,15 @@ template <typename ReadValue>
 [[nodiscard]] constexpr bool ShouldObserveFinalGuestSurfaceAtPresent(
     FinalGuestSurfaceStage stage, bool is_reusing_frame, bool stamp_valid,
     bool in_capture_window) noexcept {
-    return stage == FinalGuestSurfaceStage::PostPp && !is_reusing_frame && stamp_valid &&
-           in_capture_window;
+    return (stage == FinalGuestSurfaceStage::PostPp ||
+            stage == FinalGuestSurfaceStage::PpInputShadow) &&
+           !is_reusing_frame && stamp_valid && in_capture_window;
+}
+
+[[nodiscard]] constexpr bool IsPresentFinalGuestSurfaceStage(
+    FinalGuestSurfaceStage stage) noexcept {
+    return stage == FinalGuestSurfaceStage::PostPp ||
+           stage == FinalGuestSurfaceStage::PpInputShadow;
 }
 
 struct FinalGuestSurfaceFrameDiagnosticStamp {
