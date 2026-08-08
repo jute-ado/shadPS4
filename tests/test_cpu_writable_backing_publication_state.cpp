@@ -88,9 +88,8 @@ TEST(CpuWritableBackingPublicationState,
     EXPECT_FALSE(state.CommitReadSubmission(*plan, [] { return false; }));
     EXPECT_FALSE(state.IsImportedBackingPublished());
 
-    EXPECT_FALSE(state.CommitReadSubmission(*plan, []() -> bool {
-        throw std::runtime_error{"visibility failed"};
-    }));
+    EXPECT_FALSE(state.CommitReadSubmission(
+        *plan, []() -> bool { throw std::runtime_error{"visibility failed"}; }));
     EXPECT_FALSE(state.IsImportedBackingPublished());
 
     EXPECT_TRUE(state.CommitReadSubmission(*plan, [] { return true; }));
