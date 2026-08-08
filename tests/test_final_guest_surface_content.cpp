@@ -151,24 +151,15 @@ TEST(FinalGuestSurfaceContent, ClipsNormalizedColumnsForSmallOneDimensionalSurfa
     }
 }
 
-TEST(FinalGuestSurfaceContent, UsesFormatBlockMathAtRightAndBottomEdges) {
+TEST(FinalGuestSurfaceContent, RejectsCompressedSurfacesWithoutVisibleAlphaSemantics) {
     auto desc = Rgba8Surface(65, 37);
     desc.format = FinalGuestSurfaceFormat::Block16;
     const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(desc);
 
-    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
-    ASSERT_GT(plan.tile_count, 0u);
-    for (u32 i = 0; i < plan.tile_count; ++i) {
-        const auto& tile = plan.tiles[i];
-        EXPECT_EQ(tile.x % 4, 0u);
-        EXPECT_EQ(tile.y % 4, 0u);
-        EXPECT_TRUE(tile.width % 4 == 0 || tile.x + tile.width == desc.width);
-        EXPECT_TRUE(tile.height % 4 == 0 || tile.y + tile.height == desc.height);
-        const u32 blocks_x = (tile.width + 3) / 4;
-        const u32 blocks_y = (tile.height + 3) / 4;
-        EXPECT_EQ(tile.byte_size, blocks_x * blocks_y * 16u);
-        EXPECT_EQ(tile.buffer_offset % 16, 0u);
-    }
+    EXPECT_EQ(plan.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(plan.loss.unsupported_format, 1u);
+    EXPECT_EQ(plan.tile_count, 0u);
+    EXPECT_EQ(plan.sample_bytes, 0u);
 }
 
 TEST(FinalGuestSurfaceContent, RejectsMipLayerAspectFormatAndSampleScopeWithoutPartialPlan) {
