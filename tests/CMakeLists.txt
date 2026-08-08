@@ -259,6 +259,7 @@ list(APPEND TEST_TARGETS shadps4_buffer_access_range_test)
 
 add_executable(shadps4_input_assembly_device_integrity_test
     test_input_assembly_device_integrity.cpp
+    test_input_assembly_device_readback_plan.cpp
 )
 target_include_directories(shadps4_input_assembly_device_integrity_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
