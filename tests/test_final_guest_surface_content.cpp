@@ -22,8 +22,10 @@ using Vulkan::FinalGuestSurfaceLagConfig;
 using Vulkan::FinalGuestSurfaceReadbackCompletion;
 using Vulkan::FinalGuestSurfaceReadbackSlotPool;
 using Vulkan::FinalGuestSurfaceReducer;
+using Vulkan::FinalGuestSurfaceReport;
 using Vulkan::FinalGuestSurfaceStatus;
 using Vulkan::FinalGuestSurfaceTileLimits;
+using Vulkan::FinalGuestSurfaceTilePlan;
 using Vulkan::FinalGuestSurfaceTransport;
 
 constexpr FinalGuestSurfaceDescriptor Rgba8Surface(u32 width = 1920, u32 height = 1080) {
@@ -52,21 +54,36 @@ FinalGuestSurfaceTransport Transport(u64 surface, u64 backing) {
     };
 }
 
+FinalGuestSurfaceTilePlan TwoPixelPlan(FinalGuestSurfaceFormat format) {
+    FinalGuestSurfaceTilePlan plan{};
+    const u32 bytes_per_pixel = format == FinalGuestSurfaceFormat::Rgba16 ? 8 : 4;
+    plan.tile_count = 2;
+    plan.sample_bytes = bytes_per_pixel * 2;
+    plan.tiles[0] = {.width = 1, .height = 1, .byte_size = bytes_per_pixel};
+    plan.tiles[1] = {
+        .width = 1, .height = 1, .buffer_offset = bytes_per_pixel, .byte_size = bytes_per_pixel};
+    return plan;
+}
+
+FinalGuestSurfaceTransport TransportForFormat(FinalGuestSurfaceFormat format) {
+    auto transport = Transport(7, 11);
+    transport.format = format;
+    return transport;
+}
+
 TEST(FinalGuestSurfaceContent, PlansDeterministicNormalizedSixteenByNineColorTiles) {
     const auto first = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface());
     const auto second = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface());
 
     ASSERT_EQ(first.status, FinalGuestSurfaceStatus::Complete);
     ASSERT_EQ(first.tile_count, 16u * 9u);
-    EXPECT_EQ(first.sample_bytes, 16u * 9u * 32u * 32u * 4u);
+    EXPECT_EQ(first.sample_bytes, 1920u * 1080u * 4u);
     EXPECT_EQ(first.tiles, second.tiles);
     EXPECT_EQ(first.sample_bytes, second.sample_bytes);
     for (u32 i = 0; i < first.tile_count; ++i) {
         const auto& tile = first.tiles[i];
         EXPECT_GT(tile.width, 0u);
         EXPECT_GT(tile.height, 0u);
-        EXPECT_LE(tile.width, 32u);
-        EXPECT_LE(tile.height, 32u);
         EXPECT_LE(tile.x + tile.width, 1920u);
         EXPECT_LE(tile.y + tile.height, 1080u);
         EXPECT_EQ(tile.byte_size, tile.width * tile.height * 4u);
@@ -75,6 +92,49 @@ TEST(FinalGuestSurfaceContent, PlansDeterministicNormalizedSixteenByNineColorTil
                       first.tiles[i - 1].buffer_offset + first.tiles[i - 1].byte_size);
         }
     }
+}
+
+TEST(FinalGuestSurfaceContent, FullSurfaceCellPartitionHasNoGapsOrOverlaps) {
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(1280, 720));
+
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_EQ(plan.tile_count, 16u * 9u);
+    EXPECT_EQ(plan.sample_bytes, 1280u * 720u * 4u);
+    for (u32 row = 0; row < 9; ++row) {
+        for (u32 column = 0; column < 16; ++column) {
+            const auto& tile = plan.tiles[row * 16 + column];
+            EXPECT_EQ(tile.x, column * 80u);
+            EXPECT_EQ(tile.y, row * 80u);
+            EXPECT_EQ(tile.width, 80u);
+            EXPECT_EQ(tile.height, 80u);
+            if (column != 0) {
+                const auto& left = plan.tiles[row * 16 + column - 1];
+                EXPECT_EQ(left.x + left.width, tile.x);
+            }
+            if (row != 0) {
+                const auto& above = plan.tiles[(row - 1) * 16 + column];
+                EXPECT_EQ(above.y + above.height, tile.y);
+            }
+        }
+    }
+    const auto& last = plan.tiles[plan.tile_count - 1];
+    EXPECT_EQ(last.x + last.width, 1280u);
+    EXPECT_EQ(last.y + last.height, 720u);
+}
+
+TEST(FinalGuestSurfaceContent, FullSurfacePlanUsesBoundedSixteenMiBSlotsTransactionally) {
+    auto rgba16 = Rgba8Surface();
+    rgba16.format = FinalGuestSurfaceFormat::Rgba16;
+    const auto supported = Vulkan::PlanFinalGuestSurfaceTiles(rgba16);
+    ASSERT_EQ(supported.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(supported.sample_bytes, 1920u * 1080u * 8u);
+    EXPECT_LE(supported.sample_bytes, FinalGuestSurfaceTileLimits{}.max_bytes);
+
+    const auto too_large = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(3840, 2160));
+    EXPECT_EQ(too_large.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(too_large.loss.byte_capacity, 1u);
+    EXPECT_EQ(too_large.tile_count, 0u);
+    EXPECT_EQ(too_large.sample_bytes, 0u);
 }
 
 TEST(FinalGuestSurfaceContent, ClipsNormalizedColumnsForSmallOneDimensionalSurfaces) {
@@ -149,7 +209,7 @@ TEST(FinalGuestSurfaceContent, RejectsMipLayerAspectFormatAndSampleScopeWithoutP
 
 TEST(FinalGuestSurfaceContent, AppliesTileAndByteCapsTransactionally) {
     const auto tile_limited = Vulkan::PlanFinalGuestSurfaceTiles(
-        Rgba8Surface(), FinalGuestSurfaceTileLimits{.max_tiles = 143, .max_bytes = 4u << 20});
+        Rgba8Surface(), FinalGuestSurfaceTileLimits{.max_tiles = 143, .max_bytes = 16u << 20});
     EXPECT_EQ(tile_limited.status, FinalGuestSurfaceStatus::CapacityLoss);
     EXPECT_EQ(tile_limited.loss.tile_capacity, 1u);
     EXPECT_EQ(tile_limited.tile_count, 0u);
@@ -157,7 +217,7 @@ TEST(FinalGuestSurfaceContent, AppliesTileAndByteCapsTransactionally) {
 
     const auto byte_limited = Vulkan::PlanFinalGuestSurfaceTiles(
         Rgba8Surface(),
-        FinalGuestSurfaceTileLimits{.max_tiles = 144, .max_bytes = 144u * 4096u - 1u});
+        FinalGuestSurfaceTileLimits{.max_tiles = 144, .max_bytes = 1920u * 1080u * 4u - 1u});
     EXPECT_EQ(byte_limited.status, FinalGuestSurfaceStatus::CapacityLoss);
     EXPECT_EQ(byte_limited.loss.byte_capacity, 1u);
     EXPECT_EQ(byte_limited.tile_count, 0u);
@@ -176,6 +236,39 @@ TEST(FinalGuestSurfaceContent, WindowIsBoundedAndOverflowSafe) {
     const FinalGuestSurfaceCaptureWindow overflow{
         .frame_start = std::numeric_limits<u64>::max() - 1, .frame_count = 8};
     EXPECT_TRUE(overflow.Contains(std::numeric_limits<u64>::max()));
+    EXPECT_TRUE(overflow.IsFinal(std::numeric_limits<u64>::max()));
+}
+
+TEST(FinalGuestSurfaceContent, ProductionConfigParsingIsBoundedAndDefinesFinalCoverage) {
+    const auto read = [](std::string_view name) -> std::optional<std::string_view> {
+        if (name == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT") {
+            return "1";
+        }
+        if (name == "SHADPS4_FINAL_GUEST_SURFACE_FRAME_START") {
+            return "18446744073709551614";
+        }
+        if (name == "SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT") {
+            return "999999";
+        }
+        if (name == "SHADPS4_FINAL_GUEST_SURFACE_LAG_CADENCE_US") {
+            return "200000";
+        }
+        if (name == "SHADPS4_FINAL_GUEST_SURFACE_LAG_TOLERANCE_US") {
+            return "100000";
+        }
+        return std::nullopt;
+    };
+
+    const auto config = Vulkan::ResolveFinalGuestSurfaceContentConfig(read);
+    ASSERT_TRUE(config.has_value());
+    EXPECT_EQ(config->window.frame_count, FinalGuestSurfaceCaptureWindow::MaxFrameCount);
+    EXPECT_EQ(config->lag.cadence_us, 200'000u);
+    EXPECT_EQ(config->lag.tolerance_us, 99'999u);
+    EXPECT_TRUE(config->window.IsFinal(std::numeric_limits<u64>::max()));
+
+    const auto disabled = Vulkan::ResolveFinalGuestSurfaceContentConfig(
+        [](std::string_view) -> std::optional<std::string_view> { return std::nullopt; });
+    EXPECT_FALSE(disabled.has_value());
 }
 
 TEST(FinalGuestSurfaceContent, DisabledAndOutsideWindowPerformZeroPlanningAndStateWork) {
@@ -284,8 +377,53 @@ TEST(FinalGuestSurfaceContent, LagReducerFindsJitteredHundredMillisecondAba) {
     EXPECT_GT(returned.aba_tiles, 0u);
     EXPECT_EQ(returned.loss.gap, 0u);
     EXPECT_EQ(returned.a_sequence, 100u);
+    EXPECT_EQ(returned.a_process_time_us, 1'000'000u);
     EXPECT_EQ(returned.b_sequence, 102u);
+    EXPECT_EQ(returned.b_process_time_us, 1'098'000u);
     EXPECT_EQ(returned.c_sequence, 105u);
+    EXPECT_EQ(returned.c_process_time_us, 1'201'000u);
+}
+
+TEST(FinalGuestSurfaceContent, ReportsTrueHistoryEvictionWhenLagEndpointsCannotBeRetained) {
+    FinalGuestSurfaceReducer reducer{{.cadence_us = 1'000'000, .tolerance_us = 1}};
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(32, 32));
+    std::vector<std::byte> content(plan.sample_bytes, std::byte{0x11});
+    Vulkan::FinalGuestSurfaceReport report{};
+    for (u32 index = 0; index <= FinalGuestSurfaceReducer::MaxHistory; ++index) {
+        report = reducer.Observe(index + 1, 2'000'000 + index * 10,
+                                 TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, content);
+    }
+    EXPECT_EQ(report.loss.history, 1u);
+    EXPECT_FALSE(report.exact_aba);
+    EXPECT_FALSE(report.stable_transport);
+}
+
+TEST(FinalGuestSurfaceContent, OutsideToleranceAndTimeReversalResetComparisonState) {
+    const auto plan = Vulkan::PlanFinalGuestSurfaceTiles(Rgba8Surface(32, 32));
+    std::vector<std::byte> a(plan.sample_bytes, std::byte{0x11});
+    std::vector<std::byte> b(plan.sample_bytes, std::byte{0x22});
+
+    FinalGuestSurfaceReducer outside{FinalGuestSurfaceLagConfig::Defaults()};
+    (void)outside.Observe(1, 1'000'000, Transport(1, 1), plan, a);
+    (void)outside.Observe(2, 1'070'000, Transport(1, 1), plan, b);
+    const auto no_match = outside.Observe(3, 1'200'000, Transport(1, 1), plan, a);
+    EXPECT_FALSE(no_match.exact_aba);
+    EXPECT_FALSE(no_match.stable_transport);
+    EXPECT_EQ(no_match.a_sequence, 0u);
+    EXPECT_EQ(no_match.b_sequence, 0u);
+    EXPECT_EQ(no_match.c_sequence, 0u);
+
+    FinalGuestSurfaceReducer reversed{FinalGuestSurfaceLagConfig::Defaults()};
+    (void)reversed.Observe(10, 2'000'000, Transport(1, 1), plan, a);
+    (void)reversed.Observe(11, 2'100'000, Transport(1, 1), plan, b);
+    const auto reset = reversed.Observe(12, 2'050'000, Transport(1, 1), plan, a);
+    EXPECT_EQ(reset.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(reset.loss.gap, 1u);
+    EXPECT_FALSE(reset.exact_aba);
+    EXPECT_FALSE(reset.stable_transport);
+    const auto after_reset = reversed.Observe(13, 2'150'000, Transport(1, 1), plan, b);
+    EXPECT_FALSE(after_reset.exact_aba);
+    EXPECT_FALSE(after_reset.stable_transport);
 }
 
 TEST(FinalGuestSurfaceContent, LagReducerSuppressesGapIncompleteAndHistoryLoss) {
@@ -321,6 +459,114 @@ TEST(FinalGuestSurfaceContent, StableTransportRequiresEveryIntermediateBackingGe
     EXPECT_TRUE(returned.exact_aba);
     EXPECT_FALSE(returned.stable_transport);
     EXPECT_EQ(returned.loss.gap, 0u);
+}
+
+TEST(FinalGuestSurfaceContent, ReportsLocalizedTileAbaWhenWholeSampleDoesNotReturn) {
+    FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults()};
+    const auto plan = TwoPixelPlan(FinalGuestSurfaceFormat::Rgba8);
+    const std::array<std::byte, 8> a{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0},
+                                     std::byte{4}, std::byte{5}, std::byte{6}, std::byte{0}};
+    const std::array<std::byte, 8> b{std::byte{7},  std::byte{8},  std::byte{9},  std::byte{0},
+                                     std::byte{10}, std::byte{11}, std::byte{12}, std::byte{0}};
+    const std::array<std::byte, 8> c{std::byte{1},  std::byte{2},  std::byte{3},  std::byte{0},
+                                     std::byte{13}, std::byte{14}, std::byte{15}, std::byte{0}};
+    (void)reducer.Observe(100, 1'000'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan,
+                          a);
+    (void)reducer.Observe(101, 1'100'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan,
+                          b);
+    const auto report = reducer.Observe(
+        102, 1'200'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, c);
+
+    EXPECT_TRUE(report.exact_aba);
+    EXPECT_FALSE(report.whole_sample_aba);
+    EXPECT_TRUE(report.stable_transport);
+    EXPECT_EQ(report.aba_tiles, 1u);
+    ASSERT_EQ(report.aba_tile_ordinal_count, 1u);
+    EXPECT_EQ(report.aba_tile_ordinals[0], 1u);
+    EXPECT_EQ(report.loss.tile_detail, 0u);
+}
+
+TEST(FinalGuestSurfaceContent, BoundsNormalizedTileOrdinalDetailsWithExplicitLoss) {
+    FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults()};
+    FinalGuestSurfaceTilePlan plan{};
+    constexpr u32 tile_count = FinalGuestSurfaceReport::MaxTileDetails + 4;
+    plan.tile_count = tile_count;
+    plan.sample_bytes = tile_count * 4;
+    for (u32 tile = 0; tile < tile_count; ++tile) {
+        plan.tiles[tile] = {.width = 1, .height = 1, .buffer_offset = tile * 4, .byte_size = 4};
+    }
+    std::vector<std::byte> a(plan.sample_bytes, std::byte{1});
+    std::vector<std::byte> b(plan.sample_bytes, std::byte{2});
+    (void)reducer.Observe(200, 2'000'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan,
+                          a);
+    (void)reducer.Observe(201, 2'100'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan,
+                          b);
+    const auto report = reducer.Observe(
+        202, 2'200'000, TransportForFormat(FinalGuestSurfaceFormat::Rgba8), plan, a);
+
+    EXPECT_EQ(report.aba_tiles, tile_count);
+    EXPECT_EQ(report.aba_tile_ordinal_count, FinalGuestSurfaceReport::MaxTileDetails);
+    EXPECT_EQ(report.loss.tile_detail, 4u);
+    for (u32 i = 0; i < report.aba_tile_ordinal_count; ++i) {
+        EXPECT_EQ(report.aba_tile_ordinals[i], i + 1);
+    }
+    const std::string text = Vulkan::FormatFinalGuestSurfaceReport(report);
+    EXPECT_NE(text.find("aba_tile_ordinals=1,2,3"), std::string::npos);
+    EXPECT_NE(text.find("tile_detail_loss=4"), std::string::npos);
+    EXPECT_EQ(text.find("x="), std::string::npos);
+    EXPECT_EQ(text.find("y="), std::string::npos);
+}
+
+TEST(FinalGuestSurfaceContent, MasksForcedAlphaButRetainsVisibleColorChanges) {
+    const auto verify = [](FinalGuestSurfaceFormat format, std::vector<std::byte> a,
+                           std::vector<std::byte> alpha_only, std::vector<std::byte> color_change) {
+        const auto plan = TwoPixelPlan(format);
+        a.resize(plan.sample_bytes);
+        alpha_only.resize(plan.sample_bytes);
+        color_change.resize(plan.sample_bytes);
+        FinalGuestSurfaceReducer alpha_reducer{FinalGuestSurfaceLagConfig::Defaults()};
+        (void)alpha_reducer.Observe(300, 3'000'000, TransportForFormat(format), plan, a);
+        const auto alpha_changed =
+            alpha_reducer.Observe(301, 3'100'000, TransportForFormat(format), plan, alpha_only);
+        EXPECT_EQ(alpha_changed.changed_tiles, 0u);
+        const auto alpha_return =
+            alpha_reducer.Observe(302, 3'200'000, TransportForFormat(format), plan, a);
+        EXPECT_FALSE(alpha_return.exact_aba);
+        EXPECT_EQ(alpha_return.aba_tiles, 0u);
+
+        FinalGuestSurfaceReducer color_reducer{FinalGuestSurfaceLagConfig::Defaults()};
+        (void)color_reducer.Observe(400, 4'000'000, TransportForFormat(format), plan, a);
+        EXPECT_EQ(
+            color_reducer.Observe(401, 4'100'000, TransportForFormat(format), plan, color_change)
+                .changed_tiles,
+            1u);
+        const auto color_return =
+            color_reducer.Observe(402, 4'200'000, TransportForFormat(format), plan, a);
+        EXPECT_TRUE(color_return.exact_aba);
+        EXPECT_EQ(color_return.aba_tiles, 1u);
+    };
+
+    verify(FinalGuestSurfaceFormat::Rgba8, {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0}},
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0xFF}},
+           {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{0}});
+    verify(FinalGuestSurfaceFormat::Bgra8, {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0}},
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0xFF}},
+           {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{0}});
+    verify(FinalGuestSurfaceFormat::A2R10G10B10,
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0}},
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0xC0}},
+           {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{0}});
+    verify(FinalGuestSurfaceFormat::A2B10G10R10,
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0}},
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0xC0}},
+           {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{0}});
+    verify(FinalGuestSurfaceFormat::Rgba16,
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}, std::byte{5}, std::byte{6},
+            std::byte{0}, std::byte{0}},
+           {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}, std::byte{5}, std::byte{6},
+            std::byte{0xFF}, std::byte{0xFF}},
+           {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{4}, std::byte{5}, std::byte{6},
+            std::byte{0}, std::byte{0}});
 }
 
 TEST(FinalGuestSurfaceContent, ReportsBoundedPrivacySafeSurfaceOrdinalCapacity) {
