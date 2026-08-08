@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <ranges>
+#include <span>
+#include <unordered_set>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <sirit/sirit.h>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +30,77 @@ struct F32x2 {
     float a;
     float b;
 };
+
+struct BdaFallbackSpirvStructure {
+    u32 atomic_or_count{};
+    bool atomic_is_on_conditional_true_path{};
+    bool atomic_path_returns_zero_fallback{};
+};
+
+static BdaFallbackSpirvStructure InspectBdaFallbackStructure(std::span<const u32> spirv) {
+    constexpr size_t SpirvHeaderWords = 5;
+    struct Instruction {
+        spv::Op opcode{};
+        std::span<const u32> words;
+        u32 block{};
+    };
+
+    std::vector<Instruction> instructions;
+    std::unordered_set<u32> zero_constants;
+    u32 current_block{};
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction_word = spirv[offset];
+        const u32 word_count = instruction_word >> 16;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            break;
+        }
+        const auto opcode = static_cast<spv::Op>(instruction_word & 0xffffU);
+        const std::span words = spirv.subspan(offset, word_count);
+        if (opcode == spv::Op::OpLabel && words.size() >= 2) {
+            current_block = words[1];
+        }
+        if (opcode == spv::Op::OpConstant && words.size() >= 4 &&
+            std::ranges::all_of(words.subspan(3), [](u32 word) { return word == 0; })) {
+            zero_constants.insert(words[2]);
+        } else if (opcode == spv::Op::OpConstantNull && words.size() >= 3) {
+            zero_constants.insert(words[2]);
+        }
+        instructions.push_back({opcode, words, current_block});
+        offset += word_count;
+    }
+
+    BdaFallbackSpirvStructure result{};
+    for (const auto& atomic : instructions) {
+        if (atomic.opcode != spv::Op::OpAtomicOr) {
+            continue;
+        }
+        ++result.atomic_or_count;
+        u32 merge_block{};
+        for (const auto& instruction : instructions) {
+            if (instruction.opcode == spv::Op::OpBranchConditional &&
+                instruction.words.size() >= 4 && instruction.words[2] == atomic.block) {
+                result.atomic_is_on_conditional_true_path = true;
+            }
+            if (instruction.block == atomic.block && instruction.opcode == spv::Op::OpBranch &&
+                instruction.words.size() >= 2) {
+                merge_block = instruction.words[1];
+            }
+        }
+        for (const auto& instruction : instructions) {
+            if (instruction.block != merge_block || instruction.opcode != spv::Op::OpPhi ||
+                instruction.words.size() < 5) {
+                continue;
+            }
+            for (size_t incoming = 3; incoming + 1 < instruction.words.size(); incoming += 2) {
+                if (instruction.words[incoming + 1] == atomic.block &&
+                    zero_constants.contains(instruction.words[incoming])) {
+                    result.atomic_path_returns_zero_fallback = true;
+                }
+            }
+        }
+    }
+    return result;
+}
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
@@ -47,6 +123,20 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
+}
+
+TEST_F(GcnTest, direct_memory_fallback_attribution_is_atomic_and_preserves_zero) {
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto direct = TranslateToSpirvWithInfo(addr64_load, true);
+    const auto descriptor_relative = TranslateToSpirvWithInfo(addr64_load, false);
+    const auto structure = InspectBdaFallbackStructure(direct.spirv);
+    const auto control = InspectBdaFallbackStructure(descriptor_relative.spirv);
+
+    EXPECT_EQ(structure.atomic_or_count, 1);
+    EXPECT_TRUE(structure.atomic_is_on_conditional_true_path);
+    EXPECT_TRUE(structure.atomic_path_returns_zero_fallback);
+    EXPECT_EQ(control.atomic_or_count, 0);
 }
 
 // Example
