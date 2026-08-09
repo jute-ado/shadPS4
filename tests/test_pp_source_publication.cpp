@@ -155,4 +155,25 @@ TEST(PpSourceProducer, CompactProducerOutputDoesNotExposeImageIdentity) {
     EXPECT_LT(line.size(), size_t{40});
 }
 
+TEST(PpSourceProducer, CoverageCountsEveryFlipAndSeparatesNewProductionFromReuse) {
+    PpSourceProducerCoverage coverage{{.start = 4000, .count = 2}};
+    EXPECT_TRUE(coverage.Observe(
+        4000, {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+               .produced_since_last_observation = true}));
+    const auto final = coverage.Observe(
+        4001, {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+               .produced_since_last_observation = false});
+    ASSERT_TRUE(final);
+    EXPECT_TRUE(final->final);
+    EXPECT_EQ(final->expected, 2u);
+    EXPECT_EQ(final->selected, 2u);
+    EXPECT_EQ(final->emitted, 2u);
+    EXPECT_EQ(final->color_attachment, 2u);
+    EXPECT_EQ(final->new_production, 1u);
+    EXPECT_EQ(final->reused_production, 1u);
+    EXPECT_EQ(final->loss, 0u);
+    EXPECT_EQ(FormatPpSourceProducerCoverage(*final),
+              "FGSCPRC s=4001 n=2/2/2 c=2 s=0 t=0 u=0 x=0 p=1 r=1 l=0");
+}
+
 } // namespace
