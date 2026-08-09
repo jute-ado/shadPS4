@@ -396,6 +396,7 @@ struct PpSampledInputTransferPlan {
     bool copy{};
     bool paired_output_and_raw{};
     bool paired_source_backing_snapshot{};
+    bool paired_source_reconstruction{};
     bool callback_payload_is_scalar_only{};
     bool cpu_wait{};
     bool finish{};
@@ -405,16 +406,18 @@ struct PpSampledInputTransferPlan {
 };
 
 [[nodiscard]] constexpr PpSampledInputTransferPlan PlanPpSampledInputTransfer(
-    bool enabled, bool reused, bool frame_valid, bool metadata_valid) noexcept {
+    bool enabled, bool reused, bool frame_valid, bool metadata_valid,
+    bool source_reconstruction = false) noexcept {
     if (!enabled || reused || !frame_valid || !metadata_valid) {
         return {};
     }
     return {
-        .color_write_to_transfer_barriers = 2,
-        .copy_regions = 3,
+        .color_write_to_transfer_barriers = source_reconstruction ? 3u : 2u,
+        .copy_regions = source_reconstruction ? 4u : 3u,
         .copy = true,
         .paired_output_and_raw = true,
         .paired_source_backing_snapshot = true,
+        .paired_source_reconstruction = source_reconstruction,
         .callback_payload_is_scalar_only = true,
     };
 }
@@ -424,15 +427,17 @@ struct PpSampledInputTransferPlan {
     if (!plan.copy) {
         return plan.color_write_to_transfer_barriers == 0 && plan.copy_regions == 0 &&
                !plan.paired_output_and_raw && !plan.paired_source_backing_snapshot &&
-               !plan.callback_payload_is_scalar_only && !plan.cpu_wait && !plan.finish &&
-               !plan.callback_retains_frame && !plan.callback_retains_image &&
-               !plan.callback_retains_vk_image;
+               !plan.paired_source_reconstruction && !plan.callback_payload_is_scalar_only &&
+               !plan.cpu_wait && !plan.finish && !plan.callback_retains_frame &&
+               !plan.callback_retains_image && !plan.callback_retains_vk_image;
     }
-    return plan.color_write_to_transfer_barriers == 2 && plan.copy_regions == 3 &&
-           plan.paired_output_and_raw && plan.paired_source_backing_snapshot &&
-           plan.callback_payload_is_scalar_only && !plan.cpu_wait && !plan.finish &&
-           !plan.callback_retains_frame && !plan.callback_retains_image &&
-           !plan.callback_retains_vk_image;
+    const u32 expected_barriers = plan.paired_source_reconstruction ? 3u : 2u;
+    const u32 expected_copies = plan.paired_source_reconstruction ? 4u : 3u;
+    return plan.color_write_to_transfer_barriers == expected_barriers &&
+           plan.copy_regions == expected_copies && plan.paired_output_and_raw &&
+           plan.paired_source_backing_snapshot && plan.callback_payload_is_scalar_only &&
+           !plan.cpu_wait && !plan.finish && !plan.callback_retains_frame &&
+           !plan.callback_retains_image && !plan.callback_retains_vk_image;
 }
 
 struct PpSampledInputPairedCaptureDescriptor {
