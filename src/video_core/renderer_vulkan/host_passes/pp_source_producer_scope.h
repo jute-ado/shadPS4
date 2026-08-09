@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 
@@ -65,6 +66,12 @@ struct PpSourceProducerScopeObservation {
     u32 scope_input_reused{};
     u32 scope_input_alias{};
     u32 invalid_scope_input{};
+    u32 ancestry_observed{};
+    u32 ancestry_max_depth{};
+    u32 ancestry_truncated{};
+    u32 ancestry_loss{};
+    std::array<u32, static_cast<u32>(VideoCore::ImageColorScopeAncestryTerminal::Count)>
+        ancestry_terminals{};
     u32 loss{};
     bool final{};
 };
@@ -183,6 +190,24 @@ public:
             ++invalid_draw_scopes;
             ++loss;
         }
+        if (draw_scope.ancestry.depth != 0) {
+            ++ancestry_observed;
+            ancestry_max_depth = draw_scope.ancestry.depth > ancestry_max_depth
+                                     ? draw_scope.ancestry.depth
+                                     : ancestry_max_depth;
+            ancestry_truncated += draw_scope.ancestry.truncated;
+            const u32 terminal = static_cast<u32>(draw_scope.ancestry.terminal);
+            if (terminal < ancestry_terminals.size()) {
+                ++ancestry_terminals[terminal];
+            } else {
+                ++ancestry_loss;
+                ++loss;
+            }
+            if (VideoCore::IsImageColorScopeAncestryLoss(draw_scope.ancestry.terminal)) {
+                ++ancestry_loss;
+                ++loss;
+            }
+        }
         const bool final = window.IsFinal(sequence);
         if (final && emitted != window.count) {
             ++loss;
@@ -230,6 +255,11 @@ public:
             .scope_input_reused = scope_input_reused,
             .scope_input_alias = scope_input_alias,
             .invalid_scope_input = invalid_scope_input,
+            .ancestry_observed = ancestry_observed,
+            .ancestry_max_depth = ancestry_max_depth,
+            .ancestry_truncated = ancestry_truncated,
+            .ancestry_loss = ancestry_loss,
+            .ancestry_terminals = ancestry_terminals,
             .loss = loss,
             .final = final,
         };
@@ -276,9 +306,37 @@ private:
     u32 scope_input_reused{};
     u32 scope_input_alias{};
     u32 invalid_scope_input{};
+    u32 ancestry_observed{};
+    u32 ancestry_max_depth{};
+    u32 ancestry_truncated{};
+    u32 ancestry_loss{};
+    std::array<u32, static_cast<u32>(VideoCore::ImageColorScopeAncestryTerminal::Count)>
+        ancestry_terminals{};
     u32 loss{};
     bool has_last{};
 };
+
+[[nodiscard]] inline std::string FormatImageColorScopeAncestry(
+    const VideoCore::ImageColorScopeAncestry& ancestry) {
+    std::string result;
+    for (u32 index = 0; index < ancestry.depth; ++index) {
+        if (index != 0) {
+            result += '/';
+        }
+        const auto& node = ancestry.nodes[index];
+        result +=
+            std::to_string(static_cast<u32>(node.producer)) + '.' +
+            std::to_string(node.fresh ? 1 : 0) + '.' + std::to_string(node.alias ? 1 : 0) + '.' +
+            std::to_string(node.producer_valid ? 1 : 0) + '.' + std::to_string(node.draw_count) +
+            '.' + std::to_string(static_cast<u32>(node.last_draw)) + '.' +
+            std::to_string(node.indexed ? 1 : 0) + '.' + std::to_string(node.element_count) + '.' +
+            std::to_string(node.instance_count) + '.' + std::to_string(node.sampled_images) + '.' +
+            std::to_string(node.storage_writes) + '.' +
+            std::to_string(node.clear_at_begin ? 1 : 0) + '.' +
+            std::to_string(node.scope_valid ? 1 : 0) + '.' + std::to_string(node.overflow ? 1 : 0);
+    }
+    return result;
+}
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeObservation(
     const PpSourceProducerScopeObservation& observation) {
@@ -319,7 +377,13 @@ private:
                static_cast<u32>(observation.draw_scope.sampled_input_scope_input_producer)) +
            " nn=" + std::to_string(observation.draw_scope.sampled_input_scope_input_fresh ? 1 : 0) +
            " na=" + std::to_string(observation.draw_scope.sampled_input_scope_input_alias ? 1 : 0) +
-           " nv=" + std::to_string(observation.draw_scope.sampled_input_scope_input_valid ? 1 : 0);
+           " nv=" + std::to_string(observation.draw_scope.sampled_input_scope_input_valid ? 1 : 0) +
+           (observation.draw_scope.ancestry.depth == 0
+                ? std::string{}
+                : " ad=" + std::to_string(observation.draw_scope.ancestry.depth) + " at=" +
+                      std::to_string(static_cast<u32>(observation.draw_scope.ancestry.terminal)) +
+                      " ax=" + std::to_string(observation.draw_scope.ancestry.truncated ? 1 : 0) +
+                      " ch=" + FormatImageColorScopeAncestry(observation.draw_scope.ancestry));
 }
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeCoverage(
@@ -363,6 +427,23 @@ private:
            " dr=" + std::to_string(observation.scope_input_reused) +
            " da=" + std::to_string(observation.scope_input_alias) +
            " dl=" + std::to_string(observation.invalid_scope_input) +
+           (observation.ancestry_observed == 0
+                ? std::string{}
+                : " ao=" + std::to_string(observation.ancestry_observed) +
+                      " am=" + std::to_string(observation.ancestry_max_depth) +
+                      " ax=" + std::to_string(observation.ancestry_truncated) +
+                      " al=" + std::to_string(observation.ancestry_loss) + " at=" +
+                      [&] {
+                          std::string terminals;
+                          for (u32 index = 0; index < observation.ancestry_terminals.size();
+                               ++index) {
+                              if (index != 0) {
+                                  terminals += ',';
+                              }
+                              terminals += std::to_string(observation.ancestry_terminals[index]);
+                          }
+                          return terminals;
+                      }()) +
            " l=" + std::to_string(observation.loss);
 }
 

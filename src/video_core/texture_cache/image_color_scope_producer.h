@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/types.h"
 #include "video_core/texture_cache/image_producer.h"
 
@@ -13,6 +15,68 @@ enum class ImageColorScopeDrawKind : u8 {
     Direct,
     Indirect,
 };
+
+enum class ImageColorScopeAncestryTerminal : u8 {
+    Unknown,
+    NonColorProducer,
+    Alias,
+    InvalidProducer,
+    InvalidScope,
+    Overflow,
+    ZeroDraws,
+    MultipleDraws,
+    ZeroInputs,
+    MultipleInputs,
+    StorageWrite,
+    HistoryUnavailable,
+    DepthCap,
+    Count,
+};
+
+static constexpr u32 MaxImageColorScopeAncestryDepth = 8;
+
+struct ImageColorScopeAncestryNode {
+    ImageProducerClass producer{ImageProducerClass::Unknown};
+    bool fresh{};
+    bool alias{};
+    bool producer_valid{};
+    u32 draw_count{};
+    ImageColorScopeDrawKind last_draw{ImageColorScopeDrawKind::Unknown};
+    bool indexed{};
+    u32 element_count{};
+    u32 instance_count{};
+    u32 sampled_images{};
+    u32 storage_writes{};
+    bool clear_at_begin{};
+    bool scope_valid{};
+    bool overflow{};
+
+    auto operator<=>(const ImageColorScopeAncestryNode&) const = default;
+};
+
+struct ImageColorScopeAncestry {
+    std::array<ImageColorScopeAncestryNode, MaxImageColorScopeAncestryDepth> nodes{};
+    u32 depth{};
+    ImageColorScopeAncestryTerminal terminal{ImageColorScopeAncestryTerminal::Unknown};
+    bool truncated{};
+
+    auto operator<=>(const ImageColorScopeAncestry&) const = default;
+};
+
+[[nodiscard]] constexpr bool IsImageColorScopeAncestryLoss(
+    ImageColorScopeAncestryTerminal terminal) noexcept {
+    switch (terminal) {
+    case ImageColorScopeAncestryTerminal::InvalidProducer:
+    case ImageColorScopeAncestryTerminal::InvalidScope:
+    case ImageColorScopeAncestryTerminal::Overflow:
+    case ImageColorScopeAncestryTerminal::HistoryUnavailable:
+    case ImageColorScopeAncestryTerminal::DepthCap:
+    case ImageColorScopeAncestryTerminal::Unknown:
+        return true;
+    default:
+        return false;
+    }
+}
 
 struct ImageColorScopeDrawDescriptor {
     ImageColorScopeDrawKind kind{ImageColorScopeDrawKind::Unknown};
@@ -40,6 +104,7 @@ struct ImageColorScopeDrawDescriptor {
     bool sampled_input_scope_input_fresh{};
     bool sampled_input_scope_input_alias{};
     bool sampled_input_scope_input_valid{};
+    ImageColorScopeAncestry ancestry{};
 };
 
 struct ImageColorScopeProducerObservation {
@@ -69,12 +134,103 @@ struct ImageColorScopeProducerObservation {
     bool sampled_input_scope_input_fresh{};
     bool sampled_input_scope_input_alias{};
     bool sampled_input_scope_input_valid{};
+    ImageColorScopeAncestry ancestry{};
     bool clear_at_begin{};
     bool valid{};
     bool overflow{};
 
     auto operator<=>(const ImageColorScopeProducerObservation&) const = default;
 };
+
+[[nodiscard]] inline ImageColorScopeAncestry BuildImageColorScopeAncestry(
+    ImageProducerObservation producer, bool producer_valid, bool alias,
+    const ImageColorScopeProducerObservation* scope) noexcept {
+    ImageColorScopeAncestry ancestry{};
+    auto& node = ancestry.nodes[0];
+    node.producer = producer.classification;
+    node.fresh = producer.produced_since_last_observation;
+    node.alias = alias;
+    node.producer_valid = producer_valid;
+    ancestry.depth = 1;
+    if (!producer_valid) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::InvalidProducer;
+        return ancestry;
+    }
+    if (producer.classification == ImageProducerClass::Unknown) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::InvalidProducer;
+        return ancestry;
+    }
+    if (alias) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::Alias;
+        return ancestry;
+    }
+    if (producer.classification != ImageProducerClass::ColorAttachment) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::NonColorProducer;
+        return ancestry;
+    }
+    if (!scope) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::HistoryUnavailable;
+        return ancestry;
+    }
+    node.draw_count = scope->draw_count;
+    node.last_draw = scope->last_draw;
+    node.indexed = scope->indexed;
+    node.element_count = scope->element_count;
+    node.instance_count = scope->instance_count;
+    node.sampled_images = scope->sampled_images;
+    node.storage_writes = scope->storage_writes;
+    node.clear_at_begin = scope->clear_at_begin;
+    node.scope_valid = scope->valid;
+    node.overflow = scope->overflow;
+    if (scope->overflow) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::Overflow;
+        return ancestry;
+    }
+    if (!scope->valid) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::InvalidScope;
+        return ancestry;
+    }
+    if (scope->draw_count == 0) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::ZeroDraws;
+        return ancestry;
+    }
+    if (scope->draw_count != 1) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::MultipleDraws;
+        return ancestry;
+    }
+    if (scope->storage_writes != 0) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::StorageWrite;
+        return ancestry;
+    }
+    if (scope->sampled_images == 0) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::ZeroInputs;
+        return ancestry;
+    }
+    if (scope->sampled_images != 1) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::MultipleInputs;
+        return ancestry;
+    }
+    if (scope->ancestry.depth == 0) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::HistoryUnavailable;
+        return ancestry;
+    }
+    const u32 available = MaxImageColorScopeAncestryDepth - ancestry.depth;
+    const u32 copied = scope->ancestry.depth < available ? scope->ancestry.depth : available;
+    for (u32 index = 0; index < copied; ++index) {
+        ancestry.nodes[ancestry.depth + index] = scope->ancestry.nodes[index];
+    }
+    ancestry.depth += copied;
+    if (copied != scope->ancestry.depth || scope->ancestry.truncated) {
+        ancestry.terminal = ImageColorScopeAncestryTerminal::DepthCap;
+        ancestry.truncated = true;
+    } else {
+        ancestry.terminal = scope->ancestry.terminal;
+        if (ancestry.terminal == ImageColorScopeAncestryTerminal::Unknown) {
+            ancestry.terminal = ImageColorScopeAncestryTerminal::HistoryUnavailable;
+        }
+    }
+    return ancestry;
+}
 
 class ImageColorScopeProducerState {
 public:
@@ -134,6 +290,7 @@ public:
         observation.sampled_input_scope_input_fresh = descriptor.sampled_input_scope_input_fresh;
         observation.sampled_input_scope_input_alias = descriptor.sampled_input_scope_input_alias;
         observation.sampled_input_scope_input_valid = descriptor.sampled_input_scope_input_valid;
+        observation.ancestry = descriptor.ancestry;
         if (descriptor.sampled_images > descriptor.sampled_bindings ||
             descriptor.sampled_bindings > MaxTrackedImageBindings ||
             descriptor.storage_writes > MaxTrackedImageBindings) {

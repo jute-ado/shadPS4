@@ -906,6 +906,11 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             draw.sampled_input_scope_input_fresh = input_scope.sampled_input_fresh;
             draw.sampled_input_scope_input_alias = input_scope.sampled_input_alias;
             draw.sampled_input_scope_input_valid = input_scope.sampled_input_valid;
+            draw.ancestry =
+                VideoCore::BuildImageColorScopeAncestry(input, true, input_alias, &input_scope);
+        } else {
+            draw.ancestry =
+                VideoCore::BuildImageColorScopeAncestry(input, true, input_alias, nullptr);
         }
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
