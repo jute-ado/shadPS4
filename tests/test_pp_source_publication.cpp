@@ -2482,11 +2482,60 @@ TEST(PpTerminalScopeContent, NamedPredecessorAddsTwoBoundedPlanesAndExactVisualP
 
 TEST(PpTerminalScopeContent, PredecessorDrawCannotEraseItsFailedPreCapture) {
     const FinalGuestSurfaceLoss busy_loss{.busy = 1};
-    const auto result = ApplyPpTerminalScopeContentAction(
-        FinalGuestSurfaceStatus::BusyLoss, busy_loss,
-        PpTerminalScopeContentAction::CapturePredecessor);
+    const auto result =
+        ApplyPpTerminalScopeContentAction(FinalGuestSurfaceStatus::BusyLoss, busy_loss,
+                                          PpTerminalScopeContentAction::CapturePredecessor);
     EXPECT_EQ(result.status, FinalGuestSurfaceStatus::BusyLoss);
     EXPECT_EQ(result.loss.busy, 1u);
+}
+
+TEST(PpTerminalScopeContent, PredecessorMayBeTheImmediatelyPreviousColorScopeOnly) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .capture_pre_first = true,
+        .capture_predecessor = true,
+        .predecessor = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                        .indexed = true,
+                        .element_count = 4,
+                        .instance_count = 1,
+                        .sampled_images = 3},
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 9));
+    EXPECT_EQ(gate.PreviewDraw(17, 90, config.predecessor),
+              PpTerminalScopePreDrawAction::CaptureBeforePredecessor);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.predecessor),
+              PpTerminalScopeContentAction::CapturePredecessor);
+    EXPECT_EQ(gate.PreviewDraw(17, 91, config.first),
+              PpTerminalScopePreDrawAction::CaptureBeforeFirst)
+        << "The named predecessor is the sole draw of the immediately ended scope";
+    EXPECT_EQ(gate.ObserveDraw(17, 91, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 91, config.second), PpTerminalScopeContentAction::CaptureSecond);
+
+    ASSERT_TRUE(gate.Arm(17, 10));
+    EXPECT_EQ(gate.PreviewDraw(17, 100, config.predecessor),
+              PpTerminalScopePreDrawAction::CaptureBeforePredecessor);
+    EXPECT_EQ(gate.ObserveDraw(17, 100, config.predecessor),
+              PpTerminalScopeContentAction::CapturePredecessor);
+    auto unrelated = config.first;
+    unrelated.element_count = 12;
+    EXPECT_EQ(gate.PreviewDraw(17, 101, unrelated), PpTerminalScopePreDrawAction::ShapeLoss)
+        << "The predecessor must not bridge an unrelated next color scope";
 }
 
 } // namespace
