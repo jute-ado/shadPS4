@@ -9,26 +9,45 @@ namespace {
 
 using namespace Vulkan::HostPasses;
 
+TEST(PpSourcePublication, ImageRefreshBranchesExposeTheirActualMutationOutcome) {
+    const auto clean = VideoCore::PlanImageRefreshStart(false, 1);
+    EXPECT_FALSE(clean.refresh);
+    EXPECT_EQ(clean.result, VideoCore::ImageRefreshResult::Clean);
+
+    const auto multisampled = VideoCore::PlanImageRefreshStart(true, 4);
+    EXPECT_FALSE(multisampled.refresh);
+    EXPECT_EQ(multisampled.result, VideoCore::ImageRefreshResult::MultisampledDirty);
+
+    const auto dirty = VideoCore::PlanImageRefreshStart(true, 1);
+    EXPECT_TRUE(dirty.refresh);
+    EXPECT_EQ(VideoCore::CompleteImageRefresh(true),
+              VideoCore::ImageRefreshResult::GpuModifiedUnchanged);
+    EXPECT_EQ(VideoCore::CompleteImageRefresh(false), VideoCore::ImageRefreshResult::Uploaded);
+}
+
 TEST(PpSourcePublication, ClassifiesWhetherFlipRefreshMutatedTheSource) {
     EXPECT_EQ(ClassifyPpSourcePublication(
-                  {VideoCore::ImageRefreshResult::Clean, .gpu_modified_before = true}),
+                  {.refresh = VideoCore::ImageRefreshResult::Clean,
+                   .gpu_modified_before = true}),
               PpSourcePublicationClass::CleanGpuProduced);
     EXPECT_EQ(ClassifyPpSourcePublication(
-                  {VideoCore::ImageRefreshResult::Clean, .gpu_modified_before = false}),
+                  {.refresh = VideoCore::ImageRefreshResult::Clean,
+                   .gpu_modified_before = false}),
               PpSourcePublicationClass::CleanResident);
     EXPECT_EQ(ClassifyPpSourcePublication(
-                  {VideoCore::ImageRefreshResult::MaybeCpuDirtyUnchanged,
+                  {.refresh = VideoCore::ImageRefreshResult::MaybeCpuDirtyUnchanged,
                    .gpu_modified_before = true}),
               PpSourcePublicationClass::DirtyNoUpload);
     EXPECT_EQ(ClassifyPpSourcePublication(
-                  {VideoCore::ImageRefreshResult::GpuModifiedUnchanged,
+                  {.refresh = VideoCore::ImageRefreshResult::GpuModifiedUnchanged,
                    .gpu_modified_before = true}),
               PpSourcePublicationClass::DirtyNoUpload);
     EXPECT_EQ(ClassifyPpSourcePublication(
-                  {VideoCore::ImageRefreshResult::Uploaded, .gpu_modified_before = true}),
+                  {.refresh = VideoCore::ImageRefreshResult::Uploaded,
+                   .gpu_modified_before = true}),
               PpSourcePublicationClass::CpuUpload);
     EXPECT_EQ(ClassifyPpSourcePublication(
-                  {VideoCore::ImageRefreshResult::MultisampledDirty,
+                  {.refresh = VideoCore::ImageRefreshResult::MultisampledDirty,
                    .gpu_modified_before = true}),
               PpSourcePublicationClass::Unsupported);
 }
@@ -44,15 +63,15 @@ TEST(PpSourcePublication, ReportsEverySelectedSequenceExactlyOnce) {
     const auto final = coverage.Observe(4003, PpSourcePublicationClass::CpuUpload);
     ASSERT_TRUE(final);
     EXPECT_TRUE(final->final);
-    EXPECT_EQ(final->sequence, 4003);
-    EXPECT_EQ(final->selected, 4);
-    EXPECT_EQ(final->emitted, 4);
-    EXPECT_EQ(final->clean_gpu_produced, 2);
-    EXPECT_EQ(final->clean_resident, 0);
-    EXPECT_EQ(final->dirty_no_upload, 1);
-    EXPECT_EQ(final->cpu_upload, 1);
-    EXPECT_EQ(final->unsupported, 0);
-    EXPECT_EQ(final->loss, 0);
+    EXPECT_EQ(final->sequence, 4003u);
+    EXPECT_EQ(final->selected, 4u);
+    EXPECT_EQ(final->emitted, 4u);
+    EXPECT_EQ(final->clean_gpu_produced, 2u);
+    EXPECT_EQ(final->clean_resident, 0u);
+    EXPECT_EQ(final->dirty_no_upload, 1u);
+    EXPECT_EQ(final->cpu_upload, 1u);
+    EXPECT_EQ(final->unsupported, 0u);
+    EXPECT_EQ(final->loss, 0u);
 }
 
 TEST(PpSourcePublication, GapsAndDuplicatesFailClosed) {
@@ -61,10 +80,10 @@ TEST(PpSourcePublication, GapsAndDuplicatesFailClosed) {
     ASSERT_TRUE(coverage.Observe(10, PpSourcePublicationClass::CleanGpuProduced));
     const auto final = coverage.Observe(12, PpSourcePublicationClass::Unsupported);
     ASSERT_TRUE(final);
-    EXPECT_EQ(final->selected, 3);
-    EXPECT_EQ(final->emitted, 3);
-    EXPECT_EQ(final->unsupported, 1);
-    EXPECT_EQ(final->loss, 2);
+    EXPECT_EQ(final->selected, 3u);
+    EXPECT_EQ(final->emitted, 3u);
+    EXPECT_EQ(final->unsupported, 1u);
+    EXPECT_EQ(final->loss, 2u);
 }
 
 TEST(PpSourcePublication, CompactOutputContainsOnlySequenceClassAndCounts) {
@@ -77,8 +96,8 @@ TEST(PpSourcePublication, CompactOutputContainsOnlySequenceClassAndCounts) {
     ASSERT_TRUE(final);
     const auto coverage_line = FormatPpSourcePublicationCoverage(*final);
     EXPECT_EQ(coverage_line, "FGSCPC s=1 n=1/1 g=0 r=1 d=0 u=0 x=0 l=0");
-    EXPECT_LT(line.size(), 40);
-    EXPECT_LT(coverage_line.size(), 100);
+    EXPECT_LT(line.size(), size_t{40});
+    EXPECT_LT(coverage_line.size(), size_t{100});
 }
 
 } // namespace
