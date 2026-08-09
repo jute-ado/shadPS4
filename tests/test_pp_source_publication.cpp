@@ -7,6 +7,7 @@
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_input_content.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
 #include "video_core/texture_cache/image_producer.h"
 
@@ -2066,6 +2067,8 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM", "direct,indexed,4,1,6,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE", "0"},
         {"SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
@@ -2086,6 +2089,8 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_TRUE(config->content.capture_sampled_input_content);
     EXPECT_TRUE(config->content.capture_upstream_inputs);
     EXPECT_TRUE(config->content.capture_upstream_pre_post);
+    EXPECT_TRUE(config->content.capture_upstream_input_content);
+    EXPECT_EQ(config->content.upstream_candidate_index, 0u);
     EXPECT_EQ(config->content.upstream_input_index, 1u);
     EXPECT_EQ(config->content.upstream.sampled_images, 6u);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
@@ -3389,6 +3394,265 @@ TEST(PpUpstreamFeedbackPrePost, CompactsOnlyTheSelectedCandidatePlanes) {
     EXPECT_EQ(short_slot.status, FinalGuestSurfaceStatus::InvalidationLoss);
     EXPECT_EQ(short_slot.loss.invalidation, 1u);
     EXPECT_TRUE(short_slot.bytes.empty());
+}
+
+TEST(PpUpstreamInputContent, PlansEveryBoundedNonAliasMipWithoutRetainingImages) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.count = 2;
+    selector.ordinals[0] = 1024;
+    selector.ordinals[1] = 2031;
+    const std::array views{
+        PpUpstreamInputContentView{.width = 1920,
+                                   .height = 1080,
+                                   .bytes_per_texel = 8,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 960,
+                                   .height = 540,
+                                   .bytes_per_texel = 16,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 1920,
+                                   .height = 1080,
+                                   .bytes_per_texel = 4,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 480,
+                                   .height = 270,
+                                   .bytes_per_texel = 8,
+                                   .mip_count = 7,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 32,
+                                   .height = 32,
+                                   .bytes_per_texel = 4,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 1920,
+                                   .height = 1080,
+                                   .bytes_per_texel = 4,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true,
+                                   .aliases_output = true},
+    };
+    const auto plan = PlanPpUpstreamInputContent({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .base_offset = 1024,
+        .selector = selector,
+        .views = views,
+        .buffer_alignment = 16,
+        .max_regions = 256,
+        .max_bytes = 4 * 1024 * 1024,
+    });
+    ASSERT_TRUE(plan.copy);
+    EXPECT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(plan.loss.Any());
+    EXPECT_EQ(plan.capture_mask, 0x0fu);
+    EXPECT_EQ(plan.unavailable_mask, 0x10u);
+    EXPECT_EQ(plan.alias_mask, 0x20u);
+    EXPECT_EQ(plan.inputs[0].region_count, 2u);
+    EXPECT_EQ(plan.inputs[3].region_count, 14u);
+    EXPECT_GE(plan.inputs[0].plane_offset, 1024u);
+    EXPECT_GT(plan.total_bytes, 1024u);
+    EXPECT_LT(plan.total_bytes, 4u * 1024 * 1024);
+    EXPECT_FALSE(plan.cpu_wait);
+    EXPECT_FALSE(plan.finish);
+    EXPECT_FALSE(plan.retains_image);
+    EXPECT_FALSE(plan.retains_vk_image);
+
+    for (u32 input_index = 0; input_index < 4; ++input_index) {
+        const auto& input = plan.inputs[input_index];
+        for (u32 region_index = 0; region_index < input.region_count; ++region_index) {
+            const auto& region = input.regions[region_index];
+            EXPECT_GT(region.width, 0u);
+            EXPECT_GT(region.height, 0u);
+            EXPECT_GT(region.byte_size, 0u);
+            EXPECT_LE(region.buffer_offset + region.byte_size, plan.total_bytes);
+        }
+    }
+}
+
+TEST(PpUpstreamInputContent, CompactsCapturedPlanesAndPreservesExplicitMasks) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.count = 1;
+    selector.ordinals[0] = 1299;
+    const std::array views{
+        PpUpstreamInputContentView{.width = 1920,
+                                   .height = 1080,
+                                   .bytes_per_texel = 8,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 32,
+                                   .height = 32,
+                                   .bytes_per_texel = 4,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .uniform_state = true},
+        PpUpstreamInputContentView{.width = 1920,
+                                   .height = 1080,
+                                   .bytes_per_texel = 4,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true,
+                                   .aliases_output = true},
+    };
+    const auto plan = PlanPpUpstreamInputContent({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .base_offset = 4096,
+        .selector = selector,
+        .views = views,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = 4 * 1024 * 1024,
+    });
+    ASSERT_TRUE(plan.copy);
+    std::vector<std::byte> slot(plan.total_bytes);
+    const auto& source = plan.inputs[0];
+    std::ranges::fill(std::span{slot}.subspan(source.plane_offset, source.plane_bytes),
+                      std::byte{0x5a});
+    const auto compact = CompactPpUpstreamInputContent(plan, slot);
+    ASSERT_EQ(compact.status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_FALSE(compact.loss.Any());
+    EXPECT_EQ(compact.capture_mask, 0b001u);
+    EXPECT_EQ(compact.unavailable_mask, 0b010u);
+    EXPECT_EQ(compact.alias_mask, 0b100u);
+    EXPECT_EQ(compact.bytes.size(), source.plane_bytes);
+    EXPECT_EQ(compact.plane_offsets[0], 0u);
+    EXPECT_EQ(compact.bytes.front(), std::byte{0x5a});
+    EXPECT_TRUE(compact.bytes.back() == std::byte{0x5a});
+}
+
+TEST(PpUpstreamInputContent, RejectsUnboundedFormatsAndCapacityTransactionally) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.count = 1;
+    selector.ordinals[0] = 1297;
+    const std::array invalid_views{
+        PpUpstreamInputContentView{.width = 1280,
+                                   .height = 720,
+                                   .bytes_per_texel = 3,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+    };
+    const auto unsupported = PlanPpUpstreamInputContent({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .selector = selector,
+        .views = invalid_views,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = 4 * 1024 * 1024,
+    });
+    EXPECT_FALSE(unsupported.copy);
+    EXPECT_EQ(unsupported.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(unsupported.loss.unsupported_format, 1u);
+
+    const std::array large_views{
+        PpUpstreamInputContentView{.width = 1920,
+                                   .height = 1080,
+                                   .bytes_per_texel = 16,
+                                   .mip_count = 1,
+                                   .color = true,
+                                   .type_2d = true,
+                                   .uniform_state = true},
+    };
+    const auto capacity = PlanPpUpstreamInputContent({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .selector = selector,
+        .views = large_views,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = 1024,
+    });
+    EXPECT_FALSE(capacity.copy);
+    EXPECT_EQ(capacity.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(capacity.loss.byte_capacity, 1u);
+
+    auto disabled = PlanPpUpstreamInputContent({});
+    EXPECT_FALSE(disabled.copy);
+    EXPECT_EQ(disabled.total_bytes, 0u);
+}
+
+TEST(PpUpstreamInputContent, ClassifiesExactRawTripletsWithoutPixelInterpretation) {
+    const std::array a{std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40}};
+    const std::array b{std::byte{0x10}, std::byte{0x21}, std::byte{0x30}, std::byte{0x40}};
+    const std::array c = a;
+    const std::array d{std::byte{0x10}, std::byte{0x22}, std::byte{0x30}, std::byte{0x40}};
+    EXPECT_EQ(ClassifyPpUpstreamInputRawTriplet(a, b, c), PpUpstreamInputRawClass::Aba);
+    EXPECT_EQ(ClassifyPpUpstreamInputRawTriplet(a, a, a), PpUpstreamInputRawClass::Stable);
+    EXPECT_EQ(ClassifyPpUpstreamInputRawTriplet(a, b, d), PpUpstreamInputRawClass::Ambiguous);
+    EXPECT_EQ(ClassifyPpUpstreamInputRawTriplet(a, b, std::span<const std::byte>{}),
+              PpUpstreamInputRawClass::Unavailable);
+}
+
+TEST(PpUpstreamInputContent, CapturesOnlyTheConfiguredPrivateCandidate) {
+    PpUpstreamInputCaptureGate gate{0};
+    EXPECT_TRUE(gate.Preview(0).capture);
+    EXPECT_FALSE(gate.Preview(1).capture);
+    EXPECT_EQ(gate.Preview(1).status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_TRUE(gate.Complete(0, true).publish);
+    EXPECT_EQ(gate.Complete(1, true).status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_TRUE(gate.Preview(0).capture);
+    EXPECT_EQ(gate.Complete(0, false).status, FinalGuestSurfaceStatus::InvalidationLoss);
+    gate.Reset();
+    EXPECT_TRUE(gate.Preview(0).capture);
+}
+
+TEST(PpUpstreamInputContent, ReducerTreatsAllMipsAsOneOpaqueLogicalRegion) {
+    PpTerminalScopeContentReducer reducer{{.frame_start = 700, .frame_count = 3}, 8};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .total_bytes = 8,
+        .input_count = 1,
+        .input_capture_mask = 1,
+        .input_planes =
+            {{{.region_count = 2,
+               .plane_offset = 0,
+               .plane_bytes = 8,
+               .regions = {{{.logical_ordinal = 1024, .buffer_offset = 0, .byte_size = 4},
+                            {.logical_ordinal = 1024, .buffer_offset = 4, .byte_size = 4}}},
+               .bytes_per_texel = 2,
+               .raw_compare = true,
+               .status = FinalGuestSurfaceStatus::Complete}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const std::array a{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4},
+                       std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8}};
+    auto b = a;
+    b[7] = std::byte{9};
+    reducer.ObserveContent(700, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(701, layout, b, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(702, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 700, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 701, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 702, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].sampled_input_aba_ordinals[0], (std::vector<u32>{1024}));
+    EXPECT_TRUE(reports[0].sampled_input_stable_ordinals[0].empty());
+    EXPECT_TRUE(reports[0].sampled_input_ambiguous_ordinals[0].empty());
+    EXPECT_TRUE(reports[0].sampled_input_localized_visual_return_ordinals[0].empty());
+    EXPECT_FALSE(reports[0].loss.Any());
 }
 
 } // namespace
