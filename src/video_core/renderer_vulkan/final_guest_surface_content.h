@@ -59,6 +59,7 @@ enum class FinalGuestSurfaceStage : u8 {
     PostPp,
     PpInputShadow,
     PpSampledInput,
+    PpSourceReconstruction,
 };
 
 enum class FinalGuestSurfaceStatus : u8 {
@@ -208,6 +209,10 @@ struct FinalGuestSurfaceTilePlan {
     u32 paired_backing_region_count{};
     std::array<FinalGuestSurfacePairedRegion, 32> paired_backing_regions{};
     FinalGuestSurfaceFormat paired_backing_format{FinalGuestSurfaceFormat::Unsupported};
+    u32 paired_reconstruction_offset{};
+    u32 paired_reconstruction_bytes{};
+    u32 paired_reconstruction_row_bytes{};
+    FinalGuestSurfaceFormat paired_reconstruction_format{FinalGuestSurfaceFormat::Unsupported};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -650,14 +655,18 @@ template <typename ReadValue>
             config.stage = FinalGuestSurfaceStage::PpInputShadow;
         } else if (*stage == "pp_sampled_input") {
             config.stage = FinalGuestSurfaceStage::PpSampledInput;
+        } else if (*stage == "pp_source_reconstruction") {
+            config.stage = FinalGuestSurfaceStage::PpSourceReconstruction;
         } else if (*stage != "guest_pre_fsr") {
             return std::nullopt;
         }
     }
     if (const auto calibrated = read_value("SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS")) {
-        if (*calibrated != "1" || (config.stage != FinalGuestSurfaceStage::PostPp &&
-                                   config.stage != FinalGuestSurfaceStage::PpInputShadow &&
-                                   config.stage != FinalGuestSurfaceStage::PpSampledInput)) {
+        if (*calibrated != "1" ||
+            (config.stage != FinalGuestSurfaceStage::PostPp &&
+             config.stage != FinalGuestSurfaceStage::PpInputShadow &&
+             config.stage != FinalGuestSurfaceStage::PpSampledInput &&
+             config.stage != FinalGuestSurfaceStage::PpSourceReconstruction)) {
             return std::nullopt;
         }
         config.calibrated_triplets = true;
@@ -675,7 +684,8 @@ template <typename ReadValue>
         config.expected_calibrations = parsed;
     }
     if ((config.stage == FinalGuestSurfaceStage::PpInputShadow ||
-         config.stage == FinalGuestSurfaceStage::PpSampledInput) &&
+         config.stage == FinalGuestSurfaceStage::PpSampledInput ||
+         config.stage == FinalGuestSurfaceStage::PpSourceReconstruction) &&
         !config.calibrated_triplets) {
         return std::nullopt;
     }
@@ -705,7 +715,8 @@ template <typename ReadValue>
     bool in_capture_window) noexcept {
     return (stage == FinalGuestSurfaceStage::PostPp ||
             stage == FinalGuestSurfaceStage::PpInputShadow ||
-            stage == FinalGuestSurfaceStage::PpSampledInput) &&
+            stage == FinalGuestSurfaceStage::PpSampledInput ||
+            stage == FinalGuestSurfaceStage::PpSourceReconstruction) &&
            !is_reusing_frame && stamp_valid && in_capture_window;
 }
 
@@ -713,7 +724,8 @@ template <typename ReadValue>
     FinalGuestSurfaceStage stage) noexcept {
     return stage == FinalGuestSurfaceStage::PostPp ||
            stage == FinalGuestSurfaceStage::PpInputShadow ||
-           stage == FinalGuestSurfaceStage::PpSampledInput;
+           stage == FinalGuestSurfaceStage::PpSampledInput ||
+           stage == FinalGuestSurfaceStage::PpSourceReconstruction;
 }
 
 struct FinalGuestSurfaceLogPolicyConfig {
@@ -726,7 +738,8 @@ struct FinalGuestSurfaceLogPolicyConfig {
 [[nodiscard]] constexpr FinalGuestSurfaceLogPolicyConfig FinalGuestSurfaceLogPolicy(
     FinalGuestSurfaceStage stage) noexcept {
     if (stage == FinalGuestSurfaceStage::PpInputShadow ||
-        stage == FinalGuestSurfaceStage::PpSampledInput) {
+        stage == FinalGuestSurfaceStage::PpSampledInput ||
+        stage == FinalGuestSurfaceStage::PpSourceReconstruction) {
         return {
             .verbose_frame_reports = false,
             .calibrated_triplet_reports = true,
@@ -1081,6 +1094,10 @@ struct FinalGuestSurfaceCalibratedReport {
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> backing_aba_ordinals{};
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> backing_stable_ordinals{};
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> backing_ambiguous_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        reconstruction_reproduced_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        reconstruction_not_reproduced_ordinals{};
     u32 matched_ordinal_count{};
     u32 pre_or_at_sample_ordinal_count{};
     u32 post_sample_ordinal_count{};
@@ -1088,6 +1105,8 @@ struct FinalGuestSurfaceCalibratedReport {
     u32 backing_aba_ordinal_count{};
     u32 backing_stable_ordinal_count{};
     u32 backing_ambiguous_ordinal_count{};
+    u32 reconstruction_reproduced_ordinal_count{};
+    u32 reconstruction_not_reproduced_ordinal_count{};
     u32 selector_count{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceCalibratedLoss loss{};
@@ -1141,6 +1160,11 @@ struct FinalGuestSurfaceCalibratedCoverage {
         format_ordinals(report.backing_stable_ordinals, report.backing_stable_ordinal_count);
     const auto backing_ambiguous =
         format_ordinals(report.backing_ambiguous_ordinals, report.backing_ambiguous_ordinal_count);
+    const auto reconstruction_reproduced = format_ordinals(
+        report.reconstruction_reproduced_ordinals, report.reconstruction_reproduced_ordinal_count);
+    const auto reconstruction_not_reproduced =
+        format_ordinals(report.reconstruction_not_reproduced_ordinals,
+                        report.reconstruction_not_reproduced_ordinal_count);
     return "FGSCT q=" + std::to_string(report.request_ordinal) +
            " abc=" + std::to_string(report.a_sequence) + '/' + std::to_string(report.b_sequence) +
            '/' + std::to_string(report.c_sequence) +
@@ -1148,7 +1172,9 @@ struct FinalGuestSurfaceCalibratedCoverage {
            std::to_string(report.b_process_time_us) + '/' +
            std::to_string(report.c_process_time_us) + " r=" + ordinals + " pre=" + pre +
            " post=" + post + " amb=" + ambiguous + " ba=" + backing_aba + " bs=" + backing_stable +
-           " bx=" + backing_ambiguous + " n=" + std::to_string(report.matched_ordinal_count) + '/' +
+           " bx=" + backing_ambiguous + " ry=" + reconstruction_reproduced +
+           " rn=" + reconstruction_not_reproduced +
+           " n=" + std::to_string(report.matched_ordinal_count) + '/' +
            std::to_string(report.selector_count) + " ex=" + std::to_string(report.exact_aba) +
            " v=" + std::to_string(report.stable_transport) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
@@ -1348,6 +1374,22 @@ public:
                 }
             }
         }
+        if (plan.paired_reconstruction_format != FinalGuestSurfaceFormat::Unsupported) {
+            const auto reconstruction_block =
+                DescribeFinalGuestSurfaceFormat(plan.paired_reconstruction_format);
+            const u64 reconstruction_end = static_cast<u64>(plan.paired_reconstruction_offset) +
+                                           plan.paired_reconstruction_bytes;
+            if ((plan.paired_reconstruction_format != FinalGuestSurfaceFormat::Rgba8 &&
+                 plan.paired_reconstruction_format != FinalGuestSurfaceFormat::Bgra8) ||
+                reconstruction_block.bytes != plan.bytes_per_pixel ||
+                plan.paired_reconstruction_row_bytes != plan.row_bytes ||
+                plan.paired_reconstruction_bytes !=
+                    static_cast<u64>(plan.row_bytes) * plan.surface_height ||
+                reconstruction_end > plan.sample_bytes) {
+                return fail(FinalGuestSurfaceStatus::InvalidationLoss,
+                            &FinalGuestSurfaceCalibratedLoss::invalid);
+            }
+        }
         report.stable_transport = true;
         for (u32 selected = 0; selected < runtime_selector.count; ++selected) {
             const u32 index = runtime_selector.ordinals[selected] - 1;
@@ -1390,6 +1432,21 @@ public:
                         report
                             .backing_ambiguous_ordinals[report.backing_ambiguous_ordinal_count++] =
                             index + 1;
+                    }
+                }
+                if (plan.paired_reconstruction_format != FinalGuestSurfaceFormat::Unsupported) {
+                    const auto reconstructed = IsPairedReconstructionVisualReturn(
+                        *endpoints[0], *endpoints[1], plan, endpoints[2]->bytes, index);
+                    if (!reconstructed) {
+                        return fail(FinalGuestSurfaceStatus::InvalidationLoss,
+                                    &FinalGuestSurfaceCalibratedLoss::invalid);
+                    }
+                    if (*reconstructed) {
+                        report.reconstruction_reproduced_ordinals
+                            [report.reconstruction_reproduced_ordinal_count++] = index + 1;
+                    } else {
+                        report.reconstruction_not_reproduced_ordinals
+                            [report.reconstruction_not_reproduced_ordinal_count++] = index + 1;
                     }
                 }
             }
@@ -1612,6 +1669,42 @@ private:
                                  std::span<const std::byte>{observation.bytes}.subspan(
                                      static_cast<size_t>(start), region->byte_size),
                                  bytes.subspan(static_cast<size_t>(start), region->byte_size));
+    }
+
+    [[nodiscard]] static std::optional<bool> IsPairedReconstructionVisualReturn(
+        const Observation& baseline, const Observation& departure,
+        const FinalGuestSurfaceTilePlan& plan, std::span<const std::byte> bytes,
+        u32 index) noexcept {
+        if (!SameLayout(baseline, plan) || !SameLayout(departure, plan) ||
+            baseline.bytes.size() != bytes.size() || departure.bytes.size() != bytes.size() ||
+            plan.paired_reconstruction_format == FinalGuestSurfaceFormat::Unsupported) {
+            return std::nullopt;
+        }
+        const u64 start = plan.paired_reconstruction_offset;
+        const u64 size = plan.paired_reconstruction_bytes;
+        if (start + size > bytes.size()) {
+            return std::nullopt;
+        }
+        const auto baseline_plane = std::span<const std::byte>{baseline.bytes}.subspan(
+            static_cast<size_t>(start), static_cast<size_t>(size));
+        const auto departure_plane = std::span<const std::byte>{departure.bytes}.subspan(
+            static_cast<size_t>(start), static_cast<size_t>(size));
+        const auto current_plane =
+            bytes.subspan(static_cast<size_t>(start), static_cast<size_t>(size));
+        const auto baseline_to_departure = ChangedVisualPixels(
+            plan.paired_reconstruction_format, plan, baseline_plane, departure_plane, index);
+        const auto departure_to_current = ChangedVisualPixels(
+            plan.paired_reconstruction_format, plan, departure_plane, current_plane, index);
+        const auto baseline_to_current = ChangedVisualPixels(
+            plan.paired_reconstruction_format, plan, baseline_plane, current_plane, index);
+        if (!baseline_to_departure || !departure_to_current || !baseline_to_current) {
+            return std::nullopt;
+        }
+        const auto tile = plan.TileAt(index);
+        const u64 pixels = static_cast<u64>(tile.width) * tile.height;
+        return static_cast<u64>(*baseline_to_departure) * 4 >= pixels &&
+               static_cast<u64>(*departure_to_current) * 4 >= pixels &&
+               static_cast<u64>(*baseline_to_current) * 100 <= pixels;
     }
 
     [[nodiscard]] static u32 ChangedTiles(const Observation& previous,

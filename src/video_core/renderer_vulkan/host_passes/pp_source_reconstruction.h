@@ -37,6 +37,7 @@ struct PpSourceReconstructionDescriptor {
 
 struct PpSourceReconstructionPlan {
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceFormat output_format{FinalGuestSurfaceFormat::Unsupported};
     u32 resource_image_count{};
     u32 source_snapshot_bytes{};
     u32 reconstruction_output_bytes{};
@@ -118,6 +119,7 @@ struct PpSourceReconstructionPlan {
     }
     return {
         .status = FinalGuestSurfaceStatus::Complete,
+        .output_format = descriptor.output_format,
         .resource_image_count = 2,
         .source_snapshot_bytes = static_cast<u32>(source_bytes),
         .reconstruction_output_bytes = static_cast<u32>(output_bytes),
@@ -142,6 +144,38 @@ struct PpSourceReconstructionPlan {
         .reconstruction_restored_for_present_transfer = true,
         .callback_payload_is_scalar_only = true,
     };
+}
+
+[[nodiscard]] constexpr FinalGuestSurfaceTilePlan AttachPpSourceReconstructionPlane(
+    FinalGuestSurfaceTilePlan plan, const PpSourceReconstructionPlan& reconstruction) noexcept {
+    if (plan.status != FinalGuestSurfaceStatus::Complete ||
+        reconstruction.status != FinalGuestSurfaceStatus::Complete ||
+        reconstruction.reconstruction_readback_offset < plan.sample_bytes ||
+        reconstruction.final_readback_bytes < reconstruction.reconstruction_readback_offset ||
+        reconstruction.reconstruction_output_bytes !=
+            static_cast<u64>(plan.row_bytes) * plan.surface_height ||
+        reconstruction.final_readback_bytes !=
+            static_cast<u64>(reconstruction.reconstruction_readback_offset) +
+                reconstruction.reconstruction_output_bytes) {
+        plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        plan.loss.invalidation = 1;
+        return plan;
+    }
+    plan.paired_reconstruction_offset = reconstruction.reconstruction_readback_offset;
+    plan.paired_reconstruction_bytes = reconstruction.reconstruction_output_bytes;
+    plan.paired_reconstruction_row_bytes = plan.row_bytes;
+    plan.paired_reconstruction_format =
+        plan.stage == FinalGuestSurfaceStage::PpSourceReconstruction && plan.bytes_per_pixel == 4
+            ? reconstruction.output_format
+            : FinalGuestSurfaceFormat::Unsupported;
+    if (plan.paired_reconstruction_format == FinalGuestSurfaceFormat::Unsupported) {
+        plan.status = FinalGuestSurfaceStatus::Unsupported;
+        plan.loss.unsupported_format = 1;
+        return plan;
+    }
+    plan.sample_bytes = reconstruction.final_readback_bytes;
+    ++plan.copy_region_count;
+    return plan;
 }
 
 enum class PpSourceReconstructionClass : u8 {
