@@ -3809,7 +3809,7 @@ TEST(PpUpstreamSampleRoute, FailsClosedOnMissingInvalidDuplicateOrOverflowRoutes
         .observations = conflicting,
     });
     EXPECT_EQ(conflict.status, FinalGuestSurfaceStatus::InvalidationLoss);
-    EXPECT_EQ(conflict.loss.source_conflict, 1);
+    EXPECT_EQ(conflict.loss.invalidation, 1);
 
     std::array<PpUpstreamSampleRouteObservation, PpUpstreamSampleRouteSet::MaxRoutes + 1> many{};
     for (u32 index = 0; index < many.size(); ++index) {
