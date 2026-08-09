@@ -1050,7 +1050,8 @@ TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
     PpTerminalScopeContentGate gate{
         {.enabled = true,
          .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct},
-         .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct}}};
+         .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct},
+         .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct}}};
     ASSERT_TRUE(gate.Arm(7, 10));
     EXPECT_EQ(gate.ObserveDraw(7, 100, {.kind = VideoCore::ImageColorScopeDrawKind::Direct}),
               PpTerminalScopeContentAction::CaptureFirst);

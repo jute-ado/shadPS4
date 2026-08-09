@@ -38,6 +38,7 @@ struct PpTerminalScopeContentConfig {
     bool enabled{};
     PpTerminalScopeDrawSelector first{};
     PpTerminalScopeDrawSelector second{};
+    PpTerminalScopeDrawSelector consumer{};
 };
 
 struct PpTerminalScopeRuntimeConfig {
@@ -117,16 +118,18 @@ template <typename ReadValue>
     }
     const auto first_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_FIRST");
     const auto second_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_SECOND");
-    if (!first_value || !second_value) {
+    const auto consumer_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_CONSUMER");
+    if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
     const auto second = ParsePpTerminalScopeDrawSelector(*second_value);
-    if (!first || !second) {
+    const auto consumer = ParsePpTerminalScopeDrawSelector(*consumer_value);
+    if (!first || !second || !consumer) {
         return std::nullopt;
     }
     return PpTerminalScopeRuntimeConfig{
-        .content = {.enabled = true, .first = *first, .second = *second},
+        .content = {.enabled = true, .first = *first, .second = *second, .consumer = *consumer},
         .window = final_config->window,
         .watch_ordinals = final_config->watch_ordinals,
         .expected_calibrations = final_config->expected_calibrations,
@@ -271,7 +274,8 @@ public:
     [[nodiscard]] constexpr bool Arm(u64 target_token, u64 generation) noexcept {
         if (!config.enabled || target_token == 0 || generation == 0 ||
             config.first.kind == VideoCore::ImageColorScopeDrawKind::Unknown ||
-            config.second.kind == VideoCore::ImageColorScopeDrawKind::Unknown) {
+            config.second.kind == VideoCore::ImageColorScopeDrawKind::Unknown ||
+            config.consumer.kind == VideoCore::ImageColorScopeDrawKind::Unknown) {
             Reset();
             return false;
         }
@@ -279,6 +283,7 @@ public:
         armed_generation = generation;
         scope_serial = 0;
         phase = 0;
+        frozen = false;
         return true;
     }
 
@@ -286,6 +291,9 @@ public:
         u64 target_token, u64 observed_scope_serial,
         const PpTerminalScopeDrawSelector& draw) noexcept {
         if (target_token == 0 || target_token != token || observed_scope_serial == 0) {
+            return PpTerminalScopeContentAction::None;
+        }
+        if (frozen) {
             return PpTerminalScopeContentAction::None;
         }
         if (scope_serial != observed_scope_serial) {
@@ -315,6 +323,16 @@ public:
         return PpTerminalScopeContentAction::None;
     }
 
+    [[nodiscard]] constexpr bool ObserveConsumer(
+        u64 target_token, const PpTerminalScopeDrawSelector& consumer) noexcept {
+        if (target_token == 0 || target_token != token || phase != 2 || frozen ||
+            !MatchesPpTerminalScopeDraw(config.consumer, consumer)) {
+            return false;
+        }
+        frozen = true;
+        return true;
+    }
+
     [[nodiscard]] constexpr PpTerminalScopeContentTakeResult Take(u64 target_token,
                                                                   u64 generation) noexcept {
         PpTerminalScopeContentTakeResult result{};
@@ -331,6 +349,7 @@ public:
         }
         scope_serial = 0;
         phase = 0;
+        frozen = false;
         return result;
     }
 
@@ -340,6 +359,7 @@ private:
         armed_generation = 0;
         scope_serial = 0;
         phase = 0;
+        frozen = false;
     }
 
     PpTerminalScopeContentConfig config{};
@@ -347,6 +367,7 @@ private:
     u64 armed_generation{};
     u64 scope_serial{};
     u32 phase{};
+    bool frozen{};
 };
 
 struct PpTerminalScopeContentDescriptor {

@@ -65,7 +65,8 @@ public:
         LOG_INFO(Render,
                  "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
                  "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
-                 "second={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={}",
+                 "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} targets={} slots={} "
+                 "max_bytes={}",
                  config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
                  config.expected_calibrations, static_cast<u32>(config.content.first.kind),
                  config.content.first.indexed, config.content.first.element_count,
@@ -73,8 +74,28 @@ public:
                  config.content.first.storage_writes, static_cast<u32>(config.content.second.kind),
                  config.content.second.indexed, config.content.second.element_count,
                  config.content.second.instance_count, config.content.second.sampled_images,
-                 config.content.second.storage_writes, MaxTargets,
-                 FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes);
+                 config.content.second.storage_writes,
+                 static_cast<u32>(config.content.consumer.kind), config.content.consumer.indexed,
+                 config.content.consumer.element_count, config.content.consumer.instance_count,
+                 config.content.consumer.sampled_images, config.content.consumer.storage_writes,
+                 MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots,
+                 PpTerminalScopeSnapshotBytes);
+    }
+
+    void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+        Entry* entry = Find(draw.sampled_input_image);
+        if (!entry) {
+            return;
+        }
+        [[maybe_unused]] const bool frozen = entry->gate.ObserveConsumer(
+            draw.sampled_input_image.uid, {
+                                              .kind = draw.kind,
+                                              .indexed = draw.indexed,
+                                              .element_count = draw.element_count,
+                                              .instance_count = draw.instance_count,
+                                              .sampled_images = draw.sampled_images,
+                                              .storage_writes = draw.storage_writes,
+                                          });
     }
 
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
@@ -1404,6 +1425,9 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             draw.ancestry =
                 VideoCore::BuildImageColorScopeAncestry(input, true, input_alias, nullptr);
         }
+    }
+    if (pp_terminal_scope_content) {
+        pp_terminal_scope_content->ObserveConsumer(draw);
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
