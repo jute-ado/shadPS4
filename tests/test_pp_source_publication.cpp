@@ -870,6 +870,12 @@ TEST(PpTerminalScopeContent, ExternalShapeSelectorArmsExactlyTwoOrderedDraws) {
                    .instance_count = 1,
                    .sampled_images = 2,
                    .storage_writes = 0},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1,
+                     .storage_writes = 0},
     };
     PpTerminalScopeContentGate gate{config};
     EXPECT_TRUE(gate.Arm(17, 3));
@@ -901,6 +907,11 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
                    .element_count = 24,
                    .instance_count = 1,
                    .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
     };
     PpTerminalScopeContentGate gate{config};
     ASSERT_TRUE(gate.Arm(17, 4));
@@ -933,6 +944,45 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     const auto missing = PlanPpTerminalScopePlaneSlot(1, false);
     EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
     EXPECT_EQ(missing.loss.gap, 1u);
+}
+
+TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 4));
+    ASSERT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    ASSERT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    auto wrong_consumer = config.consumer;
+    wrong_consumer.element_count = 5;
+    EXPECT_FALSE(gate.ObserveConsumer(17, wrong_consumer));
+    EXPECT_TRUE(gate.ObserveConsumer(17, config.consumer));
+
+    const PpTerminalScopeDrawSelector later_scope{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 3,
+        .instance_count = 1,
+        .sampled_images = 1,
+    };
+    EXPECT_EQ(gate.ObserveDraw(17, 91, later_scope), PpTerminalScopeContentAction::None);
+    EXPECT_EQ(gate.Take(17, 4).status, FinalGuestSurfaceStatus::Complete);
 }
 
 TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceTwoBoundedPlanes) {
@@ -1227,6 +1277,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONSUMER", "direct,indexed,4,1,1,0"},
     };
     const auto config = ResolvePpTerminalScopeRuntimeConfig([&](const char* name) {
         const auto found = values.find(name);
@@ -1244,6 +1295,9 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->content.second,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 24, 1,
                                            2, 0}));
+    EXPECT_EQ(config->content.consumer,
+              (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 4, 1,
+                                           1, 0}));
 }
 
 TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSelection) {
