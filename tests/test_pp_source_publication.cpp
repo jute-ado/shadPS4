@@ -1259,4 +1259,39 @@ TEST(PpTerminalScopeContent, FlipDecisionEmitsAtMostOneFailClosedObservation) {
     EXPECT_TRUE(outside.arm_next);
 }
 
+TEST(PpTerminalScopeContent, CalibratedCoverageIsExactAndFailsClosedWhenIncomplete) {
+    PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 1,
+        .plane_bytes = 4,
+        .second_plane_offset = 4,
+        .total_bytes = 8,
+        .regions = {{{.logical_ordinal = 31, .buffer_offset = 0, .byte_size = 4}}},
+    };
+    const std::array<std::byte, 8> bytes{};
+    for (u64 sequence = 300; sequence <= 302; ++sequence) {
+        reducer.ObserveContent(sequence, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
+    }
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 300, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 301, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 302, .valid = true});
+    const auto complete = reducer.GetCoverage(3);
+    EXPECT_TRUE(complete.ready);
+    EXPECT_EQ(complete.calibrations, 3u);
+    EXPECT_EQ(complete.outside, 0u);
+    EXPECT_EQ(complete.eligible, 1u);
+    EXPECT_EQ(complete.emitted, 1u);
+    EXPECT_EQ(complete.complete, 1u);
+    EXPECT_EQ(complete.loss, 0u);
+
+    const auto incomplete = reducer.GetCoverage(5);
+    EXPECT_FALSE(incomplete.ready);
+    EXPECT_EQ(incomplete.calibrations, 3u);
+    EXPECT_EQ(incomplete.loss, 2u);
+    const auto line = FormatPpTerminalScopeCalibratedCoverage(incomplete);
+    EXPECT_NE(line.find("FGSCTSTC c=3"), std::string::npos);
+    EXPECT_NE(line.find("e=1/1/1"), std::string::npos);
+    EXPECT_NE(line.find("lm=2"), std::string::npos);
+}
+
 } // namespace
