@@ -1496,6 +1496,47 @@ TEST(PpTerminalScopeContent, FlipDecisionEmitsAtMostOneFailClosedObservation) {
     EXPECT_TRUE(outside.arm_next);
 }
 
+TEST(PpTerminalScopeContent, DiscoveryArmsAndCapturesTheExactFirstDraw) {
+    const auto discover = PlanPpTerminalScopeDiscoveryDecision(true, false, true, true, true, true);
+    EXPECT_EQ(discover.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(discover.allocate);
+    EXPECT_TRUE(discover.arm);
+    EXPECT_TRUE(discover.capture_current_draw);
+    EXPECT_FALSE(discover.loss.Any());
+
+    const auto tracked = PlanPpTerminalScopeDiscoveryDecision(true, true, true, true, true, true);
+    EXPECT_FALSE(tracked.allocate);
+    EXPECT_FALSE(tracked.arm);
+    EXPECT_FALSE(tracked.capture_current_draw);
+
+    const auto unrelated =
+        PlanPpTerminalScopeDiscoveryDecision(true, false, false, true, true, true);
+    EXPECT_FALSE(unrelated.allocate);
+    EXPECT_FALSE(unrelated.arm);
+    EXPECT_FALSE(unrelated.capture_current_draw);
+}
+
+TEST(PpTerminalScopeContent, DiscoveryFailsClosedForStaleMappingTargetOrCapacity) {
+    const auto stale_mapping =
+        PlanPpTerminalScopeDiscoveryDecision(true, false, true, false, true, true);
+    EXPECT_EQ(stale_mapping.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(stale_mapping.loss.invalidation, 1u);
+    EXPECT_FALSE(stale_mapping.allocate);
+    EXPECT_FALSE(stale_mapping.capture_current_draw);
+
+    const auto invalid_target =
+        PlanPpTerminalScopeDiscoveryDecision(true, false, true, true, false, true);
+    EXPECT_EQ(invalid_target.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid_target.loss.invalidation, 1u);
+    EXPECT_FALSE(invalid_target.allocate);
+
+    const auto full = PlanPpTerminalScopeDiscoveryDecision(true, false, true, true, true, false);
+    EXPECT_EQ(full.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(full.loss.tile_capacity, 1u);
+    EXPECT_FALSE(full.allocate);
+    EXPECT_FALSE(full.arm);
+}
+
 TEST(PpTerminalScopeContent, CalibratedCoverageIsExactAndFailsClosedWhenIncomplete) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
