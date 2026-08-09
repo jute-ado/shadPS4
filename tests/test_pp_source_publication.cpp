@@ -885,6 +885,8 @@ TEST(PpTerminalScopeContent, ExternalShapeSelectorArmsExactlyTwoOrderedDraws) {
     EXPECT_TRUE(gate.Arm(17, 4));
     EXPECT_EQ(gate.ObserveDraw(17, 92, config.first), PpTerminalScopeContentAction::CaptureFirst);
     EXPECT_EQ(gate.ObserveDraw(17, 92, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    EXPECT_EQ(gate.ObserveConsumer(17, config.consumer),
+              PpTerminalScopeConsumerAction::CaptureConsumer);
     const auto complete = gate.Take(17, 4);
     EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_EQ(complete.draw_count, 2u);
@@ -928,6 +930,8 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     EXPECT_EQ(gate.ObserveDraw(17, 91, unrelated), PpTerminalScopeContentAction::ShapeLoss);
     EXPECT_EQ(gate.ObserveDraw(17, 92, config.first), PpTerminalScopeContentAction::CaptureFirst);
     EXPECT_EQ(gate.ObserveDraw(17, 92, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    EXPECT_EQ(gate.ObserveConsumer(17, config.consumer),
+              PpTerminalScopeConsumerAction::CaptureConsumer);
     EXPECT_EQ(gate.Take(17, 4).status, FinalGuestSurfaceStatus::Complete);
 
     const auto reset = ApplyPpTerminalScopeContentAction(
@@ -1051,7 +1055,7 @@ TEST(PpTerminalScopeContent, ExactLateConsumerFreezesAndRequestsThirdPlane) {
     ASSERT_TRUE(gate.Arm(17, 4));
     ASSERT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
     ASSERT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
-    EXPECT_EQ(gate.ObserveDraw(17, 91, config.first), PpTerminalScopeContentAction::ShapeLoss);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::ShapeLoss);
     EXPECT_EQ(gate.ObserveConsumer(17, config.consumer),
               PpTerminalScopeConsumerAction::CaptureConsumer);
     const auto take = gate.Take(17, 4);
@@ -1261,12 +1265,12 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOr
         }
         return result;
     };
-    const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255},
-                         {10, 11, 12, 255}, {13, 14, 15, 255}, {16, 17, 18, 255});
-    const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255},
-                         {99, 98, 97, 255}, {88, 87, 86, 255}, {16, 17, 18, 255});
-    const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0},
-                         {10, 11, 12, 255}, {13, 14, 15, 0}, {19, 20, 21, 255});
+    const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {10, 11, 12, 255},
+                         {13, 14, 15, 255}, {16, 17, 18, 255});
+    const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {99, 98, 97, 255},
+                         {88, 87, 86, 255}, {16, 17, 18, 255});
+    const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0}, {10, 11, 12, 255},
+                         {13, 14, 15, 0}, {19, 20, 21, 255});
     reducer.ObserveContent(100, layout, a, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(101, layout, b, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(102, layout, c, FinalGuestSurfaceStatus::Complete, {});

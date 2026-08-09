@@ -82,20 +82,28 @@ public:
                  PpTerminalScopeSnapshotBytes);
     }
 
-    void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+    void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
+                         VideoCore::Image* sampled_input, const RenderState& state,
+                         u64 rendering_serial) {
         Entry* entry = Find(draw.sampled_input_image);
         if (!entry) {
             return;
         }
-        [[maybe_unused]] const bool frozen = entry->gate.ObserveConsumer(
-            draw.sampled_input_image.uid, {
-                                              .kind = draw.kind,
-                                              .indexed = draw.indexed,
-                                              .element_count = draw.element_count,
-                                              .instance_count = draw.instance_count,
-                                              .sampled_images = draw.sampled_images,
-                                              .storage_writes = draw.storage_writes,
-                                          });
+        const auto action = entry->gate.ObserveConsumer(draw.sampled_input_image.uid,
+                                                        {
+                                                            .kind = draw.kind,
+                                                            .indexed = draw.indexed,
+                                                            .element_count = draw.element_count,
+                                                            .instance_count = draw.instance_count,
+                                                            .sampled_images = draw.sampled_images,
+                                                            .storage_writes = draw.storage_writes,
+                                                        });
+        if (action != PpTerminalScopeConsumerAction::CaptureConsumer || !sampled_input) {
+            return;
+        }
+        entry->status = FinalGuestSurfaceStatus::Complete;
+        entry->loss = {};
+        RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2);
     }
 
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
@@ -187,7 +195,7 @@ public:
             .samples = target->backing->num_samples,
             .selector = config.watch_ordinals,
             .buffer_alignment = 16,
-            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 2,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 3,
             .max_bytes = PpTerminalScopeSnapshotBytes,
         });
         entry->status = entry->plan.status;
@@ -286,6 +294,7 @@ private:
             .region_count = plan.region_count,
             .plane_bytes = plan.plane_bytes,
             .second_plane_offset = plan.second_plane_offset,
+            .consumer_plane_offset = plan.consumer_plane_offset,
             .total_bytes = plan.total_bytes,
         };
         for (u32 index = 0; index < plan.region_count; ++index) {
@@ -356,8 +365,9 @@ private:
         image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
                       range, cmdbuf);
         std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> copies{};
-        const u64 plane_offset =
-            plane == 0 ? entry.plan.first_plane_offset : entry.plan.second_plane_offset;
+        const u64 plane_offset = plane == 0   ? entry.plan.first_plane_offset
+                                 : plane == 1 ? entry.plan.second_plane_offset
+                                              : entry.plan.consumer_plane_offset;
         for (u32 index = 0; index < entry.plan.region_count; ++index) {
             const auto& region = entry.plan.regions[index];
             copies[index] = {
@@ -401,7 +411,7 @@ private:
             .pImageMemoryBarriers = &restore,
         });
         image.backing->state = old_state;
-        if (plane == 1) {
+        if (plane == 2) {
             const vk::BufferMemoryBarrier2 post_barrier{
                 .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
                 .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
@@ -1394,6 +1404,7 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     const u64 rendering_serial = scheduler.RenderingSerial();
     bool writes_color_output{};
     bool input_alias{};
+    VideoCore::Image* sampled_input_image{};
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
         if (image_id) {
@@ -1404,6 +1415,7 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     }
     if (writes_color_output && diagnostic_sampled_images.size() == 1) {
         auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front());
+        sampled_input_image = &input_image;
         draw.sampled_input_image = {
             .id = diagnostic_sampled_images.front(),
             .uid = input_image.image_uid,
@@ -1437,7 +1449,8 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
         }
     }
     if (pp_terminal_scope_content) {
-        pp_terminal_scope_content->ObserveConsumer(draw);
+        pp_terminal_scope_content->ObserveConsumer(draw, sampled_input_image, state,
+                                                   rendering_serial);
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
