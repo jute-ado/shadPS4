@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
+#include "video_core/texture_cache/image_producer.h"
 
 namespace {
 
@@ -107,6 +108,51 @@ TEST(PpSourcePublication, CompactOutputContainsOnlySequenceClassAndCounts) {
     EXPECT_EQ(coverage_line, "FGSCPC s=1 n=1/1/1 g=0 r=1 d=0 u=0 x=0 l=0");
     EXPECT_LT(line.size(), size_t{40});
     EXPECT_LT(coverage_line.size(), size_t{100});
+}
+
+TEST(PpSourceProducer, RecordsOnlySuccessfullyEncodedWriterClasses) {
+    VideoCore::ImageProducerState state;
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageProducerObservation{
+                                   .classification = VideoCore::ImageProducerClass::Unknown,
+                                   .produced_since_last_observation = false,
+                               }));
+
+    state.Mark(VideoCore::ImageProducerClass::ColorAttachment);
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageProducerObservation{
+                                   .classification = VideoCore::ImageProducerClass::ColorAttachment,
+                                   .produced_since_last_observation = true,
+                               }));
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageProducerObservation{
+                                   .classification = VideoCore::ImageProducerClass::ColorAttachment,
+                                   .produced_since_last_observation = false,
+                               }));
+
+    state.Mark(VideoCore::ImageProducerClass::StorageImage);
+    state.Mark(VideoCore::ImageProducerClass::Transfer);
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageProducerObservation{
+                                   .classification = VideoCore::ImageProducerClass::Transfer,
+                                   .produced_since_last_observation = true,
+                               }));
+}
+
+TEST(PpSourceProducer, ResetAndGenerationChangesFailClosed) {
+    VideoCore::ImageProducerState state;
+    state.Mark(VideoCore::ImageProducerClass::ColorAttachment);
+    ASSERT_TRUE(state.Observe().produced_since_last_observation);
+    state.Reset();
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageProducerObservation{
+                                   .classification = VideoCore::ImageProducerClass::Unknown,
+                                   .produced_since_last_observation = false,
+                               }));
+}
+
+TEST(PpSourceProducer, CompactProducerOutputDoesNotExposeImageIdentity) {
+    const auto line = FormatPpSourceProducerObservation(
+        {.sequence = 4579,
+         .producer = {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+                      .produced_since_last_observation = true}});
+    EXPECT_EQ(line, "FGSCPR s=4579 r=1 n=1");
+    EXPECT_LT(line.size(), size_t{40});
 }
 
 } // namespace
