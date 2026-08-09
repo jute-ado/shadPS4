@@ -56,6 +56,15 @@ struct PpSourceProducerScopeObservation {
     u32 input_scope_direct{};
     u32 input_scope_indirect{};
     u32 input_scope_clear{};
+    u32 scope_input_color_attachment{};
+    u32 scope_input_storage_image{};
+    u32 scope_input_transfer{};
+    u32 scope_input_cpu_upload{};
+    u32 scope_input_unknown{};
+    u32 scope_input_fresh{};
+    u32 scope_input_reused{};
+    u32 scope_input_alias{};
+    u32 invalid_scope_input{};
     u32 loss{};
     bool final{};
 };
@@ -109,6 +118,35 @@ public:
                                     draw_scope.sampled_input_scope_last_draw ==
                                     VideoCore::ImageColorScopeDrawKind::Indirect;
                                 input_scope_clear += draw_scope.sampled_input_scope_clear_at_begin;
+                                if (draw_scope.sampled_input_scope_sampled_images == 1) {
+                                    if (!draw_scope.sampled_input_scope_input_valid) {
+                                        ++invalid_scope_input;
+                                        ++loss;
+                                    } else {
+                                        switch (draw_scope.sampled_input_scope_input_producer) {
+                                        case VideoCore::ImageProducerClass::ColorAttachment:
+                                            ++scope_input_color_attachment;
+                                            break;
+                                        case VideoCore::ImageProducerClass::StorageImage:
+                                            ++scope_input_storage_image;
+                                            break;
+                                        case VideoCore::ImageProducerClass::Transfer:
+                                            ++scope_input_transfer;
+                                            break;
+                                        case VideoCore::ImageProducerClass::CpuUpload:
+                                            ++scope_input_cpu_upload;
+                                            break;
+                                        case VideoCore::ImageProducerClass::Unknown:
+                                            ++scope_input_unknown;
+                                            break;
+                                        }
+                                        draw_scope.sampled_input_scope_input_fresh
+                                            ? ++scope_input_fresh
+                                            : ++scope_input_reused;
+                                        scope_input_alias +=
+                                            draw_scope.sampled_input_scope_input_alias;
+                                    }
+                                }
                             } else if (draw_scope.sampled_input_scope_overflow) {
                                 ++overflow_input_scopes;
                                 ++loss;
@@ -183,6 +221,15 @@ public:
             .input_scope_direct = input_scope_direct,
             .input_scope_indirect = input_scope_indirect,
             .input_scope_clear = input_scope_clear,
+            .scope_input_color_attachment = scope_input_color_attachment,
+            .scope_input_storage_image = scope_input_storage_image,
+            .scope_input_transfer = scope_input_transfer,
+            .scope_input_cpu_upload = scope_input_cpu_upload,
+            .scope_input_unknown = scope_input_unknown,
+            .scope_input_fresh = scope_input_fresh,
+            .scope_input_reused = scope_input_reused,
+            .scope_input_alias = scope_input_alias,
+            .invalid_scope_input = invalid_scope_input,
             .loss = loss,
             .final = final,
         };
@@ -220,6 +267,15 @@ private:
     u32 input_scope_direct{};
     u32 input_scope_indirect{};
     u32 input_scope_clear{};
+    u32 scope_input_color_attachment{};
+    u32 scope_input_storage_image{};
+    u32 scope_input_transfer{};
+    u32 scope_input_cpu_upload{};
+    u32 scope_input_unknown{};
+    u32 scope_input_fresh{};
+    u32 scope_input_reused{};
+    u32 scope_input_alias{};
+    u32 invalid_scope_input{};
     u32 loss{};
     bool has_last{};
 };
@@ -257,7 +313,13 @@ private:
            " se=" + std::to_string(observation.draw_scope.sampled_input_scope_element_count) +
            " sn=" + std::to_string(observation.draw_scope.sampled_input_scope_instance_count) +
            " su=" + std::to_string(observation.draw_scope.sampled_input_scope_sampled_images) +
-           " sw=" + std::to_string(observation.draw_scope.sampled_input_scope_storage_writes);
+           " sw=" + std::to_string(observation.draw_scope.sampled_input_scope_storage_writes) +
+           " np=" +
+           std::to_string(
+               static_cast<u32>(observation.draw_scope.sampled_input_scope_input_producer)) +
+           " nn=" + std::to_string(observation.draw_scope.sampled_input_scope_input_fresh ? 1 : 0) +
+           " na=" + std::to_string(observation.draw_scope.sampled_input_scope_input_alias ? 1 : 0) +
+           " nv=" + std::to_string(observation.draw_scope.sampled_input_scope_input_valid ? 1 : 0);
 }
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeCoverage(
@@ -292,6 +354,15 @@ private:
            " sd=" + std::to_string(observation.input_scope_direct) +
            " sn=" + std::to_string(observation.input_scope_indirect) +
            " sc=" + std::to_string(observation.input_scope_clear) +
+           " dc=" + std::to_string(observation.scope_input_color_attachment) +
+           " ds=" + std::to_string(observation.scope_input_storage_image) +
+           " dt=" + std::to_string(observation.scope_input_transfer) +
+           " du=" + std::to_string(observation.scope_input_cpu_upload) +
+           " dx=" + std::to_string(observation.scope_input_unknown) +
+           " df=" + std::to_string(observation.scope_input_fresh) +
+           " dr=" + std::to_string(observation.scope_input_reused) +
+           " da=" + std::to_string(observation.scope_input_alias) +
+           " dl=" + std::to_string(observation.invalid_scope_input) +
            " l=" + std::to_string(observation.loss);
 }
 

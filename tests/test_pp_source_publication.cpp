@@ -209,11 +209,11 @@ TEST(PpSourceProducerScope, CoverageIsExactAndPrivacySafe) {
                                   .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
                                   .valid = true}}),
               "FGSCPS s=4001 r=1 d=2 k=2 c=0 x=0 j=0 e=0 n=0 b=0 u=0 w=0 ip=0 in=0 "
-              "ia=0 iv=0 sd=0 sk=0 sc=0 sx=0 sj=0 se=0 sn=0 su=0 sw=0");
+              "ia=0 iv=0 sd=0 sk=0 sc=0 sx=0 sj=0 se=0 sn=0 su=0 sw=0 np=0 nn=0 na=0 nv=0");
     EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final),
               "FGSCPSC s=4001 n=2/2/2 a=1 e=1 v=2 i=0 x=0 s=0 z=0 m=0 w=0 ic=0 "
               "is=0 it=0 iu=0 ix=0 if=0 ir=0 ia=0 il=0 sv=0 si=0 sx=0 sz=0 ss=0 "
-              "sm=0 sd=0 sn=0 sc=0 l=0");
+              "sm=0 sd=0 sn=0 sc=0 dc=0 ds=0 dt=0 du=0 dx=0 df=0 dr=0 da=0 dl=0 l=0");
 }
 
 TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
@@ -338,11 +338,11 @@ TEST(PpSourceColorScopeDraw, CompactOutputAndCoverageClassifySingleSampledInput)
     EXPECT_EQ(final->invalid_single_input, 0u);
     EXPECT_EQ(FormatPpSourceProducerScopeObservation(*final),
               "FGSCPS s=51 r=0 d=1 k=1 c=0 x=0 j=1 e=6 n=1 b=2 u=2 w=1 ip=0 in=0 "
-              "ia=0 iv=0 sd=0 sk=0 sc=0 sx=0 sj=0 se=0 sn=0 su=0 sw=0");
+              "ia=0 iv=0 sd=0 sk=0 sc=0 sx=0 sj=0 se=0 sn=0 su=0 sw=0 np=0 nn=0 na=0 nv=0");
     EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final),
               "FGSCPSC s=51 n=2/2/2 a=2 e=0 v=2 i=0 x=0 s=1 z=0 m=1 w=1 ic=1 "
               "is=0 it=0 iu=0 ix=0 if=1 ir=0 ia=0 il=0 sv=1 si=0 sx=0 sz=0 ss=1 "
-              "sm=0 sd=1 sn=0 sc=0 l=0");
+              "sm=0 sd=1 sn=0 sc=0 dc=0 ds=0 dt=0 du=0 dx=0 df=0 dr=0 da=0 dl=0 l=0");
 }
 
 TEST(PpSourceProducer, FlipAndSampledInputObserversHaveIndependentFreshnessEpochs) {
@@ -451,8 +451,7 @@ TEST(PpSourceColorScopeDraw, RetainsSampledInputColorScopeWithoutIdentity) {
     EXPECT_TRUE(observed.sampled_input_scope_clear_at_begin);
     EXPECT_TRUE(observed.sampled_input_scope_valid);
     EXPECT_FALSE(observed.sampled_input_scope_overflow);
-    EXPECT_EQ(observed.sampled_input_scope_input_producer,
-              VideoCore::ImageProducerClass::Transfer);
+    EXPECT_EQ(observed.sampled_input_scope_input_producer, VideoCore::ImageProducerClass::Transfer);
     EXPECT_TRUE(observed.sampled_input_scope_input_fresh);
     EXPECT_TRUE(observed.sampled_input_scope_input_alias);
     EXPECT_TRUE(observed.sampled_input_scope_input_valid);

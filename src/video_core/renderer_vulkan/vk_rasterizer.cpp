@@ -873,17 +873,17 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
         return;
     }
     const u64 rendering_serial = scheduler.RenderingSerial();
-    bool writes_video_output{};
+    bool writes_color_output{};
     bool input_alias{};
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
-        if (image_id && texture_cache.GetImage(image_id).usage.vo_surface) {
-            writes_video_output = true;
+        if (image_id) {
+            writes_color_output = true;
             input_alias |= diagnostic_sampled_images.size() == 1 &&
                            diagnostic_sampled_images.front() == image_id;
         }
     }
-    if (writes_video_output && diagnostic_sampled_images.size() == 1) {
+    if (writes_color_output && diagnostic_sampled_images.size() == 1) {
         auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front());
         const auto input = input_image.ObserveDiagnosticSampledInputProducer();
         draw.sampled_input_producer = input.classification;
@@ -902,6 +902,10 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             draw.sampled_input_scope_clear_at_begin = input_scope.clear_at_begin;
             draw.sampled_input_scope_valid = input_scope.valid;
             draw.sampled_input_scope_overflow = input_scope.overflow;
+            draw.sampled_input_scope_input_producer = input_scope.sampled_input_producer;
+            draw.sampled_input_scope_input_fresh = input_scope.sampled_input_fresh;
+            draw.sampled_input_scope_input_alias = input_scope.sampled_input_alias;
+            draw.sampled_input_scope_input_valid = input_scope.sampled_input_valid;
         }
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {

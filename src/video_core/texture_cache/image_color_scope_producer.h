@@ -36,6 +36,10 @@ struct ImageColorScopeDrawDescriptor {
     bool sampled_input_scope_clear_at_begin{};
     bool sampled_input_scope_valid{};
     bool sampled_input_scope_overflow{};
+    ImageProducerClass sampled_input_scope_input_producer{ImageProducerClass::Unknown};
+    bool sampled_input_scope_input_fresh{};
+    bool sampled_input_scope_input_alias{};
+    bool sampled_input_scope_input_valid{};
 };
 
 struct ImageColorScopeProducerObservation {
@@ -61,6 +65,10 @@ struct ImageColorScopeProducerObservation {
     bool sampled_input_scope_clear_at_begin{};
     bool sampled_input_scope_valid{};
     bool sampled_input_scope_overflow{};
+    ImageProducerClass sampled_input_scope_input_producer{ImageProducerClass::Unknown};
+    bool sampled_input_scope_input_fresh{};
+    bool sampled_input_scope_input_alias{};
+    bool sampled_input_scope_input_valid{};
     bool clear_at_begin{};
     bool valid{};
     bool overflow{};
@@ -121,6 +129,11 @@ public:
             descriptor.sampled_input_scope_clear_at_begin;
         observation.sampled_input_scope_valid = descriptor.sampled_input_scope_valid;
         observation.sampled_input_scope_overflow = descriptor.sampled_input_scope_overflow;
+        observation.sampled_input_scope_input_producer =
+            descriptor.sampled_input_scope_input_producer;
+        observation.sampled_input_scope_input_fresh = descriptor.sampled_input_scope_input_fresh;
+        observation.sampled_input_scope_input_alias = descriptor.sampled_input_scope_input_alias;
+        observation.sampled_input_scope_input_valid = descriptor.sampled_input_scope_input_valid;
         if (descriptor.sampled_images > descriptor.sampled_bindings ||
             descriptor.sampled_bindings > MaxTrackedImageBindings ||
             descriptor.storage_writes > MaxTrackedImageBindings) {
