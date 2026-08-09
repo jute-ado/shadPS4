@@ -2087,8 +2087,32 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
             } else {
                 auto candidates = sampled_input_candidates;
                 for (u32 input = 0; input < diagnostic_sampled_images.size(); ++input) {
-                    candidates[input].aliases_output =
-                        diagnostic_sampled_images[input].id == image_id;
+                    const auto& sampled = diagnostic_sampled_images[input];
+                    candidates[input].aliases_output = sampled.id == image_id;
+                    if (candidates[input].aliases_output) {
+                        const auto& sampled_image = texture_cache.GetImage(sampled.id);
+                        const auto sampled_layout = sampled_image.backing
+                                                        ? sampled_image.backing->state.layout
+                                                        : vk::ImageLayout::eUndefined;
+                        const auto attachment_layout = state.color_attachments[index].image_layout;
+                        candidates[input].feedback = ClassifyPpTerminalScopeFeedbackLoop({
+                            .logical_alias = true,
+                            .exact_subresource =
+                                sampled.view.range == cb_descs[index].second.view_info.range,
+                            .extension_supported =
+                                instance.IsAttachmentFeedbackLoopLayoutSupported(),
+                            .sampled_feedback_layout =
+                                sampled_layout ==
+                                vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT,
+                            .attachment_feedback_layout =
+                                attachment_layout ==
+                                vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT,
+                            .sampled_general_layout = sampled_layout == vk::ImageLayout::eGeneral,
+                            .attachment_general_layout =
+                                attachment_layout == vk::ImageLayout::eGeneral,
+                            .dynamic_feedback_enabled = attachment_feedback_loop,
+                        });
+                    }
                 }
                 sampled_inputs = ClassifyPpTerminalScopeSampledInputs(
                     draw.sampled_images,

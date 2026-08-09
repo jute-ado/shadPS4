@@ -361,9 +361,66 @@ struct PpTerminalScopeSampledInputView {
     return result;
 }
 
+enum class PpTerminalScopeFeedbackMode : u8 {
+    None,
+    AttachmentFeedbackLoop,
+    GeneralFallback,
+};
+
+struct PpTerminalScopeFeedbackLoopDescriptor {
+    bool logical_alias{};
+    bool exact_subresource{};
+    bool extension_supported{};
+    bool sampled_feedback_layout{};
+    bool attachment_feedback_layout{};
+    bool sampled_general_layout{};
+    bool attachment_general_layout{};
+    bool dynamic_feedback_enabled{};
+};
+
+struct PpTerminalScopeFeedbackLoop {
+    PpTerminalScopeFeedbackMode mode{PpTerminalScopeFeedbackMode::None};
+    bool exact_subresource{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeFeedbackLoop ClassifyPpTerminalScopeFeedbackLoop(
+    const PpTerminalScopeFeedbackLoopDescriptor& descriptor) noexcept {
+    if (!descriptor.logical_alias) {
+        return {};
+    }
+    PpTerminalScopeFeedbackLoop result{.exact_subresource = descriptor.exact_subresource};
+    if (!descriptor.exact_subresource) {
+        result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        result.loss.invalidation = 1;
+        return result;
+    }
+    if (descriptor.extension_supported) {
+        result.mode = PpTerminalScopeFeedbackMode::AttachmentFeedbackLoop;
+        if (!descriptor.sampled_feedback_layout || !descriptor.attachment_feedback_layout ||
+            !descriptor.dynamic_feedback_enabled) {
+            result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            result.loss.invalidation = 1;
+            return result;
+        }
+    } else {
+        result.mode = PpTerminalScopeFeedbackMode::GeneralFallback;
+        if (!descriptor.sampled_general_layout || !descriptor.attachment_general_layout ||
+            descriptor.dynamic_feedback_enabled) {
+            result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            result.loss.invalidation = 1;
+            return result;
+        }
+    }
+    result.status = FinalGuestSurfaceStatus::Complete;
+    return result;
+}
+
 struct PpTerminalScopeSampledInput {
     PpTerminalScopePredecessor producer{};
     PpTerminalScopeSampledInputView view{};
+    PpTerminalScopeFeedbackLoop feedback{};
     bool aliases_output{};
 };
 
@@ -2557,6 +2614,14 @@ private:
                   std::to_string(view.uniform_state) + "/" + std::to_string(view.view_conflict) +
                   "/" + std::to_string(static_cast<u32>(view.status)) + "/" +
                   std::to_string(FinalGuestSurfaceLossMask(view.loss, 0));
+        if (input.aliases_output) {
+            const auto& feedback = input.feedback;
+            result += " f" + std::to_string(index) + "=" +
+                      std::to_string(static_cast<u32>(feedback.mode)) + "/" +
+                      std::to_string(feedback.exact_subresource) + "/" +
+                      std::to_string(static_cast<u32>(feedback.status)) + "/" +
+                      std::to_string(FinalGuestSurfaceLossMask(feedback.loss, 0));
+        }
     }
     return result;
 }
