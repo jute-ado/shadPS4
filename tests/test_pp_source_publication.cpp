@@ -1680,6 +1680,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", "800"},
         {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "390,1024,1299"},
         {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_CONSUMER", "direct,indexed,4,1,1,0"},
@@ -1693,6 +1694,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->window.frame_start, 4000u);
     EXPECT_EQ(config->window.frame_count, 800u);
     EXPECT_EQ(config->expected_calibrations, 300u);
+    EXPECT_TRUE(config->join_final_backing);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
     EXPECT_EQ(config->content.first,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 696, 1,
@@ -1703,6 +1705,57 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->content.consumer,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 4, 1,
                                            1, 0}));
+}
+
+TEST(PpTerminalScopeContent, FinalBackingObservationReusesTheExistingPackedFootprint) {
+    FinalGuestSurfaceTilePlan plan{
+        .paired_backing_offset = 4096,
+        .paired_backing_bytes = 128,
+        .paired_backing_region_count = 2,
+        .paired_backing_regions =
+            {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 64, .width = 4, .height = 4},
+              {.logical_ordinal = 12,
+               .buffer_offset = 64,
+               .byte_size = 64,
+               .width = 4,
+               .height = 4}}},
+        .paired_backing_format = FinalGuestSurfaceFormat::Bgra8,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const auto observation = PlanPpTerminalScopeFinalBackingObservation(
+        true, FinalGuestSurfaceStage::PpSourcePublicationReconstruction, plan, true);
+    ASSERT_TRUE(observation.observe);
+    EXPECT_EQ(observation.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(observation.layout.region_count, 2u);
+    EXPECT_EQ(observation.layout.total_bytes, 128u);
+    EXPECT_EQ(observation.layout.format, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(observation.layout.regions[0],
+              (PpTerminalScopeContentHistoryRegion{11, 0, 64}));
+    EXPECT_EQ(observation.layout.regions[1],
+              (PpTerminalScopeContentHistoryRegion{12, 64, 64}));
+    EXPECT_EQ(observation.source_offset, 4096u);
+    EXPECT_EQ(observation.source_bytes, 128u);
+    EXPECT_FALSE(observation.gpu_copy);
+    EXPECT_FALSE(observation.cpu_wait);
+    EXPECT_FALSE(observation.finish);
+
+    const auto disabled = PlanPpTerminalScopeFinalBackingObservation(
+        false, FinalGuestSurfaceStage::PpSourcePublicationReconstruction, plan, true);
+    EXPECT_FALSE(disabled.observe);
+    EXPECT_EQ(disabled.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    const auto wrong_stage = PlanPpTerminalScopeFinalBackingObservation(
+        true, FinalGuestSurfaceStage::PostPp, plan, true);
+    EXPECT_FALSE(wrong_stage.observe);
+    EXPECT_EQ(wrong_stage.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(wrong_stage.loss.unsupported_type, 1u);
+
+    plan.paired_backing_regions[1].byte_size = 65;
+    const auto malformed = PlanPpTerminalScopeFinalBackingObservation(
+        true, FinalGuestSurfaceStage::PpSourcePublicationReconstruction, plan, true);
+    EXPECT_FALSE(malformed.observe);
+    EXPECT_EQ(malformed.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(malformed.loss.invalidation, 1u);
 }
 
 TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSelection) {
