@@ -1023,6 +1023,55 @@ TEST(PpTerminalScopeContent, RootInputCaptureRequiresOneCompatibleReadOnlyNonAli
     EXPECT_EQ(invalid.loss.invalidation, 1u);
 }
 
+TEST(PpTerminalScopeContent, RootInputUsesTheExactBoundSingleSubresourceView) {
+    const auto complete = PlanPpTerminalScopeRootViewCapture({
+        .image_width = 2560,
+        .image_height = 1440,
+        .image_levels = 4,
+        .image_layers = 3,
+        .view_base_mip = 1,
+        .view_mip_count = 1,
+        .view_base_layer = 2,
+        .view_layer_count = 1,
+    });
+    ASSERT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(complete.source_width, 1280u);
+    EXPECT_EQ(complete.source_height, 720u);
+    EXPECT_EQ(complete.mip, 1u);
+    EXPECT_EQ(complete.layer, 2u);
+    EXPECT_EQ(complete.state_index, 5u);
+    EXPECT_TRUE(complete.capture_partial_subresource);
+    EXPECT_TRUE(complete.restore_exact_tracker_state);
+    EXPECT_FALSE(complete.cpu_wait);
+    EXPECT_FALSE(complete.finish);
+
+    auto rejected = PlanPpTerminalScopeRootViewCapture({
+        .image_width = 2560,
+        .image_height = 1440,
+        .image_levels = 4,
+        .image_layers = 3,
+        .view_base_mip = 1,
+        .view_mip_count = 2,
+        .view_base_layer = 2,
+        .view_layer_count = 1,
+    });
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(rejected.loss.unsupported_mip, 1u);
+
+    rejected = PlanPpTerminalScopeRootViewCapture({
+        .image_width = 2560,
+        .image_height = 1440,
+        .image_levels = 4,
+        .image_layers = 3,
+        .view_base_mip = 1,
+        .view_mip_count = 1,
+        .view_base_layer = 3,
+        .view_layer_count = 1,
+    });
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.loss.invalidation, 1u);
+}
+
 TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
     const PpTerminalScopeContentConfig config{
         .enabled = true,
