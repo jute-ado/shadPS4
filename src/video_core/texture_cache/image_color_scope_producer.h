@@ -7,6 +7,7 @@
 
 #include "common/types.h"
 #include "video_core/texture_cache/image_producer.h"
+#include "video_core/texture_cache/types.h"
 
 namespace VideoCore {
 
@@ -17,6 +18,22 @@ enum class ImageColorScopeDrawKind : u8 {
 };
 
 static constexpr u32 MaxImageColorScopeTerminalDraws = 8;
+
+struct ImageColorScopePrivateLink {
+    ImageId id{};
+    u64 uid{};
+
+    [[nodiscard]] constexpr bool Valid() const noexcept {
+        return static_cast<bool>(id) && uid != 0;
+    }
+
+    auto operator<=>(const ImageColorScopePrivateLink&) const = default;
+};
+
+[[nodiscard]] constexpr bool ValidateImageColorScopePrivateLink(ImageColorScopePrivateLink link,
+                                                                ImageId id, u64 uid) noexcept {
+    return link.Valid() && link.id == id && link.uid == uid;
+}
 
 struct ImageColorScopeDrawSummary {
     ImageColorScopeDrawKind kind{ImageColorScopeDrawKind::Unknown};
@@ -110,6 +127,7 @@ struct ImageColorScopeDrawDescriptor {
     bool sampled_input_fresh{};
     bool sampled_input_alias{};
     bool sampled_input_valid{};
+    ImageColorScopePrivateLink sampled_input_image{};
     u32 sampled_input_scope_draw_count{};
     ImageColorScopeDrawKind sampled_input_scope_last_draw{ImageColorScopeDrawKind::Unknown};
     bool sampled_input_scope_indexed{};
@@ -140,6 +158,7 @@ struct ImageColorScopeProducerObservation {
     bool sampled_input_fresh{};
     bool sampled_input_alias{};
     bool sampled_input_valid{};
+    ImageColorScopePrivateLink sampled_input_image{};
     u32 sampled_input_scope_draw_count{};
     ImageColorScopeDrawKind sampled_input_scope_last_draw{ImageColorScopeDrawKind::Unknown};
     bool sampled_input_scope_indexed{};
@@ -301,6 +320,9 @@ public:
         observation.sampled_input_fresh = descriptor.sampled_input_fresh;
         observation.sampled_input_alias = descriptor.sampled_input_alias;
         observation.sampled_input_valid = descriptor.sampled_input_valid;
+        observation.sampled_input_image = descriptor.sampled_images == 1
+                                              ? descriptor.sampled_input_image
+                                              : ImageColorScopePrivateLink{};
         observation.sampled_input_scope_draw_count = descriptor.sampled_input_scope_draw_count;
         observation.sampled_input_scope_last_draw = descriptor.sampled_input_scope_last_draw;
         observation.sampled_input_scope_indexed = descriptor.sampled_input_scope_indexed;

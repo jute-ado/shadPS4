@@ -992,10 +992,10 @@ TEST(PpTerminalScopeContent, PrivateLinksRetainExactSoleInputAndFailClosedOnReus
     const auto sole = state.Observe();
     EXPECT_EQ(sole.sampled_input_image.id, VideoCore::ImageId{41});
     EXPECT_EQ(sole.sampled_input_image.uid, 7001u);
-    EXPECT_TRUE(VideoCore::ValidateImageColorScopePrivateLink(
-        sole.sampled_input_image, VideoCore::ImageId{41}, 7001));
-    EXPECT_FALSE(VideoCore::ValidateImageColorScopePrivateLink(
-        sole.sampled_input_image, VideoCore::ImageId{41}, 7002));
+    EXPECT_TRUE(VideoCore::ValidateImageColorScopePrivateLink(sole.sampled_input_image,
+                                                              VideoCore::ImageId{41}, 7001));
+    EXPECT_FALSE(VideoCore::ValidateImageColorScopePrivateLink(sole.sampled_input_image,
+                                                               VideoCore::ImageId{41}, 7002));
 
     state.BeginScope(302, false);
     state.MarkDraw(302, {
@@ -1009,16 +1009,16 @@ TEST(PpTerminalScopeContent, PrivateLinksRetainExactSoleInputAndFailClosedOnReus
 
 TEST(PpTerminalScopeContent, ExistingCompactScopeOutputNeverFormatsPrivateLinks) {
     PpSourceProducerScopeCoverage coverage{{.start = 302, .count = 1}};
-    const auto report = coverage.Observe(
-        302, PpSourceProducerScopeClass::ActiveAtFlip,
-        {.draw_count = 1,
-         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
-         .sampled_bindings = 1,
-         .sampled_images = 1,
-         .sampled_input_producer = VideoCore::ImageProducerClass::Transfer,
-         .sampled_input_valid = true,
-         .sampled_input_image = {.id = VideoCore::ImageId{1234}, .uid = 998877},
-         .valid = true});
+    const auto report =
+        coverage.Observe(302, PpSourceProducerScopeClass::ActiveAtFlip,
+                         {.draw_count = 1,
+                          .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                          .sampled_bindings = 1,
+                          .sampled_images = 1,
+                          .sampled_input_producer = VideoCore::ImageProducerClass::Transfer,
+                          .sampled_input_valid = true,
+                          .sampled_input_image = {.id = VideoCore::ImageId{1234}, .uid = 998877},
+                          .valid = true});
     ASSERT_TRUE(report);
     const auto line = FormatPpSourceProducerScopeObservation(*report);
     EXPECT_EQ(line.find("1234"), std::string::npos);

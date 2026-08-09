@@ -885,6 +885,10 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     }
     if (writes_color_output && diagnostic_sampled_images.size() == 1) {
         auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front());
+        draw.sampled_input_image = {
+            .id = diagnostic_sampled_images.front(),
+            .uid = input_image.image_uid,
+        };
         const auto input = input_image.ObserveDiagnosticSampledInputProducer();
         draw.sampled_input_producer = input.classification;
         draw.sampled_input_fresh = input.produced_since_last_observation;
