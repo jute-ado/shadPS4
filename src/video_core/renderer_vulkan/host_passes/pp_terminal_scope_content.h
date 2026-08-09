@@ -205,6 +205,13 @@ struct PpTerminalScopeDiscoveryCoverage {
     u32 root_structure{};
     u32 root_plan{};
     u32 root_plan_loss_mask{};
+    u32 root_view_valid{};
+    u32 root_image_invalid{};
+    u32 root_view_missing{};
+    u32 root_view_ambiguous{};
+    u32 root_view_mip{};
+    u32 root_view_layer{};
+    u32 root_view_invalid{};
 
     constexpr void Observe(PpTerminalScopeDiscoveryObservation observation) noexcept {
         if (!observation.exact_candidate) {
@@ -257,6 +264,31 @@ struct PpTerminalScopeDiscoveryCoverage {
             root_plan_loss_mask |= FinalGuestSurfaceLossMask(plan_loss, 0);
         } else {
             increment(root_accepted);
+        }
+    }
+
+    constexpr void ObserveRootView(bool image_valid, bool view_present, bool view_ambiguous,
+                                   FinalGuestSurfaceStatus view_status,
+                                   const FinalGuestSurfaceLoss& view_loss) noexcept {
+        const auto increment = [](u32& value) {
+            if (value != std::numeric_limits<u32>::max()) {
+                ++value;
+            }
+        };
+        if (!image_valid) {
+            increment(root_image_invalid);
+        } else if (view_ambiguous) {
+            increment(root_view_ambiguous);
+        } else if (!view_present) {
+            increment(root_view_missing);
+        } else if (view_status == FinalGuestSurfaceStatus::Complete && !view_loss.Any()) {
+            increment(root_view_valid);
+        } else if (view_loss.unsupported_mip) {
+            increment(root_view_mip);
+        } else if (view_loss.unsupported_layer) {
+            increment(root_view_layer);
+        } else {
+            increment(root_view_invalid);
         }
     }
 };
@@ -1922,7 +1954,13 @@ private:
            " ri=" + std::to_string(coverage.root_accepted) + "/" +
            std::to_string(coverage.root_missing) + "/" + std::to_string(coverage.root_hazard) +
            "/" + std::to_string(coverage.root_structure) + "/" +
-           std::to_string(coverage.root_plan) + "/" + std::to_string(coverage.root_plan_loss_mask);
+           std::to_string(coverage.root_plan) + "/" + std::to_string(coverage.root_plan_loss_mask) +
+           " rv=" + std::to_string(coverage.root_view_valid) + "/" +
+           std::to_string(coverage.root_image_invalid) + "/" +
+           std::to_string(coverage.root_view_missing) + "/" +
+           std::to_string(coverage.root_view_ambiguous) + "/" +
+           std::to_string(coverage.root_view_mip) + "/" + std::to_string(coverage.root_view_layer) +
+           "/" + std::to_string(coverage.root_view_invalid);
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopePrivateLineageReport(

@@ -2356,9 +2356,8 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
     EXPECT_EQ(coverage.root_view_layer, 1u);
     EXPECT_EQ(coverage.root_view_invalid, 1u);
     const auto line = FormatPpTerminalScopeDiscoveryCoverage(coverage);
-    EXPECT_EQ(line,
-              "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1 ri=1/1/1/1/1/128 "
-              "rv=1/1/1/1/1/1/1");
+    EXPECT_EQ(line, "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1 ri=1/1/1/1/1/128 "
+                    "rv=1/1/1/1/1/1/1");
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);

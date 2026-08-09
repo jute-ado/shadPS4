@@ -149,8 +149,8 @@ public:
 
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
                      VideoCore::Image* sampled_input, const VideoCore::ImageViewInfo* sampled_view,
-                     const RenderState& state, u32 attachment_index, u64 rendering_serial,
-                     const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+                     bool sampled_view_ambiguous, const RenderState& state, u32 attachment_index,
+                     u64 rendering_serial, const VideoCore::ImageColorScopeDrawDescriptor& draw) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -229,7 +229,11 @@ public:
                                              .status = FinalGuestSurfaceStatus::InvalidationLoss,
                                              .loss = {.invalidation = 1},
                                          };
-            const bool root_structure_valid = HasCompatiblePlaneStructure(sampled_input) &&
+            const bool image_structure_valid = HasCompatiblePlaneStructure(sampled_input);
+            discovery_coverage.ObserveRootView(image_structure_valid, sampled_view != nullptr,
+                                               sampled_view_ambiguous, root_view.status,
+                                               root_view.loss);
+            const bool root_structure_valid = image_structure_valid && !sampled_view_ambiguous &&
                                               root_view.status == FinalGuestSurfaceStatus::Complete;
             if (root_structure_valid) {
                 root_plan = AttachPpTerminalScopeRootInputPlan(
@@ -1854,9 +1858,9 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             image.MarkDiagnosticColorDraw(rendering_serial, draw);
             image.MarkDiagnosticProducer(VideoCore::ImageProducerClass::ColorAttachment);
             if (pp_terminal_scope_content) {
-                pp_terminal_scope_content->ObserveDraw(image_id, image, sampled_input_image,
-                                                       sampled_input_view, state, index,
-                                                       rendering_serial, draw);
+                pp_terminal_scope_content->ObserveDraw(
+                    image_id, image, sampled_input_image, sampled_input_view,
+                    diagnostic_sampled_view_ambiguous, state, index, rendering_serial, draw);
             }
         }
     }
