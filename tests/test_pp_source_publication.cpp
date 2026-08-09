@@ -377,6 +377,26 @@ TEST(PpSourceProducer, FlipAndSampledInputObserversHaveIndependentFreshnessEpoch
     EXPECT_FALSE(state.ObserveSampledInput().produced_since_last_observation);
 }
 
+TEST(PpSourceProducer, PeekingAtThePreviousProducerDoesNotConsumeFreshness) {
+    VideoCore::ImageProducerState state;
+    state.Mark(VideoCore::ImageProducerClass::ColorAttachment);
+
+    EXPECT_EQ(state.Peek(),
+              (VideoCore::ImageProducerObservation{
+                  .classification = VideoCore::ImageProducerClass::ColorAttachment,
+                  .produced_since_last_observation = true,
+              }));
+    EXPECT_TRUE(state.Peek().produced_since_last_observation);
+    EXPECT_TRUE(state.Observe().produced_since_last_observation)
+        << "A diagnostic predecessor snapshot must not consume the Present observer";
+    EXPECT_FALSE(state.Peek().produced_since_last_observation);
+
+    state.Mark(VideoCore::ImageProducerClass::Transfer);
+    EXPECT_EQ(state.Peek().classification, VideoCore::ImageProducerClass::Transfer);
+    EXPECT_TRUE(state.Peek().produced_since_last_observation);
+    EXPECT_TRUE(state.Observe().produced_since_last_observation);
+}
+
 TEST(PpSourceColorScopeDraw, SingleSampledInputProducerClassesAreBoundedAndFailClosed) {
     PpSourceProducerScopeCoverage coverage{{.start = 70, .count = 4}};
     ASSERT_TRUE(coverage.Observe(70, PpSourceProducerScopeClass::ActiveAtFlip,
@@ -2256,6 +2276,84 @@ TEST(PpTerminalScopeContent, CalibratedCoverageIsExactAndFailsClosedWhenIncomple
     EXPECT_NE(line.find("FGSCTSTC c=3"), std::string::npos);
     EXPECT_NE(line.find("e=1/1/1"), std::string::npos);
     EXPECT_NE(line.find("lm=2"), std::string::npos);
+}
+
+TEST(PpTerminalScopeContent, ClassifiesTheExactProducerPresentBeforeTheSelectedDraw) {
+    VideoCore::ImageColorScopeProducerObservation scope{
+        .draw_count = 2,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 24,
+        .instance_count = 1,
+        .sampled_images = 2,
+        .storage_writes = 0,
+        .clear_at_begin = false,
+        .valid = true,
+    };
+    const auto color = ClassifyPpTerminalScopePredecessor(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+         .produced_since_last_observation = true},
+        scope);
+    EXPECT_EQ(color.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(color.loss.Any());
+    EXPECT_EQ(color.producer, VideoCore::ImageProducerClass::ColorAttachment);
+    EXPECT_TRUE(color.fresh);
+    EXPECT_EQ(color.draw_count, 2u);
+    EXPECT_EQ(color.last_draw, VideoCore::ImageColorScopeDrawKind::Direct);
+    EXPECT_TRUE(color.indexed);
+    EXPECT_EQ(color.element_count, 24u);
+    EXPECT_EQ(color.instance_count, 1u);
+    EXPECT_EQ(color.sampled_images, 2u);
+    EXPECT_EQ(color.storage_writes, 0u);
+    EXPECT_FALSE(color.clear_at_begin);
+
+    const auto upload = ClassifyPpTerminalScopePredecessor(
+        {.classification = VideoCore::ImageProducerClass::CpuUpload,
+         .produced_since_last_observation = false},
+        {});
+    EXPECT_EQ(upload.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(upload.producer, VideoCore::ImageProducerClass::CpuUpload);
+    EXPECT_EQ(upload.draw_count, 0u) << "Non-color producers are named without stale scope data";
+}
+
+TEST(PpTerminalScopeContent, PreviousProducerClassificationFailsClosedAndStaysPrivacySafe) {
+    const auto unknown = ClassifyPpTerminalScopePredecessor({}, {});
+    EXPECT_EQ(unknown.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(unknown.loss.invalidation, 1u);
+
+    VideoCore::ImageColorScopeProducerObservation invalid_scope{
+        .draw_count = 1,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+        .valid = false,
+    };
+    const auto invalid = ClassifyPpTerminalScopePredecessor(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, invalid_scope);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.loss.invalidation, 1u);
+
+    invalid_scope.valid = true;
+    invalid_scope.overflow = true;
+    const auto overflow = ClassifyPpTerminalScopePredecessor(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, invalid_scope);
+    EXPECT_EQ(overflow.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(overflow.loss.tile_capacity, 1u);
+
+    invalid_scope.overflow = false;
+    invalid_scope.draw_count = 0;
+    const auto missing_draw = ClassifyPpTerminalScopePredecessor(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, invalid_scope);
+    EXPECT_EQ(missing_draw.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing_draw.loss.gap, 1u);
+
+    const auto line = FormatPpTerminalScopePredecessor(ClassifyPpTerminalScopePredecessor(
+        {.classification = VideoCore::ImageProducerClass::Transfer,
+         .produced_since_last_observation = true},
+        {}));
+    EXPECT_EQ(line,
+              "pc=3 pf=1 pd=0 pk=0 pi=0 pe=0 pn=0 pr=0 pw=0 pb=0 pv=0 px=0 pt=0 pl=0");
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("image"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
 } // namespace
