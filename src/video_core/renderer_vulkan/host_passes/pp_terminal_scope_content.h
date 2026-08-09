@@ -264,14 +264,14 @@ struct PpTerminalScopePlaneSlotDecision {
 
 [[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
     u32 plane, bool has_slot) noexcept {
-    if (plane > 2 || (plane > 0 && !has_slot)) {
+    if (plane > 2 || (plane == 1 && !has_slot)) {
         return {
             .status = FinalGuestSurfaceStatus::GapLoss,
             .loss = {.gap = 1},
         };
     }
     return {
-        .acquire = plane == 0 && !has_slot,
+        .acquire = (plane == 0 || plane == 2) && !has_slot,
         .reuse = has_slot,
     };
 }
@@ -535,6 +535,7 @@ struct PpTerminalScopeContentReport {
     FinalGuestSurfaceLoss loss{};
     u32 draw_count{};
     u32 region_count{};
+    u32 plane_mask{};
     u32 consumer_observations{};
     u32 consumer_phase_mask{};
     u32 consumer_shape_matches{};
@@ -548,13 +549,14 @@ struct PpTerminalScopeContentReport {
 [[nodiscard]] constexpr PpTerminalScopeContentReport MakePpTerminalScopeContentReport(
     u64 sequence, FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss, u32 draw_count,
     u32 region_count, u32 consumer_observations = 0, u32 consumer_phase_mask = 0,
-    u32 consumer_shape_matches = 0, bool consumer_frozen = false) noexcept {
+    u32 consumer_shape_matches = 0, bool consumer_frozen = false, u32 plane_mask = 0) noexcept {
     return {
         .sequence = sequence,
         .status = status,
         .loss = loss,
         .draw_count = draw_count,
         .region_count = region_count,
+        .plane_mask = plane_mask,
         .consumer_observations = consumer_observations,
         .consumer_phase_mask = consumer_phase_mask,
         .consumer_shape_matches = consumer_shape_matches,
@@ -576,6 +578,7 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
     u32 total_bytes{};
+    u32 plane_mask{};
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
         regions{};
     u32 bytes_per_pixel{4};
@@ -787,12 +790,18 @@ private:
             report.loss.invalidation = 1;
             return report;
         }
-        ClassifyPlane(*a, *b, *c, 0, report.first_aba_ordinals, report.first_stable_ordinals,
-                      report.first_ambiguous_ordinals);
-        ClassifyPlane(*a, *b, *c, 1, report.second_aba_ordinals, report.second_stable_ordinals,
-                      report.second_ambiguous_ordinals);
-        ClassifyPlane(*a, *b, *c, 2, report.consumer_aba_ordinals, report.consumer_stable_ordinals,
-                      report.consumer_ambiguous_ordinals);
+        if ((a->layout.plane_mask & (1u << 0)) != 0) {
+            ClassifyPlane(*a, *b, *c, 0, report.first_aba_ordinals, report.first_stable_ordinals,
+                          report.first_ambiguous_ordinals);
+        }
+        if ((a->layout.plane_mask & (1u << 1)) != 0) {
+            ClassifyPlane(*a, *b, *c, 1, report.second_aba_ordinals, report.second_stable_ordinals,
+                          report.second_ambiguous_ordinals);
+        }
+        if ((a->layout.plane_mask & (1u << 2)) != 0) {
+            ClassifyPlane(*a, *b, *c, 2, report.consumer_aba_ordinals,
+                          report.consumer_stable_ordinals, report.consumer_ambiguous_ordinals);
+        }
         return report;
     }
 
@@ -894,6 +903,7 @@ private:
     return "FGSCTS s=" + std::to_string(report.sequence) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " d=" + std::to_string(report.draw_count) + " r=" + std::to_string(report.region_count) +
+           " pm=" + std::to_string(report.plane_mask) +
            " co=" + std::to_string(report.consumer_observations) +
            " cp=" + std::to_string(report.consumer_phase_mask) +
            " cm=" + std::to_string(report.consumer_shape_matches) +

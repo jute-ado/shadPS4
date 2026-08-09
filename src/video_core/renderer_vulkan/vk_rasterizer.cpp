@@ -145,7 +145,7 @@ public:
             Pending pending{
                 .sequence = sequence,
                 .process_time_us = process_time_us,
-                .layout = MakeHistoryLayout(entry->plan),
+                .layout = MakeHistoryLayout(entry->plan, entry->recorded_plane_mask),
                 .status = take.status,
                 .loss = take.loss,
                 .draw_count = take.draw_count,
@@ -201,6 +201,7 @@ public:
         entry->status = entry->plan.status;
         entry->loss = entry->plan.loss;
         entry->slot = {};
+        entry->recorded_plane_mask = 0;
         const u64 generation = target->EnsureDiagnosticBackingGeneration();
         if (!entry->gate.Arm(link.uid, generation)) {
             entry->status = FinalGuestSurfaceStatus::InvalidationLoss;
@@ -248,6 +249,7 @@ private:
         FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss loss{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
+        u32 recorded_plane_mask{};
     };
 
     struct Pending {
@@ -289,13 +291,14 @@ private:
     }
 
     [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeHistoryLayout(
-        const PpTerminalScopeContentPlan& plan) noexcept {
+        const PpTerminalScopeContentPlan& plan, u32 plane_mask = 0) noexcept {
         PpTerminalScopeContentHistoryLayout layout{
             .region_count = plan.region_count,
             .plane_bytes = plan.plane_bytes,
             .second_plane_offset = plan.second_plane_offset,
             .consumer_plane_offset = plan.consumer_plane_offset,
             .total_bytes = plan.total_bytes,
+            .plane_mask = plane_mask,
         };
         for (u32 index = 0; index < plan.region_count; ++index) {
             layout.regions[index] = {
@@ -343,7 +346,7 @@ private:
         const u64 slot_offset = entry.slot.slot * slot_stride;
         const auto cmdbuf = scheduler.CommandBuffer();
         scheduler.EndRendering();
-        if (plane == 0) {
+        if (slot_decision.acquire) {
             const vk::BufferMemoryBarrier2 pre_barrier{
                 .srcStageMask =
                     vk::PipelineStageFlagBits2::eAllCommands | vk::PipelineStageFlagBits2::eHost,
@@ -429,6 +432,8 @@ private:
         if (!scheduler.ResumeRenderingForDiagnostic(state, rendering_serial)) {
             entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
             entry.loss = {.invalidation = 1};
+        } else {
+            entry.recorded_plane_mask |= 1u << plane;
         }
     }
 
@@ -468,7 +473,7 @@ private:
                          pending.sequence, pending.status, pending.loss, pending.draw_count,
                          pending.layout.region_count, pending.consumer_observations,
                          pending.consumer_phase_mask, pending.consumer_shape_matches,
-                         pending.consumer_frozen)));
+                         pending.consumer_frozen, pending.layout.plane_mask)));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",

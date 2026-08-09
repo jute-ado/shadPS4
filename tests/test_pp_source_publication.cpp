@@ -1309,10 +1309,9 @@ TEST(PpTerminalScopeContent, ConsumerOnlyPlaneIsCompleteWithoutClassifyingMissin
         .plane_mask = 1u << 2,
         .regions = {{{.logical_ordinal = 31, .buffer_offset = 0, .byte_size = 4}}},
     };
-    const std::array<std::byte, 12> a{
-        std::byte{99}, std::byte{99}, std::byte{99}, std::byte{99},
-        std::byte{88}, std::byte{88}, std::byte{88}, std::byte{88},
-        std::byte{1},  std::byte{2},  std::byte{3},  std::byte{255}};
+    const std::array<std::byte, 12> a{std::byte{99}, std::byte{99}, std::byte{99}, std::byte{99},
+                                      std::byte{88}, std::byte{88}, std::byte{88}, std::byte{88},
+                                      std::byte{1},  std::byte{2},  std::byte{3},  std::byte{255}};
     auto b = a;
     b[8] = std::byte{9};
     auto c = a;
