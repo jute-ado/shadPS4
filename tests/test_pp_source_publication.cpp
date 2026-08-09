@@ -1542,6 +1542,50 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrd
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
+TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesCapturedInputRegionsIndependently) {
+    PpTerminalScopeContentReducer reducer{{.frame_start = 200, .frame_count = 3}, 8};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .total_bytes = 4,
+        .input_count = 2,
+        .input_capture_mask = 0b10,
+        .input_unavailable_mask = 0b01,
+        .input_planes =
+            {{{.status = FinalGuestSurfaceStatus::Unsupported,
+               .loss = {.unsupported_format = 1}},
+              {.region_count = 1,
+               .plane_offset = 0,
+               .plane_bytes = 4,
+               .regions = {{{.logical_ordinal = 42, .buffer_offset = 0, .byte_size = 4}}},
+               .format = FinalGuestSurfaceFormat::Rgba8,
+               .status = FinalGuestSurfaceStatus::Complete}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const std::array<std::byte, 4> a{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{255}};
+    const std::array<std::byte, 4> b{std::byte{9}, std::byte{8}, std::byte{7}, std::byte{255}};
+    const std::array<std::byte, 4> c{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{0}};
+    reducer.ObserveContent(200, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(201, layout, b, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(202, layout, c, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 200, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 201, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 202, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].input_capture_mask, 0b10u);
+    EXPECT_EQ(reports[0].input_unavailable_mask, 0b01u);
+    EXPECT_EQ(reports[0].sampled_input_aba_ordinals[1], (std::vector<u32>{42}));
+    EXPECT_TRUE(reports[0].sampled_input_stable_ordinals[1].empty());
+    EXPECT_TRUE(reports[0].sampled_input_ambiguous_ordinals[1].empty());
+    EXPECT_FALSE(reports[0].loss.Any());
+
+    const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
+    EXPECT_NE(line.find(" im=2/2/1"), std::string::npos);
+    EXPECT_NE(line.find(" z1a=42 z1s=- z1x=-"), std::string::npos);
+    EXPECT_EQ(line.find("byte"), std::string::npos);
+    EXPECT_EQ(line.find("hash"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+}
+
 TEST(PpTerminalScopeContent, OutputPlaneUsesTheExactLocalizedVisualReturnPredicate) {
     constexpr u32 PixelCount = 32 * 32;
     constexpr u32 RegionBytes = PixelCount * 4;
@@ -1973,6 +2017,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", "800"},
         {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "390,1024,1299"},
         {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_INPUT_CONTENT", "1"},
         {"SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
@@ -1989,6 +2034,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->expected_calibrations, 300u);
     EXPECT_TRUE(config->join_final_backing);
     EXPECT_TRUE(config->content.capture_pre_first);
+    EXPECT_TRUE(config->content.capture_sampled_input_content);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
     EXPECT_EQ(config->content.first,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 696, 1,
