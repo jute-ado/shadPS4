@@ -944,6 +944,9 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     const auto missing = PlanPpTerminalScopePlaneSlot(1, false);
     EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
     EXPECT_EQ(missing.loss.gap, 1u);
+    const auto consumer = PlanPpTerminalScopePlaneSlot(2, true);
+    EXPECT_FALSE(consumer.acquire);
+    EXPECT_TRUE(consumer.reuse);
 }
 
 TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
@@ -1025,7 +1028,39 @@ TEST(PpTerminalScopeContent, ConsumerProbePreservesOrderingAndMismatchWithoutPri
     EXPECT_FALSE(take.consumer_frozen);
 }
 
-TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceTwoBoundedPlanes) {
+TEST(PpTerminalScopeContent, ExactLateConsumerFreezesAndRequestsThirdPlane) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 4));
+    ASSERT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    ASSERT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    EXPECT_EQ(gate.ObserveDraw(17, 91, config.first), PpTerminalScopeContentAction::ShapeLoss);
+    EXPECT_EQ(gate.ObserveConsumer(17, config.consumer),
+              PpTerminalScopeConsumerAction::CaptureConsumer);
+    const auto take = gate.Take(17, 4);
+    EXPECT_EQ(take.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(take.draw_count, 3u);
+    EXPECT_TRUE(take.consumer_frozen);
+}
+
+TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceThreeBoundedPlanes) {
     FinalGuestSurfaceWatchOrdinals selector{};
     selector.status = FinalGuestSurfaceStatus::Complete;
     selector.count = 2;
@@ -1049,9 +1084,10 @@ TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceTwoBoundedPlanes) {
     });
     ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_EQ(plan.region_count, 2u);
-    EXPECT_EQ(plan.copy_region_count, 4u);
+    EXPECT_EQ(plan.copy_region_count, 6u);
     EXPECT_EQ(plan.first_plane_offset, 0u);
     EXPECT_GE(plan.second_plane_offset, plan.plane_bytes);
+    EXPECT_GE(plan.consumer_plane_offset, plan.second_plane_offset + plan.plane_bytes);
     EXPECT_LE(plan.total_bytes, PpTerminalScopeSnapshotBytes);
     EXPECT_EQ(plan.image_barriers_per_draw, 2u);
     EXPECT_TRUE(plan.ends_rendering);
@@ -1202,20 +1238,22 @@ TEST(PpTerminalScopeContent, PrivateLinkResolutionNeverIndexesAFreeOrReusedSlot)
     EXPECT_EQ(uid_queries, 2u);
 }
 
-TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesBothDrawPlanesPerOrdinal) {
+TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOrdinal) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
         .region_count = 2,
         .plane_bytes = 8,
         .second_plane_offset = 8,
-        .total_bytes = 16,
+        .consumer_plane_offset = 16,
+        .total_bytes = 24,
         .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
                      {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
     };
     const auto bytes = [](std::array<u8, 4> first0, std::array<u8, 4> first1,
-                          std::array<u8, 4> second0, std::array<u8, 4> second1) {
-        std::array<std::byte, 16> result{};
-        const std::array planes{first0, first1, second0, second1};
+                          std::array<u8, 4> second0, std::array<u8, 4> second1,
+                          std::array<u8, 4> consumer0, std::array<u8, 4> consumer1) {
+        std::array<std::byte, 24> result{};
+        const std::array planes{first0, first1, second0, second1, consumer0, consumer1};
         for (u32 plane = 0; plane < planes.size(); ++plane) {
             for (u32 index = 0; index < planes[plane].size(); ++index) {
                 result[plane * 4 + index] = std::byte{planes[plane][index]};
@@ -1223,9 +1261,12 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesBothDrawPlanesPerOr
         }
         return result;
     };
-    const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {10, 11, 12, 255});
-    const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {99, 98, 97, 255});
-    const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0}, {10, 11, 12, 255});
+    const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255},
+                         {10, 11, 12, 255}, {13, 14, 15, 255}, {16, 17, 18, 255});
+    const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255},
+                         {99, 98, 97, 255}, {88, 87, 86, 255}, {16, 17, 18, 255});
+    const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0},
+                         {10, 11, 12, 255}, {13, 14, 15, 0}, {19, 20, 21, 255});
     reducer.ObserveContent(100, layout, a, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(101, layout, b, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(102, layout, c, FinalGuestSurfaceStatus::Complete, {});
@@ -1242,6 +1283,9 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesBothDrawPlanesPerOr
     EXPECT_EQ(reports[0].second_aba_ordinals, (std::vector<u32>{12}));
     EXPECT_EQ(reports[0].second_stable_ordinals, (std::vector<u32>{11}));
     EXPECT_EQ(reports[0].second_ambiguous_ordinals, (std::vector<u32>{}));
+    EXPECT_EQ(reports[0].consumer_aba_ordinals, (std::vector<u32>{11}));
+    EXPECT_EQ(reports[0].consumer_stable_ordinals, (std::vector<u32>{}));
+    EXPECT_EQ(reports[0].consumer_ambiguous_ordinals, (std::vector<u32>{12}));
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
@@ -1251,10 +1295,11 @@ TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
         .region_count = 1,
         .plane_bytes = 4,
         .second_plane_offset = 4,
-        .total_bytes = 8,
+        .consumer_plane_offset = 8,
+        .total_bytes = 12,
         .regions = {{{.logical_ordinal = 21, .buffer_offset = 0, .byte_size = 4}}},
     };
-    const std::array<std::byte, 8> bytes{};
+    const std::array<std::byte, 12> bytes{};
     reducer.ObserveContent(200, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(201, layout, bytes, FinalGuestSurfaceStatus::GapLoss, {.gap = 1});
     reducer.ObserveContent(202, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
@@ -1294,6 +1339,9 @@ TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatu
         .first_aba_ordinals = {11, 12},
         .first_stable_ordinals = {13},
         .second_ambiguous_ordinals = {14},
+        .consumer_aba_ordinals = {15},
+        .consumer_stable_ordinals = {16},
+        .consumer_ambiguous_ordinals = {17},
         .status = FinalGuestSurfaceStatus::Complete,
     };
     const auto line = FormatPpTerminalScopeCalibratedReport(report);
@@ -1301,6 +1349,9 @@ TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatu
     EXPECT_NE(line.find("a0=11,12"), std::string::npos);
     EXPECT_NE(line.find("s0=13"), std::string::npos);
     EXPECT_NE(line.find("x1=14"), std::string::npos);
+    EXPECT_NE(line.find("a2=15"), std::string::npos);
+    EXPECT_NE(line.find("s2=16"), std::string::npos);
+    EXPECT_NE(line.find("x2=17"), std::string::npos);
     EXPECT_EQ(line.find("pixel"), std::string::npos);
     EXPECT_EQ(line.find("hash"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
