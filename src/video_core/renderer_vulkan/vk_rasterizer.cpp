@@ -148,8 +148,8 @@ public:
     }
 
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
-                     VideoCore::Image* sampled_input, const RenderState& state,
-                     u32 attachment_index, u64 rendering_serial,
+                     VideoCore::Image* sampled_input, const VideoCore::ImageViewInfo* sampled_view,
+                     const RenderState& state, u32 attachment_index, u64 rendering_serial,
                      const VideoCore::ImageColorScopeDrawDescriptor& draw) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
@@ -214,12 +214,28 @@ public:
         }
         if (action == PpTerminalScopeContentAction::CaptureFirst) {
             auto root_plan = entry->plan;
-            const bool root_structure_valid = HasCompatiblePlaneStructure(sampled_input);
+            const auto root_view = sampled_input && sampled_view
+                                       ? PlanPpTerminalScopeRootViewCapture({
+                                             .image_width = sampled_input->info.size.width,
+                                             .image_height = sampled_input->info.size.height,
+                                             .image_levels = sampled_input->info.resources.levels,
+                                             .image_layers = sampled_input->info.resources.layers,
+                                             .view_base_mip = sampled_view->range.base.level,
+                                             .view_mip_count = sampled_view->range.extent.levels,
+                                             .view_base_layer = sampled_view->range.base.layer,
+                                             .view_layer_count = sampled_view->range.extent.layers,
+                                         })
+                                       : PpTerminalScopeRootViewCaptureDecision{
+                                             .status = FinalGuestSurfaceStatus::InvalidationLoss,
+                                             .loss = {.invalidation = 1},
+                                         };
+            const bool root_structure_valid = HasCompatiblePlaneStructure(sampled_input) &&
+                                              root_view.status == FinalGuestSurfaceStatus::Complete;
             if (root_structure_valid) {
                 root_plan = AttachPpTerminalScopeRootInputPlan(
                     root_plan,
-                    {.source_width = sampled_input->info.size.width,
-                     .source_height = sampled_input->info.size.height,
+                    {.source_width = root_view.source_width,
+                     .source_height = root_view.source_height,
                      .format = TerminalScopeFormat(sampled_input->backing->image.image_ci.format),
                      .samples = sampled_input->backing->num_samples});
             } else {
@@ -248,8 +264,10 @@ public:
                 return;
             }
             entry->plan = std::move(root_plan);
+            const VideoCore::SubresourceRange root_range{
+                {.level = root_view.mip, .layer = root_view.layer}, {.levels = 1, .layers = 1}};
             RecordPlane(*entry, *sampled_input, state, attachment_index, rendering_serial,
-                        root_input.plane);
+                        root_input.plane, false, root_range);
             if (entry->status != FinalGuestSurfaceStatus::Complete || entry->loss.Any()) {
                 return;
             }
@@ -524,9 +542,7 @@ private:
     }
 
     [[nodiscard]] static bool HasCompatiblePlaneStructure(const VideoCore::Image* image) noexcept {
-        return image && image->aspect_mask == vk::ImageAspectFlagBits::eColor && image->backing &&
-               image->backing->subresource_states.empty() && image->info.resources.levels == 1 &&
-               image->info.resources.layers == 1;
+        return image && image->aspect_mask == vk::ImageAspectFlagBits::eColor && image->backing;
     }
 
     void ConfigureEntry(Entry& entry, VideoCore::ImageColorScopePrivateLink link,
@@ -600,7 +616,8 @@ private:
     }
 
     void RecordPlane(Entry& entry, VideoCore::Image& image, const RenderState& state,
-                     u32 attachment_index, u64 rendering_serial, u32 plane, bool finalize = false) {
+                     u32 attachment_index, u64 rendering_serial, u32 plane, bool finalize = false,
+                     std::optional<VideoCore::SubresourceRange> subresource = std::nullopt) {
         if (entry.status != FinalGuestSurfaceStatus::Complete || entry.loss.Any()) {
             return;
         }
@@ -609,6 +626,23 @@ private:
             entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
             entry.loss = {.invalidation = 1};
             return;
+        }
+        if (subresource && (subresource->extent.levels != 1 || subresource->extent.layers != 1 ||
+                            subresource->base.level >= image.info.resources.levels ||
+                            subresource->base.layer >= image.info.resources.layers)) {
+            entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            entry.loss = {.invalidation = 1};
+            return;
+        }
+        if (subresource && !image.backing->subresource_states.empty()) {
+            const u64 state_index =
+                static_cast<u64>(subresource->base.level) * image.info.resources.layers +
+                subresource->base.layer;
+            if (state_index >= image.backing->subresource_states.size()) {
+                entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                entry.loss = {.invalidation = 1};
+                return;
+            }
         }
         const auto slot_decision = PlanPpTerminalScopePlaneSlot(plane, bool{entry.slot});
         if (slot_decision.status != FinalGuestSurfaceStatus::Complete) {
@@ -652,8 +686,15 @@ private:
             });
         }
         const auto old_state = image.backing->state;
-        const VideoCore::SubresourceRange range{{.level = 0, .layer = 0},
-                                                {.levels = 1, .layers = 1}};
+        const auto old_subresource_states = image.backing->subresource_states;
+        const VideoCore::SubresourceRange range = subresource.value_or(
+            VideoCore::SubresourceRange{{.level = 0, .layer = 0}, {.levels = 1, .layers = 1}});
+        auto restore_state = old_state;
+        if (!old_subresource_states.empty()) {
+            const u64 state_index =
+                static_cast<u64>(range.base.level) * image.info.resources.layers + range.base.layer;
+            restore_state = old_subresource_states[state_index];
+        }
         image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
                       range, cmdbuf);
         std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> copies{};
@@ -674,8 +715,8 @@ private:
                 .imageSubresource =
                     {
                         .aspectMask = vk::ImageAspectFlagBits::eColor,
-                        .mipLevel = 0,
-                        .baseArrayLayer = 0,
+                        .mipLevel = range.base.level,
+                        .baseArrayLayer = range.base.layer,
                         .layerCount = 1,
                     },
                 .imageOffset = {static_cast<s32>(region.x), static_cast<s32>(region.y), 0},
@@ -687,19 +728,19 @@ private:
         const vk::ImageMemoryBarrier2 restore{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
-            .dstStageMask = old_state.pl_stage,
-            .dstAccessMask = old_state.access_mask,
+            .dstStageMask = restore_state.pl_stage,
+            .dstAccessMask = restore_state.access_mask,
             .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
-            .newLayout = old_state.layout,
+            .newLayout = restore_state.layout,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .image = image.GetImage(),
             .subresourceRange =
                 {
                     .aspectMask = vk::ImageAspectFlagBits::eColor,
-                    .baseMipLevel = 0,
+                    .baseMipLevel = range.base.level,
                     .levelCount = 1,
-                    .baseArrayLayer = 0,
+                    .baseArrayLayer = range.base.layer,
                     .layerCount = 1,
                 },
         };
@@ -708,6 +749,7 @@ private:
             .pImageMemoryBarriers = &restore,
         });
         image.backing->state = old_state;
+        image.backing->subresource_states = old_subresource_states;
         if (finalize) {
             const vk::BufferMemoryBarrier2 post_barrier{
                 .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -1283,6 +1325,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     image_infos.clear();
     if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
         diagnostic_sampled_images.clear();
+        diagnostic_sampled_view.reset();
+        diagnostic_sampled_view_ambiguous = false;
         diagnostic_sampled_bindings = 0;
         diagnostic_storage_writes = 0;
     }
@@ -1667,9 +1711,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 }
             } else if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
                 ++diagnostic_sampled_bindings;
-                if (std::ranges::find(diagnostic_sampled_images, image_id) ==
-                    diagnostic_sampled_images.end()) {
+                const auto found = std::ranges::find(diagnostic_sampled_images, image_id);
+                if (found == diagnostic_sampled_images.end()) {
                     diagnostic_sampled_images.emplace_back(image_id);
+                    if (diagnostic_sampled_images.size() == 1) {
+                        diagnostic_sampled_view = image_view.info;
+                    } else {
+                        diagnostic_sampled_view.reset();
+                        diagnostic_sampled_view_ambiguous = true;
+                    }
+                } else if (diagnostic_sampled_images.size() == 1 && diagnostic_sampled_view &&
+                           *diagnostic_sampled_view != image_view.info) {
+                    diagnostic_sampled_view_ambiguous = true;
                 }
             }
 
@@ -1726,6 +1779,7 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     bool writes_color_output{};
     bool input_alias{};
     VideoCore::Image* sampled_input_image{};
+    const VideoCore::ImageViewInfo* sampled_input_view{};
     VideoCore::ImageId sole_output_id{};
     u32 sole_output_attachment_index{};
     u32 output_count{};
@@ -1745,6 +1799,9 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     if (writes_color_output && diagnostic_sampled_images.size() == 1) {
         auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front());
         sampled_input_image = &input_image;
+        if (diagnostic_sampled_view && !diagnostic_sampled_view_ambiguous) {
+            sampled_input_view = &*diagnostic_sampled_view;
+        }
         draw.sampled_input_image = {
             .id = diagnostic_sampled_images.front(),
             .uid = input_image.image_uid,
@@ -1797,8 +1854,9 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             image.MarkDiagnosticColorDraw(rendering_serial, draw);
             image.MarkDiagnosticProducer(VideoCore::ImageProducerClass::ColorAttachment);
             if (pp_terminal_scope_content) {
-                pp_terminal_scope_content->ObserveDraw(image_id, image, sampled_input_image, state,
-                                                       index, rendering_serial, draw);
+                pp_terminal_scope_content->ObserveDraw(image_id, image, sampled_input_image,
+                                                       sampled_input_view, state, index,
+                                                       rendering_serial, draw);
             }
         }
     }

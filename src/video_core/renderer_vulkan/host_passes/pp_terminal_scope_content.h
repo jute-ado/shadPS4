@@ -600,6 +600,74 @@ struct PpTerminalScopeRootInputCaptureDecision {
     };
 }
 
+struct PpTerminalScopeRootViewCaptureDescriptor {
+    u32 image_width{};
+    u32 image_height{};
+    u32 image_levels{};
+    u32 image_layers{};
+    u32 view_base_mip{};
+    u32 view_mip_count{};
+    u32 view_base_layer{};
+    u32 view_layer_count{};
+};
+
+struct PpTerminalScopeRootViewCaptureDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    u32 source_width{};
+    u32 source_height{};
+    u32 mip{};
+    u32 layer{};
+    u32 state_index{};
+    bool capture_partial_subresource{};
+    bool restore_exact_tracker_state{};
+    bool cpu_wait{};
+    bool finish{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeRootViewCaptureDecision PlanPpTerminalScopeRootViewCapture(
+    const PpTerminalScopeRootViewCaptureDescriptor& descriptor) noexcept {
+    if (descriptor.image_width == 0 || descriptor.image_height == 0 ||
+        descriptor.image_levels == 0 || descriptor.image_layers == 0 ||
+        descriptor.view_base_mip >= descriptor.image_levels ||
+        descriptor.view_base_layer >= descriptor.image_layers ||
+        descriptor.view_mip_count > descriptor.image_levels - descriptor.view_base_mip ||
+        descriptor.view_layer_count > descriptor.image_layers - descriptor.view_base_layer) {
+        return {
+            .status = FinalGuestSurfaceStatus::InvalidationLoss,
+            .loss = {.invalidation = 1},
+        };
+    }
+    if (descriptor.view_mip_count != 1 || descriptor.view_layer_count != 1) {
+        FinalGuestSurfaceLoss loss{};
+        if (descriptor.view_mip_count != 1) {
+            loss.unsupported_mip = 1;
+        }
+        if (descriptor.view_layer_count != 1) {
+            loss.unsupported_layer = 1;
+        }
+        return {.status = FinalGuestSurfaceStatus::Unsupported, .loss = loss};
+    }
+    const u64 state_index = static_cast<u64>(descriptor.view_base_mip) * descriptor.image_layers +
+                            descriptor.view_base_layer;
+    if (state_index > std::numeric_limits<u32>::max()) {
+        return {
+            .status = FinalGuestSurfaceStatus::CapacityLoss,
+            .loss = {.tile_capacity = 1},
+        };
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::Complete,
+        .source_width = std::max(1u, descriptor.image_width >> descriptor.view_base_mip),
+        .source_height = std::max(1u, descriptor.image_height >> descriptor.view_base_mip),
+        .mip = descriptor.view_base_mip,
+        .layer = descriptor.view_base_layer,
+        .state_index = static_cast<u32>(state_index),
+        .capture_partial_subresource = true,
+        .restore_exact_tracker_state = true,
+    };
+}
+
 [[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
     u32 plane, bool has_slot) noexcept {
     if (plane > 4 || (plane == 4 && has_slot) ||

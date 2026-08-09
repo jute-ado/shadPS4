@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <span>
 
 #include "common/recursive_lock.h"
@@ -161,6 +162,8 @@ private:
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> storage_written_images;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES>
         diagnostic_sampled_images;
+    std::optional<VideoCore::ImageViewInfo> diagnostic_sampled_view;
+    bool diagnostic_sampled_view_ambiguous{};
     u32 diagnostic_sampled_bindings{};
     u32 diagnostic_storage_writes{};
 
