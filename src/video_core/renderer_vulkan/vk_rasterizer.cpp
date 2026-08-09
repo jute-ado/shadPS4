@@ -110,7 +110,13 @@ public:
                                                            .sampled_images = draw.sampled_images,
                                                            .storage_writes = draw.storage_writes,
                                                        });
-        if (action != PpTerminalScopeConsumerAction::CaptureConsumer || !sampled_input) {
+        if (action != PpTerminalScopeConsumerAction::CaptureConsumer) {
+            return;
+        }
+        if (entry->discovered) {
+            progress_coverage.Observe({.consumer_action = true});
+        }
+        if (!sampled_input) {
             return;
         }
         if (entry->discovered) {
@@ -147,6 +153,11 @@ public:
                 entry->flip_alias = output_link;
                 entry->flip_alias_ready = true;
             }
+            progress_coverage.Observe({
+                .consumer_captured = (entry->recorded_plane_mask & (1u << 2)) != 0,
+                .output_captured = (entry->recorded_plane_mask & (1u << 3)) != 0,
+                .alias_ready = entry->flip_alias_ready,
+            });
             return;
         }
         entry->status = FinalGuestSurfaceStatus::Complete;
@@ -210,6 +221,11 @@ public:
         });
         if (restart) {
             RestartEntry(*entry, link, image);
+            progress_coverage.Observe({
+                .restart = true,
+                .restart_plan_complete = entry->plan.status == FinalGuestSurfaceStatus::Complete &&
+                                         !entry->plan.loss.Any() && entry->plan.copy,
+            });
         }
         const auto action = entry->gate.PreviewDraw(image.image_uid, rendering_serial, observed);
         if (action == PpTerminalScopePreDrawAction::ShapeLoss) {
@@ -219,10 +235,22 @@ public:
         }
         if (action == PpTerminalScopePreDrawAction::CaptureBeforePredecessor) {
             RecordPlane(*entry, image, state, attachment_index, rendering_serial, 5);
+            if (entry->discovered) {
+                progress_coverage.Observe({
+                    .predecessor_before_action = true,
+                    .predecessor_before_captured = (entry->recorded_plane_mask & (1u << 5)) != 0,
+                });
+            }
         } else if (action == PpTerminalScopePreDrawAction::CaptureBeforeFirst) {
             entry->predecessor = ClassifyPpTerminalScopePredecessor(
                 image.PeekDiagnosticProducer(), image.ObserveDiagnosticColorScope());
             RecordPlane(*entry, image, state, attachment_index, rendering_serial, 4);
+            if (entry->discovered) {
+                progress_coverage.Observe({
+                    .first_before_action = true,
+                    .first_before_captured = (entry->recorded_plane_mask & (1u << 4)) != 0,
+                });
+            }
         }
     }
 
@@ -256,6 +284,21 @@ public:
                           : action == PpTerminalScopeContentAction::CaptureFirst     ? 0
                                                                                      : 1;
         RecordPlane(*entry, image, state, attachment_index, rendering_serial, plane);
+        if (entry->discovered) {
+            progress_coverage.Observe({
+                .predecessor_after_action =
+                    action == PpTerminalScopeContentAction::CapturePredecessor,
+                .predecessor_after_captured =
+                    action == PpTerminalScopeContentAction::CapturePredecessor &&
+                    (entry->recorded_plane_mask & (1u << 6)) != 0,
+                .first_after_action = action == PpTerminalScopeContentAction::CaptureFirst,
+                .first_after_captured = action == PpTerminalScopeContentAction::CaptureFirst &&
+                                        (entry->recorded_plane_mask & (1u << 0)) != 0,
+                .second_action = action == PpTerminalScopeContentAction::CaptureSecond,
+                .second_captured = action == PpTerminalScopeContentAction::CaptureSecond &&
+                                   (entry->recorded_plane_mask & (1u << 1)) != 0,
+            });
+        }
     }
 
     void ObserveFlip(u64 sequence, u64 process_time_us, VideoCore::ImageColorScopePrivateLink link,
@@ -396,6 +439,7 @@ public:
         scheduler.PopPendingOperations();
         if (discovery_coverage_emission.Finalize()) {
             LOG_INFO(Render, "{}", FormatPpTerminalScopeDiscoveryCoverage(discovery_coverage));
+            LOG_INFO(Render, "{}", FormatPpTerminalScopeProgressCoverage(progress_coverage));
         }
         std::scoped_lock lock{reducer_mutex};
         LogReports();
@@ -790,6 +834,8 @@ private:
                 if (discovery_coverage_emission.Observe(config.window, pending.sequence)) {
                     LOG_INFO(Render, "{}",
                              FormatPpTerminalScopeDiscoveryCoverage(discovery_coverage));
+                    LOG_INFO(Render, "{}",
+                             FormatPpTerminalScopeProgressCoverage(progress_coverage));
                 }
             }
         }
@@ -827,6 +873,7 @@ private:
     std::array<std::unique_ptr<Entry>, MaxTargets> entries{};
     MappingTemplate mapping{};
     PpTerminalScopeDiscoveryCoverage discovery_coverage{};
+    PpTerminalScopeProgressCoverage progress_coverage{};
     PpTerminalScopeDiscoveryCoverageEmissionGate discovery_coverage_emission{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};

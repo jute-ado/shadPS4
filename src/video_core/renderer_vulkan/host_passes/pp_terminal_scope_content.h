@@ -314,6 +314,68 @@ struct PpTerminalScopeDiscoveryCoverage {
     }
 };
 
+struct PpTerminalScopeProgressObservation {
+    bool restart{};
+    bool restart_plan_complete{};
+    bool predecessor_before_action{};
+    bool predecessor_before_captured{};
+    bool predecessor_after_action{};
+    bool predecessor_after_captured{};
+    bool first_before_action{};
+    bool first_before_captured{};
+    bool first_after_action{};
+    bool first_after_captured{};
+    bool second_action{};
+    bool second_captured{};
+    bool consumer_action{};
+    bool consumer_captured{};
+    bool output_captured{};
+    bool alias_ready{};
+};
+
+struct PpTerminalScopeProgressCoverage {
+    u32 restarts{};
+    u32 restart_plans_complete{};
+    u32 predecessor_before_actions{};
+    u32 predecessor_before_captures{};
+    u32 predecessor_after_actions{};
+    u32 predecessor_after_captures{};
+    u32 first_before_actions{};
+    u32 first_before_captures{};
+    u32 first_after_actions{};
+    u32 first_after_captures{};
+    u32 second_actions{};
+    u32 second_captures{};
+    u32 consumer_actions{};
+    u32 consumer_captures{};
+    u32 output_captures{};
+    u32 aliases_ready{};
+
+    constexpr void Observe(PpTerminalScopeProgressObservation observation) noexcept {
+        const auto add = [](u32& value, bool observed) {
+            if (observed && value != std::numeric_limits<u32>::max()) {
+                ++value;
+            }
+        };
+        add(restarts, observation.restart);
+        add(restart_plans_complete, observation.restart_plan_complete);
+        add(predecessor_before_actions, observation.predecessor_before_action);
+        add(predecessor_before_captures, observation.predecessor_before_captured);
+        add(predecessor_after_actions, observation.predecessor_after_action);
+        add(predecessor_after_captures, observation.predecessor_after_captured);
+        add(first_before_actions, observation.first_before_action);
+        add(first_before_captures, observation.first_before_captured);
+        add(first_after_actions, observation.first_after_action);
+        add(first_after_captures, observation.first_after_captured);
+        add(second_actions, observation.second_action);
+        add(second_captures, observation.second_captured);
+        add(consumer_actions, observation.consumer_action);
+        add(consumer_captures, observation.consumer_captured);
+        add(output_captures, observation.output_captured);
+        add(aliases_ready, observation.alias_ready);
+    }
+};
+
 class PpTerminalScopeDiscoveryCoverageEmissionGate {
 public:
     [[nodiscard]] constexpr bool Observe(const FinalGuestSurfaceCaptureWindow& window,
@@ -1919,6 +1981,26 @@ private:
            " m=" + std::to_string(coverage.mapping_rejected) +
            " v=" + std::to_string(coverage.target_rejected) +
            " z=" + std::to_string(coverage.capacity_rejected);
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopeProgressCoverage(
+    const PpTerminalScopeProgressCoverage& coverage) {
+    return "FGSCTSP r=" + std::to_string(coverage.restarts) +
+           " rp=" + std::to_string(coverage.restart_plans_complete) +
+           " ba=" + std::to_string(coverage.predecessor_before_actions) +
+           " bc=" + std::to_string(coverage.predecessor_before_captures) +
+           " pa=" + std::to_string(coverage.predecessor_after_actions) +
+           " pc=" + std::to_string(coverage.predecessor_after_captures) +
+           " fa=" + std::to_string(coverage.first_before_actions) +
+           " fc=" + std::to_string(coverage.first_before_captures) +
+           " aa=" + std::to_string(coverage.first_after_actions) +
+           " ac=" + std::to_string(coverage.first_after_captures) +
+           " sa=" + std::to_string(coverage.second_actions) +
+           " sc=" + std::to_string(coverage.second_captures) +
+           " ca=" + std::to_string(coverage.consumer_actions) +
+           " cc=" + std::to_string(coverage.consumer_captures) +
+           " oc=" + std::to_string(coverage.output_captures) +
+           " ar=" + std::to_string(coverage.aliases_ready);
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopePrivateLineageReport(

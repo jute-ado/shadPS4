@@ -2233,10 +2233,8 @@ TEST(PpTerminalScopeContent, ProgressCoverageSeparatesActionsFromSuccessfulPlane
     PpTerminalScopeProgressCoverage coverage{};
     coverage.Observe({.restart = true, .restart_plan_complete = true});
     coverage.Observe({.restart = true});
-    coverage.Observe({.predecessor_before_action = true,
-                      .predecessor_before_captured = true});
-    coverage.Observe({.predecessor_after_action = true,
-                      .predecessor_after_captured = true});
+    coverage.Observe({.predecessor_before_action = true, .predecessor_before_captured = true});
+    coverage.Observe({.predecessor_after_action = true, .predecessor_after_captured = true});
     coverage.Observe({.first_before_action = true, .first_before_captured = true});
     coverage.Observe({.first_after_action = true, .first_after_captured = true});
     coverage.Observe({.second_action = true, .second_captured = true});
@@ -2264,9 +2262,8 @@ TEST(PpTerminalScopeContent, ProgressCoverageSeparatesActionsFromSuccessfulPlane
     EXPECT_EQ(coverage.aliases_ready, 1u);
 
     const auto line = FormatPpTerminalScopeProgressCoverage(coverage);
-    EXPECT_EQ(line,
-              "FGSCTSP r=2 rp=1 ba=1 bc=1 pa=1 pc=1 fa=1 fc=1 aa=1 ac=1 sa=1 sc=1 "
-              "ca=1 cc=1 oc=1 ar=1");
+    EXPECT_EQ(line, "FGSCTSP r=2 rp=1 ba=1 bc=1 pa=1 pc=1 fa=1 fc=1 aa=1 ac=1 sa=1 sc=1 "
+                    "ca=1 cc=1 oc=1 ar=1");
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
