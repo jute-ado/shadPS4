@@ -31,6 +31,7 @@ namespace Vulkan {
         return HostPasses::PpDiagnosticMode::ComputedShadow;
     case FinalGuestSurfaceStage::PpSampledInput:
     case FinalGuestSurfaceStage::PpSourceReconstruction:
+    case FinalGuestSurfaceStage::PpSourcePublicationReconstruction:
         return HostPasses::PpDiagnosticMode::SampledInput;
     default:
         return HostPasses::PpDiagnosticMode::None;

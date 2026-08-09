@@ -17,6 +17,32 @@ enum class PpSourceSnapshotPoint : u8 {
     FlipPublication,
 };
 
+struct PpSourceReconstructionExecutionPlan {
+    bool enabled{};
+    bool prepare_resources_before_visible_pp{};
+    bool capture_snapshot_before_visible_pp{};
+    bool capture_snapshot_after_visible_pp{};
+    bool run_reconstruction_after_visible_pp{};
+    bool visible_pp_draw_remains_original_source{};
+};
+
+[[nodiscard]] constexpr PpSourceReconstructionExecutionPlan PlanPpSourceReconstructionExecution(
+    FinalGuestSurfaceStage stage, bool in_window, bool frame_is_new, bool metadata_valid) noexcept {
+    const bool post_sample = stage == FinalGuestSurfaceStage::PpSourceReconstruction;
+    const bool publication = stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction;
+    if ((!post_sample && !publication) || !in_window || !frame_is_new || !metadata_valid) {
+        return {};
+    }
+    return {
+        .enabled = true,
+        .prepare_resources_before_visible_pp = publication,
+        .capture_snapshot_before_visible_pp = publication,
+        .capture_snapshot_after_visible_pp = post_sample,
+        .run_reconstruction_after_visible_pp = true,
+        .visible_pp_draw_remains_original_source = true,
+    };
+}
+
 struct PpSourceReconstructionDescriptor {
     bool enabled{};
     bool in_window{};

@@ -393,6 +393,52 @@ void DestroyPpSourceReconstructionResources(const Instance& instance, Frame& fra
     return true;
 }
 
+[[nodiscard]] bool RecordPpSourceReconstructionSnapshot(VideoCore::Image& image,
+                                                        VideoCore::SubresourceRange source_range,
+                                                        Frame& frame, vk::Extent2D source_extent,
+                                                        vk::CommandBuffer cmdbuf) {
+    if (!frame.pp_source_reconstruction_snapshot_image || source_extent.width == 0 ||
+        source_extent.height == 0) {
+        return false;
+    }
+    const vk::ImageSubresourceRange snapshot_range{
+        .aspectMask = vk::ImageAspectFlagBits::eColor,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                  source_range, cmdbuf);
+    const vk::ImageMemoryBarrier2 snapshot_to_transfer{
+        .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+        .image = frame.pp_source_reconstruction_snapshot_image,
+        .subresourceRange = snapshot_range,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &snapshot_to_transfer,
+    });
+    const vk::ImageCopy source_copy{
+        .srcSubresource = MakeImageSubresourceLayers(),
+        .srcOffset = {0, 0, 0},
+        .dstSubresource = MakeImageSubresourceLayers(),
+        .dstOffset = {0, 0, 0},
+        .extent = {source_extent.width, source_extent.height, 1},
+    };
+    cmdbuf.copyImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                     frame.pp_source_reconstruction_snapshot_image,
+                     vk::ImageLayout::eTransferDstOptimal, 1, &source_copy);
+    image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+                  source_range, cmdbuf);
+    return true;
+}
+
 } // namespace
 
 class FinalGuestSurfaceContentState {
@@ -431,9 +477,9 @@ public:
                  "expected_calibrations={}",
                  static_cast<u32>(config.stage), config.window.frame_start,
                  config.window.frame_count, FinalGuestSurfaceTilePlan::MaxTiles,
-                 config.stage == FinalGuestSurfaceStage::PpSourceReconstruction ? 4
-                 : config.stage == FinalGuestSurfaceStage::PpSampledInput       ? 3
-                                                                                : 1,
+                 IsPpSourceReconstructionStage()                          ? 4
+                 : config.stage == FinalGuestSurfaceStage::PpSampledInput ? 3
+                                                                          : 1,
                  FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
                  config.lag.tolerance_us, config.watch_ordinals.count,
@@ -459,11 +505,16 @@ public:
 
     [[nodiscard]] bool IsPpSampledInputStage() const noexcept {
         return config.stage == FinalGuestSurfaceStage::PpSampledInput ||
-               config.stage == FinalGuestSurfaceStage::PpSourceReconstruction;
+               IsPpSourceReconstructionStage();
     }
 
     [[nodiscard]] bool IsPpSourceReconstructionStage() const noexcept {
-        return config.stage == FinalGuestSurfaceStage::PpSourceReconstruction;
+        return config.stage == FinalGuestSurfaceStage::PpSourceReconstruction ||
+               config.stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction;
+    }
+
+    [[nodiscard]] bool IsPpSourcePublicationReconstructionStage() const noexcept {
+        return config.stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction;
     }
 
     [[nodiscard]] bool IsPresentStage() const noexcept {
@@ -1604,6 +1655,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         final_guest_surface_content && final_guest_surface_content->IsPpSampledInputStage();
     const bool pp_source_reconstruction_stage =
         final_guest_surface_content && final_guest_surface_content->IsPpSourceReconstructionStage();
+    const bool pp_source_publication_reconstruction_stage =
+        final_guest_surface_content &&
+        final_guest_surface_content->IsPpSourcePublicationReconstructionStage();
     const bool pp_diagnostic_stage = pp_input_shadow_stage || pp_sampled_input_stage;
     if (pp_diagnostic_stage && frame->pp_input_shadow_image) {
         pre_barriers[pre_barrier_count++] = vk::ImageMemoryBarrier2{
@@ -1751,6 +1805,29 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             .frame_hdr = frame->is_hdr,
         });
     }
+    const bool reconstruction_metadata_valid = sampled_input_metadata.valid &&
+                                               sampled_input_metadata.bound_base_mip == 0 &&
+                                               sampled_input_metadata.bound_mip_count == 1 &&
+                                               sampled_input_metadata.bound_base_layer == 0 &&
+                                               sampled_input_metadata.bound_layer_count == 1;
+    const auto reconstruction_execution = HostPasses::PlanPpSourceReconstructionExecution(
+        final_guest_surface_content ? final_guest_surface_content->Stage()
+                                    : FinalGuestSurfaceStage::GuestPreFsr,
+        final_guest_surface_content && final_guest_surface_content->ShouldCapture(stamp.sequence),
+        true, reconstruction_metadata_valid);
+    bool source_reconstruction_resources_available{};
+    bool source_reconstruction_snapshot_captured{};
+    if (reconstruction_execution.prepare_resources_before_visible_pp) {
+        source_reconstruction_resources_available = EnsurePpSourceReconstructionResources(
+            instance, *frame, image.backing->image.image_ci.format, source_view.info.format,
+            source_view.info.mapping, image_size, swapchain.GetSurfaceFormat().format,
+            {frame->width, frame->height});
+        if (source_reconstruction_resources_available &&
+            reconstruction_execution.capture_snapshot_before_visible_pp) {
+            source_reconstruction_snapshot_captured = RecordPpSourceReconstructionSnapshot(
+                image, source_view.info.range, *frame, image_size, cmdbuf);
+        }
+    }
     const bool diagnostic_metadata_valid = pp_input_metadata.valid || sampled_input_metadata.valid;
     const bool shadow_written =
         pp_pass.Render(cmdbuf, image_view, image_size, *frame, frame_pp_settings,
@@ -1848,7 +1925,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
     HostPasses::PpSourceReconstructionPlan source_reconstruction_plan{};
     bool source_reconstruction_captured{};
-    if (pp_source_reconstruction_stage && source_backing_captured &&
+    if (reconstruction_execution.run_reconstruction_after_visible_pp && source_backing_captured &&
         final_guest_surface_content->ShouldCapture(stamp.sequence)) {
         const auto pair = PlanPpSampledInputPairedCapture({
             .enabled = true,
@@ -1874,6 +1951,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             .source_snapshot_available = true,
             .source_snapshot_view_available = true,
             .reconstruction_output_available = true,
+            .snapshot_point = pp_source_publication_reconstruction_stage
+                                  ? HostPasses::PpSourceSnapshotPoint::FlipPublication
+                                  : HostPasses::PpSourceSnapshotPoint::AfterVisiblePp,
             .source_width = image_size.width,
             .source_height = image_size.height,
             .output_width = frame->width,
@@ -1891,11 +1971,20 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         source_reconstruction_plan =
             HostPasses::PlanPpSourceReconstruction(reconstruction_descriptor);
         if (source_reconstruction_plan.status == FinalGuestSurfaceStatus::Complete) {
-            const bool resources_available = EnsurePpSourceReconstructionResources(
-                instance, *frame, image.backing->image.image_ci.format, source_view.info.format,
-                source_view.info.mapping, image_size, swapchain.GetSurfaceFormat().format,
-                {frame->width, frame->height});
-            if (!resources_available) {
+            if (!source_reconstruction_resources_available &&
+                reconstruction_execution.capture_snapshot_after_visible_pp) {
+                source_reconstruction_resources_available = EnsurePpSourceReconstructionResources(
+                    instance, *frame, image.backing->image.image_ci.format, source_view.info.format,
+                    source_view.info.mapping, image_size, swapchain.GetSurfaceFormat().format,
+                    {frame->width, frame->height});
+            }
+            if (source_reconstruction_resources_available &&
+                reconstruction_execution.capture_snapshot_after_visible_pp) {
+                source_reconstruction_snapshot_captured = RecordPpSourceReconstructionSnapshot(
+                    image, source_view.info.range, *frame, image_size, cmdbuf);
+            }
+            if (!source_reconstruction_resources_available ||
+                !source_reconstruction_snapshot_captured) {
                 reconstruction_descriptor.source_snapshot_available = false;
                 reconstruction_descriptor.source_snapshot_view_available = false;
                 reconstruction_descriptor.reconstruction_output_available = false;
@@ -1911,34 +2000,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             };
-            image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
-                          source_view.info.range, cmdbuf);
-            const vk::ImageMemoryBarrier2 snapshot_to_transfer{
-                .srcStageMask = vk::PipelineStageFlagBits2::eNone,
-                .srcAccessMask = vk::AccessFlagBits2::eNone,
-                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
-                .oldLayout = vk::ImageLayout::eUndefined,
-                .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                .image = frame->pp_source_reconstruction_snapshot_image,
-                .subresourceRange = simple_range,
-            };
-            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-                .imageMemoryBarrierCount = 1,
-                .pImageMemoryBarriers = &snapshot_to_transfer,
-            });
-            const vk::ImageCopy source_copy{
-                .srcSubresource = MakeImageSubresourceLayers(),
-                .srcOffset = {0, 0, 0},
-                .dstSubresource = MakeImageSubresourceLayers(),
-                .dstOffset = {0, 0, 0},
-                .extent = {image_size.width, image_size.height, 1},
-            };
-            cmdbuf.copyImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                             frame->pp_source_reconstruction_snapshot_image,
-                             vk::ImageLayout::eTransferDstOptimal, 1, &source_copy);
-            image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
-                          source_view.info.range, cmdbuf);
             const std::array reconstruction_barriers{
                 vk::ImageMemoryBarrier2{
                     .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
