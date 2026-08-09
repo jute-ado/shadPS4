@@ -70,6 +70,7 @@ struct PpSourceProducerScopeObservation {
     u32 ancestry_max_depth{};
     u32 ancestry_truncated{};
     u32 ancestry_loss{};
+    u32 ancestry_draw_summary_loss{};
     std::array<u32, static_cast<u32>(VideoCore::ImageColorScopeAncestryTerminal::Count)>
         ancestry_terminals{};
     u32 loss{};
@@ -207,6 +208,10 @@ public:
                 ++ancestry_loss;
                 ++loss;
             }
+            if (draw_scope.ancestry.terminal_draws_truncated) {
+                ++ancestry_draw_summary_loss;
+                ++loss;
+            }
         }
         const bool final = window.IsFinal(sequence);
         if (final && emitted != window.count) {
@@ -259,6 +264,7 @@ public:
             .ancestry_max_depth = ancestry_max_depth,
             .ancestry_truncated = ancestry_truncated,
             .ancestry_loss = ancestry_loss,
+            .ancestry_draw_summary_loss = ancestry_draw_summary_loss,
             .ancestry_terminals = ancestry_terminals,
             .loss = loss,
             .final = final,
@@ -310,11 +316,32 @@ private:
     u32 ancestry_max_depth{};
     u32 ancestry_truncated{};
     u32 ancestry_loss{};
+    u32 ancestry_draw_summary_loss{};
     std::array<u32, static_cast<u32>(VideoCore::ImageColorScopeAncestryTerminal::Count)>
         ancestry_terminals{};
     u32 loss{};
     bool has_last{};
 };
+
+[[nodiscard]] inline std::string FormatImageColorScopeDrawSummaries(
+    const VideoCore::ImageColorScopeAncestry& ancestry) {
+    std::string result;
+    for (u32 index = 0; index < ancestry.terminal_draw_count; ++index) {
+        if (index != 0) {
+            result += '/';
+        }
+        const auto& draw = ancestry.terminal_draws[index];
+        result += std::to_string(static_cast<u32>(draw.kind)) + '.' +
+                  std::to_string(draw.indexed ? 1 : 0) + '.' + std::to_string(draw.element_count) +
+                  '.' + std::to_string(draw.instance_count) + '.' +
+                  std::to_string(draw.sampled_images) + '.' + std::to_string(draw.storage_writes) +
+                  '.' + std::to_string(static_cast<u32>(draw.sampled_input_producer)) + '.' +
+                  std::to_string(draw.sampled_input_fresh ? 1 : 0) + '.' +
+                  std::to_string(draw.sampled_input_alias ? 1 : 0) + '.' +
+                  std::to_string(draw.sampled_input_valid ? 1 : 0);
+    }
+    return result;
+}
 
 [[nodiscard]] inline std::string FormatImageColorScopeAncestry(
     const VideoCore::ImageColorScopeAncestry& ancestry) {
@@ -383,7 +410,19 @@ private:
                 : " ad=" + std::to_string(observation.draw_scope.ancestry.depth) + " at=" +
                       std::to_string(static_cast<u32>(observation.draw_scope.ancestry.terminal)) +
                       " ax=" + std::to_string(observation.draw_scope.ancestry.truncated ? 1 : 0) +
-                      " ch=" + FormatImageColorScopeAncestry(observation.draw_scope.ancestry));
+                      " ch=" + FormatImageColorScopeAncestry(observation.draw_scope.ancestry) +
+                      (observation.draw_scope.ancestry.terminal_draw_count == 0
+                           ? std::string{}
+                           : " td=" +
+                                 std::to_string(
+                                     observation.draw_scope.ancestry.terminal_draw_count) +
+                                 " tx=" +
+                                 std::to_string(
+                                     observation.draw_scope.ancestry.terminal_draws_truncated ? 1
+                                                                                              : 0) +
+                                 " th=" +
+                                 FormatImageColorScopeDrawSummaries(
+                                     observation.draw_scope.ancestry)));
 }
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeCoverage(
@@ -432,7 +471,8 @@ private:
                 : " ao=" + std::to_string(observation.ancestry_observed) +
                       " am=" + std::to_string(observation.ancestry_max_depth) +
                       " ax=" + std::to_string(observation.ancestry_truncated) +
-                      " al=" + std::to_string(observation.ancestry_loss) + " at=" +
+                      " al=" + std::to_string(observation.ancestry_loss) +
+                      " ay=" + std::to_string(observation.ancestry_draw_summary_loss) + " at=" +
                       [&] {
                           std::string terminals;
                           for (u32 index = 0; index < observation.ancestry_terminals.size();

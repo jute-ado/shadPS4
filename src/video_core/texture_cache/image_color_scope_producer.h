@@ -16,6 +16,23 @@ enum class ImageColorScopeDrawKind : u8 {
     Indirect,
 };
 
+static constexpr u32 MaxImageColorScopeTerminalDraws = 8;
+
+struct ImageColorScopeDrawSummary {
+    ImageColorScopeDrawKind kind{ImageColorScopeDrawKind::Unknown};
+    bool indexed{};
+    u32 element_count{};
+    u32 instance_count{};
+    u32 sampled_images{};
+    u32 storage_writes{};
+    ImageProducerClass sampled_input_producer{ImageProducerClass::Unknown};
+    bool sampled_input_fresh{};
+    bool sampled_input_alias{};
+    bool sampled_input_valid{};
+
+    auto operator<=>(const ImageColorScopeDrawSummary&) const = default;
+};
+
 enum class ImageColorScopeAncestryTerminal : u8 {
     Unknown,
     NonColorProducer,
@@ -59,6 +76,9 @@ struct ImageColorScopeAncestry {
     u32 depth{};
     ImageColorScopeAncestryTerminal terminal{ImageColorScopeAncestryTerminal::Unknown};
     bool truncated{};
+    std::array<ImageColorScopeDrawSummary, MaxImageColorScopeTerminalDraws> terminal_draws{};
+    u32 terminal_draw_count{};
+    bool terminal_draws_truncated{};
 
     auto operator<=>(const ImageColorScopeAncestry&) const = default;
 };
@@ -135,6 +155,9 @@ struct ImageColorScopeProducerObservation {
     bool sampled_input_scope_input_alias{};
     bool sampled_input_scope_input_valid{};
     ImageColorScopeAncestry ancestry{};
+    std::array<ImageColorScopeDrawSummary, MaxImageColorScopeTerminalDraws> draw_summaries{};
+    u32 draw_summary_count{};
+    bool draw_summaries_truncated{};
     bool clear_at_begin{};
     bool valid{};
     bool overflow{};
@@ -196,6 +219,11 @@ struct ImageColorScopeProducerObservation {
     }
     if (scope->draw_count != 1) {
         ancestry.terminal = ImageColorScopeAncestryTerminal::MultipleDraws;
+        ancestry.terminal_draw_count = scope->draw_summary_count;
+        ancestry.terminal_draws_truncated = scope->draw_summaries_truncated;
+        for (u32 index = 0; index < ancestry.terminal_draw_count; ++index) {
+            ancestry.terminal_draws[index] = scope->draw_summaries[index];
+        }
         return ancestry;
     }
     if (scope->storage_writes != 0) {
@@ -225,6 +253,9 @@ struct ImageColorScopeProducerObservation {
         ancestry.truncated = true;
     } else {
         ancestry.terminal = scope->ancestry.terminal;
+        ancestry.terminal_draws = scope->ancestry.terminal_draws;
+        ancestry.terminal_draw_count = scope->ancestry.terminal_draw_count;
+        ancestry.terminal_draws_truncated = scope->ancestry.terminal_draws_truncated;
         if (ancestry.terminal == ImageColorScopeAncestryTerminal::Unknown) {
             ancestry.terminal = ImageColorScopeAncestryTerminal::HistoryUnavailable;
         }
@@ -291,6 +322,22 @@ public:
         observation.sampled_input_scope_input_alias = descriptor.sampled_input_scope_input_alias;
         observation.sampled_input_scope_input_valid = descriptor.sampled_input_scope_input_valid;
         observation.ancestry = descriptor.ancestry;
+        if (observation.draw_summary_count < MaxImageColorScopeTerminalDraws) {
+            observation.draw_summaries[observation.draw_summary_count++] = {
+                .kind = descriptor.kind,
+                .indexed = descriptor.indexed,
+                .element_count = descriptor.element_count,
+                .instance_count = descriptor.instance_count,
+                .sampled_images = descriptor.sampled_images,
+                .storage_writes = descriptor.storage_writes,
+                .sampled_input_producer = descriptor.sampled_input_producer,
+                .sampled_input_fresh = descriptor.sampled_input_fresh,
+                .sampled_input_alias = descriptor.sampled_input_alias,
+                .sampled_input_valid = descriptor.sampled_input_valid,
+            };
+        } else {
+            observation.draw_summaries_truncated = true;
+        }
         if (descriptor.sampled_images > descriptor.sampled_bindings ||
             descriptor.sampled_bindings > MaxTrackedImageBindings ||
             descriptor.storage_writes > MaxTrackedImageBindings) {
