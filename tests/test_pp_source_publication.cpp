@@ -233,22 +233,37 @@ TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
                         .sampled_images = 2,
                         .storage_writes = 1});
 
-    EXPECT_EQ(state.Observe(), (VideoCore::ImageColorScopeProducerObservation{
-                                   .draw_count = 2,
-                                   .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
-                                   .indexed = false,
-                                   .element_count = 0,
-                                   .instance_count = 0,
-                                   .sampled_bindings = 3,
-                                   .sampled_images = 2,
-                                   .storage_writes = 1,
-                                   .sampled_input_producer = VideoCore::ImageProducerClass::Unknown,
-                                   .sampled_input_fresh = false,
-                                   .sampled_input_alias = false,
-                                   .sampled_input_valid = false,
-                                   .clear_at_begin = true,
-                                   .valid = true,
-                               }));
+    EXPECT_EQ(state.Observe(),
+              (VideoCore::ImageColorScopeProducerObservation{
+                  .draw_count = 2,
+                  .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
+                  .indexed = false,
+                  .element_count = 0,
+                  .instance_count = 0,
+                  .sampled_bindings = 3,
+                  .sampled_images = 2,
+                  .storage_writes = 1,
+                  .sampled_input_producer = VideoCore::ImageProducerClass::Unknown,
+                  .sampled_input_fresh = false,
+                  .sampled_input_alias = false,
+                  .sampled_input_valid = false,
+                  .draw_summaries = {{
+                      {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                       .indexed = true,
+                       .element_count = 36,
+                       .instance_count = 2,
+                       .sampled_images = 1,
+                       .sampled_input_producer = VideoCore::ImageProducerClass::ColorAttachment,
+                       .sampled_input_fresh = true,
+                       .sampled_input_valid = true},
+                      {.kind = VideoCore::ImageColorScopeDrawKind::Indirect,
+                       .sampled_images = 2,
+                       .storage_writes = 1},
+                  }},
+                  .draw_summary_count = 2,
+                  .clear_at_begin = true,
+                  .valid = true,
+              }));
 
     state.BeginScope(12, false);
     EXPECT_EQ(state.Observe(), (VideoCore::ImageColorScopeProducerObservation{
@@ -711,6 +726,131 @@ TEST(PpSourceColorScopeAncestry, StateAndCompactReportRetainBoundedPrivacySafeCh
     EXPECT_NE(line.find(" ad=1 at=1 ax=0 ch="), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
+TEST(PpSourceTerminalScopeDraws, RetainsDrawOrderAndGenericInputShape) {
+    VideoCore::ImageColorScopeProducerState state;
+    state.BeginScope(201, false);
+    state.MarkDraw(201, {
+                            .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                            .indexed = false,
+                            .element_count = 3,
+                            .instance_count = 1,
+                            .sampled_bindings = 1,
+                            .sampled_images = 1,
+                            .sampled_input_producer = VideoCore::ImageProducerClass::Transfer,
+                            .sampled_input_fresh = true,
+                            .sampled_input_valid = true,
+                        });
+    state.MarkDraw(201, {
+                            .kind = VideoCore::ImageColorScopeDrawKind::Indirect,
+                            .indexed = true,
+                            .element_count = 24,
+                            .instance_count = 1,
+                            .sampled_bindings = 2,
+                            .sampled_images = 2,
+                        });
+
+    const auto scope = state.Observe();
+    ASSERT_EQ(scope.draw_summary_count, 2u);
+    EXPECT_FALSE(scope.draw_summaries_truncated);
+    EXPECT_EQ(scope.draw_summaries[0].kind, VideoCore::ImageColorScopeDrawKind::Direct);
+    EXPECT_FALSE(scope.draw_summaries[0].indexed);
+    EXPECT_EQ(scope.draw_summaries[0].element_count, 3u);
+    EXPECT_EQ(scope.draw_summaries[0].sampled_images, 1u);
+    EXPECT_EQ(scope.draw_summaries[0].sampled_input_producer,
+              VideoCore::ImageProducerClass::Transfer);
+    EXPECT_TRUE(scope.draw_summaries[0].sampled_input_fresh);
+    EXPECT_TRUE(scope.draw_summaries[0].sampled_input_valid);
+    EXPECT_EQ(scope.draw_summaries[1].kind, VideoCore::ImageColorScopeDrawKind::Indirect);
+    EXPECT_TRUE(scope.draw_summaries[1].indexed);
+    EXPECT_EQ(scope.draw_summaries[1].element_count, 24u);
+    EXPECT_EQ(scope.draw_summaries[1].sampled_images, 2u);
+}
+
+TEST(PpSourceTerminalScopeDraws, MultiDrawBoundaryCarriesBoundedOrderedSummaries) {
+    VideoCore::ImageColorScopeProducerObservation scope{
+        .draw_count = 2,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+        .draw_summaries = {{
+            {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+             .element_count = 6,
+             .instance_count = 1,
+             .sampled_images = 1,
+             .sampled_input_producer = VideoCore::ImageProducerClass::ColorAttachment,
+             .sampled_input_fresh = true,
+             .sampled_input_valid = true},
+            {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+             .indexed = true,
+             .element_count = 24,
+             .instance_count = 1,
+             .sampled_images = 2},
+        }},
+        .draw_summary_count = 2,
+        .valid = true,
+    };
+    const auto ancestry = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+         .produced_since_last_observation = true},
+        true, false, &scope);
+    ASSERT_EQ(ancestry.terminal, VideoCore::ImageColorScopeAncestryTerminal::MultipleDraws);
+    ASSERT_EQ(ancestry.terminal_draw_count, 2u);
+    EXPECT_FALSE(ancestry.terminal_draws_truncated);
+    EXPECT_EQ(ancestry.terminal_draws[0].element_count, 6u);
+    EXPECT_EQ(ancestry.terminal_draws[1].element_count, 24u);
+
+    PpSourceProducerScopeCoverage coverage{{.start = 202, .count = 1}};
+    const auto report =
+        coverage.Observe(202, PpSourceProducerScopeClass::ActiveAtFlip,
+                         {.draw_count = 1,
+                          .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                          .sampled_bindings = 1,
+                          .sampled_images = 1,
+                          .sampled_input_producer = VideoCore::ImageProducerClass::ColorAttachment,
+                          .sampled_input_valid = true,
+                          .sampled_input_scope_draw_count = 2,
+                          .sampled_input_scope_valid = true,
+                          .ancestry = ancestry,
+                          .valid = true});
+    ASSERT_TRUE(report);
+    EXPECT_EQ(report->ancestry_draw_summary_loss, 0u);
+    const auto line = FormatPpSourceProducerScopeObservation(*report);
+    EXPECT_NE(line.find(" td=2 tx=0 th="), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
+TEST(PpSourceTerminalScopeDraws, SummaryCapacityFailsClosedWithoutPartialClaim) {
+    VideoCore::ImageColorScopeProducerState state;
+    state.BeginScope(203, false);
+    for (u32 index = 0; index <= VideoCore::MaxImageColorScopeTerminalDraws; ++index) {
+        state.MarkDraw(203, {.kind = VideoCore::ImageColorScopeDrawKind::Direct});
+    }
+    const auto scope = state.Observe();
+    EXPECT_EQ(scope.draw_summary_count, VideoCore::MaxImageColorScopeTerminalDraws);
+    EXPECT_TRUE(scope.draw_summaries_truncated);
+
+    const auto ancestry = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, true, false, &scope);
+    EXPECT_EQ(ancestry.terminal, VideoCore::ImageColorScopeAncestryTerminal::MultipleDraws);
+    EXPECT_TRUE(ancestry.terminal_draws_truncated);
+
+    PpSourceProducerScopeCoverage coverage{{.start = 203, .count = 1}};
+    const auto report =
+        coverage.Observe(203, PpSourceProducerScopeClass::ActiveAtFlip,
+                         {.draw_count = 1,
+                          .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                          .sampled_bindings = 1,
+                          .sampled_images = 1,
+                          .sampled_input_producer = VideoCore::ImageProducerClass::ColorAttachment,
+                          .sampled_input_valid = true,
+                          .sampled_input_scope_draw_count = 2,
+                          .sampled_input_scope_valid = true,
+                          .ancestry = ancestry,
+                          .valid = true});
+    ASSERT_TRUE(report);
+    EXPECT_EQ(report->ancestry_draw_summary_loss, 1u);
+    EXPECT_EQ(report->loss, 1u);
 }
 
 } // namespace
