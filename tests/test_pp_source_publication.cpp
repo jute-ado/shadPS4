@@ -5,11 +5,13 @@
 
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
+#include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
 #include "video_core/texture_cache/image_producer.h"
 
 namespace {
 
+using namespace Vulkan;
 using namespace Vulkan::HostPasses;
 
 TEST(PpSourcePublication, ImageRefreshBranchesExposeTheirActualMutationOutcome) {
@@ -851,6 +853,131 @@ TEST(PpSourceTerminalScopeDraws, SummaryCapacityFailsClosedWithoutPartialClaim) 
     ASSERT_TRUE(report);
     EXPECT_EQ(report->ancestry_draw_summary_loss, 1u);
     EXPECT_EQ(report->loss, 1u);
+}
+
+TEST(PpTerminalScopeContent, ExternalShapeSelectorArmsExactlyTwoOrderedDraws) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1,
+                  .storage_writes = 0},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2,
+                   .storage_writes = 0},
+    };
+    PpTerminalScopeContentGate gate{config};
+    EXPECT_TRUE(gate.Arm(17, 3));
+    EXPECT_EQ(gate.ObserveDraw(16, 90, config.first), PpTerminalScopeContentAction::None);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 91, config.second), PpTerminalScopeContentAction::ShapeLoss);
+    EXPECT_TRUE(gate.Arm(17, 4));
+    EXPECT_EQ(gate.ObserveDraw(17, 92, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 92, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    const auto complete = gate.Take(17, 4);
+    EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(complete.draw_count, 2u);
+    EXPECT_FALSE(complete.cpu_wait);
+    EXPECT_FALSE(complete.finish);
+    EXPECT_FALSE(complete.retains_image);
+    EXPECT_FALSE(complete.retains_vk_image);
+}
+
+TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceTwoBoundedPlanes) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.status = FinalGuestSurfaceStatus::Complete;
+    selector.count = 2;
+    selector.ordinals[0] = 1024;
+    selector.ordinals[1] = 1299;
+    const auto plan = PlanPpTerminalScopeContent({
+        .enabled = true,
+        .armed = true,
+        .target_width = 1920,
+        .target_height = 1080,
+        .final_source_width = 1920,
+        .final_source_height = 1080,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .selector = selector,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(plan.region_count, 2u);
+    EXPECT_EQ(plan.copy_region_count, 4u);
+    EXPECT_EQ(plan.first_plane_offset, 0u);
+    EXPECT_GE(plan.second_plane_offset, plan.plane_bytes);
+    EXPECT_LE(plan.total_bytes, PpTerminalScopeSnapshotBytes);
+    EXPECT_EQ(plan.image_barriers_per_draw, 2u);
+    EXPECT_TRUE(plan.ends_rendering);
+    EXPECT_TRUE(plan.resumes_rendering_with_load);
+    EXPECT_TRUE(plan.preserves_rendering_serial);
+    EXPECT_TRUE(plan.callback_payload_is_scalar_only);
+    EXPECT_FALSE(plan.cpu_wait);
+    EXPECT_FALSE(plan.finish);
+}
+
+TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.status = FinalGuestSurfaceStatus::Complete;
+    selector.count = 1;
+    selector.ordinals[0] = 1024;
+    const auto wrong_target = PlanPpTerminalScopeContent({
+        .enabled = true,
+        .armed = true,
+        .target_width = 1280,
+        .target_height = 720,
+        .final_source_width = 1920,
+        .final_source_height = 1080,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .selector = selector,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    EXPECT_EQ(wrong_target.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(wrong_target.loss.logical_mapping, 1u);
+    EXPECT_FALSE(wrong_target.copy);
+
+    PpTerminalScopeContentGate gate{
+        {.enabled = true,
+         .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct},
+         .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct}}};
+    ASSERT_TRUE(gate.Arm(7, 10));
+    EXPECT_EQ(gate.ObserveDraw(7, 100, {.kind = VideoCore::ImageColorScopeDrawKind::Direct}),
+              PpTerminalScopeContentAction::CaptureFirst);
+    const auto stale = gate.Take(7, 11);
+    EXPECT_EQ(stale.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(stale.loss.invalidation, 1u);
+}
+
+TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
+    const PpTerminalScopeContentReport report{
+        .sequence = 4100,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .draw_count = 2,
+        .region_count = 14,
+        .first_aba = 1,
+        .first_stable = 2,
+        .second_aba = 3,
+        .second_stable = 4,
+    };
+    const auto line = FormatPpTerminalScopeContentReport(report);
+    EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 a0=1 s0=2 a1=3 s1=4 lm=0");
+    EXPECT_EQ(line.find("token"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
 } // namespace
