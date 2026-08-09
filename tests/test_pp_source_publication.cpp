@@ -1246,6 +1246,86 @@ TEST(PpTerminalScopeContent, PrivateLinkResolutionNeverIndexesAFreeOrReusedSlot)
     EXPECT_EQ(uid_queries, 2u);
 }
 
+TEST(PpTerminalScopeContent, PrivateLineageJoinsExactRotatingInputOutputGenerations) {
+    const VideoCore::ImageColorScopePrivateLink root_a{VideoCore::ImageId{41}, 7001};
+    const VideoCore::ImageColorScopePrivateLink output_a{VideoCore::ImageId{51}, 8001};
+    const VideoCore::ImageColorScopePrivateLink root_b{VideoCore::ImageId{42}, 7002};
+    const VideoCore::ImageColorScopePrivateLink output_b{VideoCore::ImageId{52}, 8002};
+    PpTerminalScopePrivateLineage lineage_a{};
+    PpTerminalScopePrivateLineage lineage_b{};
+    ASSERT_TRUE(lineage_a.Start(root_a, 11));
+    ASSERT_TRUE(lineage_b.Start(root_b, 12));
+    EXPECT_EQ(lineage_a.Extend({root_a, 11, output_a, 21, true, true}).status,
+              FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(lineage_b.Extend({root_b, 12, output_b, 22, true, true}).status,
+              FinalGuestSurfaceStatus::Complete);
+
+    const auto resolved_a = lineage_a.Resolve(output_a, 21);
+    EXPECT_TRUE(resolved_a.matched);
+    EXPECT_EQ(resolved_a.hops, 1u);
+    EXPECT_FALSE(resolved_a.retains_pointer);
+    EXPECT_FALSE(resolved_a.retains_image);
+    EXPECT_FALSE(resolved_a.retains_vk_image);
+    EXPECT_FALSE(lineage_a.Resolve(output_b, 22).matched);
+    EXPECT_FALSE(lineage_b.Resolve(output_a, 21).matched);
+}
+
+TEST(PpTerminalScopeContent, PrivateLineageFailsClosedOnReuseAmbiguityCycleAndDepth) {
+    const VideoCore::ImageColorScopePrivateLink root{VideoCore::ImageId{61}, 9001};
+    const VideoCore::ImageColorScopePrivateLink output{VideoCore::ImageId{62}, 9002};
+    PpTerminalScopePrivateLineage stale{};
+    ASSERT_TRUE(stale.Start(root, 31));
+    EXPECT_EQ(stale.Extend({root, 32, output, 41, true, true}).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(stale.Loss().invalidation, 1u);
+
+    PpTerminalScopePrivateLineage ambiguous{};
+    ASSERT_TRUE(ambiguous.Start(root, 31));
+    EXPECT_EQ(ambiguous.Extend({root, 31, output, 41, false, true}).status,
+              FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(ambiguous.Loss().gap, 1u);
+
+    PpTerminalScopePrivateLineage cycle{};
+    ASSERT_TRUE(cycle.Start(root, 31));
+    ASSERT_EQ(cycle.Extend({root, 31, output, 41, true, true}).status,
+              FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(cycle.Extend({output, 41, root, 31, true, true}).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+
+    PpTerminalScopePrivateLineage capped{};
+    ASSERT_TRUE(capped.Start({VideoCore::ImageId{70}, 1000}, 100));
+    for (u32 index = 1; index < PpTerminalScopePrivateLineage::MaxDepth; ++index) {
+        const auto tail = VideoCore::ImageColorScopePrivateLink{VideoCore::ImageId{70 + index - 1},
+                                                                1000 + index - 1};
+        const auto next =
+            VideoCore::ImageColorScopePrivateLink{VideoCore::ImageId{70 + index}, 1000 + index};
+        ASSERT_EQ(capped.Extend({tail, 100 + index - 1, next, 100 + index, true, true}).status,
+                  FinalGuestSurfaceStatus::Complete);
+    }
+    const auto overflow =
+        capped.Extend({{VideoCore::ImageId{70 + PpTerminalScopePrivateLineage::MaxDepth - 1},
+                        1000 + PpTerminalScopePrivateLineage::MaxDepth - 1},
+                       100 + PpTerminalScopePrivateLineage::MaxDepth - 1,
+                       {VideoCore::ImageId{90}, 2000},
+                       200,
+                       true,
+                       true});
+    EXPECT_EQ(overflow.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(overflow.loss.tile_capacity, 1u);
+}
+
+TEST(PpTerminalScopeContent, PrivateLineageReportFormatsOnlyHopStatusAndLoss) {
+    const auto line = FormatPpTerminalScopePrivateLineageReport({
+        .hops = 2,
+        .status = FinalGuestSurfaceStatus::Complete,
+    });
+    EXPECT_EQ(line, "lh=2 ls=0 ll=0");
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("image"), std::string::npos);
+    EXPECT_EQ(line.find("generation"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
 TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOrdinal) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
