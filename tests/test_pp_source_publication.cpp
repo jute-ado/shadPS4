@@ -2480,4 +2480,13 @@ TEST(PpTerminalScopeContent, NamedPredecessorAddsTwoBoundedPlanesAndExactVisualP
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, PredecessorDrawCannotEraseItsFailedPreCapture) {
+    const FinalGuestSurfaceLoss busy_loss{.busy = 1};
+    const auto result = ApplyPpTerminalScopeContentAction(
+        FinalGuestSurfaceStatus::BusyLoss, busy_loss,
+        PpTerminalScopeContentAction::CapturePredecessor);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(result.loss.busy, 1u);
+}
+
 } // namespace
