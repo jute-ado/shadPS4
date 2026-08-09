@@ -2178,6 +2178,28 @@ TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSele
     EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,maybe,696,1,1,0"));
     EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,0,1,1,0"));
     EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,696,0,1,0"));
+
+    const std::map<std::string_view, std::string_view> out_of_range_upstream{
+        {"SHADPS4_FINAL_GUEST_SURFACE_CONTENT", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_STAGE", "pp_source_publication_reconstruction"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS", "300"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_START", "4000"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", "800"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "390,1024,1299"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR", "direct,indexed,4,1,3,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM", "direct,indexed,4,1,6,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX", "3"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONSUMER", "direct,indexed,4,1,1,0"},
+    };
+    EXPECT_FALSE(ResolvePpTerminalScopeRuntimeConfig([&](const char* name) {
+        const auto found = out_of_range_upstream.find(name);
+        return found == out_of_range_upstream.end() ? std::optional<std::string_view>{}
+                                                    : std::optional<std::string_view>{found->second};
+    }));
 }
 
 TEST(PpTerminalScopeContent, RenderingSplitResumesWithLoadAndPreservesGuestScopeSerial) {
