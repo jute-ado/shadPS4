@@ -197,7 +197,7 @@ public:
             return;
         }
         const bool restart =
-            !entry->slot && entry->recorded_plane_mask == 0 && mapping_valid && target_valid &&
+            mapping_valid && target_valid &&
             entry->gate.CanRestartAtFirst(image.image_uid, rendering_serial, observed);
         discovery_coverage.Observe({
             .exact_candidate = exact_candidate,
@@ -209,7 +209,7 @@ public:
             .restarted = restart,
         });
         if (restart) {
-            ConfigureEntry(*entry, link, image, true);
+            RestartEntry(*entry, link, image);
         }
         const auto action = entry->gate.PreviewDraw(image.image_uid, rendering_serial, observed);
         if (action == PpTerminalScopePreDrawAction::ShapeLoss) {
@@ -566,6 +566,13 @@ private:
         }
     }
 
+    void RestartEntry(Entry& entry, VideoCore::ImageColorScopePrivateLink link,
+                      VideoCore::Image& target) {
+        const auto slot = entry.slot;
+        ConfigureEntry(entry, link, target, true);
+        entry.slot = slot;
+    }
+
     [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeHistoryLayout(
         const PpTerminalScopeContentPlan& plan, u32 plane_mask = 0) noexcept {
         PpTerminalScopeContentHistoryLayout layout{
@@ -641,6 +648,20 @@ private:
             cmdbuf.pipelineBarrier2(vk::DependencyInfo{
                 .bufferMemoryBarrierCount = 1,
                 .pBufferMemoryBarriers = &pre_barrier,
+            });
+        } else if (slot_decision.requires_write_barrier) {
+            const vk::BufferMemoryBarrier2 overwrite_barrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .buffer = download.Handle(),
+                .offset = slot_offset,
+                .size = slot_stride,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &overwrite_barrier,
             });
         }
         const auto old_state = image.backing->state;

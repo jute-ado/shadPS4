@@ -612,12 +612,12 @@ struct PpTerminalScopePlaneSlotDecision {
     FinalGuestSurfaceLoss loss{};
     bool acquire{};
     bool reuse{};
+    bool requires_write_barrier{};
 };
 
 [[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
     u32 plane, bool has_slot) noexcept {
-    if (plane > 6 || ((plane == 0 || plane == 1 || plane == 3 || plane == 6) && !has_slot) ||
-        (plane == 5 && has_slot)) {
+    if (plane > 6 || ((plane == 0 || plane == 1 || plane == 3 || plane == 6) && !has_slot)) {
         return {
             .status = FinalGuestSurfaceStatus::GapLoss,
             .loss = {.gap = 1},
@@ -626,6 +626,7 @@ struct PpTerminalScopePlaneSlotDecision {
     return {
         .acquire = (plane == 2 || plane == 4 || plane == 5) && !has_slot,
         .reuse = has_slot,
+        .requires_write_barrier = plane == 5 && has_slot,
     };
 }
 
@@ -780,8 +781,8 @@ public:
         const PpTerminalScopeDrawSelector& draw) const noexcept {
         const auto& restart = config.capture_predecessor ? config.predecessor : config.first;
         return target_token != 0 && target_token == token && observed_scope_serial != 0 &&
-               observed_scope_serial == scope_serial && phase == 3 && !frozen &&
-               MatchesPpTerminalScopeDraw(restart, draw);
+               (config.capture_predecessor || observed_scope_serial == scope_serial) &&
+               phase == 3 && !frozen && MatchesPpTerminalScopeDraw(restart, draw);
     }
 
     [[nodiscard]] constexpr PpTerminalScopeConsumerAction ObserveConsumer(
