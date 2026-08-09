@@ -980,4 +980,50 @@ TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, PrivateLinksRetainExactSoleInputAndFailClosedOnReuse) {
+    VideoCore::ImageColorScopeProducerState state;
+    state.BeginScope(301, false);
+    state.MarkDraw(301, {
+                            .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                            .sampled_bindings = 1,
+                            .sampled_images = 1,
+                            .sampled_input_image = {.id = VideoCore::ImageId{41}, .uid = 7001},
+                        });
+    const auto sole = state.Observe();
+    EXPECT_EQ(sole.sampled_input_image.id, VideoCore::ImageId{41});
+    EXPECT_EQ(sole.sampled_input_image.uid, 7001u);
+    EXPECT_TRUE(VideoCore::ValidateImageColorScopePrivateLink(
+        sole.sampled_input_image, VideoCore::ImageId{41}, 7001));
+    EXPECT_FALSE(VideoCore::ValidateImageColorScopePrivateLink(
+        sole.sampled_input_image, VideoCore::ImageId{41}, 7002));
+
+    state.BeginScope(302, false);
+    state.MarkDraw(302, {
+                            .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                            .sampled_bindings = 2,
+                            .sampled_images = 2,
+                            .sampled_input_image = {.id = VideoCore::ImageId{42}, .uid = 7003},
+                        });
+    EXPECT_FALSE(state.Observe().sampled_input_image.Valid());
+}
+
+TEST(PpTerminalScopeContent, ExistingCompactScopeOutputNeverFormatsPrivateLinks) {
+    PpSourceProducerScopeCoverage coverage{{.start = 302, .count = 1}};
+    const auto report = coverage.Observe(
+        302, PpSourceProducerScopeClass::ActiveAtFlip,
+        {.draw_count = 1,
+         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+         .sampled_bindings = 1,
+         .sampled_images = 1,
+         .sampled_input_producer = VideoCore::ImageProducerClass::Transfer,
+         .sampled_input_valid = true,
+         .sampled_input_image = {.id = VideoCore::ImageId{1234}, .uid = 998877},
+         .valid = true});
+    ASSERT_TRUE(report);
+    const auto line = FormatPpSourceProducerScopeObservation(*report);
+    EXPECT_EQ(line.find("1234"), std::string::npos);
+    EXPECT_EQ(line.find("998877"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+}
+
 } // namespace
