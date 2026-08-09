@@ -1067,7 +1067,7 @@ TEST(PpTerminalScopeContent, ExactLateConsumerFreezesAndRequestsThirdPlane) {
     EXPECT_TRUE(take.consumer_frozen);
 }
 
-TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceThreeBoundedPlanes) {
+TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFourBoundedPlanes) {
     FinalGuestSurfaceWatchOrdinals selector{};
     selector.status = FinalGuestSurfaceStatus::Complete;
     selector.count = 2;
@@ -1091,10 +1091,11 @@ TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceThreeBoundedPlanes) {
     });
     ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_EQ(plan.region_count, 2u);
-    EXPECT_EQ(plan.copy_region_count, 6u);
+    EXPECT_EQ(plan.copy_region_count, 8u);
     EXPECT_EQ(plan.first_plane_offset, 0u);
     EXPECT_GE(plan.second_plane_offset, plan.plane_bytes);
     EXPECT_GE(plan.consumer_plane_offset, plan.second_plane_offset + plan.plane_bytes);
+    EXPECT_GE(plan.output_plane_offset, plan.consumer_plane_offset + plan.plane_bytes);
     EXPECT_LE(plan.total_bytes, PpTerminalScopeSnapshotBytes);
     EXPECT_EQ(plan.image_barriers_per_draw, 2u);
     EXPECT_TRUE(plan.ends_rendering);
@@ -1333,6 +1334,7 @@ TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput
         PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, true);
     EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_TRUE(complete.capture_consumer);
+    EXPECT_TRUE(complete.capture_output);
     EXPECT_TRUE(complete.publish_flip_alias);
 
     const auto missing_plane =
@@ -1340,6 +1342,7 @@ TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput
     EXPECT_EQ(missing_plane.status, FinalGuestSurfaceStatus::GapLoss);
     EXPECT_EQ(missing_plane.loss.gap, 1u);
     EXPECT_FALSE(missing_plane.capture_consumer);
+    EXPECT_FALSE(missing_plane.capture_output);
     EXPECT_FALSE(missing_plane.publish_flip_alias);
 
     const auto ambiguous_output =
@@ -1368,23 +1371,26 @@ TEST(PpTerminalScopeContent, ConsumedLineageLeavesCapacityForTheNextDiscoveredPr
     EXPECT_TRUE(ShouldArmPpTerminalScopeFallbackAfterFlip(false));
 }
 
-TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOrdinal) {
+TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrdinal) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
         .region_count = 2,
         .plane_bytes = 8,
         .second_plane_offset = 8,
         .consumer_plane_offset = 16,
-        .total_bytes = 24,
-        .plane_mask = 7,
+        .output_plane_offset = 24,
+        .total_bytes = 32,
+        .plane_mask = 15,
         .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
                      {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
     };
     const auto bytes = [](std::array<u8, 4> first0, std::array<u8, 4> first1,
                           std::array<u8, 4> second0, std::array<u8, 4> second1,
-                          std::array<u8, 4> consumer0, std::array<u8, 4> consumer1) {
-        std::array<std::byte, 24> result{};
-        const std::array planes{first0, first1, second0, second1, consumer0, consumer1};
+                           std::array<u8, 4> consumer0, std::array<u8, 4> consumer1,
+                           std::array<u8, 4> output0, std::array<u8, 4> output1) {
+        std::array<std::byte, 32> result{};
+        const std::array planes{first0, first1, second0, second1, consumer0, consumer1, output0,
+                                output1};
         for (u32 plane = 0; plane < planes.size(); ++plane) {
             for (u32 index = 0; index < planes[plane].size(); ++index) {
                 result[plane * 4 + index] = std::byte{planes[plane][index]};
@@ -1393,11 +1399,14 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOr
         return result;
     };
     const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {10, 11, 12, 255},
-                         {13, 14, 15, 255}, {16, 17, 18, 255});
+                         {13, 14, 15, 255}, {16, 17, 18, 255}, {21, 22, 23, 255},
+                         {24, 25, 26, 255});
     const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {99, 98, 97, 255},
-                         {88, 87, 86, 255}, {16, 17, 18, 255});
+                         {88, 87, 86, 255}, {16, 17, 18, 255}, {77, 76, 75, 255},
+                         {24, 25, 26, 255});
     const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0}, {10, 11, 12, 255},
-                         {13, 14, 15, 0}, {19, 20, 21, 255});
+                         {13, 14, 15, 0}, {19, 20, 21, 255}, {21, 22, 23, 0},
+                         {24, 25, 26, 255});
     reducer.ObserveContent(100, layout, a, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(101, layout, b, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(102, layout, c, FinalGuestSurfaceStatus::Complete, {});
@@ -1417,6 +1426,9 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOr
     EXPECT_EQ(reports[0].consumer_aba_ordinals, (std::vector<u32>{11}));
     EXPECT_EQ(reports[0].consumer_stable_ordinals, (std::vector<u32>{}));
     EXPECT_EQ(reports[0].consumer_ambiguous_ordinals, (std::vector<u32>{12}));
+    EXPECT_EQ(reports[0].output_aba_ordinals, (std::vector<u32>{11}));
+    EXPECT_EQ(reports[0].output_stable_ordinals, (std::vector<u32>{12}));
+    EXPECT_EQ(reports[0].output_ambiguous_ordinals, (std::vector<u32>{}));
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
@@ -1506,6 +1518,9 @@ TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatu
         .consumer_aba_ordinals = {15},
         .consumer_stable_ordinals = {16},
         .consumer_ambiguous_ordinals = {17},
+        .output_aba_ordinals = {18},
+        .output_stable_ordinals = {19},
+        .output_ambiguous_ordinals = {20},
         .status = FinalGuestSurfaceStatus::Complete,
     };
     const auto line = FormatPpTerminalScopeCalibratedReport(report);
@@ -1516,6 +1531,9 @@ TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatu
     EXPECT_NE(line.find("a2=15"), std::string::npos);
     EXPECT_NE(line.find("s2=16"), std::string::npos);
     EXPECT_NE(line.find("x2=17"), std::string::npos);
+    EXPECT_NE(line.find("a3=18"), std::string::npos);
+    EXPECT_NE(line.find("s3=19"), std::string::npos);
+    EXPECT_NE(line.find("x3=20"), std::string::npos);
     EXPECT_EQ(line.find("pixel"), std::string::npos);
     EXPECT_EQ(line.find("hash"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
