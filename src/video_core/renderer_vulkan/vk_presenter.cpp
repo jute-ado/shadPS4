@@ -464,7 +464,8 @@ public:
     }
 
     [[nodiscard]] PendingCapture PreparePpSampledInput(
-        FinalGuestSurfaceFrameStamp stamp, const FinalGuestSurfaceSampledInputMetadata& metadata) {
+        FinalGuestSurfaceFrameStamp stamp, const FinalGuestSurfaceSampledInputMetadata& metadata,
+        FinalGuestSurfaceStatus observation_status) {
         ++selected_frames;
         PendingCapture pending{
             .stamp = stamp,
@@ -507,10 +508,10 @@ public:
             .alignment = 8,
         });
         pending.plan = MakePpSampledInputPairedTilePlan(output_plan, pair);
-        if (!metadata.valid) {
-            pending.plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
-            pending.plan.loss.invalidation = 1;
-            return pending;
+        pending.plan = ApplyPpSampledInputObservationStatus(pending.plan, observation_status);
+        if (!metadata.valid && observation_status == FinalGuestSurfaceStatus::Complete) {
+            pending.plan = ApplyPpSampledInputObservationStatus(
+                pending.plan, FinalGuestSurfaceStatus::InvalidationLoss);
         }
         if (metadata.config_generation != last_metadata_generation) {
             last_metadata_generation = metadata.config_generation;
@@ -1796,7 +1797,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             pp_sampled_input_capture = final_guest_surface_content->PreparePpSampledInput(
                 {pp_sampled_input_frame.payload.sequence,
                  pp_sampled_input_frame.payload.process_time_us},
-                metadata);
+                metadata, pp_sampled_input_frame.status);
         }
         const bool copy_frame_before_sampling =
             (post_pp_surface_capture && post_pp_surface_capture->HasCopy()) ||

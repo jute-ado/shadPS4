@@ -43,8 +43,6 @@ struct PpSampledInputSourceViewDescriptor {
     u32 bound_mip_count{};
     u32 bound_base_layer{};
     u32 bound_layer_count{};
-    FinalGuestSurfaceFormat requested_format{FinalGuestSurfaceFormat::Unsupported};
-    bool force_alpha_one{};
 };
 
 struct PpSampledInputSourceViewAssessment {
@@ -69,32 +67,6 @@ struct PpSampledInputSourceViewAssessment {
         .status = mismatch ? FinalGuestSurfaceStatus::InvalidationLoss
                            : FinalGuestSurfaceStatus::Complete,
         .resolved_range_mismatch = mismatch,
-    };
-}
-
-struct PpSampledInputSourceViewPlan {
-    u32 base_mip{};
-    u32 mip_count{};
-    u32 base_layer{};
-    u32 layer_count{};
-    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
-    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
-    bool force_alpha_one{};
-};
-
-[[nodiscard]] constexpr PpSampledInputSourceViewPlan PlanPpSampledInputSourceView(
-    PpSampledInputSourceViewDescriptor descriptor) noexcept {
-    if (descriptor.resolved_mip_count != 1 || descriptor.resolved_layer_count != 1 ||
-        descriptor.requested_format == FinalGuestSurfaceFormat::Unsupported) {
-        return {.status = FinalGuestSurfaceStatus::Unsupported};
-    }
-    return {
-        .base_mip = descriptor.resolved_base_mip,
-        .mip_count = descriptor.resolved_mip_count,
-        .base_layer = descriptor.resolved_base_layer,
-        .layer_count = descriptor.resolved_layer_count,
-        .format = descriptor.requested_format,
-        .force_alpha_one = descriptor.force_alpha_one,
     };
 }
 
@@ -293,6 +265,23 @@ struct PpSampledInputObservationPlan {
     return {.status = FinalGuestSurfaceStatus::Complete, .emit = true};
 }
 
+[[nodiscard]] constexpr FinalGuestSurfaceTilePlan ApplyPpSampledInputObservationStatus(
+    FinalGuestSurfaceTilePlan plan, FinalGuestSurfaceStatus observation_status) noexcept {
+    if (observation_status == FinalGuestSurfaceStatus::Complete) {
+        return plan;
+    }
+    plan.loss.gap = 0;
+    plan.loss.invalidation = 0;
+    if (observation_status == FinalGuestSurfaceStatus::GapLoss) {
+        plan.status = observation_status;
+        plan.loss.gap = 1;
+    } else {
+        plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        plan.loss.invalidation = 1;
+    }
+    return plan;
+}
+
 [[nodiscard]] constexpr bool ShouldAssignPpSampledInputFrame(bool enabled, bool stamp_valid,
                                                              bool metadata_valid) noexcept {
     return enabled && stamp_valid && metadata_valid;
@@ -391,8 +380,8 @@ private:
 struct PpSampledInputTransferPlan {
     u32 color_write_to_transfer_barriers{};
     u32 copy_regions{};
-    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
     bool copy{};
+    bool paired_output_and_raw{};
     bool callback_payload_is_scalar_only{};
     bool cpu_wait{};
     bool finish{};
@@ -407,10 +396,10 @@ struct PpSampledInputTransferPlan {
         return {};
     }
     return {
-        .color_write_to_transfer_barriers = 1,
-        .copy_regions = 1,
-        .format = FinalGuestSurfaceFormat::Rgba16Float,
+        .color_write_to_transfer_barriers = 2,
+        .copy_regions = 2,
         .copy = true,
+        .paired_output_and_raw = true,
         .callback_payload_is_scalar_only = true,
     };
 }
