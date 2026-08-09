@@ -1537,6 +1537,31 @@ TEST(PpTerminalScopeContent, DiscoveryFailsClosedForStaleMappingTargetOrCapacity
     EXPECT_FALSE(full.arm);
 }
 
+TEST(PpTerminalScopeContent, ExactFirstDrawCanRestartOnlyAnUnfrozenPoisonedGate) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .first = {VideoCore::ImageColorScopeDrawKind::Direct, true, 696, 1, 1, 0},
+        .second = {VideoCore::ImageColorScopeDrawKind::Direct, true, 24, 1, 2, 0},
+        .consumer = {VideoCore::ImageColorScopeDrawKind::Direct, true, 4, 1, 1, 0},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 90));
+    const PpTerminalScopeDrawSelector unrelated{
+        VideoCore::ImageColorScopeDrawKind::Direct, true, 3, 1, 1, 0};
+    ASSERT_EQ(gate.ObserveDraw(17, 91, unrelated), PpTerminalScopeContentAction::ShapeLoss);
+    EXPECT_TRUE(gate.CanRestartAtFirst(17, 91, config.first));
+    EXPECT_FALSE(gate.CanRestartAtFirst(17, 91, config.second));
+    EXPECT_FALSE(gate.CanRestartAtFirst(18, 91, config.first));
+
+    ASSERT_TRUE(gate.Arm(17, 90));
+    ASSERT_EQ(gate.ObserveDraw(17, 91, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_FALSE(gate.CanRestartAtFirst(17, 91, config.first));
+    ASSERT_EQ(gate.ObserveDraw(17, 91, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    ASSERT_EQ(gate.ObserveConsumer(17, config.consumer),
+              PpTerminalScopeConsumerAction::CaptureConsumer);
+    EXPECT_FALSE(gate.CanRestartAtFirst(17, 91, config.first));
+}
+
 TEST(PpTerminalScopeContent, CalibratedCoverageIsExactAndFailsClosedWhenIncomplete) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
