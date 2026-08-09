@@ -1399,7 +1399,7 @@ TEST(PpTerminalScopeContent, PrivateLineageReportFormatsOnlyHopStatusAndLoss) {
 
 TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput) {
     const auto complete =
-        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, true);
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 19, true);
     EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_TRUE(complete.capture_consumer);
     EXPECT_TRUE(complete.capture_output);
@@ -1413,8 +1413,14 @@ TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput
     EXPECT_FALSE(missing_plane.capture_output);
     EXPECT_FALSE(missing_plane.publish_flip_alias);
 
+    const auto missing_root_input =
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, true);
+    EXPECT_EQ(missing_root_input.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing_root_input.loss.gap, 1u);
+    EXPECT_FALSE(missing_root_input.capture_consumer);
+
     const auto ambiguous_output =
-        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, false);
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 19, false);
     EXPECT_EQ(ambiguous_output.status, FinalGuestSurfaceStatus::GapLoss);
     EXPECT_EQ(ambiguous_output.loss.gap, 1u);
     EXPECT_FALSE(ambiguous_output.publish_flip_alias);
@@ -1422,13 +1428,13 @@ TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput
 
 TEST(PpTerminalScopeContent, LineageHandoffPropagatesStaleStateAndIgnoresOtherDraws) {
     const auto stale = PlanPpTerminalScopeLineageHandoff(
-        true, FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1}, 3, true);
+        true, FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1}, 19, true);
     EXPECT_EQ(stale.status, FinalGuestSurfaceStatus::InvalidationLoss);
     EXPECT_EQ(stale.loss.invalidation, 1u);
     EXPECT_FALSE(stale.capture_consumer);
 
     const auto unrelated =
-        PlanPpTerminalScopeLineageHandoff(false, FinalGuestSurfaceStatus::Complete, {}, 3, true);
+        PlanPpTerminalScopeLineageHandoff(false, FinalGuestSurfaceStatus::Complete, {}, 19, true);
     EXPECT_EQ(unrelated.status, FinalGuestSurfaceStatus::AlreadyConsumed);
     EXPECT_FALSE(unrelated.capture_consumer);
     EXPECT_FALSE(unrelated.publish_flip_alias);
