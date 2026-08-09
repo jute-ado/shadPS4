@@ -1436,6 +1436,132 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrd
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
+TEST(PpTerminalScopeContent, ExactFinalBackingJoinCoversEveryCalibratedOutputEndpoint) {
+    PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8, true};
+    const PpTerminalScopeContentHistoryLayout content_layout{
+        .region_count = 2,
+        .plane_bytes = 8,
+        .second_plane_offset = 8,
+        .consumer_plane_offset = 16,
+        .output_plane_offset = 24,
+        .total_bytes = 32,
+        .plane_mask = 15,
+        .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
+                     {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Bgra8,
+    };
+    const PpTerminalScopeFinalBackingLayout backing_layout{
+        .region_count = 2,
+        .total_bytes = 8,
+        .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
+                     {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Bgra8,
+    };
+    const auto content = [](std::array<u8, 4> output0, std::array<u8, 4> output1) {
+        std::array<std::byte, 32> bytes{};
+        for (u32 index = 0; index < 4; ++index) {
+            bytes[24 + index] = std::byte{output0[index]};
+            bytes[28 + index] = std::byte{output1[index]};
+        }
+        return bytes;
+    };
+    const auto backing = [](std::array<u8, 4> region0, std::array<u8, 4> region1) {
+        std::array<std::byte, 8> bytes{};
+        for (u32 index = 0; index < 4; ++index) {
+            bytes[index] = std::byte{region0[index]};
+            bytes[4 + index] = std::byte{region1[index]};
+        }
+        return bytes;
+    };
+
+    const auto a = content({1, 2, 3, 4}, {5, 6, 7, 8});
+    const auto b = content({9, 10, 11, 12}, {13, 14, 15, 16});
+    const auto c = content({17, 18, 19, 20}, {21, 22, 23, 24});
+    reducer.ObserveContent(100, content_layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(101, content_layout, b, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(102, content_layout, c, FinalGuestSurfaceStatus::Complete, {});
+
+    // Alpha is not guest-visible at this boundary and must not create a false mismatch.
+    const auto backing_a = backing({1, 2, 3, 255}, {5, 6, 7, 8});
+    const auto backing_b = backing({9, 10, 11, 0}, {99, 14, 15, 16});
+    const auto backing_c = backing({17, 18, 19, 1}, {21, 22, 23, 24});
+    reducer.ObserveFinalBacking(101, backing_layout, backing_b,
+                                FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveFinalBacking(100, backing_layout, backing_a,
+                                FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveFinalBacking(102, backing_layout, backing_c,
+                                FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
+
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].output_final_backing_equal_ordinals, (std::vector<u32>{11}));
+    EXPECT_EQ(reports[0].output_final_backing_different_ordinals, (std::vector<u32>{12}));
+    EXPECT_FALSE(reports[0].loss.Any());
+    const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
+    EXPECT_NE(line.find(" e3=11 d3=12"), std::string::npos);
+    EXPECT_EQ(line.find("pixel"), std::string::npos);
+    EXPECT_EQ(line.find("hash"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+}
+
+TEST(PpTerminalScopeContent, FinalBackingJoinFailsClosedOnMissingLossOrLayoutMismatch) {
+    PpTerminalScopeContentReducer missing{{.frame_start = 200, .frame_count = 3}, 8, true};
+    const PpTerminalScopeContentHistoryLayout content_layout{
+        .region_count = 1,
+        .plane_bytes = 4,
+        .second_plane_offset = 4,
+        .consumer_plane_offset = 8,
+        .output_plane_offset = 12,
+        .total_bytes = 16,
+        .plane_mask = 15,
+        .regions = {{{.logical_ordinal = 31, .buffer_offset = 0, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const PpTerminalScopeFinalBackingLayout backing_layout{
+        .region_count = 1,
+        .total_bytes = 4,
+        .regions = {{{.logical_ordinal = 31, .buffer_offset = 0, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const std::array<std::byte, 16> content{};
+    const std::array<std::byte, 4> backing{};
+    for (u64 sequence = 200; sequence <= 202; ++sequence) {
+        missing.ObserveContent(sequence, content_layout, content,
+                               FinalGuestSurfaceStatus::Complete, {});
+    }
+    missing.ObserveFinalBacking(200, backing_layout, backing,
+                                FinalGuestSurfaceStatus::Complete, {});
+    missing.ObserveFinalBacking(202, backing_layout, backing,
+                                FinalGuestSurfaceStatus::Complete, {});
+    missing.ObserveCalibration({.request_ordinal = 1, .sequence = 200, .valid = true});
+    missing.ObserveCalibration({.request_ordinal = 2, .sequence = 201, .valid = true});
+    missing.ObserveCalibration({.request_ordinal = 3, .sequence = 202, .valid = true});
+    auto reports = missing.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(reports[0].loss.history, 1u);
+
+    PpTerminalScopeContentReducer invalid{{.frame_start = 300, .frame_count = 3}, 8, true};
+    auto mismatched = backing_layout;
+    mismatched.regions[0].byte_size = 3;
+    for (u64 sequence = 300; sequence <= 302; ++sequence) {
+        invalid.ObserveContent(sequence, content_layout, content,
+                               FinalGuestSurfaceStatus::Complete, {});
+        invalid.ObserveFinalBacking(sequence, mismatched, backing,
+                                    FinalGuestSurfaceStatus::Complete, {});
+    }
+    invalid.ObserveCalibration({.request_ordinal = 1, .sequence = 300, .valid = true});
+    invalid.ObserveCalibration({.request_ordinal = 2, .sequence = 301, .valid = true});
+    invalid.ObserveCalibration({.request_ordinal = 3, .sequence = 302, .valid = true});
+    reports = invalid.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(reports[0].loss.invalidation, 1u);
+}
+
 TEST(PpTerminalScopeContent, ConsumerOnlyPlaneIsCompleteWithoutClassifyingMissingPlanes) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
