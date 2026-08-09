@@ -8,6 +8,7 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image_info.h"
+#include "video_core/texture_cache/image_producer.h"
 #include "video_core/texture_cache/image_view.h"
 
 #include <deque>
@@ -149,6 +150,16 @@ struct Image {
         return backing->diagnostic_generation;
     }
 
+    void MarkDiagnosticProducer(ImageProducerClass classification) noexcept {
+        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+            diagnostic_producer.Mark(classification);
+        }
+    }
+
+    [[nodiscard]] ImageProducerObservation ObserveDiagnosticProducer() noexcept {
+        return diagnostic_producer.Observe();
+    }
+
 public:
     const Vulkan::Instance* instance;
     Vulkan::Scheduler* scheduler;
@@ -187,6 +198,7 @@ public:
     u64 lru_id{};
     u64 tick_accessed_last{};
     u64 hash{};
+    ImageProducerState diagnostic_producer{};
 
     struct {
         u32 texture : 1;

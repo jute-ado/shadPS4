@@ -157,12 +157,12 @@ TEST(PpSourceProducer, CompactProducerOutputDoesNotExposeImageIdentity) {
 
 TEST(PpSourceProducer, CoverageCountsEveryFlipAndSeparatesNewProductionFromReuse) {
     PpSourceProducerCoverage coverage{{.start = 4000, .count = 2}};
-    EXPECT_TRUE(coverage.Observe(
-        4000, {.classification = VideoCore::ImageProducerClass::ColorAttachment,
-               .produced_since_last_observation = true}));
-    const auto final = coverage.Observe(
-        4001, {.classification = VideoCore::ImageProducerClass::ColorAttachment,
-               .produced_since_last_observation = false});
+    EXPECT_TRUE(
+        coverage.Observe(4000, {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+                                .produced_since_last_observation = true}));
+    const auto final =
+        coverage.Observe(4001, {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+                                .produced_since_last_observation = false});
     ASSERT_TRUE(final);
     EXPECT_TRUE(final->final);
     EXPECT_EQ(final->expected, 2u);

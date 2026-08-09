@@ -463,6 +463,7 @@ public:
                               config.expected_calibrations},
           screenshot_calibration{true},
           source_publication_coverage{{config.window.frame_start, config.window.frame_count}},
+          source_producer_coverage{{config.window.frame_start, config.window.frame_count}},
           slot_stride{Common::AlignUp<u64>(FinalGuestSurfaceTileLimits{}.max_bytes,
                                            std::max<u64>(1, instance_.NonCoherentAtomSize()))},
           download{instance_,
@@ -539,6 +540,22 @@ public:
         LOG_INFO(Render, "{}", HostPasses::FormatPpSourcePublicationObservation(*report));
         if (report->final) {
             LOG_INFO(Render, "{}", HostPasses::FormatPpSourcePublicationCoverage(*report));
+        }
+    }
+
+    void ObservePpSourceProducer(u64 sequence, VideoCore::ImageProducerObservation producer) {
+        if (!IsPpSourcePublicationReconstructionStage()) {
+            return;
+        }
+        const auto report = source_producer_coverage.Observe(sequence, producer);
+        if (!report) {
+            return;
+        }
+        LOG_INFO(Render, "{}",
+                 HostPasses::FormatPpSourceProducerObservation(
+                     {.sequence = sequence, .producer = producer}));
+        if (report->final) {
+            LOG_INFO(Render, "{}", HostPasses::FormatPpSourceProducerCoverage(*report));
         }
     }
 
@@ -1042,6 +1059,7 @@ private:
     FinalGuestSurfaceCalibratedTriplets calibrated_triplets;
     FinalGuestSurfaceScreenshotCalibration screenshot_calibration;
     HostPasses::PpSourcePublicationCoverage source_publication_coverage;
+    HostPasses::PpSourceProducerCoverage source_producer_coverage;
     FinalGuestSurfacePostPpTransportTracker post_pp_transport;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
@@ -1643,9 +1661,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                                VAddr cpu_address, FinalGuestSurfaceFrameStamp stamp) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
+    auto& image = texture_cache.GetImage(image_id);
     const auto source_refresh = texture_cache.UpdateImage(image_id);
     if (final_guest_surface_content) {
         final_guest_surface_content->ObservePpSourcePublication(stamp.sequence, source_refresh);
+        final_guest_surface_content->ObservePpSourceProducer(stamp.sequence,
+                                                             image.ObserveDiagnosticProducer());
     }
 
     Frame* frame = GetRenderFrame();
@@ -1705,7 +1726,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Exclude alpha from output frame to avoid blending with UI.
     view_info.mapping.a = vk::ComponentSwizzle::eOne;
 
-    auto& image = texture_cache.GetImage(image_id);
     auto& source_view = image.FindView(view_info);
     auto image_view = *source_view.image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};

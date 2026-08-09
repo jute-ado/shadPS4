@@ -7,9 +7,38 @@
 #include <string>
 
 #include "common/types.h"
+#include "video_core/texture_cache/image_producer.h"
 #include "video_core/texture_cache/image_refresh_result.h"
 
 namespace Vulkan::HostPasses {
+
+struct PpSourceProducerObservation {
+    u64 sequence{};
+    VideoCore::ImageProducerObservation producer{};
+};
+
+struct PpSourceProducerCoverageObservation {
+    u64 sequence{};
+    u32 selected{};
+    u32 emitted{};
+    u32 expected{};
+    u32 color_attachment{};
+    u32 storage_image{};
+    u32 transfer{};
+    u32 cpu_upload{};
+    u32 unknown{};
+    u32 new_production{};
+    u32 reused_production{};
+    u32 loss{};
+    bool final{};
+};
+
+[[nodiscard]] inline std::string FormatPpSourceProducerObservation(
+    const PpSourceProducerObservation& observation) {
+    return "FGSCPR s=" + std::to_string(observation.sequence) +
+           " r=" + std::to_string(static_cast<u32>(observation.producer.classification)) +
+           " n=" + std::to_string(observation.producer.produced_since_last_observation ? 1 : 0);
+}
 
 enum class PpSourcePublicationClass : u8 {
     CleanGpuTracked,
@@ -61,6 +90,93 @@ struct PpSourcePublicationWindow {
         return count != 0 && sequence >= start && sequence - start == count - 1;
     }
 };
+
+class PpSourceProducerCoverage {
+public:
+    explicit constexpr PpSourceProducerCoverage(PpSourcePublicationWindow window_) noexcept
+        : window{window_} {}
+
+    [[nodiscard]] std::optional<PpSourceProducerCoverageObservation> Observe(
+        u64 sequence, VideoCore::ImageProducerObservation producer) noexcept {
+        if (!window.Contains(sequence)) {
+            return std::nullopt;
+        }
+        ++selected;
+        ++emitted;
+        if (has_last && sequence != last_sequence + 1) {
+            ++loss;
+        }
+        has_last = true;
+        last_sequence = sequence;
+        switch (producer.classification) {
+        case VideoCore::ImageProducerClass::ColorAttachment:
+            ++color_attachment;
+            break;
+        case VideoCore::ImageProducerClass::StorageImage:
+            ++storage_image;
+            break;
+        case VideoCore::ImageProducerClass::Transfer:
+            ++transfer;
+            break;
+        case VideoCore::ImageProducerClass::CpuUpload:
+            ++cpu_upload;
+            break;
+        case VideoCore::ImageProducerClass::Unknown:
+            ++unknown;
+            break;
+        }
+        producer.produced_since_last_observation ? ++new_production : ++reused_production;
+        const bool final = window.IsFinal(sequence);
+        if (final && emitted != window.count) {
+            ++loss;
+        }
+        return PpSourceProducerCoverageObservation{
+            .sequence = sequence,
+            .selected = selected,
+            .emitted = emitted,
+            .expected = window.count,
+            .color_attachment = color_attachment,
+            .storage_image = storage_image,
+            .transfer = transfer,
+            .cpu_upload = cpu_upload,
+            .unknown = unknown,
+            .new_production = new_production,
+            .reused_production = reused_production,
+            .loss = loss,
+            .final = final,
+        };
+    }
+
+private:
+    PpSourcePublicationWindow window{};
+    u64 last_sequence{};
+    u32 selected{};
+    u32 emitted{};
+    u32 color_attachment{};
+    u32 storage_image{};
+    u32 transfer{};
+    u32 cpu_upload{};
+    u32 unknown{};
+    u32 new_production{};
+    u32 reused_production{};
+    u32 loss{};
+    bool has_last{};
+};
+
+[[nodiscard]] inline std::string FormatPpSourceProducerCoverage(
+    const PpSourceProducerCoverageObservation& observation) {
+    return "FGSCPRC s=" + std::to_string(observation.sequence) +
+           " n=" + std::to_string(observation.emitted) + '/' +
+           std::to_string(observation.selected) + '/' + std::to_string(observation.expected) +
+           " c=" + std::to_string(observation.color_attachment) +
+           " s=" + std::to_string(observation.storage_image) +
+           " t=" + std::to_string(observation.transfer) +
+           " u=" + std::to_string(observation.cpu_upload) +
+           " x=" + std::to_string(observation.unknown) +
+           " p=" + std::to_string(observation.new_production) +
+           " r=" + std::to_string(observation.reused_production) +
+           " l=" + std::to_string(observation.loss);
+}
 
 struct PpSourcePublicationObservation {
     u64 sequence{};

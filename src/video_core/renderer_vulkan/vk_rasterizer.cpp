@@ -231,6 +231,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
+    MarkEncodedImageProducers(state.num_color_attachments);
+
     ResetBindings();
 }
 
@@ -310,6 +312,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
+    MarkEncodedImageProducers(state.num_color_attachments);
+
     ResetBindings();
 }
 
@@ -339,6 +343,8 @@ void Rasterizer::DispatchDirect() {
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+
+    MarkEncodedImageProducers(0);
 
     ResetBindings();
 }
@@ -371,6 +377,8 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+
+    MarkEncodedImageProducers(0);
 
     ResetBindings();
 }
@@ -781,6 +789,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             }
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
+            if (is_storage) {
+                storage_written_images.emplace_back(image_id);
+            }
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
@@ -823,6 +834,25 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.descriptorCount = 1;
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
+    }
+}
+
+void Rasterizer::MarkEncodedImageProducers(u32 num_color_attachments) {
+    if (!VideoCore::IsPpSourceProducerTrackingEnabled()) {
+        return;
+    }
+    for (u32 index = 0; index < num_color_attachments; ++index) {
+        const auto image_id = cb_descs[index].first;
+        if (image_id) {
+            texture_cache.GetImage(image_id).MarkDiagnosticProducer(
+                VideoCore::ImageProducerClass::ColorAttachment);
+        }
+    }
+    for (const auto image_id : storage_written_images) {
+        if (image_id) {
+            texture_cache.GetImage(image_id).MarkDiagnosticProducer(
+                VideoCore::ImageProducerClass::StorageImage);
+        }
     }
 }
 

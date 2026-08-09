@@ -397,6 +397,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
     flags &= ~ImageFlagBits::Dirty;
+    MarkDiagnosticProducer(ImageProducerClass::CpuUpload);
 }
 
 void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::Buffer buffer,
@@ -589,6 +590,7 @@ void Image::CopyImage(Image& src_image) {
 
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
+    MarkDiagnosticProducer(ImageProducerClass::Transfer);
 }
 void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
     const auto& src_info = src_image.info;
@@ -668,6 +670,7 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
                              buffer_copies);
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
+    MarkDiagnosticProducer(ImageProducerClass::Transfer);
 }
 
 void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
@@ -713,6 +716,7 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
                      backing->state.layout, image_copy);
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
+    MarkDiagnosticProducer(ImageProducerClass::Transfer);
 }
 
 void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
@@ -771,6 +775,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
 
     flags |= VideoCore::ImageFlagBits::GpuModified;
     flags &= ~VideoCore::ImageFlagBits::Dirty;
+    MarkDiagnosticProducer(ImageProducerClass::Transfer);
 }
 
 void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range) {
@@ -786,6 +791,7 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
     const auto cmdbuf = scheduler->CommandBuffer();
     cmdbuf.clearColorImage(GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
+    MarkDiagnosticProducer(ImageProducerClass::Transfer);
 }
 
 void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {

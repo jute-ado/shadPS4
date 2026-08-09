@@ -103,12 +103,14 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void MarkEncodedImageProducers(u32 num_color_attachments);
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {
             texture_cache.GetImage(image_id).binding = {};
         }
         bound_images.clear();
+        storage_written_images.clear();
     }
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
@@ -135,6 +137,7 @@ private:
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> storage_written_images;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
