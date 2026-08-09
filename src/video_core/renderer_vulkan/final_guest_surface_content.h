@@ -189,6 +189,10 @@ struct FinalGuestSurfaceTilePlan {
     FinalGuestSurfaceComparison comparison{FinalGuestSurfaceComparison::ExactVisible};
     FinalGuestSurfaceStage stage{FinalGuestSurfaceStage::GuestPreFsr};
     u32 comparison_gamma_bits{};
+    u32 paired_sampled_offset{};
+    u32 paired_sampled_bytes{};
+    u32 paired_sampled_row_bytes{};
+    FinalGuestSurfaceFormat paired_sampled_format{FinalGuestSurfaceFormat::Unsupported};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -1056,7 +1060,13 @@ struct FinalGuestSurfaceCalibratedReport {
     u64 c_sequence{};
     u64 c_process_time_us{};
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> matched_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> pre_or_at_sample_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> post_sample_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> ambiguous_boundary_ordinals{};
     u32 matched_ordinal_count{};
+    u32 pre_or_at_sample_ordinal_count{};
+    u32 post_sample_ordinal_count{};
+    u32 ambiguous_boundary_ordinal_count{};
     u32 selector_count{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceCalibratedLoss loss{};
@@ -1087,19 +1097,30 @@ struct FinalGuestSurfaceCalibratedCoverage {
 
 [[nodiscard]] inline std::string FormatFinalGuestSurfaceCalibratedReport(
     const FinalGuestSurfaceCalibratedReport& report) {
-    std::string ordinals;
-    for (u32 index = 0; index < report.matched_ordinal_count; ++index) {
-        if (!ordinals.empty()) {
-            ordinals += ',';
+    const auto format_ordinals = [](const auto& values, u32 count) {
+        std::string ordinals;
+        for (u32 index = 0; index < count; ++index) {
+            if (!ordinals.empty()) {
+                ordinals += ',';
+            }
+            ordinals += std::to_string(values[index]);
         }
-        ordinals += std::to_string(report.matched_ordinals[index]);
-    }
+        return ordinals;
+    };
+    const auto ordinals = format_ordinals(report.matched_ordinals, report.matched_ordinal_count);
+    const auto pre =
+        format_ordinals(report.pre_or_at_sample_ordinals, report.pre_or_at_sample_ordinal_count);
+    const auto post =
+        format_ordinals(report.post_sample_ordinals, report.post_sample_ordinal_count);
+    const auto ambiguous = format_ordinals(report.ambiguous_boundary_ordinals,
+                                           report.ambiguous_boundary_ordinal_count);
     return "FGSCT q=" + std::to_string(report.request_ordinal) +
            " abc=" + std::to_string(report.a_sequence) + '/' + std::to_string(report.b_sequence) +
            '/' + std::to_string(report.c_sequence) +
            " t=" + std::to_string(report.a_process_time_us) + '/' +
            std::to_string(report.b_process_time_us) + '/' +
-           std::to_string(report.c_process_time_us) + " r=" + ordinals +
+           std::to_string(report.c_process_time_us) + " r=" + ordinals + " pre=" + pre +
+           " post=" + post + " amb=" + ambiguous +
            " n=" + std::to_string(report.matched_ordinal_count) + '/' +
            std::to_string(report.selector_count) + " ex=" + std::to_string(report.exact_aba) +
            " v=" + std::to_string(report.stable_transport) +
@@ -1300,6 +1321,21 @@ public:
                 IsLocalizedVisualReturn(*endpoints[0], *endpoints[1], format, plan,
                                         endpoints[2]->bytes, index)) {
                 report.matched_ordinals[report.matched_ordinal_count++] = index + 1;
+                if (plan.paired_sampled_format != FinalGuestSurfaceFormat::Unsupported) {
+                    const bool raw_returned =
+                        EqualPairedSampleTile(*endpoints[0], index, plan, endpoints[2]->bytes);
+                    const bool raw_departed =
+                        !EqualPairedSampleTile(*endpoints[0], index, plan, endpoints[1]->bytes);
+                    if (raw_returned && raw_departed) {
+                        report.pre_or_at_sample_ordinals[report.pre_or_at_sample_ordinal_count++] =
+                            index + 1;
+                    } else if (raw_returned) {
+                        report.post_sample_ordinals[report.post_sample_ordinal_count++] = index + 1;
+                    } else {
+                        report.ambiguous_boundary_ordinals
+                            [report.ambiguous_boundary_ordinal_count++] = index + 1;
+                    }
+                }
             }
         }
         return report;
@@ -1368,7 +1404,14 @@ private:
             observation.bytes.size() != bytes.size()) {
             return false;
         }
-        return EqualVisibleBytes(format, observation.bytes, bytes);
+        const u64 output_bytes = static_cast<u64>(plan.row_bytes) * plan.surface_height;
+        if (output_bytes > bytes.size()) {
+            return false;
+        }
+        return EqualVisibleBytes(
+            format,
+            std::span<const std::byte>{observation.bytes}.first(static_cast<size_t>(output_bytes)),
+            bytes.first(static_cast<size_t>(output_bytes)));
     }
 
     [[nodiscard]] static bool EqualVisibleBytes(FinalGuestSurfaceFormat format,
@@ -1440,6 +1483,43 @@ private:
         for (u32 row = 0; row < tile.height; ++row) {
             const size_t offset = tile.buffer_offset + static_cast<size_t>(row) * plan.row_bytes;
             if (!EqualVisibleBytes(format,
+                                   std::span<const std::byte>{observation.bytes}.subspan(
+                                       offset, row_visible_bytes),
+                                   bytes.subspan(offset, row_visible_bytes))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] static bool EqualPairedSampleTile(const Observation& observation, u32 index,
+                                                    const FinalGuestSurfaceTilePlan& plan,
+                                                    std::span<const std::byte> bytes) noexcept {
+        if (!SameLayout(observation, plan) ||
+            plan.paired_sampled_format == FinalGuestSurfaceFormat::Unsupported ||
+            plan.paired_sampled_row_bytes == 0 || observation.bytes.size() != bytes.size()) {
+            return false;
+        }
+        const auto block = DescribeFinalGuestSurfaceFormat(plan.paired_sampled_format);
+        const auto tile = plan.TileAt(index);
+        if (block.width != 1 || block.height != 1 || block.bytes == 0 || tile.width == 0 ||
+            tile.height == 0) {
+            return false;
+        }
+        const u32 row_visible_bytes = tile.width * block.bytes;
+        const u64 start = static_cast<u64>(plan.paired_sampled_offset) +
+                          static_cast<u64>(tile.y) * plan.paired_sampled_row_bytes +
+                          static_cast<u64>(tile.x) * block.bytes;
+        const u64 end = start + static_cast<u64>(tile.height - 1) * plan.paired_sampled_row_bytes +
+                        row_visible_bytes;
+        if (end > bytes.size() ||
+            end > static_cast<u64>(plan.paired_sampled_offset) + plan.paired_sampled_bytes) {
+            return false;
+        }
+        for (u32 row = 0; row < tile.height; ++row) {
+            const size_t offset = static_cast<size_t>(start) +
+                                  static_cast<size_t>(row) * plan.paired_sampled_row_bytes;
+            if (!EqualVisibleBytes(plan.paired_sampled_format,
                                    std::span<const std::byte>{observation.bytes}.subspan(
                                        offset, row_visible_bytes),
                                    bytes.subspan(offset, row_visible_bytes))) {

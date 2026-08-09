@@ -110,10 +110,15 @@ struct FinalGuestSurfaceSampledInputDescriptor {
     u32 resolved_mip_count{};
     u32 resolved_base_layer{};
     u32 resolved_layer_count{};
+    u32 bound_base_mip{};
+    u32 bound_mip_count{};
+    u32 bound_base_layer{};
+    u32 bound_layer_count{};
     u64 source_image_uid{};
     u64 source_backing_generation{};
     u32 gamma_bits{};
     bool source_view_srgb{};
+    bool bound_view_observed{};
     bool settings_snapshot_matches_push{};
     bool pp_hdr{};
     bool frame_hdr{};
@@ -130,11 +135,16 @@ struct FinalGuestSurfaceSampledInputMetadata {
     u32 resolved_mip_count{};
     u32 resolved_base_layer{};
     u32 resolved_layer_count{};
+    u32 bound_base_mip{};
+    u32 bound_mip_count{};
+    u32 bound_base_layer{};
+    u32 bound_layer_count{};
     u64 source_image_uid{};
     u64 source_backing_generation{};
     u32 gamma_bits{};
     u64 config_generation{};
     bool source_view_srgb{};
+    bool resolved_range_mismatch{};
     bool settings_snapshot_matches_push{};
     bool fsr_bypassed{};
     bool valid{};
@@ -155,12 +165,24 @@ public:
             (descriptor.output_format == FinalGuestSurfaceFormat::Rgba8 ||
              descriptor.output_format == FinalGuestSurfaceFormat::Bgra8);
         const float gamma = std::bit_cast<float>(descriptor.gamma_bits);
+        const auto view_assessment = AssessPpSampledInputSourceView({
+            .resolved_base_mip = descriptor.resolved_base_mip,
+            .resolved_mip_count = descriptor.resolved_mip_count,
+            .resolved_base_layer = descriptor.resolved_base_layer,
+            .resolved_layer_count = descriptor.resolved_layer_count,
+            .bound_base_mip = descriptor.bound_base_mip,
+            .bound_mip_count = descriptor.bound_mip_count,
+            .bound_base_layer = descriptor.bound_base_layer,
+            .bound_layer_count = descriptor.bound_layer_count,
+        });
         const bool valid =
             bypassed && format_supported && descriptor.input_width != 0 &&
             descriptor.input_height != 0 && descriptor.output_width != 0 &&
             descriptor.output_height != 0 && descriptor.resolved_mip_count == 1 &&
             descriptor.resolved_layer_count == 1 && descriptor.source_image_uid != 0 &&
             descriptor.source_backing_generation != 0 && descriptor.source_view_srgb &&
+            (!descriptor.bound_view_observed ||
+             view_assessment.status == FinalGuestSurfaceStatus::Complete) &&
             descriptor.settings_snapshot_matches_push &&
             descriptor.pp_hdr == descriptor.frame_hdr && !descriptor.frame_hdr &&
             std::isfinite(gamma) && gamma >= 0.1f && gamma <= 2.0f;
@@ -178,8 +200,13 @@ public:
             .resolved_mip_count = descriptor.resolved_mip_count,
             .resolved_base_layer = descriptor.resolved_base_layer,
             .resolved_layer_count = descriptor.resolved_layer_count,
+            .bound_base_mip = descriptor.bound_base_mip,
+            .bound_mip_count = descriptor.bound_mip_count,
+            .bound_base_layer = descriptor.bound_base_layer,
+            .bound_layer_count = descriptor.bound_layer_count,
             .gamma_bits = descriptor.gamma_bits,
             .source_view_srgb = descriptor.source_view_srgb,
+            .resolved_range_mismatch = view_assessment.resolved_range_mismatch,
         };
         if (!has_descriptor || logical != last_descriptor) {
             if (generation == std::numeric_limits<u64>::max()) {
@@ -200,11 +227,16 @@ public:
             .resolved_mip_count = descriptor.resolved_mip_count,
             .resolved_base_layer = descriptor.resolved_base_layer,
             .resolved_layer_count = descriptor.resolved_layer_count,
+            .bound_base_mip = descriptor.bound_base_mip,
+            .bound_mip_count = descriptor.bound_mip_count,
+            .bound_base_layer = descriptor.bound_base_layer,
+            .bound_layer_count = descriptor.bound_layer_count,
             .source_image_uid = descriptor.source_image_uid,
             .source_backing_generation = descriptor.source_backing_generation,
             .gamma_bits = descriptor.gamma_bits,
             .config_generation = generation,
             .source_view_srgb = descriptor.source_view_srgb,
+            .resolved_range_mismatch = view_assessment.resolved_range_mismatch,
             .settings_snapshot_matches_push = descriptor.settings_snapshot_matches_push,
             .fsr_bypassed = true,
             .valid = true,
@@ -223,8 +255,13 @@ private:
         u32 resolved_mip_count{};
         u32 resolved_base_layer{};
         u32 resolved_layer_count{};
+        u32 bound_base_mip{};
+        u32 bound_mip_count{};
+        u32 bound_base_layer{};
+        u32 bound_layer_count{};
         u32 gamma_bits{};
         bool source_view_srgb{};
+        bool resolved_range_mismatch{};
 
         bool operator==(const LogicalDescriptor&) const = default;
     };
@@ -233,6 +270,28 @@ private:
     u64 generation{};
     bool has_descriptor{};
 };
+
+struct PpSampledInputObservationDescriptor {
+    bool in_window{};
+    bool stamp_valid{};
+    bool metadata_valid{};
+};
+
+struct PpSampledInputObservationPlan {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    bool emit{};
+};
+
+[[nodiscard]] constexpr PpSampledInputObservationPlan PlanPpSampledInputObservation(
+    PpSampledInputObservationDescriptor descriptor) noexcept {
+    if (!descriptor.in_window) {
+        return {};
+    }
+    if (!descriptor.stamp_valid || !descriptor.metadata_valid) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .emit = true};
+    }
+    return {.status = FinalGuestSurfaceStatus::Complete, .emit = true};
+}
 
 [[nodiscard]] constexpr bool ShouldAssignPpSampledInputFrame(bool enabled, bool stamp_valid,
                                                              bool metadata_valid) noexcept {
@@ -254,9 +313,10 @@ struct FinalGuestSurfaceSampledInputTakeResult {
 
 class FinalGuestSurfaceSampledInputFrameState {
 public:
-    [[nodiscard]] FinalGuestSurfaceStatus AssignIfValid(
-        bool eligible, FinalGuestSurfaceSampledInputPayload next) noexcept {
-        if (!eligible) {
+    [[nodiscard]] FinalGuestSurfaceStatus Assign(
+        PpSampledInputObservationPlan observation,
+        FinalGuestSurfaceSampledInputPayload next) noexcept {
+        if (!observation.emit) {
             return FinalGuestSurfaceStatus::AlreadyConsumed;
         }
         if (pending || poisoned) {
@@ -264,14 +324,24 @@ public:
             poisoned = true;
             return FinalGuestSurfaceStatus::GapLoss;
         }
-        if (next.sequence == 0 || next.process_time_us == 0 || next.token == 0 ||
-            !next.metadata.valid) {
+        if (next.sequence == 0 || next.token == 0 ||
+            (observation.status == FinalGuestSurfaceStatus::Complete &&
+             (next.process_time_us == 0 || !next.metadata.valid))) {
             poisoned = true;
             return FinalGuestSurfaceStatus::InvalidationLoss;
         }
         payload = next;
+        pending_status = observation.status;
         pending = true;
-        return FinalGuestSurfaceStatus::Complete;
+        return pending_status;
+    }
+
+    [[nodiscard]] FinalGuestSurfaceStatus AssignIfValid(
+        bool eligible, FinalGuestSurfaceSampledInputPayload next) noexcept {
+        return Assign({.status = next.metadata.valid ? FinalGuestSurfaceStatus::Complete
+                                                     : FinalGuestSurfaceStatus::InvalidationLoss,
+                       .emit = eligible},
+                      next);
     }
 
     [[nodiscard]] FinalGuestSurfaceSampledInputTakeResult TakeForPresent(bool reused) noexcept {
@@ -283,12 +353,17 @@ public:
             return {};
         }
         if (reused) {
+            const auto result = FinalGuestSurfaceSampledInputTakeResult{
+                .payload = payload,
+                .status = FinalGuestSurfaceStatus::GapLoss,
+                .emit = true,
+            };
             ClearPending();
-            return {.status = FinalGuestSurfaceStatus::GapLoss};
+            return result;
         }
         const auto result = FinalGuestSurfaceSampledInputTakeResult{
             .payload = payload,
-            .status = FinalGuestSurfaceStatus::Complete,
+            .status = pending_status,
             .emit = true,
         };
         ClearPending();
@@ -303,10 +378,12 @@ public:
 private:
     void ClearPending() noexcept {
         payload = {};
+        pending_status = FinalGuestSurfaceStatus::AlreadyConsumed;
         pending = false;
     }
 
     FinalGuestSurfaceSampledInputPayload payload{};
+    FinalGuestSurfaceStatus pending_status{FinalGuestSurfaceStatus::AlreadyConsumed};
     bool pending{};
     bool poisoned{};
 };
@@ -409,6 +486,28 @@ struct PpSampledInputPairedCapturePlan {
     };
 }
 
+[[nodiscard]] constexpr FinalGuestSurfaceTilePlan MakePpSampledInputPairedTilePlan(
+    FinalGuestSurfaceTilePlan output, const PpSampledInputPairedCapturePlan& pair) noexcept {
+    if (output.status != FinalGuestSurfaceStatus::Complete ||
+        pair.status != FinalGuestSurfaceStatus::Complete ||
+        output.sample_bytes != pair.output_bytes ||
+        pair.sampled_offset > std::numeric_limits<u32>::max() ||
+        pair.sampled_bytes > std::numeric_limits<u32>::max() ||
+        pair.total_bytes > std::numeric_limits<u32>::max() || output.surface_width == 0 ||
+        pair.sampled_bytes / 8 != static_cast<u64>(output.surface_width) * output.surface_height) {
+        output.status = FinalGuestSurfaceStatus::CapacityLoss;
+        output.loss.byte_capacity = 1;
+        return output;
+    }
+    output.sample_bytes = static_cast<u32>(pair.total_bytes);
+    output.copy_region_count = pair.copy_region_count;
+    output.paired_sampled_offset = static_cast<u32>(pair.sampled_offset);
+    output.paired_sampled_bytes = static_cast<u32>(pair.sampled_bytes);
+    output.paired_sampled_row_bytes = output.surface_width * 8;
+    output.paired_sampled_format = FinalGuestSurfaceFormat::Rgba16Float;
+    return output;
+}
+
 enum class PpSampledInputBoundary : u8 {
     Ambiguous,
     OutputClean,
@@ -438,28 +537,6 @@ struct PpSampledInputPairClassification {
         return PpSampledInputBoundary::AfterSample;
     }
     return PpSampledInputBoundary::Ambiguous;
-}
-
-struct PpSampledInputObservationDescriptor {
-    bool in_window{};
-    bool stamp_valid{};
-    bool metadata_valid{};
-};
-
-struct PpSampledInputObservationPlan {
-    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
-    bool emit{};
-};
-
-[[nodiscard]] constexpr PpSampledInputObservationPlan PlanPpSampledInputObservation(
-    PpSampledInputObservationDescriptor descriptor) noexcept {
-    if (!descriptor.in_window) {
-        return {};
-    }
-    if (!descriptor.stamp_valid || !descriptor.metadata_valid) {
-        return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .emit = true};
-    }
-    return {.status = FinalGuestSurfaceStatus::Complete, .emit = true};
 }
 
 } // namespace Vulkan

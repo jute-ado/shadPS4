@@ -271,12 +271,13 @@ public:
                    slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
         LOG_INFO(Render,
                  "FinalGuestSurfaceContentConfig enabled=1 stage={} frame_start={} frame_count={} "
-                 "logical_window=32 logical_stride=16 max_windows={} copy_regions=1 max_bytes={} "
+                 "logical_window=32 logical_stride=16 max_windows={} copy_regions={} max_bytes={} "
                  "slots={} lag_cadence_us={} lag_tolerance_us={} selector_count={} "
                  "selector_status={} selector_loss={} calibrated_triplets={} "
                  "expected_calibrations={}",
                  static_cast<u32>(config.stage), config.window.frame_start,
                  config.window.frame_count, FinalGuestSurfaceTilePlan::MaxTiles,
+                 config.stage == FinalGuestSurfaceStage::PpSampledInput ? 2 : 1,
                  FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
                  config.lag.tolerance_us, config.watch_ordinals.count,
@@ -471,12 +472,12 @@ public:
                 {
                     .surface_identity = 1,
                     .backing_generation = metadata.config_generation,
-                    .format = FinalGuestSurfaceFormat::Rgba16Float,
+                    .format = metadata.output_format,
                     .width = metadata.output_width,
                     .height = metadata.output_height,
                 },
         };
-        pending.plan = PlanFinalGuestSurfaceTiles({
+        const auto output_plan = PlanFinalGuestSurfaceTiles({
             .width = metadata.output_width,
             .height = metadata.output_height,
             .depth = 1,
@@ -487,16 +488,25 @@ public:
             .samples = 1,
             .type = FinalGuestSurfaceImageType::Color2D,
             .aspect = FinalGuestSurfaceAspect::Color,
-            .format = FinalGuestSurfaceFormat::Rgba16Float,
-            .comparison = FinalGuestSurfaceComparison::SampledLinearVisualReturn,
+            .format = metadata.output_format,
+            .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
             .stage = FinalGuestSurfaceStage::PpSampledInput,
             .logical_width = metadata.output_width,
             .logical_height = metadata.output_height,
             .logical_full_fit = true,
             .logical_top_left = true,
             .logical_no_y_flip = true,
-            .comparison_gamma_bits = metadata.gamma_bits,
         });
+        const auto pair = PlanPpSampledInputPairedCapture({
+            .enabled = true,
+            .width = metadata.output_width,
+            .height = metadata.output_height,
+            .output_format = metadata.output_format,
+            .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+            .slot_bytes = slot_stride,
+            .alignment = 8,
+        });
+        pending.plan = MakePpSampledInputPairedTilePlan(output_plan, pair);
         if (!metadata.valid) {
             pending.plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
             pending.plan.loss.invalidation = 1;
@@ -506,13 +516,15 @@ public:
             last_metadata_generation = metadata.config_generation;
             LOG_INFO(Render,
                      "FGSCM g={} fb={} sf={} sw={} sh={} of={} ow={} oh={} gm={} mip={}/{} "
-                     "layer={}/{} srgb={} snap={}",
+                     "layer={}/{} bound_mip={}/{} bound_layer={}/{} mismatch={} srgb={} snap={}",
                      metadata.config_generation, metadata.fsr_bypassed,
                      static_cast<u32>(metadata.source_format), metadata.source_width,
                      metadata.source_height, static_cast<u32>(metadata.output_format),
                      metadata.output_width, metadata.output_height, metadata.gamma_bits,
                      metadata.resolved_base_mip, metadata.resolved_mip_count,
                      metadata.resolved_base_layer, metadata.resolved_layer_count,
+                     metadata.bound_base_mip, metadata.bound_mip_count, metadata.bound_base_layer,
+                     metadata.bound_layer_count, metadata.resolved_range_mismatch,
                      metadata.source_view_srgb, metadata.settings_snapshot_matches_push);
         }
         if (pending.plan.status != FinalGuestSurfaceStatus::Complete) {
@@ -565,6 +577,70 @@ public:
         };
         cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, download.Handle(), 1,
                                  &copy);
+
+        const vk::BufferMemoryBarrier2 post_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            .buffer = download.Handle(),
+            .offset = pending.slot_offset,
+            .size = slot_stride,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &post_barrier,
+        });
+        DeferReport(std::move(pending));
+    }
+
+    void RecordPpSampledInput(PendingCapture pending, vk::Image output_image,
+                              vk::Image sampled_image, vk::CommandBuffer cmdbuf) {
+        if (!pending.HasCopy()) {
+            DeferReport(std::move(pending));
+            return;
+        }
+        ASSERT(pending.plan.paired_sampled_format == FinalGuestSurfaceFormat::Rgba16Float &&
+               pending.plan.copy_region_count == 2 && pending.plan.paired_sampled_offset != 0);
+        const vk::BufferMemoryBarrier2 pre_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+            .srcAccessMask = vk::AccessFlagBits2::eHostRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = download.Handle(),
+            .offset = pending.slot_offset,
+            .size = slot_stride,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &pre_barrier,
+        });
+
+        const auto make_copy = [&](u64 offset) {
+            return vk::BufferImageCopy{
+                .bufferOffset = offset,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource =
+                    {
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .mipLevel = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {pending.plan.surface_width, pending.plan.surface_height, 1},
+            };
+        };
+        const auto output_copy = make_copy(pending.slot_offset);
+        cmdbuf.copyImageToBuffer(output_image, vk::ImageLayout::eTransferSrcOptimal,
+                                 download.Handle(), 1, &output_copy);
+        const auto sampled_copy =
+            make_copy(pending.slot_offset + pending.plan.paired_sampled_offset);
+        cmdbuf.copyImageToBuffer(sampled_image, vk::ImageLayout::eTransferSrcOptimal,
+                                 download.Handle(), 1, &sampled_copy);
 
         const vk::BufferMemoryBarrier2 post_barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -1339,13 +1415,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         .pImageMemoryBarriers = pre_barriers.data(),
     });
 
-    auto view_info = desc.view_info;
+    VideoCore::ImageViewInfo view_info{};
     view_info.format = GetFrameViewFormat(attribute.attrib.pixel_format);
     // Exclude alpha from output frame to avoid blending with UI.
     view_info.mapping.a = vk::ComponentSwizzle::eOne;
 
     auto& image = texture_cache.GetImage(image_id);
-    auto image_view = *image.FindView(view_info).image_view;
+    auto& source_view = image.FindView(view_info);
+    auto image_view = *source_view.image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     const bool present_surface =
         final_guest_surface_content && final_guest_surface_content->IsPresentStage();
@@ -1418,22 +1495,47 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
     FinalGuestSurfaceSampledInputMetadata sampled_input_metadata{};
     if (pp_sampled_input_stage) {
+        const auto view_assessment = AssessPpSampledInputSourceView({
+            .resolved_base_mip = desc.view_info.range.base.level,
+            .resolved_mip_count = desc.view_info.range.extent.levels,
+            .resolved_base_layer = desc.view_info.range.base.layer,
+            .resolved_layer_count = desc.view_info.range.extent.layers,
+            .bound_base_mip = source_view.info.range.base.level,
+            .bound_mip_count = source_view.info.range.extent.levels,
+            .bound_base_layer = source_view.info.range.base.layer,
+            .bound_layer_count = source_view.info.range.extent.layers,
+        });
+        if (view_assessment.resolved_range_mismatch && !pp_sampled_input_view_mismatch_logged) {
+            pp_sampled_input_view_mismatch_logged = true;
+            LOG_INFO(Render,
+                     "PPSampledInputSourceView mismatch=1 resolved_mip={}/{} "
+                     "resolved_layer={}/{} bound_mip={}/{} bound_layer={}/{}",
+                     desc.view_info.range.base.level, desc.view_info.range.extent.levels,
+                     desc.view_info.range.base.layer, desc.view_info.range.extent.layers,
+                     source_view.info.range.base.level, source_view.info.range.extent.levels,
+                     source_view.info.range.base.layer, source_view.info.range.extent.layers);
+        }
         sampled_input_metadata = pp_sampled_input_config.Observe({
             .fsr_enabled = fsr_settings.enable,
             .input_width = image_size.width,
             .input_height = image_size.height,
             .output_width = frame->width,
             .output_height = frame->height,
-            .source_format = ToFinalGuestSurfaceFormat(view_info.format),
+            .source_format = ToFinalGuestSurfaceFormat(source_view.info.format),
             .output_format = ToFinalGuestSurfaceFormat(swapchain.GetSurfaceFormat().format),
-            .resolved_base_mip = view_info.range.base.level,
-            .resolved_mip_count = view_info.range.extent.levels,
-            .resolved_base_layer = view_info.range.base.layer,
-            .resolved_layer_count = view_info.range.extent.layers,
+            .resolved_base_mip = desc.view_info.range.base.level,
+            .resolved_mip_count = desc.view_info.range.extent.levels,
+            .resolved_base_layer = desc.view_info.range.base.layer,
+            .resolved_layer_count = desc.view_info.range.extent.layers,
+            .bound_base_mip = source_view.info.range.base.level,
+            .bound_mip_count = source_view.info.range.extent.levels,
+            .bound_base_layer = source_view.info.range.base.layer,
+            .bound_layer_count = source_view.info.range.extent.layers,
             .source_image_uid = image.image_uid,
             .source_backing_generation = image.EnsureDiagnosticBackingGeneration(),
             .gamma_bits = std::bit_cast<u32>(frame_pp_settings.gamma),
-            .source_view_srgb = IsSrgbViewFormat(view_info.format),
+            .source_view_srgb = IsSrgbViewFormat(source_view.info.format),
+            .bound_view_observed = true,
             .settings_snapshot_matches_push = true,
             .pp_hdr = frame_pp_settings.hdr != 0,
             .frame_hdr = frame->is_hdr,
@@ -1456,15 +1558,17 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }
     }
     if (pp_sampled_input_stage) {
-        if (!shadow_written) {
-            sampled_input_metadata.valid = false;
-        }
-        const bool assign = ShouldAssignPpSampledInputFrame(
-            true, stamp.sequence != 0 && stamp.process_time_us != 0, sampled_input_metadata.valid);
-        if (assign) {
+        const bool in_window = final_guest_surface_content->ShouldCapture(stamp.sequence);
+        const auto observation = PlanPpSampledInputObservation({
+            .in_window = in_window,
+            .stamp_valid = stamp.sequence != 0 && stamp.process_time_us != 0,
+            .metadata_valid = shadow_written && sampled_input_metadata.valid,
+        });
+        if (observation.emit) {
             const u64 token = next_pp_input_shadow_token++;
-            const auto status = frame->pp_sampled_input_state.AssignIfValid(
-                true, {stamp.sequence, stamp.process_time_us, token, sampled_input_metadata});
+            const auto status = frame->pp_sampled_input_state.Assign(
+                observation,
+                {stamp.sequence, stamp.process_time_us, token, sampled_input_metadata});
             if (status != FinalGuestSurfaceStatus::Complete) {
                 LOG_INFO(Render, "PPSampledInputFrameState seq={} st={}", stamp.sequence,
                          static_cast<u32>(status));
@@ -1685,13 +1789,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         }
         if (pp_sampled_input_stage && pp_sampled_input_frame.emit &&
             final_guest_surface_content->ShouldCapture(pp_sampled_input_frame.payload.sequence)) {
+            auto metadata = pp_sampled_input_frame.payload.metadata;
+            if (pp_sampled_input_frame.status != FinalGuestSurfaceStatus::Complete) {
+                metadata.valid = false;
+            }
             pp_sampled_input_capture = final_guest_surface_content->PreparePpSampledInput(
                 {pp_sampled_input_frame.payload.sequence,
                  pp_sampled_input_frame.payload.process_time_us},
-                pp_sampled_input_frame.payload.metadata);
+                metadata);
         }
-        const auto frame_transitions = GetPresentFrameTransitions(
-            is_reusing_frame, post_pp_surface_capture && post_pp_surface_capture->HasCopy());
+        const bool copy_frame_before_sampling =
+            (post_pp_surface_capture && post_pp_surface_capture->HasCopy()) ||
+            (pp_sampled_input_capture && pp_sampled_input_capture->HasCopy());
+        const auto frame_transitions =
+            GetPresentFrameTransitions(is_reusing_frame, copy_frame_before_sampling);
         std::array<vk::ImageMemoryBarrier2, 2> pre_barriers;
         u32 num_pre_barriers = 1;
         pre_barriers[0] = vk::ImageMemoryBarrier2{
@@ -1810,8 +1921,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                     .pImageMemoryBarriers = &sampled_to_transfer,
                 });
             }
-            final_guest_surface_content->Record(std::move(*pp_sampled_input_capture),
-                                                frame->pp_input_shadow_image, cmdbuf);
+            final_guest_surface_content->RecordPpSampledInput(std::move(*pp_sampled_input_capture),
+                                                              frame->image,
+                                                              frame->pp_input_shadow_image, cmdbuf);
         }
         if (post_pp_surface_capture) {
             final_guest_surface_content->Record(std::move(*post_pp_surface_capture), frame->image,

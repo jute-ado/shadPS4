@@ -144,6 +144,7 @@ private:
     FinalGuestSurfacePpInputConfigTracker pp_input_shadow_config;
     FinalGuestSurfaceSampledInputConfigTracker pp_sampled_input_config;
     u64 next_pp_input_shadow_token{1};
+    bool pp_sampled_input_view_mismatch_logged{};
     VideoCore::TextureCache& texture_cache;
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;

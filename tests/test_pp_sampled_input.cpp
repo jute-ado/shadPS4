@@ -458,6 +458,14 @@ TEST(PpSampledInput, SelectedInvalidFramesEmitExplicitLossWhileStartupIsSilent) 
         {.in_window = true, .stamp_valid = true, .metadata_valid = false});
     EXPECT_TRUE(invalid_metadata.emit);
     EXPECT_EQ(invalid_metadata.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    FinalGuestSurfaceSampledInputFrameState state;
+    FinalGuestSurfaceSampledInputMetadata metadata{};
+    EXPECT_EQ(state.Assign(invalid_metadata, {4000, 80'000'000, 1, metadata}),
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    const auto invalid_frame = state.TakeForPresent(false);
+    EXPECT_TRUE(invalid_frame.emit);
+    EXPECT_EQ(invalid_frame.payload.sequence, 4000u);
+    EXPECT_EQ(invalid_frame.status, FinalGuestSurfaceStatus::InvalidationLoss);
 
     const auto valid = PlanPpSampledInputObservation(
         {.in_window = true, .stamp_valid = true, .metadata_valid = true});
