@@ -1269,7 +1269,8 @@ public:
         const auto b = FindClosest(process_time_us, config.cadence_us);
         const auto a =
             config.cadence_us <= std::numeric_limits<u64>::max() / 2
-                ? FindClosest(process_time_us, config.cadence_us * 2, b ? b->index : history.size())
+                ? FindClosest(process_time_us, config.cadence_us * 2,
+                              b ? b->index : static_cast<u32>(history.size()))
                 : std::nullopt;
         if (a && b) {
             const auto& baseline = history[a->index];
