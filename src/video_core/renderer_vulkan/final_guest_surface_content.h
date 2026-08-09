@@ -60,6 +60,7 @@ enum class FinalGuestSurfaceStage : u8 {
     PpInputShadow,
     PpSampledInput,
     PpSourceReconstruction,
+    PpSourcePublicationReconstruction,
 };
 
 enum class FinalGuestSurfaceStatus : u8 {
@@ -657,6 +658,8 @@ template <typename ReadValue>
             config.stage = FinalGuestSurfaceStage::PpSampledInput;
         } else if (*stage == "pp_source_reconstruction") {
             config.stage = FinalGuestSurfaceStage::PpSourceReconstruction;
+        } else if (*stage == "pp_source_publication_reconstruction") {
+            config.stage = FinalGuestSurfaceStage::PpSourcePublicationReconstruction;
         } else if (*stage != "guest_pre_fsr") {
             return std::nullopt;
         }
@@ -666,7 +669,8 @@ template <typename ReadValue>
             (config.stage != FinalGuestSurfaceStage::PostPp &&
              config.stage != FinalGuestSurfaceStage::PpInputShadow &&
              config.stage != FinalGuestSurfaceStage::PpSampledInput &&
-             config.stage != FinalGuestSurfaceStage::PpSourceReconstruction)) {
+             config.stage != FinalGuestSurfaceStage::PpSourceReconstruction &&
+             config.stage != FinalGuestSurfaceStage::PpSourcePublicationReconstruction)) {
             return std::nullopt;
         }
         config.calibrated_triplets = true;
@@ -685,7 +689,8 @@ template <typename ReadValue>
     }
     if ((config.stage == FinalGuestSurfaceStage::PpInputShadow ||
          config.stage == FinalGuestSurfaceStage::PpSampledInput ||
-         config.stage == FinalGuestSurfaceStage::PpSourceReconstruction) &&
+         config.stage == FinalGuestSurfaceStage::PpSourceReconstruction ||
+         config.stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction) &&
         !config.calibrated_triplets) {
         return std::nullopt;
     }
@@ -716,7 +721,8 @@ template <typename ReadValue>
     return (stage == FinalGuestSurfaceStage::PostPp ||
             stage == FinalGuestSurfaceStage::PpInputShadow ||
             stage == FinalGuestSurfaceStage::PpSampledInput ||
-            stage == FinalGuestSurfaceStage::PpSourceReconstruction) &&
+            stage == FinalGuestSurfaceStage::PpSourceReconstruction ||
+            stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction) &&
            !is_reusing_frame && stamp_valid && in_capture_window;
 }
 
@@ -725,7 +731,8 @@ template <typename ReadValue>
     return stage == FinalGuestSurfaceStage::PostPp ||
            stage == FinalGuestSurfaceStage::PpInputShadow ||
            stage == FinalGuestSurfaceStage::PpSampledInput ||
-           stage == FinalGuestSurfaceStage::PpSourceReconstruction;
+           stage == FinalGuestSurfaceStage::PpSourceReconstruction ||
+           stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction;
 }
 
 struct FinalGuestSurfaceLogPolicyConfig {
@@ -739,7 +746,8 @@ struct FinalGuestSurfaceLogPolicyConfig {
     FinalGuestSurfaceStage stage) noexcept {
     if (stage == FinalGuestSurfaceStage::PpInputShadow ||
         stage == FinalGuestSurfaceStage::PpSampledInput ||
-        stage == FinalGuestSurfaceStage::PpSourceReconstruction) {
+        stage == FinalGuestSurfaceStage::PpSourceReconstruction ||
+        stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction) {
         return {
             .verbose_frame_reports = false,
             .calibrated_triplet_reports = true,

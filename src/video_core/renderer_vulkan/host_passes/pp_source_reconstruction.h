@@ -12,6 +12,11 @@
 
 namespace Vulkan::HostPasses {
 
+enum class PpSourceSnapshotPoint : u8 {
+    AfterVisiblePp,
+    FlipPublication,
+};
+
 struct PpSourceReconstructionDescriptor {
     bool enabled{};
     bool in_window{};
@@ -24,6 +29,7 @@ struct PpSourceReconstructionDescriptor {
     bool source_snapshot_available{};
     bool source_snapshot_view_available{};
     bool reconstruction_output_available{};
+    PpSourceSnapshotPoint snapshot_point{PpSourceSnapshotPoint::AfterVisiblePp};
     u32 source_width{};
     u32 source_height{};
     u32 output_width{};
@@ -56,6 +62,8 @@ struct PpSourceReconstructionPlan {
     u32 snapshot_image_barrier_count{};
     u32 reconstruction_output_barrier_count{};
     bool visible_draw_precedes_source_snapshot{};
+    bool guest_rendering_ended_before_snapshot{};
+    bool source_snapshot_precedes_visible_draw{};
     bool source_snapshot_precedes_reconstruction_draw{};
     bool snapshot_is_immutable_during_reconstruction{};
     bool same_pp_pipeline{};
@@ -65,6 +73,7 @@ struct PpSourceReconstructionPlan {
     bool source_transition_occurs_after_visible_sample{};
     bool reconstruction_restored_for_present_transfer{};
     bool inserts_barrier_before_visible_sample{};
+    bool snapshot_visibility_transition_can_perturb_visible_pp{};
     bool cpu_wait{};
     bool finish{};
     bool callback_retains_frame{};
@@ -125,6 +134,8 @@ struct PpSourceReconstructionPlan {
         output_offset + output_bytes > std::numeric_limits<u32>::max()) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss);
     }
+    const bool at_flip_publication =
+        descriptor.snapshot_point == PpSourceSnapshotPoint::FlipPublication;
     return {
         .status = FinalGuestSurfaceStatus::Complete,
         .output_format = descriptor.output_format,
@@ -141,15 +152,19 @@ struct PpSourceReconstructionPlan {
         .source_image_barrier_count = 2,
         .snapshot_image_barrier_count = 2,
         .reconstruction_output_barrier_count = 2,
-        .visible_draw_precedes_source_snapshot = true,
+        .visible_draw_precedes_source_snapshot = !at_flip_publication,
+        .guest_rendering_ended_before_snapshot = at_flip_publication,
+        .source_snapshot_precedes_visible_draw = at_flip_publication,
         .source_snapshot_precedes_reconstruction_draw = true,
         .snapshot_is_immutable_during_reconstruction = true,
         .same_pp_pipeline = true,
         .same_pp_sampler = true,
         .same_pp_settings = true,
         .same_source_view_format_and_swizzle = true,
-        .source_transition_occurs_after_visible_sample = true,
+        .source_transition_occurs_after_visible_sample = !at_flip_publication,
         .reconstruction_restored_for_present_transfer = true,
+        .inserts_barrier_before_visible_sample = at_flip_publication,
+        .snapshot_visibility_transition_can_perturb_visible_pp = at_flip_publication,
         .callback_payload_is_scalar_only = true,
     };
 }
@@ -172,10 +187,12 @@ struct PpSourceReconstructionPlan {
     plan.paired_reconstruction_offset = reconstruction.reconstruction_readback_offset;
     plan.paired_reconstruction_bytes = reconstruction.reconstruction_output_bytes;
     plan.paired_reconstruction_row_bytes = plan.row_bytes;
-    plan.paired_reconstruction_format =
-        plan.stage == FinalGuestSurfaceStage::PpSourceReconstruction && plan.bytes_per_pixel == 4
-            ? reconstruction.output_format
-            : FinalGuestSurfaceFormat::Unsupported;
+    const bool reconstruction_stage =
+        plan.stage == FinalGuestSurfaceStage::PpSourceReconstruction ||
+        plan.stage == FinalGuestSurfaceStage::PpSourcePublicationReconstruction;
+    plan.paired_reconstruction_format = reconstruction_stage && plan.bytes_per_pixel == 4
+                                            ? reconstruction.output_format
+                                            : FinalGuestSurfaceFormat::Unsupported;
     if (plan.paired_reconstruction_format == FinalGuestSurfaceFormat::Unsupported) {
         plan.status = FinalGuestSurfaceStatus::Unsupported;
         plan.loss.unsupported_format = 1;
