@@ -552,4 +552,165 @@ TEST(PpSourceColorScopeDraw, InvalidAndOverflowScopesAreExplicitCoverageLoss) {
     EXPECT_EQ(final->loss, 2u);
 }
 
+TEST(PpSourceColorScopeAncestry, BuildsOrderedChainAndStopsAtNamedBoundary) {
+    VideoCore::ImageColorScopeProducerObservation inner_scope{
+        .draw_count = 1,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 6,
+        .instance_count = 1,
+        .sampled_images = 1,
+        .storage_writes = 0,
+        .ancestry =
+            {
+                .nodes = {{
+                    {.producer = VideoCore::ImageProducerClass::Transfer,
+                     .fresh = true,
+                     .producer_valid = true},
+                }},
+                .depth = 1,
+                .terminal = VideoCore::ImageColorScopeAncestryTerminal::NonColorProducer,
+            },
+        .valid = true,
+    };
+
+    const auto ancestry = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+         .produced_since_last_observation = true},
+        true, false, &inner_scope);
+
+    ASSERT_EQ(ancestry.depth, 2u);
+    EXPECT_EQ(ancestry.terminal, VideoCore::ImageColorScopeAncestryTerminal::NonColorProducer);
+    EXPECT_FALSE(ancestry.truncated);
+    EXPECT_EQ(ancestry.nodes[0].producer, VideoCore::ImageProducerClass::ColorAttachment);
+    EXPECT_TRUE(ancestry.nodes[0].fresh);
+    EXPECT_TRUE(ancestry.nodes[0].producer_valid);
+    EXPECT_EQ(ancestry.nodes[0].draw_count, 1u);
+    EXPECT_EQ(ancestry.nodes[0].last_draw, VideoCore::ImageColorScopeDrawKind::Direct);
+    EXPECT_TRUE(ancestry.nodes[0].indexed);
+    EXPECT_EQ(ancestry.nodes[0].element_count, 6u);
+    EXPECT_EQ(ancestry.nodes[0].sampled_images, 1u);
+    EXPECT_EQ(ancestry.nodes[1].producer, VideoCore::ImageProducerClass::Transfer);
+}
+
+TEST(PpSourceColorScopeAncestry, StopsAtMultiDrawAndFailsClosedAtDepthCap) {
+    const VideoCore::ImageColorScopeProducerObservation multi_draw{
+        .draw_count = 2,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
+        .sampled_images = 1,
+        .valid = true,
+    };
+    const auto stopped = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+         .produced_since_last_observation = true},
+        true, false, &multi_draw);
+    ASSERT_EQ(stopped.depth, 1u);
+    EXPECT_EQ(stopped.terminal, VideoCore::ImageColorScopeAncestryTerminal::MultipleDraws);
+    EXPECT_FALSE(stopped.truncated);
+
+    VideoCore::ImageColorScopeProducerObservation deep_scope{
+        .draw_count = 1,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+        .sampled_images = 1,
+        .valid = true,
+    };
+    deep_scope.ancestry.depth = VideoCore::MaxImageColorScopeAncestryDepth;
+    deep_scope.ancestry.terminal = VideoCore::ImageColorScopeAncestryTerminal::NonColorProducer;
+    for (u32 index = 0; index < deep_scope.ancestry.depth; ++index) {
+        deep_scope.ancestry.nodes[index] = {
+            .producer = VideoCore::ImageProducerClass::ColorAttachment,
+            .fresh = true,
+            .producer_valid = true,
+            .draw_count = 1,
+            .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+            .sampled_images = 1,
+            .scope_valid = true,
+        };
+    }
+    const auto capped = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment,
+         .produced_since_last_observation = true},
+        true, false, &deep_scope);
+    EXPECT_EQ(capped.depth, VideoCore::MaxImageColorScopeAncestryDepth);
+    EXPECT_EQ(capped.terminal, VideoCore::ImageColorScopeAncestryTerminal::DepthCap);
+    EXPECT_TRUE(capped.truncated);
+    EXPECT_TRUE(VideoCore::IsImageColorScopeAncestryLoss(capped.terminal));
+}
+
+TEST(PpSourceColorScopeAncestry, InvalidUnknownAndMissingHistoryFailClosed) {
+    const auto invalid_producer = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::Transfer}, false, false, nullptr);
+    EXPECT_EQ(invalid_producer.terminal,
+              VideoCore::ImageColorScopeAncestryTerminal::InvalidProducer);
+
+    const auto unknown_producer = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::Unknown}, true, false, nullptr);
+    EXPECT_EQ(unknown_producer.terminal,
+              VideoCore::ImageColorScopeAncestryTerminal::InvalidProducer);
+
+    const VideoCore::ImageColorScopeProducerObservation invalid_scope{};
+    const auto invalid = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, true, false,
+        &invalid_scope);
+    EXPECT_EQ(invalid.terminal, VideoCore::ImageColorScopeAncestryTerminal::InvalidScope);
+
+    const VideoCore::ImageColorScopeProducerObservation missing_history{
+        .draw_count = 1,
+        .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+        .sampled_images = 1,
+        .valid = true,
+    };
+    const auto missing = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, true, false,
+        &missing_history);
+    EXPECT_EQ(missing.terminal, VideoCore::ImageColorScopeAncestryTerminal::HistoryUnavailable);
+    EXPECT_TRUE(VideoCore::IsImageColorScopeAncestryLoss(missing.terminal));
+
+    const auto alias = VideoCore::BuildImageColorScopeAncestry(
+        {.classification = VideoCore::ImageProducerClass::ColorAttachment}, true, true,
+        &missing_history);
+    EXPECT_EQ(alias.terminal, VideoCore::ImageColorScopeAncestryTerminal::Alias);
+    EXPECT_FALSE(VideoCore::IsImageColorScopeAncestryLoss(alias.terminal));
+}
+
+TEST(PpSourceColorScopeAncestry, StateAndCompactReportRetainBoundedPrivacySafeChain) {
+    VideoCore::ImageColorScopeProducerState state;
+    state.BeginScope(101, false);
+    state.MarkDraw(
+        101, {
+                 .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                 .sampled_bindings = 1,
+                 .sampled_images = 1,
+                 .sampled_input_producer = VideoCore::ImageProducerClass::CpuUpload,
+                 .sampled_input_fresh = true,
+                 .sampled_input_valid = true,
+                 .ancestry =
+                     {
+                         .nodes = {{
+                             {.producer = VideoCore::ImageProducerClass::CpuUpload,
+                              .fresh = true,
+                              .producer_valid = true},
+                         }},
+                         .depth = 1,
+                         .terminal = VideoCore::ImageColorScopeAncestryTerminal::NonColorProducer,
+                     },
+             });
+    const auto observed = state.Observe();
+    ASSERT_EQ(observed.ancestry.depth, 1u);
+    EXPECT_EQ(observed.ancestry.nodes[0].producer, VideoCore::ImageProducerClass::CpuUpload);
+
+    PpSourceProducerScopeCoverage coverage{{.start = 101, .count = 1}};
+    const auto final = coverage.Observe(101, PpSourceProducerScopeClass::ActiveAtFlip, observed);
+    ASSERT_TRUE(final);
+    EXPECT_EQ(final->ancestry_max_depth, 1u);
+    EXPECT_EQ(final->ancestry_terminals[static_cast<u32>(
+                  VideoCore::ImageColorScopeAncestryTerminal::NonColorProducer)],
+              1u);
+    EXPECT_EQ(final->loss, 0u);
+    const auto line = FormatPpSourceProducerScopeObservation(*final);
+    EXPECT_NE(line.find(" ad=1 at=1 ax=0 ch="), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
 } // namespace
