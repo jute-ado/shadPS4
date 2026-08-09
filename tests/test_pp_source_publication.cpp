@@ -1229,4 +1229,34 @@ TEST(PpTerminalScopeContent, RenderingSplitResumesWithLoadAndPreservesGuestScope
     EXPECT_FALSE(stale.resume_rendering);
 }
 
+TEST(PpTerminalScopeContent, FlipDecisionEmitsAtMostOneFailClosedObservation) {
+    const auto existing = PlanPpTerminalScopeFlipDecision(true, true, true, true);
+    EXPECT_TRUE(existing.use_existing_capture);
+    EXPECT_FALSE(existing.synthesize_loss);
+    EXPECT_TRUE(existing.arm_next);
+
+    const auto warmup = PlanPpTerminalScopeFlipDecision(false, true, true, true);
+    EXPECT_FALSE(warmup.use_existing_capture);
+    EXPECT_TRUE(warmup.synthesize_loss);
+    EXPECT_EQ(warmup.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(warmup.loss.gap, 1u);
+    EXPECT_TRUE(warmup.arm_next);
+
+    const auto capacity = PlanPpTerminalScopeFlipDecision(false, true, false, true);
+    EXPECT_TRUE(capacity.synthesize_loss);
+    EXPECT_EQ(capacity.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(capacity.loss.tile_capacity, 1u);
+    EXPECT_FALSE(capacity.arm_next);
+
+    const auto stale = PlanPpTerminalScopeFlipDecision(false, false, false, true);
+    EXPECT_TRUE(stale.synthesize_loss);
+    EXPECT_EQ(stale.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(stale.loss.invalidation, 1u);
+    EXPECT_FALSE(stale.arm_next);
+
+    const auto outside = PlanPpTerminalScopeFlipDecision(false, true, true, false);
+    EXPECT_FALSE(outside.synthesize_loss);
+    EXPECT_TRUE(outside.arm_next);
+}
+
 } // namespace
