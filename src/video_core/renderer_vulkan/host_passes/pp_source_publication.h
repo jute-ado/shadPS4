@@ -67,6 +67,7 @@ struct PpSourcePublicationObservation {
     PpSourcePublicationClass classification{PpSourcePublicationClass::Unsupported};
     u32 selected{};
     u32 emitted{};
+    u32 expected{};
     u32 clean_gpu_tracked{};
     u32 clean_resident{};
     u32 dirty_no_upload{};
@@ -110,18 +111,23 @@ public:
             ++unsupported;
             break;
         }
+        const bool final = window.IsFinal(sequence);
+        if (final && emitted != window.count) {
+            ++loss;
+        }
         return PpSourcePublicationObservation{
             .sequence = sequence,
             .classification = classification,
             .selected = selected,
             .emitted = emitted,
+            .expected = window.count,
             .clean_gpu_tracked = clean_gpu_tracked,
             .clean_resident = clean_resident,
             .dirty_no_upload = dirty_no_upload,
             .cpu_upload = cpu_upload,
             .unsupported = unsupported,
             .loss = loss,
-            .final = window.IsFinal(sequence),
+            .final = final,
         };
     }
 
@@ -149,7 +155,7 @@ private:
     const PpSourcePublicationObservation& observation) {
     return "FGSCPC s=" + std::to_string(observation.sequence) +
            " n=" + std::to_string(observation.emitted) + '/' +
-           std::to_string(observation.selected) +
+           std::to_string(observation.selected) + '/' + std::to_string(observation.expected) +
            " g=" + std::to_string(observation.clean_gpu_tracked) +
            " r=" + std::to_string(observation.clean_resident) +
            " d=" + std::to_string(observation.dirty_no_upload) +
