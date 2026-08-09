@@ -1485,12 +1485,12 @@ TEST(PpTerminalScopeContent, ExactFinalBackingJoinCoversEveryCalibratedOutputEnd
     const auto backing_a = backing({1, 2, 3, 255}, {5, 6, 7, 8});
     const auto backing_b = backing({9, 10, 11, 0}, {99, 14, 15, 16});
     const auto backing_c = backing({17, 18, 19, 1}, {21, 22, 23, 24});
-    reducer.ObserveFinalBacking(101, backing_layout, backing_b,
-                                FinalGuestSurfaceStatus::Complete, {});
-    reducer.ObserveFinalBacking(100, backing_layout, backing_a,
-                                FinalGuestSurfaceStatus::Complete, {});
-    reducer.ObserveFinalBacking(102, backing_layout, backing_c,
-                                FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveFinalBacking(101, backing_layout, backing_b, FinalGuestSurfaceStatus::Complete,
+                                {});
+    reducer.ObserveFinalBacking(100, backing_layout, backing_a, FinalGuestSurfaceStatus::Complete,
+                                {});
+    reducer.ObserveFinalBacking(102, backing_layout, backing_c, FinalGuestSurfaceStatus::Complete,
+                                {});
     reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
@@ -1529,13 +1529,13 @@ TEST(PpTerminalScopeContent, FinalBackingJoinFailsClosedOnMissingLossOrLayoutMis
     const std::array<std::byte, 16> content{};
     const std::array<std::byte, 4> backing{};
     for (u64 sequence = 200; sequence <= 202; ++sequence) {
-        missing.ObserveContent(sequence, content_layout, content,
-                               FinalGuestSurfaceStatus::Complete, {});
+        missing.ObserveContent(sequence, content_layout, content, FinalGuestSurfaceStatus::Complete,
+                               {});
     }
-    missing.ObserveFinalBacking(200, backing_layout, backing,
-                                FinalGuestSurfaceStatus::Complete, {});
-    missing.ObserveFinalBacking(202, backing_layout, backing,
-                                FinalGuestSurfaceStatus::Complete, {});
+    missing.ObserveFinalBacking(200, backing_layout, backing, FinalGuestSurfaceStatus::Complete,
+                                {});
+    missing.ObserveFinalBacking(202, backing_layout, backing, FinalGuestSurfaceStatus::Complete,
+                                {});
     missing.ObserveCalibration({.request_ordinal = 1, .sequence = 200, .valid = true});
     missing.ObserveCalibration({.request_ordinal = 2, .sequence = 201, .valid = true});
     missing.ObserveCalibration({.request_ordinal = 3, .sequence = 202, .valid = true});
@@ -1548,8 +1548,8 @@ TEST(PpTerminalScopeContent, FinalBackingJoinFailsClosedOnMissingLossOrLayoutMis
     auto mismatched = backing_layout;
     mismatched.regions[0].byte_size = 3;
     for (u64 sequence = 300; sequence <= 302; ++sequence) {
-        invalid.ObserveContent(sequence, content_layout, content,
-                               FinalGuestSurfaceStatus::Complete, {});
+        invalid.ObserveContent(sequence, content_layout, content, FinalGuestSurfaceStatus::Complete,
+                               {});
         invalid.ObserveFinalBacking(sequence, mismatched, backing,
                                     FinalGuestSurfaceStatus::Complete, {});
     }

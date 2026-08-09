@@ -890,8 +890,20 @@ struct PpTerminalScopeContentHistoryLayout {
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
         regions{};
     u32 bytes_per_pixel{4};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
 
     auto operator<=>(const PpTerminalScopeContentHistoryLayout&) const = default;
+};
+
+struct PpTerminalScopeFinalBackingLayout {
+    u32 region_count{};
+    u32 total_bytes{};
+    std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        regions{};
+    u32 bytes_per_pixel{4};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+
+    auto operator<=>(const PpTerminalScopeFinalBackingLayout&) const = default;
 };
 
 struct PpTerminalScopeCalibratedReport {
@@ -909,6 +921,8 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> output_aba_ordinals{};
     std::vector<u32> output_stable_ordinals{};
     std::vector<u32> output_ambiguous_ordinals{};
+    std::vector<u32> output_final_backing_equal_ordinals{};
+    std::vector<u32> output_final_backing_different_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
 };
@@ -928,8 +942,10 @@ public:
     static constexpr u32 MaxCalibrations = FinalGuestSurfaceMaxScreenshotRequests;
 
     explicit PpTerminalScopeContentReducer(FinalGuestSurfaceCaptureWindow window_,
-                                           u32 history_capacity_ = 32)
-        : window{window_}, history_capacity{std::clamp(history_capacity_, 1u, 32u)} {}
+                                           u32 history_capacity_ = 32,
+                                           bool join_final_backing_ = false)
+        : window{window_}, history_capacity{std::clamp(history_capacity_, 1u, 32u)},
+          join_final_backing{join_final_backing_} {}
 
     void ObserveContent(u64 sequence, const PpTerminalScopeContentHistoryLayout& layout,
                         std::span<const std::byte> bytes, FinalGuestSurfaceStatus status,
@@ -948,6 +964,35 @@ public:
             .loss = loss,
         });
         last_content_sequence = std::max(last_content_sequence, sequence);
+        Reconcile();
+    }
+
+    void ObserveFinalBacking(u64 sequence, const PpTerminalScopeFinalBackingLayout& layout,
+                             std::span<const std::byte> bytes, FinalGuestSurfaceStatus status,
+                             FinalGuestSurfaceLoss loss) {
+        if (!join_final_backing || !window.Contains(sequence)) {
+            return;
+        }
+        if (const auto existing = std::ranges::find(final_backing_history, sequence,
+                                                    &FinalBackingObservation::sequence);
+            existing != final_backing_history.end()) {
+            existing->status = FinalGuestSurfaceStatus::InvalidationLoss;
+            existing->loss = {.invalidation = 1};
+            existing->bytes.clear();
+            Reconcile();
+            return;
+        }
+        if (final_backing_history.size() == history_capacity) {
+            final_backing_history.pop_front();
+        }
+        final_backing_history.push_back({
+            .sequence = sequence,
+            .layout = layout,
+            .bytes = std::vector<std::byte>{bytes.begin(), bytes.end()},
+            .status = status,
+            .loss = loss,
+        });
+        last_final_backing_sequence = std::max(last_final_backing_sequence, sequence);
         Reconcile();
     }
 
@@ -996,9 +1041,23 @@ private:
         FinalGuestSurfaceLoss loss{};
     };
 
+    struct FinalBackingObservation {
+        u64 sequence{};
+        PpTerminalScopeFinalBackingLayout layout{};
+        std::vector<std::byte> bytes{};
+        FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+        FinalGuestSurfaceLoss loss{};
+    };
+
     [[nodiscard]] const Observation* Find(u64 sequence) const noexcept {
         const auto found = std::ranges::find(history, sequence, &Observation::sequence);
         return found == history.end() ? nullptr : &*found;
+    }
+
+    [[nodiscard]] const FinalBackingObservation* FindFinalBacking(u64 sequence) const noexcept {
+        const auto found =
+            std::ranges::find(final_backing_history, sequence, &FinalBackingObservation::sequence);
+        return found == final_backing_history.end() ? nullptr : &*found;
     }
 
     static void AddLoss(FinalGuestSurfaceLoss& target, const FinalGuestSurfaceLoss& source) {
@@ -1069,9 +1128,72 @@ private:
         }
     }
 
-    [[nodiscard]] PpTerminalScopeCalibratedReport Evaluate(u32 request, const Observation* a,
-                                                           const Observation* b,
-                                                           const Observation* c) const {
+    [[nodiscard]] static std::optional<bool> EqualOutputToFinalBacking(
+        const Observation& output, const FinalBackingObservation& backing,
+        u32 region_index) noexcept {
+        if (region_index >= output.layout.region_count || output.layout.bytes_per_pixel != 4 ||
+            backing.layout.bytes_per_pixel != 4 ||
+            output.layout.format == FinalGuestSurfaceFormat::Unsupported ||
+            output.layout.format != backing.layout.format ||
+            backing.bytes.size() != backing.layout.total_bytes) {
+            return std::nullopt;
+        }
+        const auto& output_region = output.layout.regions[region_index];
+        const auto backing_region = std::ranges::find(
+            backing.layout.regions.begin(),
+            backing.layout.regions.begin() + backing.layout.region_count,
+            output_region.logical_ordinal, &PpTerminalScopeContentHistoryRegion::logical_ordinal);
+        if (backing_region == backing.layout.regions.begin() + backing.layout.region_count ||
+            output_region.byte_size == 0 || output_region.byte_size != backing_region->byte_size ||
+            output_region.byte_size % output.layout.bytes_per_pixel != 0) {
+            return std::nullopt;
+        }
+        const u64 output_offset =
+            static_cast<u64>(output.layout.output_plane_offset) + output_region.buffer_offset;
+        const u64 backing_offset = backing_region->buffer_offset;
+        if (output_offset + output_region.byte_size > output.bytes.size() ||
+            backing_offset + backing_region->byte_size > backing.bytes.size()) {
+            return std::nullopt;
+        }
+        for (u32 offset = 0; offset < output_region.byte_size; ++offset) {
+            if (offset % output.layout.bytes_per_pixel == 3) {
+                continue;
+            }
+            if (output.bytes[output_offset + offset] != backing.bytes[backing_offset + offset]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] static bool ClassifyFinalBackingJoin(const Observation& a, const Observation& b,
+                                                       const Observation& c,
+                                                       const FinalBackingObservation& backing_a,
+                                                       const FinalBackingObservation& backing_b,
+                                                       const FinalBackingObservation& backing_c,
+                                                       std::vector<u32>& equal,
+                                                       std::vector<u32>& different) {
+        for (u32 index = 0; index < a.layout.region_count; ++index) {
+            const auto a_equal = EqualOutputToFinalBacking(a, backing_a, index);
+            const auto b_equal = EqualOutputToFinalBacking(b, backing_b, index);
+            const auto c_equal = EqualOutputToFinalBacking(c, backing_c, index);
+            if (!a_equal || !b_equal || !c_equal) {
+                return false;
+            }
+            const u32 ordinal = a.layout.regions[index].logical_ordinal;
+            if (*a_equal && *b_equal && *c_equal) {
+                equal.push_back(ordinal);
+            } else {
+                different.push_back(ordinal);
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] PpTerminalScopeCalibratedReport Evaluate(
+        u32 request, const Observation* a, const Observation* b, const Observation* c,
+        const FinalBackingObservation* backing_a, const FinalBackingObservation* backing_b,
+        const FinalBackingObservation* backing_c) const {
         PpTerminalScopeCalibratedReport report{
             .request_ordinal = request,
             .sequences = {calibrations[request - 2]->sequence, calibrations[request - 1]->sequence,
@@ -1083,12 +1205,26 @@ private:
             report.loss.history = 1;
             return report;
         }
+        if (join_final_backing && (!backing_a || !backing_b || !backing_c)) {
+            report.status = FinalGuestSurfaceStatus::GapLoss;
+            report.loss.history = 1;
+            return report;
+        }
         AddLoss(report.loss, a->loss);
         AddLoss(report.loss, b->loss);
         AddLoss(report.loss, c->loss);
+        if (join_final_backing) {
+            AddLoss(report.loss, backing_a->loss);
+            AddLoss(report.loss, backing_b->loss);
+            AddLoss(report.loss, backing_c->loss);
+        }
         if (a->status != FinalGuestSurfaceStatus::Complete ||
             b->status != FinalGuestSurfaceStatus::Complete ||
-            c->status != FinalGuestSurfaceStatus::Complete || report.loss.Any()) {
+            c->status != FinalGuestSurfaceStatus::Complete ||
+            (join_final_backing && (backing_a->status != FinalGuestSurfaceStatus::Complete ||
+                                    backing_b->status != FinalGuestSurfaceStatus::Complete ||
+                                    backing_c->status != FinalGuestSurfaceStatus::Complete)) ||
+            report.loss.Any()) {
             report.status = FinalGuestSurfaceStatus::GapLoss;
             if (!report.loss.Any()) {
                 report.loss.gap = 1;
@@ -1117,6 +1253,14 @@ private:
         if ((a->layout.plane_mask & (1u << 3)) != 0) {
             ClassifyPlane(*a, *b, *c, 3, report.output_aba_ordinals, report.output_stable_ordinals,
                           report.output_ambiguous_ordinals);
+        }
+        if (join_final_backing &&
+            ((a->layout.plane_mask & (1u << 3)) == 0 ||
+             !ClassifyFinalBackingJoin(*a, *b, *c, *backing_a, *backing_b, *backing_c,
+                                       report.output_final_backing_equal_ordinals,
+                                       report.output_final_backing_different_ordinals))) {
+            report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            report.loss.invalidation = 1;
         }
         return report;
     }
@@ -1147,7 +1291,17 @@ private:
             if ((!a || !b || !c) && last_content_sequence < c_stamp.sequence) {
                 continue;
             }
-            auto report = Evaluate(request, a, b, c);
+            const auto* backing_a =
+                join_final_backing ? FindFinalBacking(a_stamp.sequence) : nullptr;
+            const auto* backing_b =
+                join_final_backing ? FindFinalBacking(b_stamp.sequence) : nullptr;
+            const auto* backing_c =
+                join_final_backing ? FindFinalBacking(c_stamp.sequence) : nullptr;
+            if (join_final_backing && (!backing_a || !backing_b || !backing_c) &&
+                last_final_backing_sequence < c_stamp.sequence) {
+                continue;
+            }
+            auto report = Evaluate(request, a, b, c, backing_a, backing_b, backing_c);
             ++emitted_count;
             complete_count +=
                 report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
@@ -1161,17 +1315,20 @@ private:
     FinalGuestSurfaceCaptureWindow window{};
     u32 history_capacity{};
     std::deque<Observation> history{};
+    std::deque<FinalBackingObservation> final_backing_history{};
     std::array<std::optional<FinalGuestSurfaceCalibratedStamp>, MaxCalibrations + 1> calibrations{};
     std::array<bool, MaxCalibrations + 1> classified{};
     std::array<bool, MaxCalibrations + 1> eligible_request{};
     std::vector<PpTerminalScopeCalibratedReport> reports{};
     u64 last_content_sequence{};
+    u64 last_final_backing_sequence{};
     u32 calibration_count{};
     u32 outside_count{};
     u32 eligible_count{};
     u32 emitted_count{};
     u32 complete_count{};
     u32 coverage_loss{};
+    bool join_final_backing{};
 };
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeOrdinalList(std::span<const u32> ordinals) {
@@ -1205,6 +1362,9 @@ private:
            " a3=" + FormatPpTerminalScopeOrdinalList(report.output_aba_ordinals) +
            " s3=" + FormatPpTerminalScopeOrdinalList(report.output_stable_ordinals) +
            " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) +
+           " e3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_equal_ordinals) +
+           " d3=" +
+           FormatPpTerminalScopeOrdinalList(report.output_final_backing_different_ordinals) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
 }
