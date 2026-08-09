@@ -1551,6 +1551,7 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesCapturedInputRegion
         .input_count = 2,
         .input_capture_mask = 0b10,
         .input_unavailable_mask = 0b01,
+        .input_alias_mask = 0b10,
         .input_planes =
             {{{.status = FinalGuestSurfaceStatus::Unsupported, .loss = {.unsupported_format = 1}},
               {.region_count = 1,
@@ -1574,13 +1575,14 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesCapturedInputRegion
     ASSERT_EQ(reports.size(), 1u);
     EXPECT_EQ(reports[0].input_capture_mask, 0b10u);
     EXPECT_EQ(reports[0].input_unavailable_mask, 0b01u);
+    EXPECT_EQ(reports[0].input_alias_mask, 0b10u);
     EXPECT_EQ(reports[0].sampled_input_aba_ordinals[1], (std::vector<u32>{42}));
     EXPECT_TRUE(reports[0].sampled_input_stable_ordinals[1].empty());
     EXPECT_TRUE(reports[0].sampled_input_ambiguous_ordinals[1].empty());
     EXPECT_FALSE(reports[0].loss.Any());
 
     const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
-    EXPECT_NE(line.find(" im=2/2/1"), std::string::npos);
+    EXPECT_NE(line.find(" im=2/2/1/2"), std::string::npos);
     EXPECT_NE(line.find(" z1a=42 z1s=- z1x=-"), std::string::npos);
     EXPECT_EQ(line.find("byte"), std::string::npos);
     EXPECT_EQ(line.find("hash"), std::string::npos);
@@ -3689,6 +3691,24 @@ TEST(PpUpstreamInputContent, PreservesSpecificCaptureLossBeforePublicationReconc
         true, true, 0, 0, FinalGuestSurfaceStatus::Complete, {}, true);
     EXPECT_EQ(ready.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_TRUE(ready.copy);
+}
+
+TEST(PpUpstreamInputContent, SlotReleaseFailureMakesFinalCoverageIncomplete) {
+    const auto complete = ReconcilePpUpstreamInputSlotRelease(
+        true, true, FinalGuestSurfaceStatus::Complete, {}, true);
+    EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(complete.copy);
+
+    const auto failed = ReconcilePpUpstreamInputSlotRelease(
+        true, false, FinalGuestSurfaceStatus::Complete, {}, true);
+    EXPECT_EQ(failed.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(failed.loss.invalidation, 1u);
+    EXPECT_FALSE(failed.copy);
+
+    const auto no_slot = ReconcilePpUpstreamInputSlotRelease(
+        false, false, FinalGuestSurfaceStatus::GapLoss, FinalGuestSurfaceLoss{.gap = 1}, false);
+    EXPECT_EQ(no_slot.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(no_slot.loss.gap, 1u);
 }
 
 } // namespace
