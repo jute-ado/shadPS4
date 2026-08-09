@@ -118,6 +118,16 @@ target_compile_definitions(shadps4_pp_sampled_input_test PRIVATE
 target_link_libraries(shadps4_pp_sampled_input_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pp_sampled_input_test)
 
+add_executable(shadps4_pp_source_backing_test
+    test_pp_source_backing.cpp
+)
+target_include_directories(shadps4_pp_source_backing_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pp_source_backing_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pp_source_backing_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pp_source_backing_test)
+
 add_executable(shadps4_submit_info_test
     test_submit_info.cpp
 )
