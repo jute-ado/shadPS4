@@ -2614,6 +2614,8 @@ TEST(PpTerminalScopeContent, FailedPredecessorCandidateCanRestartInALaterScope) 
     unrelated.element_count = 12;
     ASSERT_EQ(gate.PreviewDraw(17, 81, unrelated), PpTerminalScopePreDrawAction::ShapeLoss);
 
+    EXPECT_EQ(gate.ObserveConsumer(17, config.consumer), PpTerminalScopeConsumerAction::None)
+        << "A poisoned discovered predecessor must not freeze on a later consumer-shaped draw";
     EXPECT_TRUE(gate.CanRestartAtFirst(17, 89, config.predecessor));
     ASSERT_TRUE(gate.Arm(17, 9));
     EXPECT_EQ(gate.PreviewDraw(17, 89, config.predecessor),
