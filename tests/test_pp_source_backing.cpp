@@ -440,5 +440,47 @@ TEST(PpSourceBacking, CalibratedOutputReturnClassifiesExactBackingPerOrdinal) {
     EXPECT_LT(compact.size(), 320u);
 }
 
+TEST(PpSourceBacking, ProductionHandoffSnapshotsAfterDrawAndPacksOnPresent) {
+    const auto backing = PlanPpSourceBackingFootprints(RouteDescriptor());
+    const auto handoff = PlanPpSourceBackingHandoff({
+        .enabled = true,
+        .frame_is_new = true,
+        .metadata_valid = true,
+        .snapshot_buffer_available = true,
+        .backing = backing,
+    });
+    ASSERT_EQ(handoff.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(handoff.pp_draw_precedes_source_transition);
+    EXPECT_EQ(handoff.draw_source_image_barriers, 2u);
+    EXPECT_EQ(handoff.draw_image_to_snapshot_regions, backing.region_count);
+    EXPECT_EQ(handoff.draw_snapshot_buffer_barriers, 2u);
+    EXPECT_EQ(handoff.present_snapshot_to_readback_copies, 1u);
+    EXPECT_TRUE(handoff.present_wait_includes_transfer);
+    EXPECT_TRUE(handoff.callback_payload_is_scalar_only);
+    EXPECT_FALSE(handoff.cpu_wait);
+    EXPECT_FALSE(handoff.finish);
+    EXPECT_FALSE(handoff.callback_retains_frame);
+    EXPECT_FALSE(handoff.callback_retains_image);
+    EXPECT_FALSE(handoff.callback_retains_vk_image);
+
+    EXPECT_FALSE(PlanPpSourceBackingHandoff({
+                                                .enabled = true,
+                                                .frame_is_new = false,
+                                                .metadata_valid = true,
+                                                .snapshot_buffer_available = true,
+                                                .backing = backing,
+                                            })
+                     .copy);
+    EXPECT_EQ(PlanPpSourceBackingHandoff({
+                                             .enabled = true,
+                                             .frame_is_new = true,
+                                             .metadata_valid = false,
+                                             .snapshot_buffer_available = true,
+                                             .backing = backing,
+                                         })
+                  .status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+}
+
 } // namespace
 } // namespace Vulkan
