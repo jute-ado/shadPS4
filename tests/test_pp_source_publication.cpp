@@ -3671,4 +3671,24 @@ TEST(PpUpstreamInputContent, RestoresTheExactUniformTrackerAfterAPartialCopy) {
     EXPECT_TRUE(transient_subresources.empty());
 }
 
+TEST(PpUpstreamInputContent, PreservesSpecificCaptureLossBeforePublicationReconciliation) {
+    const auto capacity = ReconcilePpUpstreamInputPublication(
+        true, false, 0, 0, FinalGuestSurfaceStatus::CapacityLoss,
+        FinalGuestSurfaceLoss{.byte_capacity = 1}, false);
+    EXPECT_EQ(capacity.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(capacity.loss.byte_capacity, 1u);
+    EXPECT_FALSE(capacity.copy);
+
+    const auto missing = ReconcilePpUpstreamInputPublication(
+        true, false, 0, 0, FinalGuestSurfaceStatus::Complete, {}, true);
+    EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing.loss.gap, 1u);
+    EXPECT_FALSE(missing.copy);
+
+    const auto ready = ReconcilePpUpstreamInputPublication(
+        true, true, 0, 0, FinalGuestSurfaceStatus::Complete, {}, true);
+    EXPECT_EQ(ready.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(ready.copy);
+}
+
 } // namespace
