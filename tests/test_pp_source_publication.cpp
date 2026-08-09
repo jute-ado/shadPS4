@@ -2610,6 +2610,51 @@ TEST(PpTerminalScopeContent, UpstreamInputRegistryJoinsOnlyTheExactPrivateProduc
     EXPECT_FALSE(registry.Resolve(output).matched);
 }
 
+TEST(PpTerminalScopeContent, FeedbackLoopClassificationRequiresExactVulkanState) {
+    const auto extension = ClassifyPpTerminalScopeFeedbackLoop({
+        .logical_alias = true,
+        .exact_subresource = true,
+        .extension_supported = true,
+        .sampled_feedback_layout = true,
+        .attachment_feedback_layout = true,
+        .dynamic_feedback_enabled = true,
+    });
+    EXPECT_EQ(extension.mode, PpTerminalScopeFeedbackMode::AttachmentFeedbackLoop);
+    EXPECT_TRUE(extension.exact_subresource);
+    EXPECT_EQ(extension.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(extension.loss.Any());
+
+    const auto fallback = ClassifyPpTerminalScopeFeedbackLoop({
+        .logical_alias = true,
+        .exact_subresource = true,
+        .sampled_general_layout = true,
+        .attachment_general_layout = true,
+    });
+    EXPECT_EQ(fallback.mode, PpTerminalScopeFeedbackMode::GeneralFallback);
+    EXPECT_EQ(fallback.status, FinalGuestSurfaceStatus::Complete);
+
+    auto mismatched_range = PpTerminalScopeFeedbackLoopDescriptor{
+        .logical_alias = true,
+        .extension_supported = true,
+        .sampled_feedback_layout = true,
+        .attachment_feedback_layout = true,
+        .dynamic_feedback_enabled = true,
+    };
+    const auto range_loss = ClassifyPpTerminalScopeFeedbackLoop(mismatched_range);
+    EXPECT_EQ(range_loss.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(range_loss.loss.invalidation, 1u);
+
+    mismatched_range.exact_subresource = true;
+    mismatched_range.dynamic_feedback_enabled = false;
+    const auto dynamic_loss = ClassifyPpTerminalScopeFeedbackLoop(mismatched_range);
+    EXPECT_EQ(dynamic_loss.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(dynamic_loss.loss.invalidation, 1u);
+
+    const auto no_alias = ClassifyPpTerminalScopeFeedbackLoop({});
+    EXPECT_EQ(no_alias.mode, PpTerminalScopeFeedbackMode::None);
+    EXPECT_EQ(no_alias.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+}
+
 TEST(PpTerminalScopeContent, SampledInputViewPreservesExactBoundCopyEligibility) {
     const auto view = ClassifyPpTerminalScopeSampledInputView({
         .width = 1920,
