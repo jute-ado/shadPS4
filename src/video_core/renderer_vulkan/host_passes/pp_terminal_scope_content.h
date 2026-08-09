@@ -861,7 +861,7 @@ public:
             ++consumer_shape_matches;
         }
         if (phase != 2 || !shape_matches) {
-            if (phase != 3 || !shape_matches) {
+            if (phase != 3 || !shape_matches || config.capture_predecessor) {
                 return PpTerminalScopeConsumerAction::None;
             }
         }
