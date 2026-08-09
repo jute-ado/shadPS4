@@ -1200,11 +1200,11 @@ TEST(PpTerminalScopeContent, RootInputUsesItsOwnExactLogicalFootprints) {
     ASSERT_EQ(base.regions[0].width, 48u);
     ASSERT_EQ(base.regions[0].height, 48u);
 
-    const auto attached = AttachPpTerminalScopeRootInputPlan(
-        base, {.source_width = 1280,
-               .source_height = 720,
-               .format = FinalGuestSurfaceFormat::Rgba8,
-               .samples = 1});
+    const auto attached =
+        AttachPpTerminalScopeRootInputPlan(base, {.source_width = 1280,
+                                                  .source_height = 720,
+                                                  .format = FinalGuestSurfaceFormat::Rgba8,
+                                                  .samples = 1});
     ASSERT_EQ(attached.status, FinalGuestSurfaceStatus::Complete);
     ASSERT_EQ(attached.root_input_region_count, 2u);
     EXPECT_EQ(attached.root_input_regions[0].logical_ordinal, 1024u);
@@ -1218,11 +1218,11 @@ TEST(PpTerminalScopeContent, RootInputUsesItsOwnExactLogicalFootprints) {
               attached.root_input_plane_offset + attached.root_input_plane_bytes);
     EXPECT_LE(attached.total_bytes, PpTerminalScopeSnapshotBytes);
 
-    const auto incompatible = AttachPpTerminalScopeRootInputPlan(
-        base, {.source_width = 1024,
-               .source_height = 1024,
-               .format = FinalGuestSurfaceFormat::Rgba8,
-               .samples = 1});
+    const auto incompatible =
+        AttachPpTerminalScopeRootInputPlan(base, {.source_width = 1024,
+                                                  .source_height = 1024,
+                                                  .format = FinalGuestSurfaceFormat::Rgba8,
+                                                  .samples = 1});
     EXPECT_EQ(incompatible.status, FinalGuestSurfaceStatus::Unsupported);
     EXPECT_EQ(incompatible.loss.logical_mapping, 1u);
     EXPECT_FALSE(incompatible.copy);
@@ -1651,7 +1651,9 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
 
     const PpTerminalScopeContentHistoryLayout layout{
         .region_count = 3,
+        .root_input_region_count = 3,
         .plane_bytes = PlaneBytes,
+        .root_input_plane_bytes = PlaneBytes,
         .second_plane_offset = PlaneBytes,
         .consumer_plane_offset = PlaneBytes * 2,
         .output_plane_offset = PlaneBytes * 3,
@@ -1662,7 +1664,12 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
             {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes},
               {.logical_ordinal = 42, .buffer_offset = RegionBytes, .byte_size = RegionBytes},
               {.logical_ordinal = 43, .buffer_offset = RegionBytes * 2, .byte_size = RegionBytes}}},
+        .root_input_regions =
+            {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes},
+              {.logical_ordinal = 42, .buffer_offset = RegionBytes, .byte_size = RegionBytes},
+              {.logical_ordinal = 43, .buffer_offset = RegionBytes * 2, .byte_size = RegionBytes}}},
         .format = FinalGuestSurfaceFormat::Rgba8,
+        .root_input_format = FinalGuestSurfaceFormat::Rgba8,
     };
     const auto observation = [&](bool is_departure, bool is_returned) {
         std::array<std::byte, PlaneBytes * 5> bytes{};

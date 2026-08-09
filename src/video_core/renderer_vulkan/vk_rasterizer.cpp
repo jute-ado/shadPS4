@@ -213,19 +213,38 @@ public:
             return;
         }
         if (action == PpTerminalScopeContentAction::CaptureFirst) {
+            auto root_plan = entry->plan;
+            const bool root_structure_valid = HasCompatiblePlaneStructure(sampled_input);
+            if (root_structure_valid) {
+                root_plan = AttachPpTerminalScopeRootInputPlan(
+                    root_plan,
+                    {.source_width = sampled_input->info.size.width,
+                     .source_height = sampled_input->info.size.height,
+                     .format = TerminalScopeFormat(sampled_input->backing->image.image_ci.format),
+                     .samples = sampled_input->backing->num_samples});
+            } else {
+                root_plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                root_plan.loss = {.invalidation = 1};
+                root_plan.copy = false;
+            }
             const auto root_input = PlanPpTerminalScopeRootInputCapture({
                 .capture_first = true,
                 .single_sampled_input = draw.sampled_images == 1,
                 .sampled_input_valid = draw.sampled_input_valid && sampled_input,
                 .sampled_input_alias = draw.sampled_input_alias,
                 .read_only = draw.storage_writes == 0,
-                .compatible_layout = IsCompatiblePlane(entry->plan, sampled_input),
+                .compatible_layout = root_plan.status == FinalGuestSurfaceStatus::Complete,
             });
             if (!root_input.capture) {
-                entry->status = root_input.status;
-                entry->loss = root_input.loss;
+                const bool layout_is_only_failure =
+                    draw.sampled_images == 1 && draw.sampled_input_valid && sampled_input &&
+                    !draw.sampled_input_alias && draw.storage_writes == 0 &&
+                    root_plan.status != FinalGuestSurfaceStatus::Complete;
+                entry->status = layout_is_only_failure ? root_plan.status : root_input.status;
+                entry->loss = layout_is_only_failure ? root_plan.loss : root_input.loss;
                 return;
             }
+            entry->plan = std::move(root_plan);
             RecordPlane(*entry, *sampled_input, state, attachment_index, rendering_serial,
                         root_input.plane);
             if (entry->status != FinalGuestSurfaceStatus::Complete || entry->loss.Any()) {
@@ -501,13 +520,10 @@ private:
                target->backing->subresource_states.empty();
     }
 
-    [[nodiscard]] static bool IsCompatiblePlane(const PpTerminalScopeContentPlan& plan,
-                                                const VideoCore::Image* image) noexcept {
+    [[nodiscard]] static bool HasCompatiblePlaneStructure(const VideoCore::Image* image) noexcept {
         return image && image->aspect_mask == vk::ImageAspectFlagBits::eColor && image->backing &&
                image->backing->subresource_states.empty() && image->info.resources.levels == 1 &&
-               image->info.resources.layers == 1 && image->info.size.width == plan.target_width &&
-               image->info.size.height == plan.target_height && image->backing->num_samples == 1 &&
-               TerminalScopeFormat(image->backing->image.image_ci.format) == plan.format;
+               image->info.resources.layers == 1;
     }
 
     void ConfigureEntry(Entry& entry, VideoCore::ImageColorScopePrivateLink link,
@@ -551,7 +567,9 @@ private:
         const PpTerminalScopeContentPlan& plan, u32 plane_mask = 0) noexcept {
         PpTerminalScopeContentHistoryLayout layout{
             .region_count = plan.region_count,
+            .root_input_region_count = plan.root_input_region_count,
             .plane_bytes = plan.plane_bytes,
+            .root_input_plane_bytes = plan.root_input_plane_bytes,
             .second_plane_offset = plan.second_plane_offset,
             .consumer_plane_offset = plan.consumer_plane_offset,
             .output_plane_offset = plan.output_plane_offset,
@@ -559,12 +577,20 @@ private:
             .total_bytes = plan.total_bytes,
             .plane_mask = plane_mask,
             .format = plan.format,
+            .root_input_format = plan.root_input_format,
         };
         for (u32 index = 0; index < plan.region_count; ++index) {
             layout.regions[index] = {
                 .logical_ordinal = plan.regions[index].logical_ordinal,
                 .buffer_offset = plan.regions[index].buffer_offset,
                 .byte_size = plan.regions[index].byte_size,
+            };
+        }
+        for (u32 index = 0; index < plan.root_input_region_count; ++index) {
+            layout.root_input_regions[index] = {
+                .logical_ordinal = plan.root_input_regions[index].logical_ordinal,
+                .buffer_offset = plan.root_input_regions[index].buffer_offset,
+                .byte_size = plan.root_input_regions[index].byte_size,
             };
         }
         return layout;
@@ -633,8 +659,11 @@ private:
                                  : plane == 2 ? entry.plan.consumer_plane_offset
                                  : plane == 3 ? entry.plan.output_plane_offset
                                               : entry.plan.root_input_plane_offset;
-        for (u32 index = 0; index < entry.plan.region_count; ++index) {
-            const auto& region = entry.plan.regions[index];
+        const u32 region_count =
+            plane == 4 ? entry.plan.root_input_region_count : entry.plan.region_count;
+        for (u32 index = 0; index < region_count; ++index) {
+            const auto& region =
+                plane == 4 ? entry.plan.root_input_regions[index] : entry.plan.regions[index];
             copies[index] = {
                 .bufferOffset = slot_offset + plane_offset + region.buffer_offset,
                 .bufferRowLength = 0,
@@ -651,7 +680,7 @@ private:
             };
         }
         cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                                 download.Handle(), entry.plan.region_count, copies.data());
+                                 download.Handle(), region_count, copies.data());
         const vk::ImageMemoryBarrier2 restore{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask = vk::AccessFlagBits2::eTransferRead,

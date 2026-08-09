@@ -742,11 +742,17 @@ struct PpTerminalScopeContentDescriptor {
 
 struct PpTerminalScopeContentPlan {
     std::array<PpSourceBackingRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> regions{};
+    std::array<PpSourceBackingRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        root_input_regions{};
     u32 region_count{};
+    u32 root_input_region_count{};
     u32 copy_region_count{};
     u32 target_width{};
     u32 target_height{};
+    u32 logical_width{};
+    u32 logical_height{};
     u32 plane_bytes{};
+    u32 root_input_plane_bytes{};
     u32 first_plane_offset{};
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
@@ -755,6 +761,11 @@ struct PpTerminalScopeContentPlan {
     u32 total_bytes{};
     u32 image_barriers_per_draw{};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceFormat root_input_format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceWatchOrdinals selector{};
+    u32 buffer_alignment{};
+    u32 max_regions{};
+    u32 max_bytes{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
     bool copy{};
@@ -838,10 +849,14 @@ struct PpTerminalScopeContentPlan {
     }
     PpTerminalScopeContentPlan plan{
         .region_count = footprint.region_count,
+        .root_input_region_count = footprint.region_count,
         .copy_region_count = footprint.region_count * 5,
         .target_width = descriptor.target_width,
         .target_height = descriptor.target_height,
+        .logical_width = descriptor.logical_width,
+        .logical_height = descriptor.logical_height,
         .plane_bytes = footprint.buffer_bytes,
+        .root_input_plane_bytes = footprint.buffer_bytes,
         .first_plane_offset = 0,
         .second_plane_offset = static_cast<u32>(second_offset),
         .consumer_plane_offset = static_cast<u32>(consumer_offset),
@@ -850,6 +865,11 @@ struct PpTerminalScopeContentPlan {
         .total_bytes = static_cast<u32>(total_bytes),
         .image_barriers_per_draw = 2,
         .format = footprint.format,
+        .root_input_format = footprint.format,
+        .selector = descriptor.selector,
+        .buffer_alignment = descriptor.buffer_alignment,
+        .max_regions = descriptor.max_regions,
+        .max_bytes = descriptor.max_bytes,
         .status = FinalGuestSurfaceStatus::Complete,
         .copy = true,
         .ends_rendering = true,
@@ -859,7 +879,86 @@ struct PpTerminalScopeContentPlan {
     };
     for (u32 index = 0; index < footprint.region_count; ++index) {
         plan.regions[index] = footprint.regions[index];
+        plan.root_input_regions[index] = footprint.regions[index];
     }
+    return plan;
+}
+
+struct PpTerminalScopeRootInputPlanDescriptor {
+    u32 source_width{};
+    u32 source_height{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    u32 samples{};
+};
+
+[[nodiscard]] inline PpTerminalScopeContentPlan AttachPpTerminalScopeRootInputPlan(
+    PpTerminalScopeContentPlan plan,
+    const PpTerminalScopeRootInputPlanDescriptor& descriptor) noexcept {
+    if (plan.status != FinalGuestSurfaceStatus::Complete || !plan.copy) {
+        return plan;
+    }
+    const auto reject = [&](FinalGuestSurfaceStatus status, const FinalGuestSurfaceLoss& loss) {
+        plan.status = status;
+        plan.loss = loss;
+        plan.copy = false;
+        return plan;
+    };
+    const auto root = PlanPpSourceBackingFootprints({
+        .enabled = true,
+        .in_window = true,
+        .pp_draw_encoded = true,
+        .fsr_bypassed = true,
+        .source_width = descriptor.source_width,
+        .source_height = descriptor.source_height,
+        .logical_width = plan.logical_width,
+        .logical_height = plan.logical_height,
+        .source_format = descriptor.format,
+        .samples = descriptor.samples,
+        .resolved_base_mip = 0,
+        .resolved_mip_count = 1,
+        .resolved_base_layer = 0,
+        .resolved_layer_count = 1,
+        .bound_base_mip = 0,
+        .bound_mip_count = 1,
+        .bound_base_layer = 0,
+        .bound_layer_count = 1,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+        .buffer_alignment = plan.buffer_alignment,
+        .max_regions = plan.max_regions,
+        .max_bytes = plan.max_bytes,
+        .selector = plan.selector,
+    });
+    if (root.status != FinalGuestSurfaceStatus::Complete) {
+        return reject(root.status, root.loss);
+    }
+    if (static_cast<u64>(plan.region_count) * 4 + root.region_count > plan.max_regions) {
+        FinalGuestSurfaceLoss loss{};
+        loss.tile_capacity = 1;
+        return reject(FinalGuestSurfaceStatus::CapacityLoss, loss);
+    }
+    const u64 root_offset = AlignPpSourceBackingOffset(
+        static_cast<u64>(plan.output_plane_offset) + plan.plane_bytes, plan.buffer_alignment);
+    const u64 total_bytes = root_offset == std::numeric_limits<u64>::max()
+                                ? root_offset
+                                : root_offset + root.buffer_bytes;
+    if (root_offset == std::numeric_limits<u64>::max() || total_bytes > plan.max_bytes ||
+        total_bytes > std::numeric_limits<u32>::max()) {
+        FinalGuestSurfaceLoss loss{};
+        loss.byte_capacity = 1;
+        return reject(FinalGuestSurfaceStatus::CapacityLoss, loss);
+    }
+    plan.root_input_regions = {};
+    for (u32 index = 0; index < root.region_count; ++index) {
+        plan.root_input_regions[index] = root.regions[index];
+    }
+    plan.root_input_region_count = root.region_count;
+    plan.copy_region_count = plan.region_count * 4 + root.region_count;
+    plan.root_input_plane_offset = static_cast<u32>(root_offset);
+    plan.root_input_plane_bytes = root.buffer_bytes;
+    plan.total_bytes = static_cast<u32>(total_bytes);
+    plan.root_input_format = root.format;
     return plan;
 }
 
@@ -972,7 +1071,9 @@ struct PpTerminalScopeContentHistoryRegion {
 
 struct PpTerminalScopeContentHistoryLayout {
     u32 region_count{};
+    u32 root_input_region_count{};
     u32 plane_bytes{};
+    u32 root_input_plane_bytes{};
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
     u32 output_plane_offset{};
@@ -981,8 +1082,11 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 plane_mask{};
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
         regions{};
+    std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        root_input_regions{};
     u32 bytes_per_pixel{4};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceFormat root_input_format{FinalGuestSurfaceFormat::Unsupported};
 
     auto operator<=>(const PpTerminalScopeContentHistoryLayout&) const = default;
 };
@@ -1280,13 +1384,31 @@ private:
         target.tile_detail += source.tile_detail;
     }
 
+    [[nodiscard]] static u32 PlaneRegionCount(const PpTerminalScopeContentHistoryLayout& layout,
+                                              u32 plane) noexcept {
+        return plane == 4 ? layout.root_input_region_count : layout.region_count;
+    }
+
+    [[nodiscard]] static const PpTerminalScopeContentHistoryRegion* PlaneRegion(
+        const PpTerminalScopeContentHistoryLayout& layout, u32 plane, u32 index) noexcept {
+        if (index >= PlaneRegionCount(layout, plane)) {
+            return nullptr;
+        }
+        return plane == 4 ? &layout.root_input_regions[index] : &layout.regions[index];
+    }
+
+    [[nodiscard]] static FinalGuestSurfaceFormat PlaneFormat(
+        const PpTerminalScopeContentHistoryLayout& layout, u32 plane) noexcept {
+        return plane == 4 ? layout.root_input_format : layout.format;
+    }
+
     [[nodiscard]] static bool EqualVisibleRegion(const Observation& left, const Observation& right,
                                                  u32 plane, u32 region_index) noexcept {
-        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 4 ||
+        const auto* region = PlaneRegion(left.layout, plane, region_index);
+        if (left.layout != right.layout || !region || plane > 4 ||
             left.layout.bytes_per_pixel != 4) {
             return false;
         }
-        const auto& region = left.layout.regions[region_index];
         const auto plane_offset = [plane](const PpTerminalScopeContentHistoryLayout& layout) {
             return plane == 0   ? 0u
                    : plane == 1 ? layout.second_plane_offset
@@ -1294,14 +1416,14 @@ private:
                    : plane == 3 ? layout.output_plane_offset
                                 : layout.root_input_plane_offset;
         };
-        const u64 left_offset = region.buffer_offset + plane_offset(left.layout);
-        const u64 right_offset = region.buffer_offset + plane_offset(right.layout);
-        if (region.byte_size == 0 || region.byte_size % left.layout.bytes_per_pixel != 0 ||
-            left_offset + region.byte_size > left.bytes.size() ||
-            right_offset + region.byte_size > right.bytes.size()) {
+        const u64 left_offset = region->buffer_offset + plane_offset(left.layout);
+        const u64 right_offset = region->buffer_offset + plane_offset(right.layout);
+        if (region->byte_size == 0 || region->byte_size % left.layout.bytes_per_pixel != 0 ||
+            left_offset + region->byte_size > left.bytes.size() ||
+            right_offset + region->byte_size > right.bytes.size()) {
             return false;
         }
-        for (u32 offset = 0; offset < region.byte_size; ++offset) {
+        for (u32 offset = 0; offset < region->byte_size; ++offset) {
             if (offset % left.layout.bytes_per_pixel == 3) {
                 continue;
             }
@@ -1315,11 +1437,11 @@ private:
     static void ClassifyPlane(const Observation& a, const Observation& b, const Observation& c,
                               u32 plane, std::vector<u32>& aba, std::vector<u32>& stable,
                               std::vector<u32>& ambiguous) {
-        for (u32 index = 0; index < a.layout.region_count; ++index) {
+        for (u32 index = 0; index < PlaneRegionCount(a.layout, plane); ++index) {
             const bool ab = EqualVisibleRegion(a, b, plane, index);
             const bool bc = EqualVisibleRegion(b, c, plane, index);
             const bool ac = EqualVisibleRegion(a, c, plane, index);
-            const u32 ordinal = a.layout.regions[index].logical_ordinal;
+            const u32 ordinal = PlaneRegion(a.layout, plane, index)->logical_ordinal;
             if (ac && !ab) {
                 aba.push_back(ordinal);
             } else if (ab && bc) {
@@ -1350,8 +1472,8 @@ private:
             c_plane_offset > c.bytes.size()) {
             return false;
         }
-        for (u32 index = 0; index < a.layout.region_count; ++index) {
-            const auto& region = a.layout.regions[index];
+        for (u32 index = 0; index < PlaneRegionCount(a.layout, plane); ++index) {
+            const auto& region = *PlaneRegion(a.layout, plane, index);
             if (region.logical_ordinal == 0 || region.byte_size == 0 ||
                 a_plane_offset + region.buffer_offset + region.byte_size > a.bytes.size() ||
                 b_plane_offset + region.buffer_offset + region.byte_size > b.bytes.size() ||
@@ -1359,7 +1481,7 @@ private:
                 return false;
             }
             const auto result = IsPpTerminalScopeLocalizedVisualReturn(
-                a.layout.format,
+                PlaneFormat(a.layout, plane),
                 std::span{a.bytes}.subspan(a_plane_offset + region.buffer_offset, region.byte_size),
                 std::span{b.bytes}.subspan(b_plane_offset + region.buffer_offset, region.byte_size),
                 std::span{c.bytes}.subspan(c_plane_offset + region.buffer_offset,
