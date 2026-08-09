@@ -1167,4 +1167,46 @@ TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatu
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) {
+    const std::map<std::string_view, std::string_view> values{
+        {"SHADPS4_FINAL_GUEST_SURFACE_CONTENT", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_STAGE", "pp_source_publication_reconstruction"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS", "300"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_START", "4000"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", "800"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "390,1024,1299"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
+    };
+    const auto config = ResolvePpTerminalScopeRuntimeConfig([&](const char* name) {
+        const auto found = values.find(name);
+        return found == values.end() ? std::optional<std::string_view>{}
+                                     : std::optional<std::string_view>{found->second};
+    });
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->window.frame_start, 4000u);
+    EXPECT_EQ(config->window.frame_count, 800u);
+    EXPECT_EQ(config->expected_calibrations, 300u);
+    EXPECT_EQ(config->watch_ordinals.count, 3u);
+    EXPECT_EQ(config->content.first,
+              (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 696, 1,
+                                           1, 0}));
+    EXPECT_EQ(config->content.second,
+              (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 24, 1,
+                                           2, 0}));
+}
+
+TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSelection) {
+    const auto missing = [](const char*) { return std::optional<std::string_view>{}; };
+    EXPECT_FALSE(ResolvePpTerminalScopeRuntimeConfig(missing));
+    EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,696,1,1"));
+    EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,696,1,1,0,trailing"));
+    EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("title,indexed,696,1,1,0"));
+    EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,maybe,696,1,1,0"));
+    EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,0,1,1,0"));
+    EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,696,0,1,0"));
+}
+
 } // namespace
