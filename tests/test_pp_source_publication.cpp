@@ -2229,6 +2229,49 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, ProgressCoverageSeparatesActionsFromSuccessfulPlaneCaptures) {
+    PpTerminalScopeProgressCoverage coverage{};
+    coverage.Observe({.restart = true, .restart_plan_complete = true});
+    coverage.Observe({.restart = true});
+    coverage.Observe({.predecessor_before_action = true,
+                      .predecessor_before_captured = true});
+    coverage.Observe({.predecessor_after_action = true,
+                      .predecessor_after_captured = true});
+    coverage.Observe({.first_before_action = true, .first_before_captured = true});
+    coverage.Observe({.first_after_action = true, .first_after_captured = true});
+    coverage.Observe({.second_action = true, .second_captured = true});
+    coverage.Observe({.consumer_action = true,
+                      .consumer_captured = true,
+                      .output_captured = true,
+                      .alias_ready = true});
+    coverage.Observe({});
+
+    EXPECT_EQ(coverage.restarts, 2u);
+    EXPECT_EQ(coverage.restart_plans_complete, 1u);
+    EXPECT_EQ(coverage.predecessor_before_actions, 1u);
+    EXPECT_EQ(coverage.predecessor_before_captures, 1u);
+    EXPECT_EQ(coverage.predecessor_after_actions, 1u);
+    EXPECT_EQ(coverage.predecessor_after_captures, 1u);
+    EXPECT_EQ(coverage.first_before_actions, 1u);
+    EXPECT_EQ(coverage.first_before_captures, 1u);
+    EXPECT_EQ(coverage.first_after_actions, 1u);
+    EXPECT_EQ(coverage.first_after_captures, 1u);
+    EXPECT_EQ(coverage.second_actions, 1u);
+    EXPECT_EQ(coverage.second_captures, 1u);
+    EXPECT_EQ(coverage.consumer_actions, 1u);
+    EXPECT_EQ(coverage.consumer_captures, 1u);
+    EXPECT_EQ(coverage.output_captures, 1u);
+    EXPECT_EQ(coverage.aliases_ready, 1u);
+
+    const auto line = FormatPpTerminalScopeProgressCoverage(coverage);
+    EXPECT_EQ(line,
+              "FGSCTSP r=2 rp=1 ba=1 bc=1 pa=1 pc=1 fa=1 fc=1 aa=1 ac=1 sa=1 sc=1 "
+              "ca=1 cc=1 oc=1 ar=1");
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("image"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
 TEST(PpTerminalScopeContent, DiscoveryCoverageEmitsAtFinalSequenceWithFinalizeFallback) {
     PpTerminalScopeDiscoveryCoverageEmissionGate final_sequence{};
     const FinalGuestSurfaceCaptureWindow window{.frame_start = 4000, .frame_count = 800};
