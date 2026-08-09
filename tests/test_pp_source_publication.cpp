@@ -1174,6 +1174,60 @@ TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFiveBoundedPlanes) {
     EXPECT_FALSE(plan.finish);
 }
 
+TEST(PpTerminalScopeContent, RootInputUsesItsOwnExactLogicalFootprints) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.status = FinalGuestSurfaceStatus::Complete;
+    selector.count = 2;
+    selector.ordinals[0] = 1024;
+    selector.ordinals[1] = 1299;
+    const auto base = PlanPpTerminalScopeContent({
+        .enabled = true,
+        .armed = true,
+        .target_width = 1920,
+        .target_height = 1080,
+        .final_source_width = 1920,
+        .final_source_height = 1080,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .selector = selector,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    ASSERT_EQ(base.status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_EQ(base.regions[0].width, 48u);
+    ASSERT_EQ(base.regions[0].height, 48u);
+
+    const auto attached = AttachPpTerminalScopeRootInputPlan(
+        base, {.source_width = 1280,
+               .source_height = 720,
+               .format = FinalGuestSurfaceFormat::Rgba8,
+               .samples = 1});
+    ASSERT_EQ(attached.status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_EQ(attached.root_input_region_count, 2u);
+    EXPECT_EQ(attached.root_input_regions[0].logical_ordinal, 1024u);
+    EXPECT_EQ(attached.root_input_regions[0].width, 32u);
+    EXPECT_EQ(attached.root_input_regions[0].height, 32u);
+    EXPECT_EQ(attached.root_input_format, FinalGuestSurfaceFormat::Rgba8);
+    EXPECT_EQ(attached.copy_region_count, 10u);
+    EXPECT_GE(attached.root_input_plane_offset,
+              attached.output_plane_offset + attached.plane_bytes);
+    EXPECT_EQ(attached.total_bytes,
+              attached.root_input_plane_offset + attached.root_input_plane_bytes);
+    EXPECT_LE(attached.total_bytes, PpTerminalScopeSnapshotBytes);
+
+    const auto incompatible = AttachPpTerminalScopeRootInputPlan(
+        base, {.source_width = 1024,
+               .source_height = 1024,
+               .format = FinalGuestSurfaceFormat::Rgba8,
+               .samples = 1});
+    EXPECT_EQ(incompatible.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(incompatible.loss.logical_mapping, 1u);
+    EXPECT_FALSE(incompatible.copy);
+}
+
 TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
     FinalGuestSurfaceWatchOrdinals selector{};
     selector.status = FinalGuestSurfaceStatus::Complete;
