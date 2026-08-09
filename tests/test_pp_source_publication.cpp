@@ -2303,6 +2303,19 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
                                                   .sampled_input_alias = true,
                                                   .read_only = true},
         true, FinalGuestSurfaceStatus::Complete, {});
+    coverage.ObserveRootView(false, false, false, FinalGuestSurfaceStatus::InvalidationLoss,
+                             {.invalidation = 1});
+    coverage.ObserveRootView(true, false, false, FinalGuestSurfaceStatus::InvalidationLoss,
+                             {.invalidation = 1});
+    coverage.ObserveRootView(true, true, true, FinalGuestSurfaceStatus::InvalidationLoss,
+                             {.invalidation = 1});
+    coverage.ObserveRootView(true, true, false, FinalGuestSurfaceStatus::Unsupported,
+                             {.unsupported_mip = 1});
+    coverage.ObserveRootView(true, true, false, FinalGuestSurfaceStatus::Unsupported,
+                             {.unsupported_layer = 1});
+    coverage.ObserveRootView(true, true, false, FinalGuestSurfaceStatus::InvalidationLoss,
+                             {.invalidation = 1});
+    coverage.ObserveRootView(true, true, false, FinalGuestSurfaceStatus::Complete, {});
     coverage.ObserveRootInput(
         PpTerminalScopeRootInputCaptureDescriptor{.capture_first = true,
                                                   .single_sampled_input = true,
@@ -2335,8 +2348,17 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
     EXPECT_EQ(coverage.root_structure, 1u);
     EXPECT_EQ(coverage.root_plan, 1u);
     EXPECT_EQ(coverage.root_plan_loss_mask, 128u);
+    EXPECT_EQ(coverage.root_view_valid, 1u);
+    EXPECT_EQ(coverage.root_image_invalid, 1u);
+    EXPECT_EQ(coverage.root_view_missing, 1u);
+    EXPECT_EQ(coverage.root_view_ambiguous, 1u);
+    EXPECT_EQ(coverage.root_view_mip, 1u);
+    EXPECT_EQ(coverage.root_view_layer, 1u);
+    EXPECT_EQ(coverage.root_view_invalid, 1u);
     const auto line = FormatPpTerminalScopeDiscoveryCoverage(coverage);
-    EXPECT_EQ(line, "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1 ri=1/1/1/1/1/128");
+    EXPECT_EQ(line,
+              "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1 ri=1/1/1/1/1/128 "
+              "rv=1/1/1/1/1/1/1");
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
