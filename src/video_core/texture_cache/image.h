@@ -152,13 +152,17 @@ struct Image {
     }
 
     void MarkDiagnosticProducer(ImageProducerClass classification) noexcept {
-        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+        if (IsPpSourceProducerTrackingEnabled()) {
             diagnostic_producer.Mark(classification);
         }
     }
 
     [[nodiscard]] ImageProducerObservation ObserveDiagnosticProducer() noexcept {
         return diagnostic_producer.Observe();
+    }
+
+    [[nodiscard]] ImageProducerObservation ObserveDiagnosticSampledInputProducer() noexcept {
+        return diagnostic_producer.ObserveSampledInput();
     }
 
     void BeginDiagnosticColorScope(u64 scope_serial, bool clear_at_begin) noexcept {
@@ -179,9 +183,11 @@ struct Image {
     }
 
     void ResetDiagnosticProducer() noexcept {
-        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+        if (IsPpSourceProducerTrackingEnabled()) {
             diagnostic_producer.Reset();
-            diagnostic_color_scope.Reset();
+            if (usage.vo_surface) {
+                diagnostic_color_scope.Reset();
+            }
         }
     }
 

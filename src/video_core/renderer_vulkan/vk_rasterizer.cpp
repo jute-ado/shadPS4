@@ -873,6 +873,24 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
         return;
     }
     const u64 rendering_serial = scheduler.RenderingSerial();
+    bool writes_video_output{};
+    bool input_alias{};
+    for (u32 index = 0; index < state.num_color_attachments; ++index) {
+        const auto image_id = cb_descs[index].first;
+        if (image_id && texture_cache.GetImage(image_id).usage.vo_surface) {
+            writes_video_output = true;
+            input_alias |= diagnostic_sampled_images.size() == 1 &&
+                           diagnostic_sampled_images.front() == image_id;
+        }
+    }
+    if (writes_video_output && diagnostic_sampled_images.size() == 1) {
+        const auto input = texture_cache.GetImage(diagnostic_sampled_images.front())
+                               .ObserveDiagnosticSampledInputProducer();
+        draw.sampled_input_producer = input.classification;
+        draw.sampled_input_fresh = input.produced_since_last_observation;
+        draw.sampled_input_alias = input_alias;
+        draw.sampled_input_valid = true;
+    }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
         if (image_id) {

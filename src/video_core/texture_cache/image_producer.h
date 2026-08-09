@@ -38,16 +38,24 @@ public:
         return {.classification = last_class, .produced_since_last_observation = produced};
     }
 
+    [[nodiscard]] ImageProducerObservation ObserveSampledInput() noexcept {
+        const bool produced = producer_epoch != sampled_input_observed_epoch;
+        sampled_input_observed_epoch = producer_epoch;
+        return {.classification = last_class, .produced_since_last_observation = produced};
+    }
+
     void Reset() noexcept {
         last_class = ImageProducerClass::Unknown;
         producer_epoch = 0;
         observed_epoch = 0;
+        sampled_input_observed_epoch = 0;
     }
 
 private:
     ImageProducerClass last_class{ImageProducerClass::Unknown};
     u64 producer_epoch{};
     u64 observed_epoch{};
+    u64 sampled_input_observed_epoch{};
 };
 
 [[nodiscard]] inline bool IsPpSourceProducerTrackingEnabled() noexcept {

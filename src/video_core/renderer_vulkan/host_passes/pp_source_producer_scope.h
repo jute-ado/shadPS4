@@ -38,6 +38,15 @@ struct PpSourceProducerScopeObservation {
     u32 zero_sampled_inputs{};
     u32 multiple_sampled_inputs{};
     u32 writable_image_draws{};
+    u32 input_color_attachment{};
+    u32 input_storage_image{};
+    u32 input_transfer{};
+    u32 input_cpu_upload{};
+    u32 input_unknown{};
+    u32 input_fresh{};
+    u32 input_reused{};
+    u32 input_alias{};
+    u32 invalid_single_input{};
     u32 loss{};
     bool final{};
 };
@@ -69,6 +78,30 @@ public:
                     ++zero_sampled_inputs;
                 } else if (draw_scope.sampled_images == 1) {
                     ++single_sampled_input;
+                    if (!draw_scope.sampled_input_valid) {
+                        ++invalid_single_input;
+                        ++loss;
+                    } else {
+                        switch (draw_scope.sampled_input_producer) {
+                        case VideoCore::ImageProducerClass::ColorAttachment:
+                            ++input_color_attachment;
+                            break;
+                        case VideoCore::ImageProducerClass::StorageImage:
+                            ++input_storage_image;
+                            break;
+                        case VideoCore::ImageProducerClass::Transfer:
+                            ++input_transfer;
+                            break;
+                        case VideoCore::ImageProducerClass::CpuUpload:
+                            ++input_cpu_upload;
+                            break;
+                        case VideoCore::ImageProducerClass::Unknown:
+                            ++input_unknown;
+                            break;
+                        }
+                        draw_scope.sampled_input_fresh ? ++input_fresh : ++input_reused;
+                        input_alias += draw_scope.sampled_input_alias;
+                    }
                 } else {
                     ++multiple_sampled_inputs;
                 }
@@ -101,6 +134,15 @@ public:
             .zero_sampled_inputs = zero_sampled_inputs,
             .multiple_sampled_inputs = multiple_sampled_inputs,
             .writable_image_draws = writable_image_draws,
+            .input_color_attachment = input_color_attachment,
+            .input_storage_image = input_storage_image,
+            .input_transfer = input_transfer,
+            .input_cpu_upload = input_cpu_upload,
+            .input_unknown = input_unknown,
+            .input_fresh = input_fresh,
+            .input_reused = input_reused,
+            .input_alias = input_alias,
+            .invalid_single_input = invalid_single_input,
             .loss = loss,
             .final = final,
         };
@@ -120,6 +162,15 @@ private:
     u32 zero_sampled_inputs{};
     u32 multiple_sampled_inputs{};
     u32 writable_image_draws{};
+    u32 input_color_attachment{};
+    u32 input_storage_image{};
+    u32 input_transfer{};
+    u32 input_cpu_upload{};
+    u32 input_unknown{};
+    u32 input_fresh{};
+    u32 input_reused{};
+    u32 input_alias{};
+    u32 invalid_single_input{};
     u32 loss{};
     bool has_last{};
 };
@@ -137,7 +188,11 @@ private:
            " n=" + std::to_string(observation.draw_scope.instance_count) +
            " b=" + std::to_string(observation.draw_scope.sampled_bindings) +
            " u=" + std::to_string(observation.draw_scope.sampled_images) +
-           " w=" + std::to_string(observation.draw_scope.storage_writes);
+           " w=" + std::to_string(observation.draw_scope.storage_writes) + " ip=" +
+           std::to_string(static_cast<u32>(observation.draw_scope.sampled_input_producer)) +
+           " in=" + std::to_string(observation.draw_scope.sampled_input_fresh ? 1 : 0) +
+           " ia=" + std::to_string(observation.draw_scope.sampled_input_alias ? 1 : 0) +
+           " iv=" + std::to_string(observation.draw_scope.sampled_input_valid ? 1 : 0);
 }
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeCoverage(
@@ -154,6 +209,15 @@ private:
            " z=" + std::to_string(observation.zero_sampled_inputs) +
            " m=" + std::to_string(observation.multiple_sampled_inputs) +
            " w=" + std::to_string(observation.writable_image_draws) +
+           " ic=" + std::to_string(observation.input_color_attachment) +
+           " is=" + std::to_string(observation.input_storage_image) +
+           " it=" + std::to_string(observation.input_transfer) +
+           " iu=" + std::to_string(observation.input_cpu_upload) +
+           " ix=" + std::to_string(observation.input_unknown) +
+           " if=" + std::to_string(observation.input_fresh) +
+           " ir=" + std::to_string(observation.input_reused) +
+           " ia=" + std::to_string(observation.input_alias) +
+           " il=" + std::to_string(observation.invalid_single_input) +
            " l=" + std::to_string(observation.loss);
 }
 

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "video_core/texture_cache/image_producer.h"
 
 namespace VideoCore {
 
@@ -21,6 +22,10 @@ struct ImageColorScopeDrawDescriptor {
     u32 sampled_bindings{};
     u32 sampled_images{};
     u32 storage_writes{};
+    ImageProducerClass sampled_input_producer{ImageProducerClass::Unknown};
+    bool sampled_input_fresh{};
+    bool sampled_input_alias{};
+    bool sampled_input_valid{};
 };
 
 struct ImageColorScopeProducerObservation {
@@ -32,6 +37,10 @@ struct ImageColorScopeProducerObservation {
     u32 sampled_bindings{};
     u32 sampled_images{};
     u32 storage_writes{};
+    ImageProducerClass sampled_input_producer{ImageProducerClass::Unknown};
+    bool sampled_input_fresh{};
+    bool sampled_input_alias{};
+    bool sampled_input_valid{};
     bool clear_at_begin{};
     bool valid{};
     bool overflow{};
@@ -73,6 +82,10 @@ public:
         observation.sampled_bindings = descriptor.sampled_bindings;
         observation.sampled_images = descriptor.sampled_images;
         observation.storage_writes = descriptor.storage_writes;
+        observation.sampled_input_producer = descriptor.sampled_input_producer;
+        observation.sampled_input_fresh = descriptor.sampled_input_fresh;
+        observation.sampled_input_alias = descriptor.sampled_input_alias;
+        observation.sampled_input_valid = descriptor.sampled_input_valid;
         if (descriptor.sampled_images > descriptor.sampled_bindings ||
             descriptor.sampled_bindings > MaxTrackedImageBindings ||
             descriptor.storage_writes > MaxTrackedImageBindings) {
