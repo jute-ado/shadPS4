@@ -24,6 +24,7 @@
 #include "video_core/completed_readback.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/present_frame_transition.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
@@ -461,6 +462,7 @@ public:
           calibrated_triplets{config.calibrated_triplets, config.watch_ordinals, config.window,
                               config.expected_calibrations},
           screenshot_calibration{true},
+          source_publication_coverage{{config.window.frame_start, config.window.frame_count}},
           slot_stride{Common::AlignUp<u64>(FinalGuestSurfaceTileLimits{}.max_bytes,
                                            std::max<u64>(1, instance_.NonCoherentAtomSize()))},
           download{instance_,
@@ -523,6 +525,21 @@ public:
 
     [[nodiscard]] FinalGuestSurfaceStage Stage() const noexcept {
         return config.stage;
+    }
+
+    void ObservePpSourcePublication(u64 sequence, VideoCore::ImageRefreshObservation observation) {
+        if (!IsPpSourcePublicationReconstructionStage()) {
+            return;
+        }
+        const auto report = source_publication_coverage.Observe(
+            sequence, HostPasses::ClassifyPpSourcePublication(observation));
+        if (!report) {
+            return;
+        }
+        LOG_INFO(Render, "{}", HostPasses::FormatPpSourcePublicationObservation(*report));
+        if (report->final) {
+            LOG_INFO(Render, "{}", HostPasses::FormatPpSourcePublicationCoverage(*report));
+        }
     }
 
     [[nodiscard]] PendingCapture PrepareGuest(FinalGuestSurfaceFrameStamp stamp,
@@ -1024,6 +1041,7 @@ private:
     FinalGuestSurfaceReducer reducer;
     FinalGuestSurfaceCalibratedTriplets calibrated_triplets;
     FinalGuestSurfaceScreenshotCalibration screenshot_calibration;
+    HostPasses::PpSourcePublicationCoverage source_publication_coverage;
     FinalGuestSurfacePostPpTransportTracker post_pp_transport;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
@@ -1625,7 +1643,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                                VAddr cpu_address, FinalGuestSurfaceFrameStamp stamp) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
-    texture_cache.UpdateImage(image_id);
+    const auto source_refresh = texture_cache.UpdateImage(image_id);
+    if (final_guest_surface_content) {
+        final_guest_surface_content->ObservePpSourcePublication(stamp.sequence, source_refresh);
+    }
 
     Frame* frame = GetRenderFrame();
 
