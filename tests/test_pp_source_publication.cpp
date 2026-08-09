@@ -1513,7 +1513,6 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
     constexpr u32 PixelCount = 32 * 32;
     constexpr u32 RegionBytes = PixelCount * 4;
     constexpr u32 PlaneBytes = RegionBytes * 2;
-    std::array<std::byte, RegionBytes> baseline{};
     std::array<std::byte, RegionBytes> departure{};
     std::array<std::byte, RegionBytes> returned{};
     for (u32 pixel = 0; pixel < 300; ++pixel) {
@@ -1535,10 +1534,9 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
         .output_plane_offset = PlaneBytes * 3,
         .total_bytes = PlaneBytes * 4,
         .plane_mask = 0xf,
-        .regions = {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes},
-                     {.logical_ordinal = 42,
-                      .buffer_offset = RegionBytes,
-                      .byte_size = RegionBytes}}},
+        .regions =
+            {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes},
+              {.logical_ordinal = 42, .buffer_offset = RegionBytes, .byte_size = RegionBytes}}},
         .format = FinalGuestSurfaceFormat::Rgba8,
     };
     const auto observation = [&](bool is_departure, bool is_returned) {
@@ -1558,10 +1556,10 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
     PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
     reducer.ObserveContent(100, layout, observation(false, false),
                            FinalGuestSurfaceStatus::Complete, {});
-    reducer.ObserveContent(101, layout, observation(true, false),
-                           FinalGuestSurfaceStatus::Complete, {});
-    reducer.ObserveContent(102, layout, observation(false, true),
-                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(101, layout, observation(true, false), FinalGuestSurfaceStatus::Complete,
+                           {});
+    reducer.ObserveContent(102, layout, observation(false, true), FinalGuestSurfaceStatus::Complete,
+                           {});
     reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
@@ -1570,8 +1568,7 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
     ASSERT_EQ(reports.size(), 1u);
     EXPECT_EQ(reports[0].first_localized_visual_return_ordinals, (std::vector<u32>{41}));
     EXPECT_EQ(reports[0].second_localized_visual_return_ordinals, (std::vector<u32>{42}));
-    EXPECT_EQ(reports[0].consumer_localized_visual_return_ordinals,
-              (std::vector<u32>{41, 42}));
+    EXPECT_EQ(reports[0].consumer_localized_visual_return_ordinals, (std::vector<u32>{41, 42}));
     EXPECT_TRUE(reports[0].output_localized_visual_return_ordinals.empty());
     const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
     EXPECT_NE(line.find(" y0=41"), std::string::npos);
@@ -1761,6 +1758,7 @@ TEST(PpTerminalScopeContent, ConsumerOnlyPlaneIsCompleteWithoutClassifyingMissin
         .total_bytes = 12,
         .plane_mask = 1u << 2,
         .regions = {{{.logical_ordinal = 31, .buffer_offset = 0, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
     };
     const std::array<std::byte, 12> a{std::byte{99}, std::byte{99}, std::byte{99}, std::byte{99},
                                       std::byte{88}, std::byte{88}, std::byte{88}, std::byte{88},
@@ -1793,6 +1791,7 @@ TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
         .total_bytes = 12,
         .plane_mask = 7,
         .regions = {{{.logical_ordinal = 21, .buffer_offset = 0, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
     };
     const std::array<std::byte, 12> bytes{};
     reducer.ObserveContent(200, layout, bytes, FinalGuestSurfaceStatus::Complete, {});

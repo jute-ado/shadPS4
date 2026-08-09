@@ -1022,6 +1022,9 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> output_aba_ordinals{};
     std::vector<u32> output_stable_ordinals{};
     std::vector<u32> output_ambiguous_ordinals{};
+    std::vector<u32> first_localized_visual_return_ordinals{};
+    std::vector<u32> second_localized_visual_return_ordinals{};
+    std::vector<u32> consumer_localized_visual_return_ordinals{};
     std::vector<u32> output_localized_visual_return_ordinals{};
     std::vector<u32> output_final_backing_equal_ordinals{};
     std::vector<u32> output_final_backing_different_ordinals{};
@@ -1260,29 +1263,39 @@ private:
         }
     }
 
-    [[nodiscard]] static bool ClassifyLocalizedOutput(const Observation& a, const Observation& b,
-                                                      const Observation& c,
-                                                      std::vector<u32>& localized_visual_return) {
-        if (a.layout != b.layout || a.layout != c.layout ||
-            a.layout.output_plane_offset > a.bytes.size() ||
-            b.layout.output_plane_offset > b.bytes.size() ||
-            c.layout.output_plane_offset > c.bytes.size()) {
+    [[nodiscard]] static bool ClassifyLocalizedPlane(const Observation& a, const Observation& b,
+                                                     const Observation& c, u32 plane,
+                                                     std::vector<u32>& localized_visual_return) {
+        if (a.layout != b.layout || a.layout != c.layout || plane > 3) {
+            return false;
+        }
+        const auto plane_offset = [plane](const PpTerminalScopeContentHistoryLayout& layout) {
+            return plane == 0   ? 0u
+                   : plane == 1 ? layout.second_plane_offset
+                   : plane == 2 ? layout.consumer_plane_offset
+                                : layout.output_plane_offset;
+        };
+        const u64 a_plane_offset = plane_offset(a.layout);
+        const u64 b_plane_offset = plane_offset(b.layout);
+        const u64 c_plane_offset = plane_offset(c.layout);
+        if (a_plane_offset > a.bytes.size() || b_plane_offset > b.bytes.size() ||
+            c_plane_offset > c.bytes.size()) {
             return false;
         }
         for (u32 index = 0; index < a.layout.region_count; ++index) {
             const auto& region = a.layout.regions[index];
-            const u64 offset =
-                static_cast<u64>(a.layout.output_plane_offset) + region.buffer_offset;
             if (region.logical_ordinal == 0 || region.byte_size == 0 ||
-                offset + region.byte_size > a.bytes.size() ||
-                offset + region.byte_size > b.bytes.size() ||
-                offset + region.byte_size > c.bytes.size()) {
+                a_plane_offset + region.buffer_offset + region.byte_size > a.bytes.size() ||
+                b_plane_offset + region.buffer_offset + region.byte_size > b.bytes.size() ||
+                c_plane_offset + region.buffer_offset + region.byte_size > c.bytes.size()) {
                 return false;
             }
             const auto result = IsPpTerminalScopeLocalizedVisualReturn(
-                a.layout.format, std::span{a.bytes}.subspan(offset, region.byte_size),
-                std::span{b.bytes}.subspan(offset, region.byte_size),
-                std::span{c.bytes}.subspan(offset, region.byte_size));
+                a.layout.format,
+                std::span{a.bytes}.subspan(a_plane_offset + region.buffer_offset, region.byte_size),
+                std::span{b.bytes}.subspan(b_plane_offset + region.buffer_offset, region.byte_size),
+                std::span{c.bytes}.subspan(c_plane_offset + region.buffer_offset,
+                                           region.byte_size));
             if (!result) {
                 return false;
             }
@@ -1406,20 +1419,38 @@ private:
         if ((a->layout.plane_mask & (1u << 0)) != 0) {
             ClassifyPlane(*a, *b, *c, 0, report.first_aba_ordinals, report.first_stable_ordinals,
                           report.first_ambiguous_ordinals);
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 0,
+                                        report.first_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
         }
         if ((a->layout.plane_mask & (1u << 1)) != 0) {
             ClassifyPlane(*a, *b, *c, 1, report.second_aba_ordinals, report.second_stable_ordinals,
                           report.second_ambiguous_ordinals);
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 1,
+                                        report.second_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
         }
         if ((a->layout.plane_mask & (1u << 2)) != 0) {
             ClassifyPlane(*a, *b, *c, 2, report.consumer_aba_ordinals,
                           report.consumer_stable_ordinals, report.consumer_ambiguous_ordinals);
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 2,
+                                        report.consumer_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
         }
         if ((a->layout.plane_mask & (1u << 3)) != 0) {
             ClassifyPlane(*a, *b, *c, 3, report.output_aba_ordinals, report.output_stable_ordinals,
                           report.output_ambiguous_ordinals);
-            if (!ClassifyLocalizedOutput(*a, *b, *c,
-                                         report.output_localized_visual_return_ordinals)) {
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 3,
+                                        report.output_localized_visual_return_ordinals)) {
                 report.status = FinalGuestSurfaceStatus::InvalidationLoss;
                 report.loss.invalidation = 1;
                 return report;
@@ -1532,7 +1563,13 @@ private:
            " x2=" + FormatPpTerminalScopeOrdinalList(report.consumer_ambiguous_ordinals) +
            " a3=" + FormatPpTerminalScopeOrdinalList(report.output_aba_ordinals) +
            " s3=" + FormatPpTerminalScopeOrdinalList(report.output_stable_ordinals) +
-           " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) + " y3=" +
+           " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) + " y0=" +
+           FormatPpTerminalScopeOrdinalList(report.first_localized_visual_return_ordinals) +
+           " y1=" +
+           FormatPpTerminalScopeOrdinalList(report.second_localized_visual_return_ordinals) +
+           " y2=" +
+           FormatPpTerminalScopeOrdinalList(report.consumer_localized_visual_return_ordinals) +
+           " y3=" +
            FormatPpTerminalScopeOrdinalList(report.output_localized_visual_return_ordinals) +
            " e3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_equal_ordinals) +
            " d3=" +
