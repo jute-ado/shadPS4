@@ -26,6 +26,16 @@ struct ImageColorScopeDrawDescriptor {
     bool sampled_input_fresh{};
     bool sampled_input_alias{};
     bool sampled_input_valid{};
+    u32 sampled_input_scope_draw_count{};
+    ImageColorScopeDrawKind sampled_input_scope_last_draw{ImageColorScopeDrawKind::Unknown};
+    bool sampled_input_scope_indexed{};
+    u32 sampled_input_scope_element_count{};
+    u32 sampled_input_scope_instance_count{};
+    u32 sampled_input_scope_sampled_images{};
+    u32 sampled_input_scope_storage_writes{};
+    bool sampled_input_scope_clear_at_begin{};
+    bool sampled_input_scope_valid{};
+    bool sampled_input_scope_overflow{};
 };
 
 struct ImageColorScopeProducerObservation {
@@ -41,6 +51,16 @@ struct ImageColorScopeProducerObservation {
     bool sampled_input_fresh{};
     bool sampled_input_alias{};
     bool sampled_input_valid{};
+    u32 sampled_input_scope_draw_count{};
+    ImageColorScopeDrawKind sampled_input_scope_last_draw{ImageColorScopeDrawKind::Unknown};
+    bool sampled_input_scope_indexed{};
+    u32 sampled_input_scope_element_count{};
+    u32 sampled_input_scope_instance_count{};
+    u32 sampled_input_scope_sampled_images{};
+    u32 sampled_input_scope_storage_writes{};
+    bool sampled_input_scope_clear_at_begin{};
+    bool sampled_input_scope_valid{};
+    bool sampled_input_scope_overflow{};
     bool clear_at_begin{};
     bool valid{};
     bool overflow{};
@@ -86,6 +106,21 @@ public:
         observation.sampled_input_fresh = descriptor.sampled_input_fresh;
         observation.sampled_input_alias = descriptor.sampled_input_alias;
         observation.sampled_input_valid = descriptor.sampled_input_valid;
+        observation.sampled_input_scope_draw_count = descriptor.sampled_input_scope_draw_count;
+        observation.sampled_input_scope_last_draw = descriptor.sampled_input_scope_last_draw;
+        observation.sampled_input_scope_indexed = descriptor.sampled_input_scope_indexed;
+        observation.sampled_input_scope_element_count =
+            descriptor.sampled_input_scope_element_count;
+        observation.sampled_input_scope_instance_count =
+            descriptor.sampled_input_scope_instance_count;
+        observation.sampled_input_scope_sampled_images =
+            descriptor.sampled_input_scope_sampled_images;
+        observation.sampled_input_scope_storage_writes =
+            descriptor.sampled_input_scope_storage_writes;
+        observation.sampled_input_scope_clear_at_begin =
+            descriptor.sampled_input_scope_clear_at_begin;
+        observation.sampled_input_scope_valid = descriptor.sampled_input_scope_valid;
+        observation.sampled_input_scope_overflow = descriptor.sampled_input_scope_overflow;
         if (descriptor.sampled_images > descriptor.sampled_bindings ||
             descriptor.sampled_bindings > MaxTrackedImageBindings ||
             descriptor.storage_writes > MaxTrackedImageBindings) {

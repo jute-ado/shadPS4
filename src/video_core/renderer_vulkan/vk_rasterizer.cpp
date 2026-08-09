@@ -884,12 +884,25 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
         }
     }
     if (writes_video_output && diagnostic_sampled_images.size() == 1) {
-        const auto input = texture_cache.GetImage(diagnostic_sampled_images.front())
-                               .ObserveDiagnosticSampledInputProducer();
+        auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front());
+        const auto input = input_image.ObserveDiagnosticSampledInputProducer();
         draw.sampled_input_producer = input.classification;
         draw.sampled_input_fresh = input.produced_since_last_observation;
         draw.sampled_input_alias = input_alias;
         draw.sampled_input_valid = true;
+        if (input.classification == VideoCore::ImageProducerClass::ColorAttachment) {
+            const auto input_scope = input_image.ObserveDiagnosticColorScope();
+            draw.sampled_input_scope_draw_count = input_scope.draw_count;
+            draw.sampled_input_scope_last_draw = input_scope.last_draw;
+            draw.sampled_input_scope_indexed = input_scope.indexed;
+            draw.sampled_input_scope_element_count = input_scope.element_count;
+            draw.sampled_input_scope_instance_count = input_scope.instance_count;
+            draw.sampled_input_scope_sampled_images = input_scope.sampled_images;
+            draw.sampled_input_scope_storage_writes = input_scope.storage_writes;
+            draw.sampled_input_scope_clear_at_begin = input_scope.clear_at_begin;
+            draw.sampled_input_scope_valid = input_scope.valid;
+            draw.sampled_input_scope_overflow = input_scope.overflow;
+        }
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;

@@ -166,14 +166,14 @@ struct Image {
     }
 
     void BeginDiagnosticColorScope(u64 scope_serial, bool clear_at_begin) noexcept {
-        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+        if (IsPpSourceProducerTrackingEnabled()) {
             diagnostic_color_scope.BeginScope(scope_serial, clear_at_begin);
         }
     }
 
     void MarkDiagnosticColorDraw(u64 scope_serial,
                                  ImageColorScopeDrawDescriptor descriptor) noexcept {
-        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+        if (IsPpSourceProducerTrackingEnabled()) {
             diagnostic_color_scope.MarkDraw(scope_serial, descriptor);
         }
     }
@@ -185,9 +185,7 @@ struct Image {
     void ResetDiagnosticProducer() noexcept {
         if (IsPpSourceProducerTrackingEnabled()) {
             diagnostic_producer.Reset();
-            if (usage.vo_surface) {
-                diagnostic_color_scope.Reset();
-            }
+            diagnostic_color_scope.Reset();
         }
     }
 
