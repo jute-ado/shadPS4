@@ -665,11 +665,21 @@ public:
             return PpTerminalScopePreDrawAction::None;
         }
         if (scope_serial != observed_scope_serial) {
-            scope_serial = observed_scope_serial;
-            phase = 0;
-            predecessor_captured = !config.capture_predecessor;
-            previewed_predecessor = false;
-            previewed_first = false;
+            if (config.capture_predecessor && predecessor_captured) {
+                scope_serial = observed_scope_serial;
+                previewed_predecessor = false;
+                previewed_first = false;
+                if (phase != 0 || !MatchesPpTerminalScopeDraw(config.first, draw)) {
+                    phase = 3;
+                    return PpTerminalScopePreDrawAction::ShapeLoss;
+                }
+            } else {
+                scope_serial = observed_scope_serial;
+                phase = 0;
+                predecessor_captured = !config.capture_predecessor;
+                previewed_predecessor = false;
+                previewed_first = false;
+            }
         }
         if (!predecessor_captured) {
             if (!MatchesPpTerminalScopeDraw(config.predecessor, draw)) {
@@ -710,11 +720,21 @@ public:
             return PpTerminalScopeContentAction::None;
         }
         if (scope_serial != observed_scope_serial) {
-            scope_serial = observed_scope_serial;
-            phase = 0;
-            predecessor_captured = !config.capture_predecessor;
-            previewed_predecessor = false;
-            previewed_first = false;
+            if (config.capture_predecessor && predecessor_captured) {
+                scope_serial = observed_scope_serial;
+                previewed_predecessor = false;
+                if (phase != 0) {
+                    phase = 3;
+                    previewed_first = false;
+                    return PpTerminalScopeContentAction::ShapeLoss;
+                }
+            } else {
+                scope_serial = observed_scope_serial;
+                phase = 0;
+                predecessor_captured = !config.capture_predecessor;
+                previewed_predecessor = false;
+                previewed_first = false;
+            }
         }
         if (!predecessor_captured) {
             if (!previewed_predecessor || !MatchesPpTerminalScopeDraw(config.predecessor, draw)) {
