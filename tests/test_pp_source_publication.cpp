@@ -1729,10 +1729,8 @@ TEST(PpTerminalScopeContent, FinalBackingObservationReusesTheExistingPackedFootp
     EXPECT_EQ(observation.layout.region_count, 2u);
     EXPECT_EQ(observation.layout.total_bytes, 128u);
     EXPECT_EQ(observation.layout.format, FinalGuestSurfaceFormat::Bgra8);
-    EXPECT_EQ(observation.layout.regions[0],
-              (PpTerminalScopeContentHistoryRegion{11, 0, 64}));
-    EXPECT_EQ(observation.layout.regions[1],
-              (PpTerminalScopeContentHistoryRegion{12, 64, 64}));
+    EXPECT_EQ(observation.layout.regions[0], (PpTerminalScopeContentHistoryRegion{11, 0, 64}));
+    EXPECT_EQ(observation.layout.regions[1], (PpTerminalScopeContentHistoryRegion{12, 64, 64}));
     EXPECT_EQ(observation.source_offset, 4096u);
     EXPECT_EQ(observation.source_bytes, 128u);
     EXPECT_FALSE(observation.gpu_copy);

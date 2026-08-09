@@ -47,6 +47,7 @@ struct PpTerminalScopeRuntimeConfig {
     FinalGuestSurfaceCaptureWindow window{};
     FinalGuestSurfaceWatchOrdinals watch_ordinals{};
     u32 expected_calibrations{};
+    bool join_final_backing{};
 };
 
 [[nodiscard]] inline std::optional<PpTerminalScopeDrawSelector> ParsePpTerminalScopeDrawSelector(
@@ -120,7 +121,11 @@ template <typename ReadValue>
     const auto first_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_FIRST");
     const auto second_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_SECOND");
     const auto consumer_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_CONSUMER");
+    const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
+        return std::nullopt;
+    }
+    if (final_backing_join_value && *final_backing_join_value != "1") {
         return std::nullopt;
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
@@ -134,6 +139,7 @@ template <typename ReadValue>
         .window = final_config->window,
         .watch_ordinals = final_config->watch_ordinals,
         .expected_calibrations = final_config->expected_calibrations,
+        .join_final_backing = final_backing_join_value.has_value(),
     };
 }
 
@@ -905,6 +911,77 @@ struct PpTerminalScopeFinalBackingLayout {
 
     auto operator<=>(const PpTerminalScopeFinalBackingLayout&) const = default;
 };
+
+struct PpTerminalScopeFinalBackingObservationPlan {
+    PpTerminalScopeFinalBackingLayout layout{};
+    u32 source_offset{};
+    u32 source_bytes{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool observe{};
+    bool gpu_copy{};
+    bool cpu_wait{};
+    bool finish{};
+};
+
+[[nodiscard]] inline PpTerminalScopeFinalBackingObservationPlan
+PlanPpTerminalScopeFinalBackingObservation(bool enabled, FinalGuestSurfaceStage stage,
+                                           const FinalGuestSurfaceTilePlan& plan,
+                                           bool bytes_available) noexcept {
+    if (!enabled) {
+        return {};
+    }
+    const auto reject = [](FinalGuestSurfaceStatus status, u32 FinalGuestSurfaceLoss::* member) {
+        PpTerminalScopeFinalBackingObservationPlan result{};
+        result.status = status;
+        result.loss.*member = 1;
+        return result;
+    };
+    if (stage != FinalGuestSurfaceStage::PpSourcePublicationReconstruction) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_type);
+    }
+    if (plan.status != FinalGuestSurfaceStatus::Complete || !bytes_available ||
+        (plan.paired_backing_format != FinalGuestSurfaceFormat::Rgba8 &&
+         plan.paired_backing_format != FinalGuestSurfaceFormat::Bgra8) ||
+        plan.paired_backing_bytes == 0 || plan.paired_backing_region_count == 0 ||
+        plan.paired_backing_region_count > FinalGuestSurfaceWatchOrdinals::MaxOrdinals) {
+        return reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                      &FinalGuestSurfaceLoss::invalidation);
+    }
+    PpTerminalScopeFinalBackingObservationPlan result{
+        .layout =
+            {
+                .region_count = plan.paired_backing_region_count,
+                .total_bytes = plan.paired_backing_bytes,
+                .format = plan.paired_backing_format,
+            },
+        .source_offset = plan.paired_backing_offset,
+        .source_bytes = plan.paired_backing_bytes,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .observe = true,
+    };
+    for (u32 index = 0; index < plan.paired_backing_region_count; ++index) {
+        const auto& region = plan.paired_backing_regions[index];
+        if (region.logical_ordinal == 0 || region.byte_size == 0 || region.byte_size % 4 != 0 ||
+            static_cast<u64>(region.buffer_offset) + region.byte_size > plan.paired_backing_bytes) {
+            return reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                          &FinalGuestSurfaceLoss::invalidation);
+        }
+        for (u32 previous = 0; previous < index; ++previous) {
+            if (plan.paired_backing_regions[previous].logical_ordinal == region.logical_ordinal) {
+                return reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                              &FinalGuestSurfaceLoss::invalidation);
+            }
+        }
+        result.layout.regions[index] = {
+            .logical_ordinal = region.logical_ordinal,
+            .buffer_offset = region.buffer_offset,
+            .byte_size = region.byte_size,
+        };
+    }
+    return result;
+}
 
 struct PpTerminalScopeCalibratedReport {
     u32 request_ordinal{};
