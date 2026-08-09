@@ -2394,6 +2394,69 @@ TEST(PpTerminalScopeContent, PreviousProducerClassificationFailsClosedAndStaysPr
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, PredecessorSampledInputsRetainBoundedOrderedProducerClasses) {
+    const std::array<PpTerminalScopeSampledInput, 3> inputs{{
+        {.producer = {.producer = VideoCore::ImageProducerClass::ColorAttachment,
+                      .fresh = true,
+                      .draw_count = 1,
+                      .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                      .indexed = true,
+                      .element_count = 12,
+                      .instance_count = 1,
+                      .sampled_images = 1,
+                      .scope_valid = true,
+                      .status = FinalGuestSurfaceStatus::Complete}},
+        {.producer = {.producer = VideoCore::ImageProducerClass::CpuUpload,
+                      .fresh = true,
+                      .status = FinalGuestSurfaceStatus::Complete},
+         .aliases_output = true},
+        {.producer = {.producer = VideoCore::ImageProducerClass::Transfer,
+                      .status = FinalGuestSurfaceStatus::Complete}},
+    }};
+    const auto classified = ClassifyPpTerminalScopeSampledInputs(3, inputs);
+    ASSERT_EQ(classified.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(classified.loss.Any());
+    EXPECT_EQ(classified.count, 3u);
+    EXPECT_EQ(classified.alias_count, 1u);
+    EXPECT_EQ(classified.inputs[0].producer.element_count, 12u);
+    EXPECT_EQ(classified.inputs[1].producer.producer, VideoCore::ImageProducerClass::CpuUpload);
+    EXPECT_EQ(classified.inputs[2].producer.producer, VideoCore::ImageProducerClass::Transfer);
+
+    const auto line = FormatPpTerminalScopeSampledInputs(classified);
+    EXPECT_NE(line.find("ic=3 ia=1 is=0 il=0"), std::string::npos);
+    EXPECT_NE(line.find(" i0=1/1/1/1/1/12/1/1/0/0/1/0/0/0/0"), std::string::npos);
+    EXPECT_NE(line.find(" i1=4/1/0/0/0/0/0/0/0/0/0/0/0/0/1"), std::string::npos);
+    EXPECT_NE(line.find(" i2=3/0/0/0/0/0/0/0/0/0/0/0/0/0/0"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("image"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
+TEST(PpTerminalScopeContent, PredecessorSampledInputsFailClosedOnCountCapacityOrInvalidState) {
+    const std::array<PpTerminalScopeSampledInput, 2> two{{
+        {.producer = {.producer = VideoCore::ImageProducerClass::CpuUpload,
+                      .status = FinalGuestSurfaceStatus::Complete}},
+        {.producer = {.producer = VideoCore::ImageProducerClass::Transfer,
+                      .status = FinalGuestSurfaceStatus::Complete}},
+    }};
+    const auto missing = ClassifyPpTerminalScopeSampledInputs(3, two);
+    EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing.loss.gap, 1u);
+
+    std::array<PpTerminalScopeSampledInput, PpTerminalScopeSampledInputs::MaxInputs + 1> many{};
+    const auto capacity = ClassifyPpTerminalScopeSampledInputs(many.size(), many);
+    EXPECT_EQ(capacity.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(capacity.loss.tile_capacity, 1u);
+
+    auto invalid = two;
+    invalid[1].producer.status = FinalGuestSurfaceStatus::InvalidationLoss;
+    invalid[1].producer.loss.invalidation = 1;
+    const auto rejected = ClassifyPpTerminalScopeSampledInputs(2, invalid);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.loss.invalidation, 1u);
+    EXPECT_EQ(rejected.count, 2u);
+}
+
 TEST(PpTerminalScopeContent, NamedPredecessorIsCapturedBeforeAndAfterWithoutReplacingTheLineage) {
     const PpTerminalScopeContentConfig config{
         .enabled = true,
