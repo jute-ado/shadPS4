@@ -896,6 +896,44 @@ TEST(PpTerminalScopeContent, ExternalShapeSelectorArmsExactlyTwoOrderedDraws) {
     EXPECT_FALSE(complete.retains_vk_image);
 }
 
+TEST(PpTerminalScopeContent, FirstProducerPreviewCapturesBeforeTheDrawWithoutAdvancingIt) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .capture_pre_first = true,
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 3));
+    EXPECT_EQ(gate.PreviewDraw(16, 90, config.first), PpTerminalScopePreDrawAction::None);
+    EXPECT_EQ(gate.PreviewDraw(17, 90, config.first),
+              PpTerminalScopePreDrawAction::CaptureBeforeFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first),
+              PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.second),
+              PpTerminalScopeContentAction::CaptureSecond);
+
+    ASSERT_TRUE(gate.Arm(17, 4));
+    EXPECT_EQ(gate.ObserveDraw(17, 91, config.first), PpTerminalScopeContentAction::ShapeLoss);
+    ASSERT_TRUE(gate.Arm(17, 5));
+    EXPECT_EQ(gate.PreviewDraw(17, 92, config.first),
+              PpTerminalScopePreDrawAction::CaptureBeforeFirst);
+    EXPECT_EQ(gate.PreviewDraw(17, 92, config.first), PpTerminalScopePreDrawAction::ShapeLoss);
+}
+
 TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape) {
     const PpTerminalScopeContentConfig config{
         .enabled = true,
@@ -1072,7 +1110,7 @@ TEST(PpTerminalScopeContent, ExactLateConsumerFreezesAndRequestsThirdPlane) {
     EXPECT_TRUE(take.consumer_frozen);
 }
 
-TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFourBoundedPlanes) {
+TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFiveBoundedPlanes) {
     FinalGuestSurfaceWatchOrdinals selector{};
     selector.status = FinalGuestSurfaceStatus::Complete;
     selector.count = 2;
@@ -1096,11 +1134,13 @@ TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFourBoundedPlanes) {
     });
     ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_EQ(plan.region_count, 2u);
-    EXPECT_EQ(plan.copy_region_count, 8u);
+    EXPECT_EQ(plan.copy_region_count, 10u);
     EXPECT_EQ(plan.first_plane_offset, 0u);
     EXPECT_GE(plan.second_plane_offset, plan.plane_bytes);
     EXPECT_GE(plan.consumer_plane_offset, plan.second_plane_offset + plan.plane_bytes);
     EXPECT_GE(plan.output_plane_offset, plan.consumer_plane_offset + plan.plane_bytes);
+    EXPECT_GE(plan.pre_first_plane_offset, plan.output_plane_offset + plan.plane_bytes);
+    EXPECT_GE(plan.total_bytes, plan.pre_first_plane_offset + plan.plane_bytes);
     EXPECT_LE(plan.total_bytes, PpTerminalScopeSnapshotBytes);
     EXPECT_EQ(plan.image_barriers_per_draw, 2u);
     EXPECT_TRUE(plan.ends_rendering);
@@ -1109,6 +1149,48 @@ TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFourBoundedPlanes) {
     EXPECT_TRUE(plan.callback_payload_is_scalar_only);
     EXPECT_FALSE(plan.cpu_wait);
     EXPECT_FALSE(plan.finish);
+}
+
+TEST(PpTerminalScopeContent, PreFirstPlaneUsesTheExactCalibratedVisualPredicate) {
+    constexpr u32 RegionBytes = 4;
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 1,
+        .plane_bytes = RegionBytes,
+        .second_plane_offset = RegionBytes,
+        .consumer_plane_offset = RegionBytes * 2,
+        .output_plane_offset = RegionBytes * 3,
+        .pre_first_plane_offset = RegionBytes * 4,
+        .total_bytes = RegionBytes * 5,
+        .plane_mask = 0x1f,
+        .regions = {{{.logical_ordinal = 77, .buffer_offset = 0, .byte_size = RegionBytes}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const auto observation = [](std::array<u8, 4> pre) {
+        std::array<std::byte, RegionBytes * 5> bytes{};
+        for (u32 index = 0; index < pre.size(); ++index) {
+            bytes[RegionBytes * 4 + index] = std::byte{pre[index]};
+        }
+        return bytes;
+    };
+    PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
+    reducer.ObserveContent(100, layout, observation({1, 2, 3, 255}),
+                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(101, layout, observation({32, 33, 34, 255}),
+                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(102, layout, observation({1, 2, 3, 0}),
+                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].pre_first_aba_ordinals, (std::vector<u32>{77}));
+    EXPECT_TRUE(reports[0].pre_first_stable_ordinals.empty());
+    EXPECT_TRUE(reports[0].pre_first_ambiguous_ordinals.empty());
+    EXPECT_EQ(reports[0].pre_first_localized_visual_return_ordinals,
+              (std::vector<u32>{77}));
+    EXPECT_NE(FormatPpTerminalScopeCalibratedReport(reports[0]).find(" y4=77"),
+              std::string::npos);
 }
 
 TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
