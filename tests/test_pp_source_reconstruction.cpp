@@ -5,6 +5,7 @@
 
 #include "video_core/renderer_vulkan/host_passes/pp_sampled_input.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_reconstruction.h"
+#include "video_core/renderer_vulkan/present_frame_transition.h"
 
 namespace Vulkan::HostPasses {
 namespace {
@@ -325,6 +326,34 @@ TEST(PpSourceReconstruction, CalibratedReducerUsesExactPredicateOnReconstruction
     EXPECT_NE(text.find(" ry=1"), std::string::npos);
     EXPECT_NE(text.find(" rn="), std::string::npos);
     EXPECT_EQ(text.find("pixel"), std::string::npos);
+}
+
+TEST(PpSourceReconstruction, PresentTransferAddsExactlyOneFourthPlane) {
+    const auto transfer = PlanPpSampledInputTransfer(true, false, true, true, true);
+    EXPECT_TRUE(transfer.copy);
+    EXPECT_EQ(transfer.color_write_to_transfer_barriers, 3u);
+    EXPECT_EQ(transfer.copy_regions, 4u);
+    EXPECT_TRUE(transfer.paired_output_and_raw);
+    EXPECT_TRUE(transfer.paired_source_backing_snapshot);
+    EXPECT_TRUE(transfer.paired_source_reconstruction);
+    EXPECT_TRUE(IsPpSampledInputTransferContractValid(transfer));
+
+    const auto normal = PlanPpSampledInputTransfer(true, false, true, true, false);
+    EXPECT_EQ(normal.copy_regions, 3u);
+    EXPECT_FALSE(normal.paired_source_reconstruction);
+    EXPECT_TRUE(IsPpSampledInputTransferContractValid(normal));
+}
+
+TEST(PpSourceReconstruction, PresentTransitionsReconstructionFromGeneralAfterColorWrite) {
+    const auto transition = GetPpSourceReconstructionCaptureTransition(true);
+    EXPECT_TRUE(transition.required);
+    EXPECT_EQ(transition.src_stage, vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+    EXPECT_EQ(transition.src_access, vk::AccessFlagBits2::eColorAttachmentWrite);
+    EXPECT_EQ(transition.dst_stage, vk::PipelineStageFlagBits2::eTransfer);
+    EXPECT_EQ(transition.dst_access, vk::AccessFlagBits2::eTransferRead);
+    EXPECT_EQ(transition.old_layout, vk::ImageLayout::eGeneral);
+    EXPECT_EQ(transition.new_layout, vk::ImageLayout::eTransferSrcOptimal);
+    EXPECT_FALSE(GetPpSourceReconstructionCaptureTransition(false).required);
 }
 
 } // namespace
