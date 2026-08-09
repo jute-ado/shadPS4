@@ -8,6 +8,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_input_content.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -58,8 +59,11 @@ public:
           upstream_registry{config.content.upstream},
           upstream_feedback_frame{config.content.upstream,
                                   HostPasses::PpUpstreamFeedbackPrePostPlan::MaxCandidates},
+          upstream_input_gate{config.content.upstream_candidate_index},
           upstream_feedback_reducer{config.window, 32, false},
-          slot_stride{Common::AlignUp<u64>(PpTerminalScopeSnapshotBytes,
+          slot_stride{Common::AlignUp<u64>(config.content.capture_upstream_input_content
+                                               ? HostPasses::PpUpstreamInputSnapshotBytes
+                                               : PpTerminalScopeSnapshotBytes,
                                            std::max<u64>(1, instance.NonCoherentAtomSize()))},
           download{instance,
                    scheduler,
@@ -74,7 +78,7 @@ public:
             "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
             "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
             "capture_predecessor={} input_content={} upstream_inputs={} upstream_pre_post={} "
-            "upstream_index={} "
+            "upstream_input_content={} upstream_index={} upstream_candidate={} "
             "upstream={}/{}/{}/{}/{}/{} final_backing_join={}",
             config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
             config.expected_calibrations, static_cast<u32>(config.content.first.kind),
@@ -90,10 +94,11 @@ public:
             static_cast<u32>(config.content.predecessor.kind), config.content.predecessor.indexed,
             config.content.predecessor.element_count, config.content.predecessor.instance_count,
             config.content.predecessor.sampled_images, config.content.predecessor.storage_writes,
-            MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes,
+            MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots, slot_stride,
             config.content.capture_pre_first, config.content.capture_predecessor,
             config.content.capture_sampled_input_content, config.content.capture_upstream_inputs,
-            config.content.capture_upstream_pre_post, config.content.upstream_input_index,
+            config.content.capture_upstream_pre_post, config.content.capture_upstream_input_content,
+            config.content.upstream_input_index, config.content.upstream_candidate_index,
             static_cast<u32>(config.content.upstream.kind), config.content.upstream.indexed,
             config.content.upstream.element_count, config.content.upstream.instance_count,
             config.content.upstream.sampled_images, config.content.upstream.storage_writes,
@@ -211,7 +216,8 @@ public:
                         const VideoCore::ImageColorScopeDrawDescriptor& draw,
                         const PpTerminalScopeSampledInputs& sampled_inputs,
                         std::span<VideoCore::Image* const> sampled_images,
-                        std::span<const VideoCore::ImageColorScopePrivateLink> sampled_links) {
+                        std::span<const VideoCore::ImageColorScopePrivateLink> sampled_links,
+                        std::span<const HostPasses::PpUpstreamInputContentView> upstream_views) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -224,7 +230,7 @@ public:
         if (config.content.capture_upstream_inputs &&
             MatchesPpTerminalScopeDraw(config.content.upstream, observed)) {
             ObserveUpstreamFeedbackPreDraw(link, image, state, attachment_index, rendering_serial,
-                                           observed);
+                                           observed, upstream_views, sampled_images);
             static_cast<void>(upstream_registry.Observe(link, observed, sampled_inputs));
         }
         Entry* entry = Find(link);
@@ -413,6 +419,9 @@ public:
         }
         if (config.content.capture_upstream_pre_post) {
             upstream_feedback_armed = upstream_feedback_frame.Arm();
+            upstream_input_gate.Reset();
+            upstream_input_plan = {};
+            upstream_input_ready = false;
         }
         const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
         const u64 target_generation =
@@ -616,6 +625,8 @@ private:
         u64 sequence{};
         u64 process_time_us{};
         HostPasses::PpUpstreamFeedbackPrePostTakeResult take{};
+        HostPasses::PpUpstreamInputContentPlan input_plan{};
+        bool input_ready{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -821,10 +832,12 @@ private:
         });
     }
 
-    void ObserveUpstreamFeedbackPreDraw(VideoCore::ImageColorScopePrivateLink link,
-                                        VideoCore::Image& image, const RenderState& state,
-                                        u32 attachment_index, u64 rendering_serial,
-                                        const PpTerminalScopeDrawSelector& draw) {
+    void ObserveUpstreamFeedbackPreDraw(
+        VideoCore::ImageColorScopePrivateLink link, VideoCore::Image& image,
+        const RenderState& state, u32 attachment_index, u64 rendering_serial,
+        const PpTerminalScopeDrawSelector& draw,
+        std::span<const HostPasses::PpUpstreamInputContentView> upstream_views,
+        std::span<VideoCore::Image* const> sampled_images) {
         if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed ||
             !MatchesPpTerminalScopeDraw(config.content.upstream, draw)) {
             return;
@@ -837,6 +850,32 @@ private:
         if (!action.capture) {
             return;
         }
+        const auto input_action = config.content.capture_upstream_input_content
+                                      ? upstream_input_gate.Preview(action.candidate_index)
+                                      : HostPasses::PpUpstreamInputCaptureAction{};
+        const bool capture_inputs = input_action.capture;
+        if (capture_inputs) {
+            upstream_input_plan = HostPasses::PlanPpUpstreamInputContent({
+                .enabled = true,
+                .logical_width = mapping.logical_width,
+                .logical_height = mapping.logical_height,
+                .base_offset = plan.total_bytes,
+                .selector = config.watch_ordinals,
+                .views = upstream_views,
+                .buffer_alignment = 16,
+                .max_regions = HostPasses::PpUpstreamInputContentPlan::MaxInputs *
+                               HostPasses::PpUpstreamInputContentPlane::MaxRegions,
+                .max_bytes = HostPasses::PpUpstreamInputSnapshotBytes,
+            });
+            if (!upstream_input_plan.copy ||
+                upstream_input_plan.status != FinalGuestSurfaceStatus::Complete ||
+                upstream_input_plan.loss.Any()) {
+                upstream_feedback_frame.Reject(upstream_input_plan.status,
+                                               upstream_input_plan.loss);
+                static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
+                return;
+            }
+        }
         bool acquired{};
         if (!upstream_feedback_slot) {
             const auto token = slots.TryAcquire();
@@ -847,9 +886,19 @@ private:
             upstream_feedback_slot = *token;
             acquired = true;
         }
-        if (RecordUpstreamFeedbackPlane(image, state, attachment_index, rendering_serial,
-                                        action.candidate_index, false, acquired, plan)) {
+        if (RecordUpstreamFeedbackPlane(
+                image, state, attachment_index, rendering_serial, action.candidate_index, false,
+                acquired, plan, capture_inputs ? &upstream_input_plan : nullptr, sampled_images)) {
             upstream_feedback_frame.MarkCopied(action.candidate_index, false);
+            if (capture_inputs) {
+                const auto completed = upstream_input_gate.Complete(action.candidate_index, true);
+                upstream_input_ready = completed.publish;
+                if (!upstream_input_ready) {
+                    upstream_feedback_frame.Reject(completed.status, completed.loss);
+                }
+            }
+        } else if (capture_inputs) {
+            static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
         }
     }
 
@@ -879,13 +928,47 @@ private:
     [[nodiscard]] bool RecordUpstreamFeedbackPlane(
         VideoCore::Image& image, const RenderState& state, u32 attachment_index,
         u64 rendering_serial, u32 candidate_index, bool post, bool first_copy,
-        const HostPasses::PpUpstreamFeedbackPrePostPlan& plan) {
+        const HostPasses::PpUpstreamFeedbackPrePostPlan& plan,
+        const HostPasses::PpUpstreamInputContentPlan* input_plan = nullptr,
+        std::span<VideoCore::Image* const> sampled_images = {}) {
         if (!upstream_feedback_slot || attachment_index >= state.num_color_attachments ||
             !scheduler.IsRendering() || !image.backing ||
             image.backing->state.layout == vk::ImageLayout::eUndefined) {
             upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
                                            {.invalidation = 1});
             return false;
+        }
+        if (input_plan) {
+            if (!input_plan->copy || input_plan->status != FinalGuestSurfaceStatus::Complete ||
+                input_plan->loss.Any() || input_plan->total_bytes > slot_stride ||
+                input_plan->input_count > sampled_images.size()) {
+                upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                                               {.invalidation = 1});
+                return false;
+            }
+            for (u32 input_index = 0; input_index < input_plan->input_count; ++input_index) {
+                if ((input_plan->capture_mask & (1u << input_index)) == 0) {
+                    continue;
+                }
+                const auto* sampled = sampled_images[input_index];
+                const auto& input = input_plan->inputs[input_index];
+                const u32 bytes_per_texel =
+                    sampled && !sampled->info.props.is_block && sampled->info.num_bits % 8 == 0
+                        ? sampled->info.num_bits / 8
+                        : 0;
+                if (!sampled || sampled == &image || !sampled->backing ||
+                    sampled->backing->state.layout == vk::ImageLayout::eUndefined ||
+                    !sampled->backing->subresource_states.empty() ||
+                    sampled->aspect_mask != vk::ImageAspectFlagBits::eColor ||
+                    sampled->backing->num_samples != 1 ||
+                    bytes_per_texel != input.bytes_per_texel || input.mip_count == 0 ||
+                    input.base_mip + input.mip_count > sampled->info.resources.levels ||
+                    input.base_layer >= sampled->info.resources.layers) {
+                    upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                                                   {.invalidation = 1});
+                    return false;
+                }
+            }
         }
         const auto split = PlanPpTerminalScopeRenderingSplit(
             scheduler.IsRendering(), scheduler.RenderingSerial(), rendering_serial);
@@ -943,6 +1026,68 @@ private:
                       range, cmdbuf);
         cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                                  download.Handle(), plan.region_count, copies.data());
+        if (input_plan) {
+            for (u32 input_index = 0; input_index < input_plan->input_count; ++input_index) {
+                if ((input_plan->capture_mask & (1u << input_index)) == 0) {
+                    continue;
+                }
+                auto& sampled = *sampled_images[input_index];
+                const auto& input = input_plan->inputs[input_index];
+                const auto sampled_old_state = sampled.backing->state;
+                const VideoCore::SubresourceRange sampled_range{
+                    {.level = input.base_mip, .layer = input.base_layer},
+                    {.levels = input.mip_count, .layers = 1}};
+                sampled.Transit(vk::ImageLayout::eTransferSrcOptimal,
+                                vk::AccessFlagBits2::eTransferRead, sampled_range, cmdbuf);
+                std::array<vk::BufferImageCopy, HostPasses::PpUpstreamInputContentPlane::MaxRegions>
+                    input_copies{};
+                for (u32 region_index = 0; region_index < input.region_count; ++region_index) {
+                    const auto& region = input.regions[region_index];
+                    input_copies[region_index] = {
+                        .bufferOffset = slot_offset + input.plane_offset + region.buffer_offset,
+                        .bufferRowLength = 0,
+                        .bufferImageHeight = 0,
+                        .imageSubresource =
+                            {
+                                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                .mipLevel = region.mip_level,
+                                .baseArrayLayer = input.base_layer,
+                                .layerCount = 1,
+                            },
+                        .imageOffset = {static_cast<s32>(region.x), static_cast<s32>(region.y), 0},
+                        .imageExtent = {region.width, region.height, 1},
+                    };
+                }
+                cmdbuf.copyImageToBuffer(sampled.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                         download.Handle(), input.region_count,
+                                         input_copies.data());
+                const vk::ImageMemoryBarrier2 sampled_restore{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                    .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+                    .dstStageMask = sampled_old_state.pl_stage,
+                    .dstAccessMask = sampled_old_state.access_mask,
+                    .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+                    .newLayout = sampled_old_state.layout,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = sampled.GetImage(),
+                    .subresourceRange =
+                        {
+                            .aspectMask = vk::ImageAspectFlagBits::eColor,
+                            .baseMipLevel = input.base_mip,
+                            .levelCount = input.mip_count,
+                            .baseArrayLayer = input.base_layer,
+                            .layerCount = 1,
+                        },
+                };
+                cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                    .imageMemoryBarrierCount = 1,
+                    .pImageMemoryBarriers = &sampled_restore,
+                });
+                HostPasses::RestorePpUpstreamInputUniformTracker(
+                    sampled.backing->state, sampled.backing->subresource_states, sampled_old_state);
+            }
+        }
         const vk::ImageMemoryBarrier2 restore{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
@@ -1249,12 +1394,17 @@ private:
     }
 
     [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeUpstreamFeedbackHistoryLayout(
-        const HostPasses::PpUpstreamFeedbackPrePostPlan& plan) noexcept {
+        const HostPasses::PpUpstreamFeedbackPrePostPlan& plan,
+        const HostPasses::PpUpstreamInputContentPlan& input_plan,
+        const HostPasses::PpUpstreamInputContentCompactResult& input_compact) noexcept {
         PpTerminalScopeContentHistoryLayout layout{
             .region_count = plan.region_count,
             .plane_bytes = plan.plane_bytes,
             .second_plane_offset = plan.plane_bytes,
             .total_bytes = plan.plane_bytes * 2,
+            .input_count = input_plan.input_count,
+            .input_capture_mask = input_compact.capture_mask | input_compact.alias_mask,
+            .input_unavailable_mask = input_compact.unavailable_mask,
             .plane_mask = 0x3,
             .format = plan.format,
         };
@@ -1265,6 +1415,52 @@ private:
                 .byte_size = plan.regions[index].byte_size,
             };
         }
+        const u32 input_base = layout.total_bytes;
+        for (u32 input_index = 0; input_index < input_plan.input_count; ++input_index) {
+            const u32 bit = 1u << input_index;
+            auto& destination = layout.input_planes[input_index];
+            const auto& source = input_plan.inputs[input_index];
+            if ((input_compact.alias_mask & bit) != 0) {
+                destination = {
+                    .region_count = plan.region_count,
+                    .plane_offset = 0,
+                    .plane_bytes = plan.plane_bytes,
+                    .format = plan.format,
+                    .bytes_per_texel = 4,
+                    .status = FinalGuestSurfaceStatus::Complete,
+                };
+                for (u32 region_index = 0; region_index < plan.region_count; ++region_index) {
+                    destination.regions[region_index] = {
+                        .logical_ordinal = plan.regions[region_index].logical_ordinal,
+                        .buffer_offset = plan.regions[region_index].buffer_offset,
+                        .byte_size = plan.regions[region_index].byte_size,
+                    };
+                }
+                continue;
+            }
+            if ((input_compact.capture_mask & bit) == 0) {
+                destination.status = source.status;
+                destination.loss = source.loss;
+                continue;
+            }
+            destination = {
+                .region_count = source.region_count,
+                .plane_offset = input_base + input_compact.plane_offsets[input_index],
+                .plane_bytes = source.plane_bytes,
+                .format = FinalGuestSurfaceFormat::Unsupported,
+                .bytes_per_texel = source.bytes_per_texel,
+                .raw_compare = true,
+                .status = FinalGuestSurfaceStatus::Complete,
+            };
+            for (u32 region_index = 0; region_index < source.region_count; ++region_index) {
+                destination.regions[region_index] = {
+                    .logical_ordinal = source.regions[region_index].logical_ordinal,
+                    .buffer_offset = source.regions[region_index].buffer_offset,
+                    .byte_size = source.regions[region_index].byte_size,
+                };
+            }
+        }
+        layout.total_bytes += static_cast<u32>(input_compact.bytes.size());
         return layout;
     }
 
@@ -1276,10 +1472,14 @@ private:
             .sequence = sequence,
             .process_time_us = process_time_us,
             .take = upstream_feedback_frame.Take(bool{upstream_feedback_slot}),
+            .input_plan = upstream_input_plan,
+            .input_ready = upstream_input_ready,
             .slot = upstream_feedback_slot,
             .slot_offset = upstream_feedback_slot ? upstream_feedback_slot.slot * slot_stride : 0,
         };
         upstream_feedback_slot = {};
+        upstream_input_plan = {};
+        upstream_input_ready = false;
         upstream_feedback_armed = false;
         scheduler.DeferOperation([this, pending = std::move(pending)]() mutable {
             ConsumeUpstreamFeedback(std::move(pending));
@@ -1287,8 +1487,17 @@ private:
     }
 
     void ConsumeUpstreamFeedback(PendingUpstreamFeedback pending) {
-        auto layout = MakeUpstreamFeedbackHistoryLayout(pending.take.plan);
         std::vector<std::byte> compact_bytes{};
+        HostPasses::PpUpstreamInputContentCompactResult input_compact{
+            .status = FinalGuestSurfaceStatus::Complete,
+        };
+        const auto publication = HostPasses::ReconcilePpUpstreamInputPublication(
+            config.content.capture_upstream_input_content, pending.input_ready,
+            pending.take.candidate_index, config.content.upstream_candidate_index,
+            pending.take.status, pending.take.loss, pending.take.copy);
+        pending.take.status = publication.status;
+        pending.take.loss = publication.loss;
+        pending.take.copy = publication.copy;
         if (pending.take.copy && pending.slot) {
             if (!download.InvalidateMappedRange(pending.slot_offset, slot_stride) ||
                 pending.slot_offset + pending.take.plan.total_bytes > download.mapped_data.size()) {
@@ -1306,9 +1515,25 @@ private:
                     pending.take.copy = false;
                 } else {
                     compact_bytes = compact.bytes;
+                    if (config.content.capture_upstream_input_content) {
+                        input_compact = HostPasses::CompactPpUpstreamInputContent(
+                            pending.input_plan, mapped.subspan(pending.slot_offset, slot_stride));
+                        if (input_compact.status != FinalGuestSurfaceStatus::Complete ||
+                            input_compact.loss.Any()) {
+                            pending.take.status = input_compact.status;
+                            pending.take.loss = input_compact.loss;
+                            pending.take.copy = false;
+                            compact_bytes.clear();
+                        } else {
+                            compact_bytes.insert(compact_bytes.end(), input_compact.bytes.begin(),
+                                                 input_compact.bytes.end());
+                        }
+                    }
                 }
             }
         }
+        auto layout =
+            MakeUpstreamFeedbackHistoryLayout(pending.take.plan, pending.input_plan, input_compact);
         {
             std::scoped_lock lock{reducer_mutex};
             upstream_feedback_reducer.ObserveContent(pending.sequence, layout, compact_bytes,
@@ -1358,6 +1583,33 @@ private:
                 FormatPpTerminalScopeOrdinalList(report.second_stable_ordinals),
                 FormatPpTerminalScopeOrdinalList(report.second_ambiguous_ordinals),
                 static_cast<u32>(report.status), FinalGuestSurfaceLossMask(report.loss, 0));
+            if (config.content.capture_upstream_input_content) {
+                std::string inputs = "FGSCTUI q=" + std::to_string(report.request_ordinal) +
+                                     " im=" + std::to_string(report.input_count) + '/' +
+                                     std::to_string(report.input_capture_mask) + '/' +
+                                     std::to_string(report.input_unavailable_mask);
+                for (u32 input_index = 0; input_index < report.input_count; ++input_index) {
+                    if ((report.input_capture_mask & (1u << input_index)) == 0) {
+                        continue;
+                    }
+                    inputs +=
+                        " z" + std::to_string(input_index) + "a=" +
+                        FormatPpTerminalScopeOrdinalList(
+                            report.sampled_input_aba_ordinals[input_index]) +
+                        " z" + std::to_string(input_index) + "s=" +
+                        FormatPpTerminalScopeOrdinalList(
+                            report.sampled_input_stable_ordinals[input_index]) +
+                        " z" + std::to_string(input_index) + "x=" +
+                        FormatPpTerminalScopeOrdinalList(
+                            report.sampled_input_ambiguous_ordinals[input_index]) +
+                        " z" + std::to_string(input_index) + "y=" +
+                        FormatPpTerminalScopeOrdinalList(
+                            report.sampled_input_localized_visual_return_ordinals[input_index]);
+                }
+                inputs += " st=" + std::to_string(static_cast<u32>(report.status)) +
+                          " lm=" + std::to_string(FinalGuestSurfaceLossMask(report.loss, 0));
+                LOG_INFO(Render, "{}", inputs);
+            }
         }
     }
 
@@ -1462,6 +1714,7 @@ private:
     FinalGuestSurfaceScreenshotCalibration calibration;
     PpTerminalScopeUpstreamInputRegistry upstream_registry;
     HostPasses::PpUpstreamFeedbackPrePostFrame upstream_feedback_frame;
+    HostPasses::PpUpstreamInputCaptureGate upstream_input_gate;
     PpTerminalScopeContentReducer upstream_feedback_reducer;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
@@ -1472,6 +1725,8 @@ private:
     PpTerminalScopeProgressCoverage progress_coverage{};
     PpTerminalScopeDiscoveryCoverageEmissionGate discovery_coverage_emission{};
     FinalGuestSurfaceReadbackSlotPool::Token upstream_feedback_slot{};
+    HostPasses::PpUpstreamInputContentPlan upstream_input_plan{};
+    bool upstream_input_ready{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
     u32 emitted_frames{};
@@ -2403,6 +2658,8 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
     std::array<VideoCore::Image*, PpTerminalScopeSampledInputs::MaxInputs> sampled_input_images{};
     std::array<VideoCore::ImageColorScopePrivateLink, PpTerminalScopeSampledInputs::MaxInputs>
         sampled_input_links{};
+    std::array<HostPasses::PpUpstreamInputContentView, PpTerminalScopeSampledInputs::MaxInputs>
+        upstream_input_views{};
     if (classify_inputs &&
         diagnostic_sampled_images.size() <= PpTerminalScopeSampledInputs::MaxInputs) {
         for (u32 index = 0; index < diagnostic_sampled_images.size(); ++index) {
@@ -2434,6 +2691,23 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
                     sampled_image.backing && sampled_image.backing->subresource_states.empty(),
                 .view_conflict = sampled.view_conflict,
             });
+            upstream_input_views[index] = {
+                .width = mip_dimension(sampled_image.info.size.width, range.base.level),
+                .height = mip_dimension(sampled_image.info.size.height, range.base.level),
+                .bytes_per_texel =
+                    !sampled_image.info.props.is_block && sampled_image.info.num_bits % 8 == 0
+                        ? sampled_image.info.num_bits / 8
+                        : 0,
+                .base_mip = range.base.level,
+                .mip_count = range.extent.levels,
+                .base_layer = range.base.layer,
+                .layer_count = range.extent.layers,
+                .color = sampled_image.aspect_mask == vk::ImageAspectFlagBits::eColor,
+                .type_2d = type_2d,
+                .uniform_state =
+                    sampled_image.backing && sampled_image.backing->subresource_states.empty(),
+                .view_conflict = sampled.view_conflict,
+            };
         }
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
@@ -2452,6 +2726,7 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
                 for (u32 input = 0; input < diagnostic_sampled_images.size(); ++input) {
                     const auto& sampled = diagnostic_sampled_images[input];
                     candidates[input].aliases_output = sampled.id == image_id;
+                    upstream_input_views[input].aliases_output = sampled.id == image_id;
                     if (candidates[input].aliases_output) {
                         const auto& sampled_image = texture_cache.GetImage(sampled.id);
                         const auto sampled_layout = sampled_image.backing
@@ -2485,7 +2760,8 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
         pp_terminal_scope_content->ObservePreDraw(
             image_id, image, state, index, rendering_serial, draw, sampled_inputs,
             std::span{sampled_input_images.data(), sampled_inputs.count},
-            std::span{sampled_input_links.data(), sampled_inputs.count});
+            std::span{sampled_input_links.data(), sampled_inputs.count},
+            std::span{upstream_input_views.data(), sampled_inputs.count});
     }
 }
 

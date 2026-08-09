@@ -42,7 +42,9 @@ struct PpTerminalScopeContentConfig {
     bool capture_sampled_input_content{};
     bool capture_upstream_inputs{};
     bool capture_upstream_pre_post{};
+    bool capture_upstream_input_content{};
     u32 upstream_input_index{};
+    u32 upstream_candidate_index{};
     PpTerminalScopeDrawSelector upstream{};
     PpTerminalScopeDrawSelector predecessor{};
     PpTerminalScopeDrawSelector first{};
@@ -133,8 +135,11 @@ template <typename ReadValue>
     const auto input_content_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_INPUT_CONTENT");
     const auto upstream_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM");
     const auto upstream_index_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX");
-    const auto upstream_pre_post_value =
-        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST");
+    const auto upstream_pre_post_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST");
+    const auto upstream_input_content_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_CONTENT");
+    const auto upstream_candidate_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
@@ -150,6 +155,11 @@ template <typename ReadValue>
     }
     if (upstream_pre_post_value &&
         (*upstream_pre_post_value != "1" || !upstream_value || !upstream_index_value)) {
+        return std::nullopt;
+    }
+    if (upstream_input_content_value.has_value() != upstream_candidate_value.has_value() ||
+        (upstream_input_content_value &&
+         (*upstream_input_content_value != "1" || !upstream_pre_post_value))) {
         return std::nullopt;
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
@@ -169,6 +179,15 @@ template <typename ReadValue>
             return std::nullopt;
         }
     }
+    u32 upstream_candidate_index{};
+    if (upstream_candidate_value) {
+        const auto* begin = upstream_candidate_value->data();
+        const auto* end = begin + upstream_candidate_value->size();
+        const auto [ptr, error] = std::from_chars(begin, end, upstream_candidate_index);
+        if (error != std::errc{} || ptr != end || upstream_candidate_index >= 4) {
+            return std::nullopt;
+        }
+    }
     if (!first || !second || !consumer || (predecessor_value && !predecessor) ||
         (upstream_value &&
          (!predecessor || !upstream || upstream_input_index >= predecessor->sampled_images))) {
@@ -181,7 +200,9 @@ template <typename ReadValue>
                     .capture_sampled_input_content = input_content_value.has_value(),
                     .capture_upstream_inputs = upstream.has_value(),
                     .capture_upstream_pre_post = upstream_pre_post_value.has_value(),
+                    .capture_upstream_input_content = upstream_input_content_value.has_value(),
                     .upstream_input_index = upstream_input_index,
+                    .upstream_candidate_index = upstream_candidate_index,
                     .upstream = upstream.value_or(PpTerminalScopeDrawSelector{}),
                     .predecessor = predecessor.value_or(PpTerminalScopeDrawSelector{}),
                     .first = *first,
@@ -1750,9 +1771,12 @@ struct PpTerminalScopeSampledInputContentHistoryPlane {
     u32 region_count{};
     u32 plane_offset{};
     u32 plane_bytes{};
-    std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+    std::array<PpTerminalScopeContentHistoryRegion,
+               FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 16>
         regions{};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    u32 bytes_per_texel{4};
+    bool raw_compare{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
 
@@ -2156,8 +2180,8 @@ private:
             return false;
         }
         const auto& plane = left.layout.input_planes[input_index];
-        if (region_index >= plane.region_count ||
-            (plane.format != FinalGuestSurfaceFormat::Rgba8 &&
+        if (region_index >= plane.region_count || plane.bytes_per_texel == 0 ||
+            (!plane.raw_compare && plane.format != FinalGuestSurfaceFormat::Rgba8 &&
              plane.format != FinalGuestSurfaceFormat::Bgra8)) {
             return false;
         }
@@ -2166,13 +2190,13 @@ private:
         const u64 right_offset =
             static_cast<u64>(right.layout.input_planes[input_index].plane_offset) +
             right.layout.input_planes[input_index].regions[region_index].buffer_offset;
-        if (region.byte_size == 0 || region.byte_size % 4 != 0 ||
+        if (region.byte_size == 0 || region.byte_size % plane.bytes_per_texel != 0 ||
             left_offset + region.byte_size > left.bytes.size() ||
             right_offset + region.byte_size > right.bytes.size()) {
             return false;
         }
         for (u32 offset = 0; offset < region.byte_size; ++offset) {
-            if (offset % 4 == 3) {
+            if (!plane.raw_compare && offset % 4 == 3) {
                 continue;
             }
             if (left.bytes[left_offset + offset] != right.bytes[right_offset + offset]) {
@@ -2186,11 +2210,18 @@ private:
                                      const Observation& c, u32 input_index, std::vector<u32>& aba,
                                      std::vector<u32>& stable, std::vector<u32>& ambiguous) {
         const auto& plane = a.layout.input_planes[input_index];
-        for (u32 region_index = 0; region_index < plane.region_count; ++region_index) {
-            const bool ab = EqualSampledInputRegion(a, b, input_index, region_index);
-            const bool bc = EqualSampledInputRegion(b, c, input_index, region_index);
-            const bool ac = EqualSampledInputRegion(a, c, input_index, region_index);
+        for (u32 region_index = 0; region_index < plane.region_count;) {
             const u32 ordinal = plane.regions[region_index].logical_ordinal;
+            bool ab = true;
+            bool bc = true;
+            bool ac = true;
+            u32 next = region_index;
+            do {
+                ab &= EqualSampledInputRegion(a, b, input_index, next);
+                bc &= EqualSampledInputRegion(b, c, input_index, next);
+                ac &= EqualSampledInputRegion(a, c, input_index, next);
+                ++next;
+            } while (next < plane.region_count && plane.regions[next].logical_ordinal == ordinal);
             if (ac && !ab) {
                 aba.push_back(ordinal);
             } else if (ab && bc) {
@@ -2198,6 +2229,7 @@ private:
             } else {
                 ambiguous.push_back(ordinal);
             }
+            region_index = next;
         }
     }
 
@@ -2208,6 +2240,9 @@ private:
             return false;
         }
         const auto& plane = a.layout.input_planes[input_index];
+        if (plane.raw_compare) {
+            return true;
+        }
         for (u32 region_index = 0; region_index < plane.region_count; ++region_index) {
             const auto& region = plane.regions[region_index];
             const u64 offset = static_cast<u64>(plane.plane_offset) + region.buffer_offset;
