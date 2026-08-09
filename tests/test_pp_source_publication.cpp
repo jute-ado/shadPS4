@@ -221,7 +221,10 @@ TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
                         .element_count = 36,
                         .instance_count = 2,
                         .sampled_bindings = 2,
-                        .sampled_images = 1});
+                        .sampled_images = 1,
+                        .sampled_input_producer = VideoCore::ImageProducerClass::ColorAttachment,
+                        .sampled_input_fresh = true,
+                        .sampled_input_valid = true});
     state.MarkDraw(11, {.kind = VideoCore::ImageColorScopeDrawKind::Indirect,
                         .sampled_bindings = 3,
                         .sampled_images = 2,
@@ -236,6 +239,10 @@ TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
                                    .sampled_bindings = 3,
                                    .sampled_images = 2,
                                    .storage_writes = 1,
+                                   .sampled_input_producer = VideoCore::ImageProducerClass::Unknown,
+                                   .sampled_input_fresh = false,
+                                   .sampled_input_alias = false,
+                                   .sampled_input_valid = false,
                                    .clear_at_begin = true,
                                    .valid = true,
                                }));
@@ -294,6 +301,10 @@ TEST(PpSourceColorScopeDraw, CompactOutputAndCoverageClassifySingleSampledInput)
                                   .instance_count = 1,
                                   .sampled_bindings = 1,
                                   .sampled_images = 1,
+                                  .sampled_input_producer =
+                                      VideoCore::ImageProducerClass::ColorAttachment,
+                                  .sampled_input_fresh = true,
+                                  .sampled_input_valid = true,
                                   .valid = true}));
     const auto final = coverage.Observe(51, PpSourceProducerScopeClass::ActiveAtFlip,
                                         {.draw_count = 1,
@@ -304,15 +315,77 @@ TEST(PpSourceColorScopeDraw, CompactOutputAndCoverageClassifySingleSampledInput)
                                          .sampled_bindings = 2,
                                          .sampled_images = 2,
                                          .storage_writes = 1,
+                                         .sampled_input_valid = false,
                                          .valid = true});
     ASSERT_TRUE(final);
     EXPECT_EQ(final->single_sampled_input, 1u);
     EXPECT_EQ(final->multiple_sampled_inputs, 1u);
     EXPECT_EQ(final->writable_image_draws, 1u);
+    EXPECT_EQ(final->input_color_attachment, 1u);
+    EXPECT_EQ(final->input_storage_image, 0u);
+    EXPECT_EQ(final->input_transfer, 0u);
+    EXPECT_EQ(final->input_cpu_upload, 0u);
+    EXPECT_EQ(final->input_unknown, 0u);
+    EXPECT_EQ(final->input_fresh, 1u);
+    EXPECT_EQ(final->input_reused, 0u);
+    EXPECT_EQ(final->input_alias, 0u);
+    EXPECT_EQ(final->invalid_single_input, 0u);
     EXPECT_EQ(FormatPpSourceProducerScopeObservation(*final),
-              "FGSCPS s=51 r=0 d=1 k=1 c=0 x=0 j=1 e=6 n=1 b=2 u=2 w=1");
+              "FGSCPS s=51 r=0 d=1 k=1 c=0 x=0 j=1 e=6 n=1 b=2 u=2 w=1 ip=0 in=0 "
+              "ia=0 iv=0");
     EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final),
-              "FGSCPSC s=51 n=2/2/2 a=2 e=0 v=2 i=0 x=0 s=1 z=0 m=1 w=1 l=0");
+              "FGSCPSC s=51 n=2/2/2 a=2 e=0 v=2 i=0 x=0 s=1 z=0 m=1 w=1 ic=1 "
+              "is=0 it=0 iu=0 ix=0 if=1 ir=0 ia=0 il=0 l=0");
+}
+
+TEST(PpSourceColorScopeDraw, SingleSampledInputProducerClassesAreBoundedAndFailClosed) {
+    PpSourceProducerScopeCoverage coverage{{.start = 70, .count = 4}};
+    ASSERT_TRUE(coverage.Observe(70, PpSourceProducerScopeClass::ActiveAtFlip,
+                                 {.draw_count = 1,
+                                  .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                                  .sampled_bindings = 1,
+                                  .sampled_images = 1,
+                                  .sampled_input_producer = VideoCore::ImageProducerClass::Transfer,
+                                  .sampled_input_valid = true,
+                                  .valid = true}));
+    ASSERT_TRUE(coverage.Observe(71, PpSourceProducerScopeClass::ActiveAtFlip,
+                                 {.draw_count = 1,
+                                  .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                                  .sampled_bindings = 1,
+                                  .sampled_images = 1,
+                                  .sampled_input_producer = VideoCore::ImageProducerClass::CpuUpload,
+                                  .sampled_input_fresh = true,
+                                  .sampled_input_valid = true,
+                                  .valid = true}));
+    ASSERT_TRUE(coverage.Observe(72, PpSourceProducerScopeClass::ActiveAtFlip,
+                                 {.draw_count = 1,
+                                  .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                                  .sampled_bindings = 1,
+                                  .sampled_images = 1,
+                                  .sampled_input_producer =
+                                      VideoCore::ImageProducerClass::StorageImage,
+                                  .sampled_input_alias = true,
+                                  .sampled_input_valid = true,
+                                  .valid = true}));
+    const auto final = coverage.Observe(
+        73, PpSourceProducerScopeClass::ActiveAtFlip,
+        {.draw_count = 1,
+         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+         .sampled_bindings = 1,
+         .sampled_images = 1,
+         .sampled_input_producer = VideoCore::ImageProducerClass::Unknown,
+         .sampled_input_valid = false,
+         .valid = true});
+    ASSERT_TRUE(final);
+    EXPECT_EQ(final->input_transfer, 1u);
+    EXPECT_EQ(final->input_cpu_upload, 1u);
+    EXPECT_EQ(final->input_storage_image, 1u);
+    EXPECT_EQ(final->input_unknown, 0u);
+    EXPECT_EQ(final->input_fresh, 1u);
+    EXPECT_EQ(final->input_reused, 2u);
+    EXPECT_EQ(final->input_alias, 1u);
+    EXPECT_EQ(final->invalid_single_input, 1u);
+    EXPECT_EQ(final->loss, 1u);
 }
 
 TEST(PpSourceColorScopeDraw, InvalidAndOverflowScopesAreExplicitCoverageLoss) {
