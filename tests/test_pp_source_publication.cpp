@@ -1063,7 +1063,7 @@ TEST(PpTerminalScopeContent, PrivateLinkResolutionNeverIndexesAFreeOrReusedSlot)
 }
 
 TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesBothDrawPlanesPerOrdinal) {
-    PpTerminalScopeContentReducer reducer{{.start = 100, .count = 3}, 8};
+    PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
         .region_count = 2,
         .plane_bytes = 8,
@@ -1106,7 +1106,7 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesBothDrawPlanesPerOr
 }
 
 TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
-    PpTerminalScopeContentReducer reducer{{.start = 200, .count = 40}, 2};
+    PpTerminalScopeContentReducer reducer{{.frame_start = 200, .frame_count = 40}, 3};
     const PpTerminalScopeContentHistoryLayout layout{
         .region_count = 1,
         .plane_bytes = 4,
@@ -1133,16 +1133,18 @@ TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
     reducer.ObserveCalibration({.request_ordinal = 5, .sequence = 204, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 6, .sequence = 205, .valid = true});
     reports = reducer.TakeReports();
-    ASSERT_EQ(reports.size(), 1u);
-    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_EQ(reports.size(), 3u);
+    EXPECT_EQ(reports.back().request_ordinal, 6u);
+    EXPECT_EQ(reports.back().status, FinalGuestSurfaceStatus::Complete);
 
     reducer.ObserveCalibration({.request_ordinal = 7, .sequence = 200, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 8, .sequence = 204, .valid = true});
     reducer.ObserveCalibration({.request_ordinal = 9, .sequence = 205, .valid = true});
     reports = reducer.TakeReports();
-    ASSERT_EQ(reports.size(), 1u);
-    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::GapLoss);
-    EXPECT_EQ(reports[0].loss.history, 1u);
+    ASSERT_EQ(reports.size(), 3u);
+    EXPECT_EQ(reports.back().request_ordinal, 9u);
+    EXPECT_EQ(reports.back().status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(reports.back().loss.history, 1u);
 }
 
 TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatus) {

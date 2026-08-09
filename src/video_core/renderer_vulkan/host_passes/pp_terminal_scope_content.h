@@ -4,7 +4,10 @@
 #pragma once
 
 #include <array>
+#include <deque>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "video_core/renderer_vulkan/host_passes/pp_source_backing.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
@@ -261,6 +264,264 @@ struct PpTerminalScopeContentReport {
     u32 second_aba{};
     u32 second_stable{};
 };
+
+struct PpTerminalScopeContentHistoryRegion {
+    u32 logical_ordinal{};
+    u32 buffer_offset{};
+    u32 byte_size{};
+
+    auto operator<=>(const PpTerminalScopeContentHistoryRegion&) const = default;
+};
+
+struct PpTerminalScopeContentHistoryLayout {
+    u32 region_count{};
+    u32 plane_bytes{};
+    u32 second_plane_offset{};
+    u32 total_bytes{};
+    std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        regions{};
+    u32 bytes_per_pixel{4};
+
+    auto operator<=>(const PpTerminalScopeContentHistoryLayout&) const = default;
+};
+
+struct PpTerminalScopeCalibratedReport {
+    u32 request_ordinal{};
+    std::array<u64, 3> sequences{};
+    std::vector<u32> first_aba_ordinals{};
+    std::vector<u32> first_stable_ordinals{};
+    std::vector<u32> first_ambiguous_ordinals{};
+    std::vector<u32> second_aba_ordinals{};
+    std::vector<u32> second_stable_ordinals{};
+    std::vector<u32> second_ambiguous_ordinals{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+class PpTerminalScopeContentReducer {
+public:
+    static constexpr u32 MaxCalibrations = FinalGuestSurfaceMaxScreenshotRequests;
+
+    explicit PpTerminalScopeContentReducer(FinalGuestSurfaceCaptureWindow window_,
+                                           u32 history_capacity_ = 32)
+        : window{window_}, history_capacity{std::clamp(history_capacity_, 1u, 32u)} {}
+
+    void ObserveContent(u64 sequence, const PpTerminalScopeContentHistoryLayout& layout,
+                        std::span<const std::byte> bytes, FinalGuestSurfaceStatus status,
+                        FinalGuestSurfaceLoss loss) {
+        if (!window.Contains(sequence)) {
+            return;
+        }
+        if (history.size() == history_capacity) {
+            history.pop_front();
+        }
+        history.push_back({
+            .sequence = sequence,
+            .layout = layout,
+            .bytes = std::vector<std::byte>{bytes.begin(), bytes.end()},
+            .status = status,
+            .loss = loss,
+        });
+        last_content_sequence = std::max(last_content_sequence, sequence);
+        Reconcile();
+    }
+
+    void ObserveCalibration(FinalGuestSurfaceCalibratedStamp stamp) {
+        if (stamp.request_ordinal == 0 || stamp.request_ordinal > MaxCalibrations ||
+            calibrations[stamp.request_ordinal].has_value()) {
+            return;
+        }
+        calibrations[stamp.request_ordinal] = stamp;
+        Reconcile();
+    }
+
+    [[nodiscard]] std::vector<PpTerminalScopeCalibratedReport> TakeReports() {
+        auto result = std::move(reports);
+        reports.clear();
+        return result;
+    }
+
+private:
+    struct Observation {
+        u64 sequence{};
+        PpTerminalScopeContentHistoryLayout layout{};
+        std::vector<std::byte> bytes{};
+        FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+        FinalGuestSurfaceLoss loss{};
+    };
+
+    [[nodiscard]] const Observation* Find(u64 sequence) const noexcept {
+        const auto found = std::ranges::find(history, sequence, &Observation::sequence);
+        return found == history.end() ? nullptr : &*found;
+    }
+
+    static void AddLoss(FinalGuestSurfaceLoss& target, const FinalGuestSurfaceLoss& source) {
+        target.unsupported_type += source.unsupported_type;
+        target.unsupported_samples += source.unsupported_samples;
+        target.unsupported_mip += source.unsupported_mip;
+        target.unsupported_layer += source.unsupported_layer;
+        target.unsupported_aspect += source.unsupported_aspect;
+        target.unsupported_format += source.unsupported_format;
+        target.invalid_extent += source.invalid_extent;
+        target.logical_mapping += source.logical_mapping;
+        target.tile_capacity += source.tile_capacity;
+        target.byte_capacity += source.byte_capacity;
+        target.ordinal_capacity += source.ordinal_capacity;
+        target.busy += source.busy;
+        target.invalidation += source.invalidation;
+        target.gap += source.gap;
+        target.history += source.history;
+        target.tile_detail += source.tile_detail;
+    }
+
+    [[nodiscard]] static bool EqualVisibleRegion(const Observation& left, const Observation& right,
+                                                 u32 plane, u32 region_index) noexcept {
+        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 1 ||
+            left.layout.bytes_per_pixel != 4) {
+            return false;
+        }
+        const auto& region = left.layout.regions[region_index];
+        const u64 left_offset =
+            region.buffer_offset + (plane == 0 ? 0u : left.layout.second_plane_offset);
+        const u64 right_offset =
+            region.buffer_offset + (plane == 0 ? 0u : right.layout.second_plane_offset);
+        if (region.byte_size == 0 || region.byte_size % left.layout.bytes_per_pixel != 0 ||
+            left_offset + region.byte_size > left.bytes.size() ||
+            right_offset + region.byte_size > right.bytes.size()) {
+            return false;
+        }
+        for (u32 offset = 0; offset < region.byte_size; ++offset) {
+            if (offset % left.layout.bytes_per_pixel == 3) {
+                continue;
+            }
+            if (left.bytes[left_offset + offset] != right.bytes[right_offset + offset]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static void ClassifyPlane(const Observation& a, const Observation& b, const Observation& c,
+                              u32 plane, std::vector<u32>& aba, std::vector<u32>& stable,
+                              std::vector<u32>& ambiguous) {
+        for (u32 index = 0; index < a.layout.region_count; ++index) {
+            const bool ab = EqualVisibleRegion(a, b, plane, index);
+            const bool bc = EqualVisibleRegion(b, c, plane, index);
+            const bool ac = EqualVisibleRegion(a, c, plane, index);
+            const u32 ordinal = a.layout.regions[index].logical_ordinal;
+            if (ac && !ab) {
+                aba.push_back(ordinal);
+            } else if (ab && bc) {
+                stable.push_back(ordinal);
+            } else {
+                ambiguous.push_back(ordinal);
+            }
+        }
+    }
+
+    [[nodiscard]] PpTerminalScopeCalibratedReport Evaluate(u32 request, const Observation* a,
+                                                           const Observation* b,
+                                                           const Observation* c) const {
+        PpTerminalScopeCalibratedReport report{
+            .request_ordinal = request,
+            .sequences = {calibrations[request - 2]->sequence, calibrations[request - 1]->sequence,
+                          calibrations[request]->sequence},
+            .status = FinalGuestSurfaceStatus::Complete,
+        };
+        if (!a || !b || !c) {
+            report.status = FinalGuestSurfaceStatus::GapLoss;
+            report.loss.history = 1;
+            return report;
+        }
+        AddLoss(report.loss, a->loss);
+        AddLoss(report.loss, b->loss);
+        AddLoss(report.loss, c->loss);
+        if (a->status != FinalGuestSurfaceStatus::Complete ||
+            b->status != FinalGuestSurfaceStatus::Complete ||
+            c->status != FinalGuestSurfaceStatus::Complete || report.loss.Any()) {
+            report.status = FinalGuestSurfaceStatus::GapLoss;
+            if (!report.loss.Any()) {
+                report.loss.gap = 1;
+            }
+            return report;
+        }
+        if (a->layout != b->layout || a->layout != c->layout ||
+            a->bytes.size() != a->layout.total_bytes || b->bytes.size() != b->layout.total_bytes ||
+            c->bytes.size() != c->layout.total_bytes) {
+            report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            report.loss.invalidation = 1;
+            return report;
+        }
+        ClassifyPlane(*a, *b, *c, 0, report.first_aba_ordinals, report.first_stable_ordinals,
+                      report.first_ambiguous_ordinals);
+        ClassifyPlane(*a, *b, *c, 1, report.second_aba_ordinals, report.second_stable_ordinals,
+                      report.second_ambiguous_ordinals);
+        return report;
+    }
+
+    void Reconcile() {
+        for (u32 request = 3; request <= MaxCalibrations; ++request) {
+            if (classified[request] || !calibrations[request] || !calibrations[request - 1] ||
+                !calibrations[request - 2]) {
+                continue;
+            }
+            const auto& a_stamp = *calibrations[request - 2];
+            const auto& b_stamp = *calibrations[request - 1];
+            const auto& c_stamp = *calibrations[request];
+            if (!a_stamp.valid || !b_stamp.valid || !c_stamp.valid ||
+                !window.Contains(a_stamp.sequence) || !window.Contains(b_stamp.sequence) ||
+                !window.Contains(c_stamp.sequence)) {
+                classified[request] = true;
+                continue;
+            }
+            const auto* a = Find(a_stamp.sequence);
+            const auto* b = Find(b_stamp.sequence);
+            const auto* c = Find(c_stamp.sequence);
+            if ((!a || !b || !c) && last_content_sequence < c_stamp.sequence) {
+                continue;
+            }
+            reports.push_back(Evaluate(request, a, b, c));
+            classified[request] = true;
+        }
+    }
+
+    FinalGuestSurfaceCaptureWindow window{};
+    u32 history_capacity{};
+    std::deque<Observation> history{};
+    std::array<std::optional<FinalGuestSurfaceCalibratedStamp>, MaxCalibrations + 1> calibrations{};
+    std::array<bool, MaxCalibrations + 1> classified{};
+    std::vector<PpTerminalScopeCalibratedReport> reports{};
+    u64 last_content_sequence{};
+};
+
+[[nodiscard]] inline std::string FormatPpTerminalScopeOrdinalList(std::span<const u32> ordinals) {
+    if (ordinals.empty()) {
+        return "-";
+    }
+    std::string result{};
+    for (const u32 ordinal : ordinals) {
+        if (!result.empty()) {
+            result += ',';
+        }
+        result += std::to_string(ordinal);
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedReport(
+    const PpTerminalScopeCalibratedReport& report) {
+    return "FGSCTST q=" + std::to_string(report.request_ordinal) +
+           " abc=" + std::to_string(report.sequences[0]) + '/' +
+           std::to_string(report.sequences[1]) + '/' + std::to_string(report.sequences[2]) +
+           " a0=" + FormatPpTerminalScopeOrdinalList(report.first_aba_ordinals) +
+           " s0=" + FormatPpTerminalScopeOrdinalList(report.first_stable_ordinals) +
+           " x0=" + FormatPpTerminalScopeOrdinalList(report.first_ambiguous_ordinals) +
+           " a1=" + FormatPpTerminalScopeOrdinalList(report.second_aba_ordinals) +
+           " s1=" + FormatPpTerminalScopeOrdinalList(report.second_stable_ordinals) +
+           " x1=" + FormatPpTerminalScopeOrdinalList(report.second_ambiguous_ordinals) +
+           " st=" + std::to_string(static_cast<u32>(report.status)) +
+           " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
+}
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeContentReport(
     const PpTerminalScopeContentReport& report) {
