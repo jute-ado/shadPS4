@@ -2072,6 +2072,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_CONTENT", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE", "0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_ROUTE_INPUT", "2"},
         {"SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
@@ -2093,8 +2094,10 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_TRUE(config->content.capture_upstream_inputs);
     EXPECT_TRUE(config->content.capture_upstream_pre_post);
     EXPECT_TRUE(config->content.capture_upstream_input_content);
+    EXPECT_TRUE(config->content.capture_upstream_sample_routes);
     EXPECT_EQ(config->content.upstream_candidate_index, 0u);
     EXPECT_EQ(config->content.upstream_input_index, 1u);
+    EXPECT_EQ(config->content.upstream_sample_route_input_index, 2u);
     EXPECT_EQ(config->content.upstream.sampled_images, 6u);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
     EXPECT_EQ(config->content.first,
@@ -3856,6 +3859,64 @@ TEST(PpUpstreamSampleRoute, ExactPrivateFingerprintParticipatesInHistoryEquality
     b = a;
     b.routes[0].view.mapping[3]++;
     EXPECT_NE(a, b);
+}
+
+TEST(PpUpstreamSampleRoute, CalibratedHistoryPublishesOnlyBoundedRouteShape) {
+    using namespace Vulkan::HostPasses;
+    PpTerminalScopeContentReducer reducer{{.frame_start = 700, .frame_count = 3}, 8};
+    const PpUpstreamSampleRouteSet routes{
+        .routes = {{{.logical_stage = 4,
+                     .image_resource_index = 2,
+                     .view = {.type = 2,
+                              .format = 37,
+                              .base_mip = 0,
+                              .mip_count = 1,
+                              .base_layer = 0,
+                              .layer_count = 1},
+                     .samplers = {{{0x1111, 0x2222}}},
+                     .sampler_count = 1}}},
+        .selected_input_index = 2,
+        .route_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const PpTerminalScopeContentHistoryLayout layout{
+        .total_bytes = 4,
+        .region_count = 1,
+        .plane_mask = 1,
+        .regions = {{{.logical_ordinal = 1299, .buffer_offset = 0, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+        .upstream_sample_routes = routes,
+    };
+    const std::array a{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    auto b = a;
+    b[0] = std::byte{9};
+    reducer.ObserveContent(700, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(701, layout, b, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(702, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 700, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 701, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 702, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].upstream_sample_route_input_index, 2u);
+    EXPECT_EQ(reports[0].upstream_sample_route_count, 1u);
+    EXPECT_EQ(reports[0].upstream_sample_route_sampler_count, 1u);
+    EXPECT_EQ(reports[0].upstream_sample_route_stage_mask, 1u << 4);
+    EXPECT_FALSE(reports[0].loss.Any());
+
+    auto changed = layout;
+    changed.upstream_sample_routes.routes[0].samplers[0].raw1++;
+    PpTerminalScopeContentReducer changed_reducer{{.frame_start = 700, .frame_count = 3}, 8};
+    changed_reducer.ObserveContent(700, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    changed_reducer.ObserveContent(701, layout, b, FinalGuestSurfaceStatus::Complete, {});
+    changed_reducer.ObserveContent(702, changed, a, FinalGuestSurfaceStatus::Complete, {});
+    changed_reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 700, .valid = true});
+    changed_reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 701, .valid = true});
+    changed_reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 702, .valid = true});
+    const auto changed_reports = changed_reducer.TakeReports();
+    ASSERT_EQ(changed_reports.size(), 1u);
+    EXPECT_EQ(changed_reports[0].status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(changed_reports[0].loss.invalidation, 1u);
 }
 
 } // namespace
