@@ -325,6 +325,19 @@ TEST(PpSampledInput, PresentTransferPairsExactOutputAndRawSampleWithoutWait) {
     EXPECT_FALSE(PlanPpSampledInputTransfer(true, true, true, true).copy);
 }
 
+TEST(PpSampledInput, PresentTransferContractAcceptsDeferredNoCopyLoss) {
+    const auto loss = PlanPpSampledInputTransfer(true, false, true, false);
+    EXPECT_FALSE(loss.copy);
+    EXPECT_TRUE(IsPpSampledInputTransferContractValid(loss))
+        << "A selected no-copy loss must reach the deferred reducer instead of asserting";
+
+    const auto positive = PlanPpSampledInputTransfer(true, false, true, true);
+    EXPECT_TRUE(IsPpSampledInputTransferContractValid(positive));
+    auto malformed = positive;
+    malformed.copy_regions = 0;
+    EXPECT_FALSE(IsPpSampledInputTransferContractValid(malformed));
+}
+
 TEST(PpSampledInput, DiagnosticPreservesBaselineViewAndFailsClosedOnResolvedMismatch) {
     const auto baseline = AssessPpSampledInputSourceView({
         .resolved_base_mip = 0,
