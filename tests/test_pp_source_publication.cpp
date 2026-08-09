@@ -3257,4 +3257,70 @@ TEST(PpUpstreamFeedbackPrePost, ResolvesOnlyOneCompleteExactPrivateCandidate) {
     EXPECT_FALSE(registry.Resolve(second).matched);
 }
 
+TEST(PpUpstreamFeedbackPrePost, FramePublishesOnlyTheSelectedCompletePair) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.count = 1;
+    selector.ordinals[0] = 1024;
+    const auto plan = PlanPpUpstreamFeedbackPrePost({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .source_width = 1920,
+        .source_height = 1080,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .mip_count = 1,
+        .layer_count = 1,
+        .color = true,
+        .type_2d = true,
+        .uniform_state = true,
+        .selector = selector,
+        .candidate_capacity = 4,
+        .buffer_alignment = 16,
+        .max_regions = 8,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    ASSERT_TRUE(plan.copy);
+    const PpTerminalScopeDrawSelector draw{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 4,
+        .instance_count = 1,
+        .sampled_images = 6,
+    };
+    const VideoCore::ImageColorScopePrivateLink selected{VideoCore::ImageId{91}, 9100};
+    PpUpstreamFeedbackPrePostFrame frame{draw, 4};
+    ASSERT_TRUE(frame.Arm());
+    ASSERT_TRUE(frame.Configure(plan));
+    const auto before = frame.Preview(selected, draw);
+    ASSERT_TRUE(before.capture);
+    frame.MarkCopied(before.candidate_index, false);
+    const auto after = frame.Complete(selected, draw);
+    ASSERT_TRUE(after.capture);
+    frame.MarkCopied(after.candidate_index, true);
+    ASSERT_TRUE(frame.Select(selected));
+
+    const auto take = frame.Take(true);
+    EXPECT_TRUE(take.copy);
+    EXPECT_EQ(take.candidate_index, 0u);
+    EXPECT_EQ(take.recorded_plane_mask, 0x3u);
+    EXPECT_EQ(take.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(take.loss.Any());
+    EXPECT_FALSE(take.cpu_wait);
+    EXPECT_FALSE(take.finish);
+    EXPECT_FALSE(take.retains_image);
+    EXPECT_FALSE(take.retains_vk_image);
+
+    ASSERT_TRUE(frame.Arm());
+    ASSERT_TRUE(frame.Configure(plan));
+    const auto incomplete = frame.Preview(selected, draw);
+    frame.MarkCopied(incomplete.candidate_index, false);
+    ASSERT_TRUE(frame.Select(selected) == false)
+        << "Selection must fail closed until the matching post-draw observation exists";
+    const auto failed = frame.Take(true);
+    EXPECT_FALSE(failed.copy);
+    EXPECT_EQ(failed.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(failed.loss.gap, 1u);
+}
+
 } // namespace
