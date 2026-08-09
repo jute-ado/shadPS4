@@ -2065,6 +2065,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR", "direct,indexed,4,1,3,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM", "direct,indexed,4,1,6,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST", "1"},
         {"SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
@@ -2084,6 +2085,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_TRUE(config->content.capture_predecessor);
     EXPECT_TRUE(config->content.capture_sampled_input_content);
     EXPECT_TRUE(config->content.capture_upstream_inputs);
+    EXPECT_TRUE(config->content.capture_upstream_pre_post);
     EXPECT_EQ(config->content.upstream_input_index, 1u);
     EXPECT_EQ(config->content.upstream.sampled_images, 6u);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
@@ -2201,6 +2203,26 @@ TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSele
         return found == out_of_range_upstream.end()
                    ? std::optional<std::string_view>{}
                    : std::optional<std::string_view>{found->second};
+    }));
+
+    const std::map<std::string_view, std::string_view> orphan_pre_post{
+        {"SHADPS4_FINAL_GUEST_SURFACE_CONTENT", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_STAGE", "pp_source_publication_reconstruction"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS", "300"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_START", "4000"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", "800"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "390,1024,1299"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONSUMER", "direct,indexed,4,1,1,0"},
+    };
+    EXPECT_FALSE(ResolvePpTerminalScopeRuntimeConfig([&](const char* name) {
+        const auto found = orphan_pre_post.find(name);
+        return found == orphan_pre_post.end() ? std::optional<std::string_view>{}
+                                              : std::optional<std::string_view>{found->second};
     }));
 }
 
