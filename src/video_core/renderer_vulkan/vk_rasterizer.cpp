@@ -109,10 +109,6 @@ public:
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
                      u32 attachment_index, u64 rendering_serial,
                      const VideoCore::ImageColorScopeDrawDescriptor& draw) {
-        Entry* entry = Find({.id = image_id, .uid = image.image_uid});
-        if (!entry) {
-            return;
-        }
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -121,6 +117,21 @@ public:
             .sampled_images = draw.sampled_images,
             .storage_writes = draw.storage_writes,
         };
+        const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
+        Entry* entry = Find(link);
+        const auto discovery = PlanPpTerminalScopeDiscoveryDecision(
+            config.content.enabled, entry != nullptr,
+            MatchesPpTerminalScopeDraw(config.content.first, observed), mapping.Valid(),
+            IsValidTarget(link, &image), HasTargetCapacity());
+        if (!entry && discovery.allocate) {
+            entry = FindOrAllocate(link);
+            if (entry) {
+                ConfigureEntry(*entry, link, image);
+            }
+        }
+        if (!entry) {
+            return;
+        }
         const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
         const auto action_result =
             ApplyPpTerminalScopeContentAction(entry->status, entry->loss, action);
@@ -137,6 +148,15 @@ public:
     void ObserveFlip(u64 sequence, u64 process_time_us, VideoCore::ImageColorScopePrivateLink link,
                      VideoCore::Image* target, u32 final_source_width, u32 final_source_height,
                      u32 logical_width, u32 logical_height) {
+        mapping = {
+            .final_source_width = final_source_width,
+            .final_source_height = final_source_height,
+            .logical_width = logical_width,
+            .logical_height = logical_height,
+        };
+        if (!mapping.Valid()) {
+            mapping = {};
+        }
         Entry* entry = Find(link);
         const bool had_entry = entry != nullptr;
         if (entry) {
@@ -164,10 +184,7 @@ public:
             Defer(std::move(pending));
         }
 
-        const bool target_valid =
-            target && link.Valid() && target->aspect_mask == vk::ImageAspectFlagBits::eColor &&
-            target->info.resources.levels == 1 && target->info.resources.layers == 1 &&
-            target->backing && target->backing->subresource_states.empty();
+        const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
         entry = target_valid ? FindOrAllocate(link) : nullptr;
         const auto decision = PlanPpTerminalScopeFlipDecision(
             had_entry, target_valid, entry != nullptr, config.window.Contains(sequence));
@@ -182,31 +199,7 @@ public:
         if (!decision.arm_next || !entry) {
             return;
         }
-        entry->plan = PlanPpTerminalScopeContent({
-            .enabled = true,
-            .armed = true,
-            .target_width = target->info.size.width,
-            .target_height = target->info.size.height,
-            .final_source_width = final_source_width,
-            .final_source_height = final_source_height,
-            .logical_width = logical_width,
-            .logical_height = logical_height,
-            .format = TerminalScopeFormat(target->backing->image.image_ci.format),
-            .samples = target->backing->num_samples,
-            .selector = config.watch_ordinals,
-            .buffer_alignment = 16,
-            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 3,
-            .max_bytes = PpTerminalScopeSnapshotBytes,
-        });
-        entry->status = entry->plan.status;
-        entry->loss = entry->plan.loss;
-        entry->slot = {};
-        entry->recorded_plane_mask = 0;
-        const u64 generation = target->EnsureDiagnosticBackingGeneration();
-        if (!entry->gate.Arm(link.uid, generation)) {
-            entry->status = FinalGuestSurfaceStatus::InvalidationLoss;
-            entry->loss = {.invalidation = 1};
-        }
+        ConfigureEntry(*entry, link, *target);
     }
 
     void Calibrate(const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
@@ -240,6 +233,18 @@ public:
     }
 
 private:
+    struct MappingTemplate {
+        u32 final_source_width{};
+        u32 final_source_height{};
+        u32 logical_width{};
+        u32 logical_height{};
+
+        [[nodiscard]] bool Valid() const noexcept {
+            return final_source_width != 0 && final_source_height != 0 && logical_width != 0 &&
+                   logical_height != 0;
+        }
+    };
+
     struct Entry {
         explicit Entry(PpTerminalScopeContentConfig config_) : gate{config_} {}
 
@@ -288,6 +293,48 @@ private:
             }
         }
         return nullptr;
+    }
+
+    [[nodiscard]] bool HasTargetCapacity() const noexcept {
+        return std::ranges::any_of(entries, [](const auto& entry) { return !entry; });
+    }
+
+    [[nodiscard]] static bool IsValidTarget(VideoCore::ImageColorScopePrivateLink link,
+                                            const VideoCore::Image* target) noexcept {
+        return target && link.Valid() && target->image_uid == link.uid &&
+               target->aspect_mask == vk::ImageAspectFlagBits::eColor &&
+               target->info.resources.levels == 1 && target->info.resources.layers == 1 &&
+               target->info.size.width != 0 && target->info.size.height != 0 && target->backing &&
+               target->backing->subresource_states.empty();
+    }
+
+    void ConfigureEntry(Entry& entry, VideoCore::ImageColorScopePrivateLink link,
+                        VideoCore::Image& target) {
+        entry.plan = PlanPpTerminalScopeContent({
+            .enabled = true,
+            .armed = true,
+            .target_width = target.info.size.width,
+            .target_height = target.info.size.height,
+            .final_source_width = mapping.final_source_width,
+            .final_source_height = mapping.final_source_height,
+            .logical_width = mapping.logical_width,
+            .logical_height = mapping.logical_height,
+            .format = TerminalScopeFormat(target.backing->image.image_ci.format),
+            .samples = target.backing->num_samples,
+            .selector = config.watch_ordinals,
+            .buffer_alignment = 16,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 3,
+            .max_bytes = PpTerminalScopeSnapshotBytes,
+        });
+        entry.status = entry.plan.status;
+        entry.loss = entry.plan.loss;
+        entry.slot = {};
+        entry.recorded_plane_mask = 0;
+        const u64 generation = target.EnsureDiagnosticBackingGeneration();
+        if (!entry.gate.Arm(link.uid, generation)) {
+            entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            entry.loss = {.invalidation = 1};
+        }
     }
 
     [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeHistoryLayout(
@@ -513,6 +560,7 @@ private:
     u64 slot_stride{};
     VideoCore::Buffer download;
     std::array<std::unique_ptr<Entry>, MaxTargets> entries{};
+    MappingTemplate mapping{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
     u32 emitted_frames{};

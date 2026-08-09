@@ -167,6 +167,40 @@ struct PpTerminalScopeFlipDecision {
     bool arm_next{};
 };
 
+struct PpTerminalScopeDiscoveryDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool allocate{};
+    bool arm{};
+    bool capture_current_draw{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeDiscoveryDecision PlanPpTerminalScopeDiscoveryDecision(
+    bool enabled, bool already_tracked, bool first_selector_matches, bool mapping_valid,
+    bool target_valid, bool target_capacity) noexcept {
+    if (!enabled || already_tracked || !first_selector_matches) {
+        return {};
+    }
+    if (!mapping_valid || !target_valid) {
+        return {
+            .status = FinalGuestSurfaceStatus::InvalidationLoss,
+            .loss = {.invalidation = 1},
+        };
+    }
+    if (!target_capacity) {
+        return {
+            .status = FinalGuestSurfaceStatus::CapacityLoss,
+            .loss = {.tile_capacity = 1},
+        };
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::Complete,
+        .allocate = true,
+        .arm = true,
+        .capture_current_draw = true,
+    };
+}
+
 [[nodiscard]] constexpr PpTerminalScopeFlipDecision PlanPpTerminalScopeFlipDecision(
     bool has_existing_capture, bool target_valid, bool target_capacity, bool in_window) noexcept {
     if (has_existing_capture) {
