@@ -313,8 +313,9 @@ TEST(PpSampledInput, PresentTransferPairsExactOutputAndRawSampleWithoutWait) {
     const auto plan = PlanPpSampledInputTransfer(true, false, true, true);
     EXPECT_TRUE(plan.copy);
     EXPECT_EQ(plan.color_write_to_transfer_barriers, 2u);
-    EXPECT_EQ(plan.copy_regions, 2u);
+    EXPECT_EQ(plan.copy_regions, 3u);
     EXPECT_TRUE(plan.paired_output_and_raw);
+    EXPECT_TRUE(plan.paired_source_backing_snapshot);
     EXPECT_TRUE(plan.callback_payload_is_scalar_only);
     EXPECT_FALSE(plan.cpu_wait);
     EXPECT_FALSE(plan.finish);
