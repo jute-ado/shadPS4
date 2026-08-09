@@ -954,6 +954,11 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     const auto consumer_only = PlanPpTerminalScopePlaneSlot(2, false);
     EXPECT_TRUE(consumer_only.acquire);
     EXPECT_FALSE(consumer_only.reuse);
+    const auto output = PlanPpTerminalScopePlaneSlot(3, true);
+    EXPECT_TRUE(output.reuse);
+    EXPECT_EQ(output.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    const auto output_without_input = PlanPpTerminalScopePlaneSlot(3, false);
+    EXPECT_EQ(output_without_input.status, FinalGuestSurfaceStatus::GapLoss);
 }
 
 TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
