@@ -119,22 +119,46 @@ public:
         };
         const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
         Entry* entry = Find(link);
+        const bool initially_tracked = entry != nullptr;
+        const bool exact_candidate = MatchesPpTerminalScopeDraw(config.content.first, observed);
+        const bool mapping_valid = mapping.Valid();
+        const bool target_valid = IsValidTarget(link, &image);
+        const bool target_capacity = HasTargetCapacity();
         const auto discovery = PlanPpTerminalScopeDiscoveryDecision(
-            config.content.enabled, entry != nullptr,
-            MatchesPpTerminalScopeDraw(config.content.first, observed), mapping.Valid(),
-            IsValidTarget(link, &image), HasTargetCapacity());
+            config.content.enabled, initially_tracked, exact_candidate, mapping_valid, target_valid,
+            target_capacity);
+        bool allocated = false;
         if (!entry && discovery.allocate) {
             entry = FindOrAllocate(link);
             if (entry) {
+                allocated = true;
                 ConfigureEntry(*entry, link, image);
             }
         }
         if (!entry) {
+            discovery_coverage.Observe({
+                .exact_candidate = exact_candidate,
+                .tracked = initially_tracked,
+                .mapping_valid = mapping_valid,
+                .target_valid = target_valid,
+                .capacity = target_capacity,
+                .allocated = allocated,
+            });
             return;
         }
-        if (!entry->slot && entry->recorded_plane_mask == 0 && mapping.Valid() &&
-            IsValidTarget(link, &image) &&
-            entry->gate.CanRestartAtFirst(image.image_uid, rendering_serial, observed)) {
+        const bool restart =
+            !entry->slot && entry->recorded_plane_mask == 0 && mapping_valid && target_valid &&
+            entry->gate.CanRestartAtFirst(image.image_uid, rendering_serial, observed);
+        discovery_coverage.Observe({
+            .exact_candidate = exact_candidate,
+            .tracked = initially_tracked,
+            .mapping_valid = mapping_valid,
+            .target_valid = target_valid,
+            .capacity = target_capacity,
+            .allocated = allocated,
+            .restarted = restart,
+        });
+        if (restart) {
             ConfigureEntry(*entry, link, image);
         }
         const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
@@ -232,6 +256,10 @@ public:
 
     void Finalize() {
         scheduler.PopPendingOperations();
+        if (!discovery_coverage_logged) {
+            LOG_INFO(Render, "{}", FormatPpTerminalScopeDiscoveryCoverage(discovery_coverage));
+            discovery_coverage_logged = true;
+        }
         std::scoped_lock lock{reducer_mutex};
         LogReports();
         LogCalibratedCoverage(true);
@@ -566,12 +594,14 @@ private:
     VideoCore::Buffer download;
     std::array<std::unique_ptr<Entry>, MaxTargets> entries{};
     MappingTemplate mapping{};
+    PpTerminalScopeDiscoveryCoverage discovery_coverage{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
     u32 emitted_frames{};
     u32 complete_frames{};
     u32 loss_frames{};
     bool calibrated_coverage_logged{};
+    bool discovery_coverage_logged{};
 };
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {

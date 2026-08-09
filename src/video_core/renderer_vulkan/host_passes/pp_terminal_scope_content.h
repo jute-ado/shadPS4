@@ -175,6 +175,54 @@ struct PpTerminalScopeDiscoveryDecision {
     bool capture_current_draw{};
 };
 
+struct PpTerminalScopeDiscoveryObservation {
+    bool exact_candidate{};
+    bool tracked{};
+    bool mapping_valid{};
+    bool target_valid{};
+    bool capacity{};
+    bool allocated{};
+    bool restarted{};
+};
+
+struct PpTerminalScopeDiscoveryCoverage {
+    u32 candidates{};
+    u32 tracked{};
+    u32 allocated{};
+    u32 restarted{};
+    u32 mapping_rejected{};
+    u32 target_rejected{};
+    u32 capacity_rejected{};
+
+    constexpr void Observe(PpTerminalScopeDiscoveryObservation observation) noexcept {
+        if (!observation.exact_candidate) {
+            return;
+        }
+        const auto increment = [](u32& value) {
+            if (value != std::numeric_limits<u32>::max()) {
+                ++value;
+            }
+        };
+        increment(candidates);
+        if (observation.tracked) {
+            increment(tracked);
+            if (observation.restarted) {
+                increment(restarted);
+            }
+            return;
+        }
+        if (!observation.mapping_valid) {
+            increment(mapping_rejected);
+        } else if (!observation.target_valid) {
+            increment(target_rejected);
+        } else if (!observation.capacity) {
+            increment(capacity_rejected);
+        } else if (observation.allocated) {
+            increment(allocated);
+        }
+    }
+};
+
 [[nodiscard]] constexpr PpTerminalScopeDiscoveryDecision PlanPpTerminalScopeDiscoveryDecision(
     bool enabled, bool already_tracked, bool first_selector_matches, bool mapping_valid,
     bool target_valid, bool target_capacity) noexcept {
@@ -955,6 +1003,16 @@ private:
            " a1=" + std::to_string(report.second_aba) +
            " s1=" + std::to_string(report.second_stable) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopeDiscoveryCoverage(
+    const PpTerminalScopeDiscoveryCoverage& coverage) {
+    return "FGSCTSD c=" + std::to_string(coverage.candidates) +
+           " t=" + std::to_string(coverage.tracked) + " a=" + std::to_string(coverage.allocated) +
+           " r=" + std::to_string(coverage.restarted) +
+           " m=" + std::to_string(coverage.mapping_rejected) +
+           " v=" + std::to_string(coverage.target_rejected) +
+           " z=" + std::to_string(coverage.capacity_rejected);
 }
 
 } // namespace Vulkan
