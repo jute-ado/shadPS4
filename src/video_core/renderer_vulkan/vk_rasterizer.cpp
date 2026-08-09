@@ -88,6 +88,20 @@ public:
             config.join_final_backing);
     }
 
+    [[nodiscard]] bool IsPredecessorCandidate(
+        const VideoCore::ImageColorScopeDrawDescriptor& draw) const noexcept {
+        return config.content.capture_predecessor &&
+               MatchesPpTerminalScopeDraw(config.content.predecessor,
+                                          {
+                                              .kind = draw.kind,
+                                              .indexed = draw.indexed,
+                                              .element_count = draw.element_count,
+                                              .instance_count = draw.instance_count,
+                                              .sampled_images = draw.sampled_images,
+                                              .storage_writes = draw.storage_writes,
+                                          });
+    }
+
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
                          VideoCore::Image* sampled_input,
                          VideoCore::ImageColorScopePrivateLink output_link,
@@ -167,7 +181,8 @@ public:
 
     void ObservePreDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
                         const RenderState& state, u32 attachment_index, u64 rendering_serial,
-                        const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+                        const VideoCore::ImageColorScopeDrawDescriptor& draw,
+                        const PpTerminalScopeSampledInputs& sampled_inputs) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -234,6 +249,7 @@ public:
             return;
         }
         if (action == PpTerminalScopePreDrawAction::CaptureBeforePredecessor) {
+            entry->sampled_inputs = sampled_inputs;
             RecordPlane(*entry, image, state, attachment_index, rendering_serial, 5);
             if (entry->discovered) {
                 progress_coverage.Observe({
@@ -343,6 +359,7 @@ public:
                                                 : FinalGuestSurfaceStatus::AlreadyConsumed,
                 .lineage_loss = lineage_entry ? entry->lineage.Loss() : FinalGuestSurfaceLoss{},
                 .predecessor = entry->predecessor,
+                .sampled_inputs = entry->sampled_inputs,
                 .slot = entry->slot,
                 .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
             };
@@ -471,6 +488,7 @@ private:
         u32 recorded_plane_mask{};
         PpTerminalScopePrivateLineage lineage{};
         PpTerminalScopePredecessor predecessor{};
+        PpTerminalScopeSampledInputs sampled_inputs{};
         VideoCore::ImageColorScopePrivateLink flip_alias{};
         bool discovered{};
         bool flip_alias_ready{};
@@ -491,6 +509,7 @@ private:
         FinalGuestSurfaceStatus lineage_status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss lineage_loss{};
         PpTerminalScopePredecessor predecessor{};
+        PpTerminalScopeSampledInputs sampled_inputs{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -599,6 +618,7 @@ private:
         entry.flip_alias_ready = false;
         entry.lineage.Reset();
         entry.predecessor = {};
+        entry.sampled_inputs = {};
         const u64 generation = target.EnsureDiagnosticBackingGeneration();
         if (discovered && !entry.lineage.Start(link, generation)) {
             entry.status = entry.lineage.Status();
@@ -818,14 +838,15 @@ private:
                 pending.status == FinalGuestSurfaceStatus::Complete && !pending.loss.Any();
             loss_frames +=
                 pending.status != FinalGuestSurfaceStatus::Complete || pending.loss.Any();
-            LOG_INFO(Render, "{} {}",
+            LOG_INFO(Render, "{} {} {}",
                      FormatPpTerminalScopeContentReport(MakePpTerminalScopeContentReport(
                          pending.sequence, pending.status, pending.loss, pending.draw_count,
                          pending.layout.region_count, pending.consumer_observations,
                          pending.consumer_phase_mask, pending.consumer_shape_matches,
                          pending.consumer_frozen, pending.layout.plane_mask, pending.lineage_hops,
                          pending.lineage_status, pending.lineage_loss)),
-                     FormatPpTerminalScopePredecessor(pending.predecessor));
+                     FormatPpTerminalScopePredecessor(pending.predecessor),
+                     FormatPpTerminalScopeSampledInputs(pending.sampled_inputs));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",
@@ -1787,14 +1808,41 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
         return;
     }
     const u64 rendering_serial = scheduler.RenderingSerial();
+    const bool classify_inputs = pp_terminal_scope_content->IsPredecessorCandidate(draw);
+    std::array<PpTerminalScopeSampledInput, PpTerminalScopeSampledInputs::MaxInputs>
+        sampled_input_candidates{};
+    if (classify_inputs &&
+        diagnostic_sampled_images.size() <= PpTerminalScopeSampledInputs::MaxInputs) {
+        for (u32 index = 0; index < diagnostic_sampled_images.size(); ++index) {
+            const auto& sampled_image = texture_cache.GetImage(diagnostic_sampled_images[index]);
+            sampled_input_candidates[index].producer =
+                ClassifyPpTerminalScopePredecessor(sampled_image.PeekDiagnosticProducer(),
+                                                   sampled_image.ObserveDiagnosticColorScope());
+        }
+    }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
         if (!image_id) {
             continue;
         }
         auto& image = texture_cache.GetImage(image_id);
+        PpTerminalScopeSampledInputs sampled_inputs{};
+        if (classify_inputs) {
+            if (diagnostic_sampled_images.size() > PpTerminalScopeSampledInputs::MaxInputs) {
+                sampled_inputs.status = FinalGuestSurfaceStatus::CapacityLoss;
+                sampled_inputs.loss.tile_capacity = 1;
+            } else {
+                auto candidates = sampled_input_candidates;
+                for (u32 input = 0; input < diagnostic_sampled_images.size(); ++input) {
+                    candidates[input].aliases_output = diagnostic_sampled_images[input] == image_id;
+                }
+                sampled_inputs = ClassifyPpTerminalScopeSampledInputs(
+                    draw.sampled_images,
+                    std::span{candidates.data(), diagnostic_sampled_images.size()});
+            }
+        }
         pp_terminal_scope_content->ObservePreDraw(image_id, image, state, index, rendering_serial,
-                                                  draw);
+                                                  draw, sampled_inputs);
     }
 }
 

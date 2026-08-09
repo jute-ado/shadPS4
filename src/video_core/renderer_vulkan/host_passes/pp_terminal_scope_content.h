@@ -240,6 +240,53 @@ struct PpTerminalScopePredecessor {
     return result;
 }
 
+struct PpTerminalScopeSampledInput {
+    PpTerminalScopePredecessor producer{};
+    bool aliases_output{};
+};
+
+struct PpTerminalScopeSampledInputs {
+    static constexpr u32 MaxInputs = 8;
+
+    std::array<PpTerminalScopeSampledInput, MaxInputs> inputs{};
+    u32 count{};
+    u32 alias_count{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeSampledInputs ClassifyPpTerminalScopeSampledInputs(
+    u32 expected_count, std::span<const PpTerminalScopeSampledInput> inputs) noexcept {
+    PpTerminalScopeSampledInputs result{};
+    if (inputs.size() > PpTerminalScopeSampledInputs::MaxInputs) {
+        result.status = FinalGuestSurfaceStatus::CapacityLoss;
+        result.loss.tile_capacity = 1;
+        return result;
+    }
+    if (expected_count == 0 || inputs.size() != expected_count) {
+        result.status = FinalGuestSurfaceStatus::GapLoss;
+        result.loss.gap = 1;
+        return result;
+    }
+    result.count = static_cast<u32>(inputs.size());
+    result.status = FinalGuestSurfaceStatus::Complete;
+    for (u32 index = 0; index < result.count; ++index) {
+        result.inputs[index] = inputs[index];
+        result.alias_count += inputs[index].aliases_output;
+        if (inputs[index].producer.status == FinalGuestSurfaceStatus::Complete &&
+            !inputs[index].producer.loss.Any()) {
+            continue;
+        }
+        result.status = inputs[index].producer.status;
+        result.loss = inputs[index].producer.loss;
+        if (result.status == FinalGuestSurfaceStatus::AlreadyConsumed || !result.loss.Any()) {
+            result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            result.loss = {.invalidation = 1};
+        }
+    }
+    return result;
+}
+
 struct PpTerminalScopeRenderingSplitPlan {
     u64 serial{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -1896,6 +1943,33 @@ private:
            " px=" + std::to_string(predecessor.scope_overflow) +
            " pt=" + std::to_string(static_cast<u32>(predecessor.status)) +
            " pl=" + std::to_string(FinalGuestSurfaceLossMask(predecessor.loss, 0));
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopeSampledInputs(
+    const PpTerminalScopeSampledInputs& inputs) {
+    std::string result = "ic=" + std::to_string(inputs.count) +
+                         " ia=" + std::to_string(inputs.alias_count) +
+                         " is=" + std::to_string(static_cast<u32>(inputs.status)) +
+                         " il=" + std::to_string(FinalGuestSurfaceLossMask(inputs.loss, 0));
+    for (u32 index = 0; index < inputs.count; ++index) {
+        const auto& input = inputs.inputs[index];
+        const auto& producer = input.producer;
+        result += " i" + std::to_string(index) + "=" +
+                  std::to_string(static_cast<u32>(producer.producer)) + "/" +
+                  std::to_string(producer.fresh) + "/" + std::to_string(producer.draw_count) + "/" +
+                  std::to_string(static_cast<u32>(producer.last_draw)) + "/" +
+                  std::to_string(producer.indexed) + "/" + std::to_string(producer.element_count) +
+                  "/" + std::to_string(producer.instance_count) + "/" +
+                  std::to_string(producer.sampled_images) + "/" +
+                  std::to_string(producer.storage_writes) + "/" +
+                  std::to_string(producer.clear_at_begin) + "/" +
+                  std::to_string(producer.scope_valid) + "/" +
+                  std::to_string(producer.scope_overflow) + "/" +
+                  std::to_string(static_cast<u32>(producer.status)) + "/" +
+                  std::to_string(FinalGuestSurfaceLossMask(producer.loss, 0)) + "/" +
+                  std::to_string(input.aliases_output);
+    }
+    return result;
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedReport(
