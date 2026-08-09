@@ -30,6 +30,10 @@ constexpr u64 ExistingPairedBytes = 12'107'776;
         .source_height = 1080,
         .output_width = 1280,
         .output_height = 720,
+        .bound_base_mip = 0,
+        .bound_mip_count = 1,
+        .bound_base_layer = 0,
+        .bound_layer_count = 1,
         .source_format = FinalGuestSurfaceFormat::Bgra8,
         .output_format = FinalGuestSurfaceFormat::Bgra8,
         .existing_readback_bytes = ExistingPairedBytes,
@@ -110,6 +114,18 @@ TEST(PpSourceReconstruction, BaselineMetadataAndExactFormatsFailClosed) {
     EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
     descriptor = RouteDescriptor();
     descriptor.output_format = FinalGuestSurfaceFormat::A2R10G10B10;
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
+    descriptor = RouteDescriptor();
+    descriptor.bound_base_mip = 1;
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
+    descriptor = RouteDescriptor();
+    descriptor.bound_mip_count = 2;
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
+    descriptor = RouteDescriptor();
+    descriptor.bound_base_layer = 1;
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
+    descriptor = RouteDescriptor();
+    descriptor.bound_layer_count = 2;
     EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
 }
 
@@ -266,6 +282,8 @@ TEST(PpSourceReconstruction, CalibratedReducerUsesExactPredicateOnReconstruction
         .source_height = Height,
         .output_width = Width,
         .output_height = Height,
+        .bound_mip_count = 1,
+        .bound_layer_count = 1,
         .source_format = FinalGuestSurfaceFormat::Bgra8,
         .output_format = FinalGuestSurfaceFormat::Bgra8,
         .existing_readback_bytes = output_bytes,
