@@ -54,6 +54,7 @@ public:
                                   PpTerminalScopeRuntimeConfig config_)
         : instance{instance_}, scheduler{scheduler_}, config{config_},
           reducer{config.window, 32, config.join_final_backing}, calibration{true},
+          upstream_registry{config.content.upstream},
           slot_stride{Common::AlignUp<u64>(PpTerminalScopeSnapshotBytes,
                                            std::max<u64>(1, instance.NonCoherentAtomSize()))},
           download{instance,
@@ -68,7 +69,8 @@ public:
             "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
             "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
             "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
-            "capture_predecessor={} input_content={} final_backing_join={}",
+            "capture_predecessor={} input_content={} upstream_inputs={} upstream_index={} "
+            "upstream={}/{}/{}/{}/{}/{} final_backing_join={}",
             config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
             config.expected_calibrations, static_cast<u32>(config.content.first.kind),
             config.content.first.indexed, config.content.first.element_count,
@@ -85,7 +87,11 @@ public:
             config.content.predecessor.sampled_images, config.content.predecessor.storage_writes,
             MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes,
             config.content.capture_pre_first, config.content.capture_predecessor,
-            config.content.capture_sampled_input_content, config.join_final_backing);
+            config.content.capture_sampled_input_content, config.content.capture_upstream_inputs,
+            config.content.upstream_input_index, static_cast<u32>(config.content.upstream.kind),
+            config.content.upstream.indexed, config.content.upstream.element_count,
+            config.content.upstream.instance_count, config.content.upstream.sampled_images,
+            config.content.upstream.storage_writes, config.join_final_backing);
     }
 
     [[nodiscard]] bool IsPredecessorCandidate(
@@ -100,6 +106,21 @@ public:
                                               .sampled_images = draw.sampled_images,
                                               .storage_writes = draw.storage_writes,
                                           });
+    }
+
+    [[nodiscard]] bool ShouldClassifyInputs(
+        const VideoCore::ImageColorScopeDrawDescriptor& draw) const noexcept {
+        const PpTerminalScopeDrawSelector observed{
+            .kind = draw.kind,
+            .indexed = draw.indexed,
+            .element_count = draw.element_count,
+            .instance_count = draw.instance_count,
+            .sampled_images = draw.sampled_images,
+            .storage_writes = draw.storage_writes,
+        };
+        return IsPredecessorCandidate(draw) ||
+               (config.content.capture_upstream_inputs &&
+                MatchesPpTerminalScopeDraw(config.content.upstream, observed));
     }
 
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
@@ -183,7 +204,8 @@ public:
                         const RenderState& state, u32 attachment_index, u64 rendering_serial,
                         const VideoCore::ImageColorScopeDrawDescriptor& draw,
                         const PpTerminalScopeSampledInputs& sampled_inputs,
-                        std::span<VideoCore::Image* const> sampled_images) {
+                        std::span<VideoCore::Image* const> sampled_images,
+                        std::span<const VideoCore::ImageColorScopePrivateLink> sampled_links) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -193,6 +215,10 @@ public:
             .storage_writes = draw.storage_writes,
         };
         const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
+        if (config.content.capture_upstream_inputs &&
+            MatchesPpTerminalScopeDraw(config.content.upstream, observed)) {
+            static_cast<void>(upstream_registry.Observe(link, observed, sampled_inputs));
+        }
         Entry* entry = Find(link);
         const bool initially_tracked = entry != nullptr;
         const auto& allocation_selector =
@@ -251,6 +277,22 @@ public:
         }
         if (action == PpTerminalScopePreDrawAction::CaptureBeforePredecessor) {
             entry->sampled_inputs = sampled_inputs;
+            if (config.content.capture_upstream_inputs) {
+                const u32 selected = config.content.upstream_input_index;
+                const auto resolution = selected < sampled_links.size()
+                                            ? upstream_registry.Resolve(sampled_links[selected])
+                                            : PpTerminalScopeUpstreamInputRegistryResolution{};
+                entry->upstream_inputs = resolution.inputs;
+                if (!resolution.matched) {
+                    entry->status = resolution.status == FinalGuestSurfaceStatus::AlreadyConsumed
+                                        ? FinalGuestSurfaceStatus::GapLoss
+                                        : resolution.status;
+                    entry->loss = resolution.loss;
+                    if (!entry->loss.Any()) {
+                        entry->loss.gap = 1;
+                    }
+                }
+            }
             std::array<PpTerminalScopeSampledInputView, PpTerminalScopeSampledInputs::MaxInputs>
                 sampled_views{};
             for (u32 input = 0; input < sampled_inputs.count; ++input) {
@@ -345,6 +387,7 @@ public:
     void ObserveFlip(u64 sequence, u64 process_time_us, VideoCore::ImageColorScopePrivateLink link,
                      VideoCore::Image* target, u32 final_source_width, u32 final_source_height,
                      u32 logical_width, u32 logical_height) {
+        upstream_registry.Reset();
         mapping = {
             .final_source_width = final_source_width,
             .final_source_height = final_source_height,
@@ -386,6 +429,7 @@ public:
                 .lineage_loss = lineage_entry ? entry->lineage.Loss() : FinalGuestSurfaceLoss{},
                 .predecessor = entry->predecessor,
                 .sampled_inputs = entry->sampled_inputs,
+                .upstream_inputs = entry->upstream_inputs,
                 .slot = entry->slot,
                 .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
             };
@@ -516,6 +560,7 @@ private:
         PpTerminalScopePrivateLineage lineage{};
         PpTerminalScopePredecessor predecessor{};
         PpTerminalScopeSampledInputs sampled_inputs{};
+        PpTerminalScopeSampledInputs upstream_inputs{};
         VideoCore::ImageColorScopePrivateLink flip_alias{};
         bool discovered{};
         bool flip_alias_ready{};
@@ -537,6 +582,7 @@ private:
         FinalGuestSurfaceLoss lineage_loss{};
         PpTerminalScopePredecessor predecessor{};
         PpTerminalScopeSampledInputs sampled_inputs{};
+        PpTerminalScopeSampledInputs upstream_inputs{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -646,6 +692,7 @@ private:
         entry.lineage.Reset();
         entry.predecessor = {};
         entry.sampled_inputs = {};
+        entry.upstream_inputs = {};
         entry.input_content_plan = {};
         const u64 generation = target.EnsureDiagnosticBackingGeneration();
         if (discovered && !entry.lineage.Start(link, generation)) {
@@ -1005,15 +1052,19 @@ private:
                 pending.status == FinalGuestSurfaceStatus::Complete && !pending.loss.Any();
             loss_frames +=
                 pending.status != FinalGuestSurfaceStatus::Complete || pending.loss.Any();
-            LOG_INFO(Render, "{} {} {}",
-                     FormatPpTerminalScopeContentReport(MakePpTerminalScopeContentReport(
-                         pending.sequence, pending.status, pending.loss, pending.draw_count,
-                         pending.layout.region_count, pending.consumer_observations,
-                         pending.consumer_phase_mask, pending.consumer_shape_matches,
-                         pending.consumer_frozen, pending.layout.plane_mask, pending.lineage_hops,
-                         pending.lineage_status, pending.lineage_loss)),
-                     FormatPpTerminalScopePredecessor(pending.predecessor),
-                     FormatPpTerminalScopeSampledInputs(pending.sampled_inputs));
+            LOG_INFO(
+                Render, "{} {} {}",
+                FormatPpTerminalScopeContentReport(MakePpTerminalScopeContentReport(
+                    pending.sequence, pending.status, pending.loss, pending.draw_count,
+                    pending.layout.region_count, pending.consumer_observations,
+                    pending.consumer_phase_mask, pending.consumer_shape_matches,
+                    pending.consumer_frozen, pending.layout.plane_mask, pending.lineage_hops,
+                    pending.lineage_status, pending.lineage_loss)),
+                FormatPpTerminalScopePredecessor(pending.predecessor),
+                FormatPpTerminalScopeSampledInputs(pending.sampled_inputs) +
+                    (config.content.capture_upstream_inputs
+                         ? " " + FormatPpTerminalScopeSampledInputs(pending.upstream_inputs, 'u')
+                         : ""));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",
@@ -1055,6 +1106,7 @@ private:
     PpTerminalScopeRuntimeConfig config{};
     PpTerminalScopeContentReducer reducer;
     FinalGuestSurfaceScreenshotCalibration calibration;
+    PpTerminalScopeUpstreamInputRegistry upstream_registry;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
     VideoCore::Buffer download;
@@ -1982,16 +2034,19 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
         return;
     }
     const u64 rendering_serial = scheduler.RenderingSerial();
-    const bool classify_inputs = pp_terminal_scope_content->IsPredecessorCandidate(draw);
+    const bool classify_inputs = pp_terminal_scope_content->ShouldClassifyInputs(draw);
     std::array<PpTerminalScopeSampledInput, PpTerminalScopeSampledInputs::MaxInputs>
         sampled_input_candidates{};
     std::array<VideoCore::Image*, PpTerminalScopeSampledInputs::MaxInputs> sampled_input_images{};
+    std::array<VideoCore::ImageColorScopePrivateLink, PpTerminalScopeSampledInputs::MaxInputs>
+        sampled_input_links{};
     if (classify_inputs &&
         diagnostic_sampled_images.size() <= PpTerminalScopeSampledInputs::MaxInputs) {
         for (u32 index = 0; index < diagnostic_sampled_images.size(); ++index) {
             const auto& sampled = diagnostic_sampled_images[index];
             auto& sampled_image = texture_cache.GetImage(sampled.id);
             sampled_input_images[index] = &sampled_image;
+            sampled_input_links[index] = {.id = sampled.id, .uid = sampled_image.image_uid};
             sampled_input_candidates[index].producer =
                 ClassifyPpTerminalScopePredecessor(sampled_image.PeekDiagnosticProducer(),
                                                    sampled_image.ObserveDiagnosticColorScope());
@@ -2042,7 +2097,8 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
         }
         pp_terminal_scope_content->ObservePreDraw(
             image_id, image, state, index, rendering_serial, draw, sampled_inputs,
-            std::span{sampled_input_images.data(), sampled_inputs.count});
+            std::span{sampled_input_images.data(), sampled_inputs.count},
+            std::span{sampled_input_links.data(), sampled_inputs.count});
     }
 }
 

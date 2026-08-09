@@ -40,6 +40,9 @@ struct PpTerminalScopeContentConfig {
     bool capture_pre_first{};
     bool capture_predecessor{};
     bool capture_sampled_input_content{};
+    bool capture_upstream_inputs{};
+    u32 upstream_input_index{};
+    PpTerminalScopeDrawSelector upstream{};
     PpTerminalScopeDrawSelector predecessor{};
     PpTerminalScopeDrawSelector first{};
     PpTerminalScopeDrawSelector second{};
@@ -127,6 +130,8 @@ template <typename ReadValue>
     const auto consumer_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_CONSUMER");
     const auto predecessor_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR");
     const auto input_content_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_INPUT_CONTENT");
+    const auto upstream_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM");
+    const auto upstream_index_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
@@ -137,13 +142,29 @@ template <typename ReadValue>
     if (input_content_value && *input_content_value != "1") {
         return std::nullopt;
     }
+    if (upstream_value.has_value() != upstream_index_value.has_value()) {
+        return std::nullopt;
+    }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
     const auto second = ParsePpTerminalScopeDrawSelector(*second_value);
     const auto consumer = ParsePpTerminalScopeDrawSelector(*consumer_value);
     const auto predecessor = predecessor_value
                                  ? ParsePpTerminalScopeDrawSelector(*predecessor_value)
                                  : std::optional<PpTerminalScopeDrawSelector>{};
-    if (!first || !second || !consumer || (predecessor_value && !predecessor)) {
+    const auto upstream = upstream_value ? ParsePpTerminalScopeDrawSelector(*upstream_value)
+                                         : std::optional<PpTerminalScopeDrawSelector>{};
+    u32 upstream_input_index{};
+    if (upstream_index_value) {
+        const auto* begin = upstream_index_value->data();
+        const auto* end = begin + upstream_index_value->size();
+        const auto [ptr, error] = std::from_chars(begin, end, upstream_input_index);
+        if (error != std::errc{} || ptr != end || upstream_input_index >= 8) {
+            return std::nullopt;
+        }
+    }
+    if (!first || !second || !consumer || (predecessor_value && !predecessor) ||
+        (upstream_value &&
+         (!predecessor || !upstream || upstream_input_index >= predecessor->sampled_images))) {
         return std::nullopt;
     }
     return PpTerminalScopeRuntimeConfig{
@@ -151,6 +172,9 @@ template <typename ReadValue>
                     .capture_pre_first = true,
                     .capture_predecessor = predecessor.has_value(),
                     .capture_sampled_input_content = input_content_value.has_value(),
+                    .capture_upstream_inputs = upstream.has_value(),
+                    .upstream_input_index = upstream_input_index,
+                    .upstream = upstream.value_or(PpTerminalScopeDrawSelector{}),
                     .predecessor = predecessor.value_or(PpTerminalScopeDrawSelector{}),
                     .first = *first,
                     .second = *second,
@@ -384,6 +408,91 @@ struct PpTerminalScopeSampledInputs {
     }
     return result;
 }
+
+struct PpTerminalScopeUpstreamInputRegistryObservation {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool stored{};
+};
+
+struct PpTerminalScopeUpstreamInputRegistryResolution {
+    PpTerminalScopeSampledInputs inputs{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool matched{};
+};
+
+class PpTerminalScopeUpstreamInputRegistry {
+public:
+    static constexpr u32 MaxCandidates = 32;
+
+    explicit constexpr PpTerminalScopeUpstreamInputRegistry(
+        PpTerminalScopeDrawSelector selector_) noexcept
+        : selector{selector_} {}
+
+    [[nodiscard]] constexpr PpTerminalScopeUpstreamInputRegistryObservation Observe(
+        VideoCore::ImageColorScopePrivateLink output, const PpTerminalScopeDrawSelector& draw,
+        const PpTerminalScopeSampledInputs& inputs) noexcept {
+        if (!MatchesPpTerminalScopeDraw(selector, draw)) {
+            return {};
+        }
+        if (!output.Valid() || inputs.status != FinalGuestSurfaceStatus::Complete ||
+            inputs.loss.Any() || inputs.count != selector.sampled_images) {
+            return {.status = FinalGuestSurfaceStatus::InvalidationLoss,
+                    .loss = {.invalidation = 1}};
+        }
+        Entry* destination{};
+        for (auto& entry : entries) {
+            if (entry.active && entry.output == output) {
+                destination = &entry;
+                break;
+            }
+            if (!entry.active && !destination) {
+                destination = &entry;
+            }
+        }
+        if (!destination) {
+            capacity_loss = true;
+            return {.status = FinalGuestSurfaceStatus::CapacityLoss, .loss = {.tile_capacity = 1}};
+        }
+        *destination = {.output = output, .inputs = inputs, .active = true};
+        return {.status = FinalGuestSurfaceStatus::Complete, .stored = true};
+    }
+
+    [[nodiscard]] constexpr PpTerminalScopeUpstreamInputRegistryResolution Resolve(
+        VideoCore::ImageColorScopePrivateLink output) const noexcept {
+        if (!output.Valid() || capacity_loss) {
+            return {.status = capacity_loss ? FinalGuestSurfaceStatus::CapacityLoss
+                                            : FinalGuestSurfaceStatus::InvalidationLoss,
+                    .loss = capacity_loss ? FinalGuestSurfaceLoss{.tile_capacity = 1}
+                                          : FinalGuestSurfaceLoss{.invalidation = 1}};
+        }
+        for (const auto& entry : entries) {
+            if (entry.active && entry.output == output) {
+                return {.inputs = entry.inputs,
+                        .status = FinalGuestSurfaceStatus::Complete,
+                        .matched = true};
+            }
+        }
+        return {};
+    }
+
+    constexpr void Reset() noexcept {
+        entries = {};
+        capacity_loss = false;
+    }
+
+private:
+    struct Entry {
+        VideoCore::ImageColorScopePrivateLink output{};
+        PpTerminalScopeSampledInputs inputs{};
+        bool active{};
+    };
+
+    PpTerminalScopeDrawSelector selector{};
+    std::array<Entry, MaxCandidates> entries{};
+    bool capacity_loss{};
+};
 
 struct PpTerminalScopeSampledInputContentDescriptor {
     bool enabled{};
@@ -2414,15 +2523,17 @@ private:
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeSampledInputs(
-    const PpTerminalScopeSampledInputs& inputs) {
-    std::string result = "ic=" + std::to_string(inputs.count) +
-                         " ia=" + std::to_string(inputs.alias_count) +
-                         " is=" + std::to_string(static_cast<u32>(inputs.status)) +
-                         " il=" + std::to_string(FinalGuestSurfaceLossMask(inputs.loss, 0));
+    const PpTerminalScopeSampledInputs& inputs, char prefix = 'i') {
+    const std::string key{prefix};
+    const char view_prefix = prefix == 'i' ? 'v' : 'w';
+    std::string result = key + "c=" + std::to_string(inputs.count) + " " + key +
+                         "a=" + std::to_string(inputs.alias_count) + " " + key +
+                         "s=" + std::to_string(static_cast<u32>(inputs.status)) + " " + key +
+                         "l=" + std::to_string(FinalGuestSurfaceLossMask(inputs.loss, 0));
     for (u32 index = 0; index < inputs.count; ++index) {
         const auto& input = inputs.inputs[index];
         const auto& producer = input.producer;
-        result += " i" + std::to_string(index) + "=" +
+        result += " " + key + std::to_string(index) + "=" +
                   std::to_string(static_cast<u32>(producer.producer)) + "/" +
                   std::to_string(producer.fresh) + "/" + std::to_string(producer.draw_count) + "/" +
                   std::to_string(static_cast<u32>(producer.last_draw)) + "/" +
@@ -2437,8 +2548,8 @@ private:
                   std::to_string(FinalGuestSurfaceLossMask(producer.loss, 0)) + "/" +
                   std::to_string(input.aliases_output);
         const auto& view = input.view;
-        result += " v" + std::to_string(index) + "=" + std::to_string(view.width) + "/" +
-                  std::to_string(view.height) + "/" +
+        result += " " + std::string{view_prefix} + std::to_string(index) + "=" +
+                  std::to_string(view.width) + "/" + std::to_string(view.height) + "/" +
                   std::to_string(static_cast<u32>(view.format)) + "/" +
                   std::to_string(view.samples) + "/" + std::to_string(view.base_mip) + "/" +
                   std::to_string(view.mip_count) + "/" + std::to_string(view.base_layer) + "/" +

@@ -2197,8 +2197,9 @@ TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSele
     };
     EXPECT_FALSE(ResolvePpTerminalScopeRuntimeConfig([&](const char* name) {
         const auto found = out_of_range_upstream.find(name);
-        return found == out_of_range_upstream.end() ? std::optional<std::string_view>{}
-                                                    : std::optional<std::string_view>{found->second};
+        return found == out_of_range_upstream.end()
+                   ? std::optional<std::string_view>{}
+                   : std::optional<std::string_view>{found->second};
     }));
 }
 
