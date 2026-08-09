@@ -951,6 +951,9 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     const auto consumer = PlanPpTerminalScopePlaneSlot(2, true);
     EXPECT_FALSE(consumer.acquire);
     EXPECT_TRUE(consumer.reuse);
+    const auto consumer_only = PlanPpTerminalScopePlaneSlot(2, false);
+    EXPECT_TRUE(consumer_only.acquire);
+    EXPECT_FALSE(consumer_only.reuse);
 }
 
 TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
@@ -1143,12 +1146,13 @@ TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
 TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
     auto report = MakePpTerminalScopeContentReport(4100, FinalGuestSurfaceStatus::Complete, {}, 2,
                                                    14, 3, 5, 2, true);
+    report.plane_mask = 7;
     report.first_aba = 1;
     report.first_stable = 2;
     report.second_aba = 3;
     report.second_stable = 4;
     const auto line = FormatPpTerminalScopeContentReport(report);
-    EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 co=3 cp=5 cm=2 cf=1 a0=1 s0=2 a1=3 "
+    EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 pm=7 co=3 cp=5 cm=2 cf=1 a0=1 s0=2 a1=3 "
                     "s1=4 lm=0");
     EXPECT_EQ(line.find("token"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
@@ -1250,6 +1254,7 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOr
         .second_plane_offset = 8,
         .consumer_plane_offset = 16,
         .total_bytes = 24,
+        .plane_mask = 7,
         .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
                      {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
     };
@@ -1293,6 +1298,39 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOr
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
+TEST(PpTerminalScopeContent, ConsumerOnlyPlaneIsCompleteWithoutClassifyingMissingPlanes) {
+    PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 1,
+        .plane_bytes = 4,
+        .second_plane_offset = 4,
+        .consumer_plane_offset = 8,
+        .total_bytes = 12,
+        .plane_mask = 1u << 2,
+        .regions = {{{.logical_ordinal = 31, .buffer_offset = 0, .byte_size = 4}}},
+    };
+    const std::array<std::byte, 12> a{
+        std::byte{99}, std::byte{99}, std::byte{99}, std::byte{99},
+        std::byte{88}, std::byte{88}, std::byte{88}, std::byte{88},
+        std::byte{1},  std::byte{2},  std::byte{3},  std::byte{255}};
+    auto b = a;
+    b[8] = std::byte{9};
+    auto c = a;
+    c[11] = std::byte{0};
+    reducer.ObserveContent(300, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(301, layout, b, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(302, layout, c, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 300, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 301, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 302, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_TRUE(reports[0].first_aba_ordinals.empty());
+    EXPECT_TRUE(reports[0].second_aba_ordinals.empty());
+    EXPECT_EQ(reports[0].consumer_aba_ordinals, (std::vector<u32>{31}));
+    EXPECT_FALSE(reports[0].loss.Any());
+}
+
 TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 200, .frame_count = 40}, 3};
     const PpTerminalScopeContentHistoryLayout layout{
@@ -1301,6 +1339,7 @@ TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
         .second_plane_offset = 4,
         .consumer_plane_offset = 8,
         .total_bytes = 12,
+        .plane_mask = 7,
         .regions = {{{.logical_ordinal = 21, .buffer_offset = 0, .byte_size = 4}}},
     };
     const std::array<std::byte, 12> bytes{};
