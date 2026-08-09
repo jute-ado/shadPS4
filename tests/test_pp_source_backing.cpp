@@ -152,6 +152,15 @@ TEST(PpSourceBacking, InvalidViewFormatScaleOrOrderingFailsClosed) {
               FinalGuestSurfaceStatus::InvalidationLoss);
 }
 
+TEST(PpSourceBacking, UpscaleWithoutBilinearHaloFailsClosed) {
+    auto descriptor = RouteDescriptor();
+    descriptor.source_width = 640;
+    descriptor.source_height = 360;
+    EXPECT_EQ(PlanPpSourceBackingFootprints(descriptor).status,
+              FinalGuestSurfaceStatus::Unsupported)
+        << "Upscaling needs a bilinear halo and must fail closed in the exact-footprint probe";
+}
+
 TEST(PpSourceBacking, ExactAbaStableAndChangingBackingAreDistinct) {
     const auto plan = PlanPpSourceBackingFootprints(RouteDescriptor());
     ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
