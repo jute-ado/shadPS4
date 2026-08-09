@@ -227,14 +227,17 @@ public:
                 root_plan.loss = {.invalidation = 1};
                 root_plan.copy = false;
             }
-            const auto root_input = PlanPpTerminalScopeRootInputCapture({
+            const PpTerminalScopeRootInputCaptureDescriptor root_descriptor{
                 .capture_first = true,
                 .single_sampled_input = draw.sampled_images == 1,
                 .sampled_input_valid = draw.sampled_input_valid && sampled_input,
                 .sampled_input_alias = draw.sampled_input_alias,
                 .read_only = draw.storage_writes == 0,
                 .compatible_layout = root_plan.status == FinalGuestSurfaceStatus::Complete,
-            });
+            };
+            discovery_coverage.ObserveRootInput(root_descriptor, root_structure_valid,
+                                                root_plan.status, root_plan.loss);
+            const auto root_input = PlanPpTerminalScopeRootInputCapture(root_descriptor);
             if (!root_input.capture) {
                 const bool layout_is_only_failure =
                     draw.sampled_images == 1 && draw.sampled_input_valid && sampled_input &&

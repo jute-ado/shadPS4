@@ -2244,30 +2244,34 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
     coverage.Observe({.exact_candidate = true, .tracked = true, .restarted = true});
     coverage.Observe({});
     coverage.ObserveRootInput(
-        {.capture_first = true, .single_sampled_input = false, .sampled_input_valid = true}, false,
-        FinalGuestSurfaceStatus::AlreadyConsumed, {});
-    coverage.ObserveRootInput({.capture_first = true,
-                               .single_sampled_input = true,
-                               .sampled_input_valid = true,
-                               .sampled_input_alias = true,
-                               .read_only = true},
-                              true, FinalGuestSurfaceStatus::Complete, {});
-    coverage.ObserveRootInput({.capture_first = true,
-                               .single_sampled_input = true,
-                               .sampled_input_valid = true,
-                               .read_only = true},
-                              false, FinalGuestSurfaceStatus::InvalidationLoss,
-                              {.invalidation = 1});
-    coverage.ObserveRootInput({.capture_first = true,
-                               .single_sampled_input = true,
-                               .sampled_input_valid = true,
-                               .read_only = true},
-                              true, FinalGuestSurfaceStatus::Unsupported, {.logical_mapping = 1});
-    coverage.ObserveRootInput({.capture_first = true,
-                               .single_sampled_input = true,
-                               .sampled_input_valid = true,
-                               .read_only = true},
-                              true, FinalGuestSurfaceStatus::Complete, {});
+        PpTerminalScopeRootInputCaptureDescriptor{
+            .capture_first = true, .single_sampled_input = false, .sampled_input_valid = true},
+        false, FinalGuestSurfaceStatus::AlreadyConsumed, {});
+    coverage.ObserveRootInput(
+        PpTerminalScopeRootInputCaptureDescriptor{.capture_first = true,
+                                                  .single_sampled_input = true,
+                                                  .sampled_input_valid = true,
+                                                  .sampled_input_alias = true,
+                                                  .read_only = true},
+        true, FinalGuestSurfaceStatus::Complete, {});
+    coverage.ObserveRootInput(
+        PpTerminalScopeRootInputCaptureDescriptor{.capture_first = true,
+                                                  .single_sampled_input = true,
+                                                  .sampled_input_valid = true,
+                                                  .read_only = true},
+        false, FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
+    coverage.ObserveRootInput(
+        PpTerminalScopeRootInputCaptureDescriptor{.capture_first = true,
+                                                  .single_sampled_input = true,
+                                                  .sampled_input_valid = true,
+                                                  .read_only = true},
+        true, FinalGuestSurfaceStatus::Unsupported, {.logical_mapping = 1});
+    coverage.ObserveRootInput(
+        PpTerminalScopeRootInputCaptureDescriptor{.capture_first = true,
+                                                  .single_sampled_input = true,
+                                                  .sampled_input_valid = true,
+                                                  .read_only = true},
+        true, FinalGuestSurfaceStatus::Complete, {});
 
     EXPECT_EQ(coverage.candidates, 6u);
     EXPECT_EQ(coverage.tracked, 2u);
@@ -2283,8 +2287,7 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
     EXPECT_EQ(coverage.root_plan, 1u);
     EXPECT_EQ(coverage.root_plan_loss_mask, 128u);
     const auto line = FormatPpTerminalScopeDiscoveryCoverage(coverage);
-    EXPECT_EQ(line,
-              "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1 ri=1/1/1/1/1/128");
+    EXPECT_EQ(line, "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1 ri=1/1/1/1/1/128");
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);

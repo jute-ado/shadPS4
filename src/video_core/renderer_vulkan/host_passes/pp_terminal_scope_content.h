@@ -199,6 +199,12 @@ struct PpTerminalScopeDiscoveryCoverage {
     u32 mapping_rejected{};
     u32 target_rejected{};
     u32 capacity_rejected{};
+    u32 root_accepted{};
+    u32 root_missing{};
+    u32 root_hazard{};
+    u32 root_structure{};
+    u32 root_plan{};
+    u32 root_plan_loss_mask{};
 
     constexpr void Observe(PpTerminalScopeDiscoveryObservation observation) noexcept {
         if (!observation.exact_candidate) {
@@ -225,6 +231,32 @@ struct PpTerminalScopeDiscoveryCoverage {
             increment(capacity_rejected);
         } else if (observation.allocated) {
             increment(allocated);
+        }
+    }
+
+    template <typename Descriptor>
+    constexpr void ObserveRootInput(const Descriptor& descriptor, bool structure_valid,
+                                    FinalGuestSurfaceStatus plan_status,
+                                    const FinalGuestSurfaceLoss& plan_loss) noexcept {
+        if (!descriptor.capture_first) {
+            return;
+        }
+        const auto increment = [](u32& value) {
+            if (value != std::numeric_limits<u32>::max()) {
+                ++value;
+            }
+        };
+        if (!descriptor.single_sampled_input || !descriptor.sampled_input_valid) {
+            increment(root_missing);
+        } else if (descriptor.sampled_input_alias || !descriptor.read_only) {
+            increment(root_hazard);
+        } else if (!structure_valid) {
+            increment(root_structure);
+        } else if (plan_status != FinalGuestSurfaceStatus::Complete || plan_loss.Any()) {
+            increment(root_plan);
+            root_plan_loss_mask |= FinalGuestSurfaceLossMask(plan_loss, 0);
+        } else {
+            increment(root_accepted);
         }
     }
 };
@@ -1818,7 +1850,11 @@ private:
            " r=" + std::to_string(coverage.restarted) +
            " m=" + std::to_string(coverage.mapping_rejected) +
            " v=" + std::to_string(coverage.target_rejected) +
-           " z=" + std::to_string(coverage.capacity_rejected);
+           " z=" + std::to_string(coverage.capacity_rejected) +
+           " ri=" + std::to_string(coverage.root_accepted) + "/" +
+           std::to_string(coverage.root_missing) + "/" + std::to_string(coverage.root_hazard) +
+           "/" + std::to_string(coverage.root_structure) + "/" +
+           std::to_string(coverage.root_plan) + "/" + std::to_string(coverage.root_plan_loss_mask);
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopePrivateLineageReport(
