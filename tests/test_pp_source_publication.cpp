@@ -1756,6 +1756,23 @@ TEST(PpTerminalScopeContent, FinalBackingObservationReusesTheExistingPackedFootp
     EXPECT_EQ(malformed.loss.invalidation, 1u);
 }
 
+TEST(PpTerminalScopeContent, FinalBackingCallbacksDrainBeforeTerminalCoverageFinalizes) {
+    const auto joined = PlanPpTerminalScopeFinalizeOrder(true, true);
+    EXPECT_TRUE(joined.drain_draw_callbacks_before_terminal);
+    EXPECT_TRUE(joined.finalize_terminal);
+    EXPECT_FALSE(joined.drain_draw_callbacks_after_terminal);
+
+    const auto legacy = PlanPpTerminalScopeFinalizeOrder(false, true);
+    EXPECT_FALSE(legacy.drain_draw_callbacks_before_terminal);
+    EXPECT_TRUE(legacy.finalize_terminal);
+    EXPECT_TRUE(legacy.drain_draw_callbacks_after_terminal);
+
+    const auto present_owned = PlanPpTerminalScopeFinalizeOrder(true, false);
+    EXPECT_FALSE(present_owned.drain_draw_callbacks_before_terminal);
+    EXPECT_TRUE(present_owned.finalize_terminal);
+    EXPECT_FALSE(present_owned.drain_draw_callbacks_after_terminal);
+}
+
 TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSelection) {
     const auto missing = [](const char*) { return std::optional<std::string_view>{}; };
     EXPECT_FALSE(ResolvePpTerminalScopeRuntimeConfig(missing));
