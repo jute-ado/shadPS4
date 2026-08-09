@@ -472,10 +472,59 @@ TEST(PpSampledInput, SelectedInvalidFramesEmitExplicitLossWhileStartupIsSilent) 
     EXPECT_EQ(invalid_plan.loss.gap, 0u);
     EXPECT_EQ(invalid_plan.loss.invalidation, 1u);
 
+    FinalGuestSurfaceTilePlan mixed_plan{};
+    mixed_plan.status = FinalGuestSurfaceStatus::CapacityLoss;
+    mixed_plan.loss.unsupported_format = 1;
+    mixed_plan.loss.byte_capacity = 1;
+    mixed_plan =
+        ApplyPpSampledInputObservationStatus(mixed_plan, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(mixed_plan.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(mixed_plan.loss, (FinalGuestSurfaceLoss{.invalidation = 1}));
+
     const auto valid = PlanPpSampledInputObservation(
         {.in_window = true, .stamp_valid = true, .metadata_valid = true});
     EXPECT_TRUE(valid.emit);
     EXPECT_EQ(valid.status, FinalGuestSurfaceStatus::Complete);
+}
+
+TEST(PpSampledInput, BlankAndAcquireDropsRemainReportableGapObservations) {
+    FinalGuestSurfaceSampledInputFrameState state;
+    FinalGuestSurfaceSampledInputMetadata metadata{
+        .config_generation = 1,
+        .valid = true,
+    };
+    const auto valid = PlanPpSampledInputObservation(
+        {.in_window = true, .stamp_valid = true, .metadata_valid = true});
+    ASSERT_EQ(state.Assign(valid, {4000, 80'000'000, 1, metadata}),
+              FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(state.MarkPendingLoss(FinalGuestSurfaceStatus::GapLoss),
+              FinalGuestSurfaceStatus::GapLoss);
+    const auto blank = state.TakeForPresent(false);
+    EXPECT_TRUE(blank.emit);
+    EXPECT_EQ(blank.payload.sequence, 4000u);
+    EXPECT_EQ(blank.status, FinalGuestSurfaceStatus::GapLoss);
+
+    auto dropped_plan = PlanFinalGuestSurfaceTiles({
+        .width = 1280,
+        .height = 720,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSampledInput,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    dropped_plan = ApplyPpSampledInputObservationStatus(dropped_plan, blank.status);
+    EXPECT_EQ(dropped_plan.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(dropped_plan.loss, (FinalGuestSurfaceLoss{.gap = 1}));
 }
 
 TEST(PpSampledInput, PairedReducerUsesExactOutputAndClassifiesRawBoundaryPerOrdinal) {
