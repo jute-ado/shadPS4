@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/renderer_vulkan/attachment_feedback_loop_pipeline.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
@@ -13,6 +14,16 @@ namespace {
 
 using namespace Vulkan;
 using namespace Vulkan::HostPasses;
+
+TEST(AttachmentFeedbackLoopPipeline, DeclaresDynamicStateExactlyWhenTheFeatureIsEnabled) {
+    const auto enabled = PlanAttachmentFeedbackLoopPipeline(true);
+    EXPECT_TRUE(enabled.declare_dynamic_state);
+    EXPECT_FALSE(enabled.declare_static_color_feedback);
+
+    const auto disabled = PlanAttachmentFeedbackLoopPipeline(false);
+    EXPECT_FALSE(disabled.declare_dynamic_state);
+    EXPECT_FALSE(disabled.declare_static_color_feedback);
+}
 
 TEST(PpSourcePublication, ImageRefreshBranchesExposeTheirActualMutationOutcome) {
     const auto clean = VideoCore::PlanImageRefreshStart(false, 1);
