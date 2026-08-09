@@ -161,6 +161,16 @@ struct FinalGuestSurfaceTile {
     auto operator<=>(const FinalGuestSurfaceTile&) const = default;
 };
 
+struct FinalGuestSurfacePairedRegion {
+    u32 logical_ordinal{};
+    u32 buffer_offset{};
+    u32 byte_size{};
+    u32 width{};
+    u32 height{};
+
+    bool operator==(const FinalGuestSurfacePairedRegion&) const = default;
+};
+
 struct FinalGuestSurfaceTileLimits {
     u32 max_tiles{4096};
     u32 max_bytes{16u << 20};
@@ -193,6 +203,11 @@ struct FinalGuestSurfaceTilePlan {
     u32 paired_sampled_bytes{};
     u32 paired_sampled_row_bytes{};
     FinalGuestSurfaceFormat paired_sampled_format{FinalGuestSurfaceFormat::Unsupported};
+    u32 paired_backing_offset{};
+    u32 paired_backing_bytes{};
+    u32 paired_backing_region_count{};
+    std::array<FinalGuestSurfacePairedRegion, 32> paired_backing_regions{};
+    FinalGuestSurfaceFormat paired_backing_format{FinalGuestSurfaceFormat::Unsupported};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceLoss loss{};
 
@@ -1063,10 +1078,16 @@ struct FinalGuestSurfaceCalibratedReport {
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> pre_or_at_sample_ordinals{};
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> post_sample_ordinals{};
     std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> ambiguous_boundary_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> backing_aba_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> backing_stable_ordinals{};
+    std::array<u32, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> backing_ambiguous_ordinals{};
     u32 matched_ordinal_count{};
     u32 pre_or_at_sample_ordinal_count{};
     u32 post_sample_ordinal_count{};
     u32 ambiguous_boundary_ordinal_count{};
+    u32 backing_aba_ordinal_count{};
+    u32 backing_stable_ordinal_count{};
+    u32 backing_ambiguous_ordinal_count{};
     u32 selector_count{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
     FinalGuestSurfaceCalibratedLoss loss{};
@@ -1114,14 +1135,20 @@ struct FinalGuestSurfaceCalibratedCoverage {
         format_ordinals(report.post_sample_ordinals, report.post_sample_ordinal_count);
     const auto ambiguous = format_ordinals(report.ambiguous_boundary_ordinals,
                                            report.ambiguous_boundary_ordinal_count);
+    const auto backing_aba =
+        format_ordinals(report.backing_aba_ordinals, report.backing_aba_ordinal_count);
+    const auto backing_stable =
+        format_ordinals(report.backing_stable_ordinals, report.backing_stable_ordinal_count);
+    const auto backing_ambiguous =
+        format_ordinals(report.backing_ambiguous_ordinals, report.backing_ambiguous_ordinal_count);
     return "FGSCT q=" + std::to_string(report.request_ordinal) +
            " abc=" + std::to_string(report.a_sequence) + '/' + std::to_string(report.b_sequence) +
            '/' + std::to_string(report.c_sequence) +
            " t=" + std::to_string(report.a_process_time_us) + '/' +
            std::to_string(report.b_process_time_us) + '/' +
            std::to_string(report.c_process_time_us) + " r=" + ordinals + " pre=" + pre +
-           " post=" + post + " amb=" + ambiguous +
-           " n=" + std::to_string(report.matched_ordinal_count) + '/' +
+           " post=" + post + " amb=" + ambiguous + " ba=" + backing_aba + " bs=" + backing_stable +
+           " bx=" + backing_ambiguous + " n=" + std::to_string(report.matched_ordinal_count) + '/' +
            std::to_string(report.selector_count) + " ex=" + std::to_string(report.exact_aba) +
            " v=" + std::to_string(report.stable_transport) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
@@ -1308,6 +1335,19 @@ public:
                             &FinalGuestSurfaceCalibratedLoss::transport);
             }
         }
+        if (plan.paired_backing_format != FinalGuestSurfaceFormat::Unsupported) {
+            if (plan.paired_backing_region_count != runtime_selector.count) {
+                return fail(FinalGuestSurfaceStatus::Unsupported,
+                            &FinalGuestSurfaceCalibratedLoss::selector);
+            }
+            for (u32 selected = 0; selected < runtime_selector.count; ++selected) {
+                if (plan.paired_backing_regions[selected].logical_ordinal !=
+                    runtime_selector.ordinals[selected]) {
+                    return fail(FinalGuestSurfaceStatus::Unsupported,
+                                &FinalGuestSurfaceCalibratedLoss::selector);
+                }
+            }
+        }
         report.stable_transport = true;
         for (u32 selected = 0; selected < runtime_selector.count; ++selected) {
             const u32 index = runtime_selector.ordinals[selected] - 1;
@@ -1334,6 +1374,22 @@ public:
                     } else {
                         report.ambiguous_boundary_ordinals
                             [report.ambiguous_boundary_ordinal_count++] = index + 1;
+                    }
+                }
+                if (plan.paired_backing_format != FinalGuestSurfaceFormat::Unsupported) {
+                    const bool backing_returned = EqualPairedBackingRegion(
+                        *endpoints[0], index + 1, plan, endpoints[2]->bytes);
+                    const bool backing_departed = !EqualPairedBackingRegion(
+                        *endpoints[0], index + 1, plan, endpoints[1]->bytes);
+                    if (backing_returned && backing_departed) {
+                        report.backing_aba_ordinals[report.backing_aba_ordinal_count++] = index + 1;
+                    } else if (backing_returned) {
+                        report.backing_stable_ordinals[report.backing_stable_ordinal_count++] =
+                            index + 1;
+                    } else {
+                        report
+                            .backing_ambiguous_ordinals[report.backing_ambiguous_ordinal_count++] =
+                            index + 1;
                     }
                 }
             }
@@ -1527,6 +1583,35 @@ private:
             }
         }
         return true;
+    }
+
+    [[nodiscard]] static bool EqualPairedBackingRegion(const Observation& observation,
+                                                       u32 logical_ordinal,
+                                                       const FinalGuestSurfaceTilePlan& plan,
+                                                       std::span<const std::byte> bytes) noexcept {
+        if (!SameLayout(observation, plan) ||
+            (plan.paired_backing_format != FinalGuestSurfaceFormat::Rgba8 &&
+             plan.paired_backing_format != FinalGuestSurfaceFormat::Bgra8) ||
+            observation.bytes.size() != bytes.size()) {
+            return false;
+        }
+        const auto region = std::ranges::find(plan.paired_backing_regions, logical_ordinal,
+                                              &FinalGuestSurfacePairedRegion::logical_ordinal);
+        if (region == plan.paired_backing_regions.begin() + plan.paired_backing_region_count ||
+            region == plan.paired_backing_regions.end() || region->byte_size == 0 ||
+            region->byte_size != static_cast<u64>(region->width) * region->height * 4) {
+            return false;
+        }
+        const u64 start = static_cast<u64>(plan.paired_backing_offset) + region->buffer_offset;
+        const u64 end = start + region->byte_size;
+        if (end > bytes.size() ||
+            end > static_cast<u64>(plan.paired_backing_offset) + plan.paired_backing_bytes) {
+            return false;
+        }
+        return EqualVisibleBytes(plan.paired_backing_format,
+                                 std::span<const std::byte>{observation.bytes}.subspan(
+                                     static_cast<size_t>(start), region->byte_size),
+                                 bytes.subspan(static_cast<size_t>(start), region->byte_size));
     }
 
     [[nodiscard]] static u32 ChangedTiles(const Observation& previous,

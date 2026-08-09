@@ -126,6 +126,11 @@ struct PpSourceBackingFootprintPlan {
         return reject(FinalGuestSurfaceStatus::InvalidationLoss,
                       &FinalGuestSurfaceLoss::invalidation);
     }
+    if (descriptor.bound_base_mip != 0 || descriptor.bound_base_layer != 0) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      descriptor.bound_base_mip != 0 ? &FinalGuestSurfaceLoss::unsupported_mip
+                                                     : &FinalGuestSurfaceLoss::unsupported_layer);
+    }
     if (!descriptor.logical_full_fit || !descriptor.logical_top_left ||
         !descriptor.logical_no_y_flip ||
         static_cast<u64>(descriptor.source_width) * descriptor.logical_height !=
@@ -230,6 +235,44 @@ struct PpSourceBackingFootprintPlan {
     plan.pp_draw_precedes_copy = true;
     plan.restores_shader_read = true;
     plan.callback_payload_is_scalar_only = true;
+    return plan;
+}
+
+[[nodiscard]] inline FinalGuestSurfaceTilePlan MakePpSampledInputSourceBackingTilePlan(
+    FinalGuestSurfaceTilePlan plan, const PpSourceBackingFootprintPlan& backing, u64 slot_bytes,
+    u64 alignment) noexcept {
+    if (plan.status != FinalGuestSurfaceStatus::Complete ||
+        backing.status != FinalGuestSurfaceStatus::Complete || backing.region_count == 0 ||
+        backing.region_count > plan.paired_backing_regions.size() || alignment == 0) {
+        plan.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        plan.loss.invalidation = 1;
+        return plan;
+    }
+    const u64 backing_offset = AlignPpSourceBackingOffset(plan.sample_bytes, alignment);
+    if (backing_offset == std::numeric_limits<u64>::max() ||
+        backing_offset > std::numeric_limits<u32>::max() ||
+        backing.buffer_bytes > std::numeric_limits<u32>::max() ||
+        backing_offset + backing.buffer_bytes > slot_bytes ||
+        backing_offset + backing.buffer_bytes > std::numeric_limits<u32>::max()) {
+        plan.status = FinalGuestSurfaceStatus::CapacityLoss;
+        plan.loss.byte_capacity = 1;
+        return plan;
+    }
+    plan.paired_backing_offset = static_cast<u32>(backing_offset);
+    plan.paired_backing_bytes = backing.buffer_bytes;
+    plan.paired_backing_region_count = backing.region_count;
+    plan.paired_backing_format = backing.format;
+    for (u32 index = 0; index < backing.region_count; ++index) {
+        plan.paired_backing_regions[index] = {
+            .logical_ordinal = backing.regions[index].logical_ordinal,
+            .buffer_offset = backing.regions[index].buffer_offset,
+            .byte_size = backing.regions[index].byte_size,
+            .width = backing.regions[index].width,
+            .height = backing.regions[index].height,
+        };
+    }
+    plan.sample_bytes = static_cast<u32>(backing_offset + backing.buffer_bytes);
+    ++plan.copy_region_count;
     return plan;
 }
 
