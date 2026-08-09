@@ -213,6 +213,8 @@ public:
             return;
         }
         if (action == PpTerminalScopePreDrawAction::CaptureBeforeFirst) {
+            entry->predecessor = ClassifyPpTerminalScopePredecessor(
+                image.PeekDiagnosticProducer(), image.ObserveDiagnosticColorScope());
             RecordPlane(*entry, image, state, attachment_index, rendering_serial, 4);
         }
     }
@@ -287,6 +289,7 @@ public:
                 .lineage_status = lineage_entry ? entry->lineage.Status()
                                                 : FinalGuestSurfaceStatus::AlreadyConsumed,
                 .lineage_loss = lineage_entry ? entry->lineage.Loss() : FinalGuestSurfaceLoss{},
+                .predecessor = entry->predecessor,
                 .slot = entry->slot,
                 .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
             };
@@ -413,6 +416,7 @@ private:
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u32 recorded_plane_mask{};
         PpTerminalScopePrivateLineage lineage{};
+        PpTerminalScopePredecessor predecessor{};
         VideoCore::ImageColorScopePrivateLink flip_alias{};
         bool discovered{};
         bool flip_alias_ready{};
@@ -432,6 +436,7 @@ private:
         u32 lineage_hops{};
         FinalGuestSurfaceStatus lineage_status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss lineage_loss{};
+        PpTerminalScopePredecessor predecessor{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -537,6 +542,7 @@ private:
         entry.flip_alias = {};
         entry.flip_alias_ready = false;
         entry.lineage.Reset();
+        entry.predecessor = {};
         const u64 generation = target.EnsureDiagnosticBackingGeneration();
         if (discovered && !entry.lineage.Start(link, generation)) {
             entry.status = entry.lineage.Status();
@@ -731,13 +737,14 @@ private:
                 pending.status == FinalGuestSurfaceStatus::Complete && !pending.loss.Any();
             loss_frames +=
                 pending.status != FinalGuestSurfaceStatus::Complete || pending.loss.Any();
-            LOG_INFO(Render, "{}",
+            LOG_INFO(Render, "{} {}",
                      FormatPpTerminalScopeContentReport(MakePpTerminalScopeContentReport(
                          pending.sequence, pending.status, pending.loss, pending.draw_count,
                          pending.layout.region_count, pending.consumer_observations,
                          pending.consumer_phase_mask, pending.consumer_shape_matches,
                          pending.consumer_frozen, pending.layout.plane_mask, pending.lineage_hops,
-                         pending.lineage_status, pending.lineage_loss)));
+                         pending.lineage_status, pending.lineage_loss)),
+                     FormatPpTerminalScopePredecessor(pending.predecessor));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",

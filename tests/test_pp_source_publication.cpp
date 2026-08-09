@@ -381,11 +381,10 @@ TEST(PpSourceProducer, PeekingAtThePreviousProducerDoesNotConsumeFreshness) {
     VideoCore::ImageProducerState state;
     state.Mark(VideoCore::ImageProducerClass::ColorAttachment);
 
-    EXPECT_EQ(state.Peek(),
-              (VideoCore::ImageProducerObservation{
-                  .classification = VideoCore::ImageProducerClass::ColorAttachment,
-                  .produced_since_last_observation = true,
-              }));
+    EXPECT_EQ(state.Peek(), (VideoCore::ImageProducerObservation{
+                                .classification = VideoCore::ImageProducerClass::ColorAttachment,
+                                .produced_since_last_observation = true,
+                            }));
     EXPECT_TRUE(state.Peek().produced_since_last_observation);
     EXPECT_TRUE(state.Observe().produced_since_last_observation)
         << "A diagnostic predecessor snapshot must not consume the Present observer";
@@ -2349,8 +2348,7 @@ TEST(PpTerminalScopeContent, PreviousProducerClassificationFailsClosedAndStaysPr
         {.classification = VideoCore::ImageProducerClass::Transfer,
          .produced_since_last_observation = true},
         {}));
-    EXPECT_EQ(line,
-              "pc=3 pf=1 pd=0 pk=0 pi=0 pe=0 pn=0 pr=0 pw=0 pb=0 pv=0 px=0 pt=0 pl=0");
+    EXPECT_EQ(line, "pc=3 pf=1 pd=0 pk=0 pi=0 pe=0 pn=0 pr=0 pw=0 pb=0 pv=0 px=0 pt=0 pl=0");
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);

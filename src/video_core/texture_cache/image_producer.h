@@ -44,6 +44,13 @@ public:
         return {.classification = last_class, .produced_since_last_observation = produced};
     }
 
+    [[nodiscard]] ImageProducerObservation Peek() const noexcept {
+        return {
+            .classification = last_class,
+            .produced_since_last_observation = producer_epoch != observed_epoch,
+        };
+    }
+
     void Reset() noexcept {
         last_class = ImageProducerClass::Unknown;
         producer_epoch = 0;

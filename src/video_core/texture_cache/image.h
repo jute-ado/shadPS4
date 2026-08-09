@@ -165,6 +165,10 @@ struct Image {
         return diagnostic_producer.ObserveSampledInput();
     }
 
+    [[nodiscard]] ImageProducerObservation PeekDiagnosticProducer() const noexcept {
+        return diagnostic_producer.Peek();
+    }
+
     void BeginDiagnosticColorScope(u64 scope_serial, bool clear_at_begin) noexcept {
         if (IsPpSourceProducerTrackingEnabled()) {
             diagnostic_color_scope.BeginScope(scope_serial, clear_at_begin);

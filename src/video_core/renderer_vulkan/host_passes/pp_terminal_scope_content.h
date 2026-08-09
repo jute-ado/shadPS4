@@ -166,6 +166,70 @@ enum PpTerminalScopeConsumerAction : u8 {
     CaptureConsumer,
 };
 
+struct PpTerminalScopePredecessor {
+    VideoCore::ImageProducerClass producer{VideoCore::ImageProducerClass::Unknown};
+    bool fresh{};
+    u32 draw_count{};
+    VideoCore::ImageColorScopeDrawKind last_draw{VideoCore::ImageColorScopeDrawKind::Unknown};
+    bool indexed{};
+    u32 element_count{};
+    u32 instance_count{};
+    u32 sampled_images{};
+    u32 storage_writes{};
+    bool clear_at_begin{};
+    bool scope_valid{};
+    bool scope_overflow{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+
+    bool operator==(const PpTerminalScopePredecessor&) const = default;
+};
+
+[[nodiscard]] constexpr PpTerminalScopePredecessor ClassifyPpTerminalScopePredecessor(
+    VideoCore::ImageProducerObservation producer,
+    const VideoCore::ImageColorScopeProducerObservation& scope) noexcept {
+    PpTerminalScopePredecessor result{
+        .producer = producer.classification,
+        .fresh = producer.produced_since_last_observation,
+    };
+    if (producer.classification == VideoCore::ImageProducerClass::Unknown) {
+        result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        result.loss.invalidation = 1;
+        return result;
+    }
+    if (producer.classification != VideoCore::ImageProducerClass::ColorAttachment) {
+        result.status = FinalGuestSurfaceStatus::Complete;
+        return result;
+    }
+    result.scope_valid = scope.valid;
+    result.scope_overflow = scope.overflow || scope.draw_summaries_truncated;
+    if (result.scope_overflow) {
+        result.status = FinalGuestSurfaceStatus::CapacityLoss;
+        result.loss.tile_capacity = 1;
+        return result;
+    }
+    if (!scope.valid) {
+        result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        result.loss.invalidation = 1;
+        return result;
+    }
+    if (scope.draw_count == 0 || scope.last_draw == VideoCore::ImageColorScopeDrawKind::Unknown) {
+        result.status = FinalGuestSurfaceStatus::GapLoss;
+        result.loss.gap = 1;
+        return result;
+    }
+    result.draw_count = scope.draw_count;
+    result.last_draw = scope.last_draw;
+    result.indexed = scope.indexed;
+    result.element_count = scope.element_count;
+    result.instance_count = scope.instance_count;
+    result.sampled_images = scope.sampled_images;
+    result.storage_writes = scope.storage_writes;
+    result.clear_at_begin = scope.clear_at_begin;
+    result.status = FinalGuestSurfaceStatus::Complete;
+    return result;
+}
+
 struct PpTerminalScopeRenderingSplitPlan {
     u64 serial{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -1618,6 +1682,24 @@ private:
         result += std::to_string(ordinal);
     }
     return result;
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopePredecessor(
+    const PpTerminalScopePredecessor& predecessor) {
+    return "pc=" + std::to_string(static_cast<u32>(predecessor.producer)) +
+           " pf=" + std::to_string(predecessor.fresh) +
+           " pd=" + std::to_string(predecessor.draw_count) +
+           " pk=" + std::to_string(static_cast<u32>(predecessor.last_draw)) +
+           " pi=" + std::to_string(predecessor.indexed) +
+           " pe=" + std::to_string(predecessor.element_count) +
+           " pn=" + std::to_string(predecessor.instance_count) +
+           " pr=" + std::to_string(predecessor.sampled_images) +
+           " pw=" + std::to_string(predecessor.storage_writes) +
+           " pb=" + std::to_string(predecessor.clear_at_begin) +
+           " pv=" + std::to_string(predecessor.scope_valid) +
+           " px=" + std::to_string(predecessor.scope_overflow) +
+           " pt=" + std::to_string(static_cast<u32>(predecessor.status)) +
+           " pl=" + std::to_string(FinalGuestSurfaceLossMask(predecessor.loss, 0));
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedReport(
