@@ -1752,9 +1752,16 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 }
             } else if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
                 ++diagnostic_sampled_bindings;
-                if (std::ranges::find(diagnostic_sampled_images, image_id) ==
-                    diagnostic_sampled_images.end()) {
-                    diagnostic_sampled_images.emplace_back(image_id);
+                const auto sampled = std::ranges::find_if(
+                    diagnostic_sampled_images,
+                    [image_id](const auto& candidate) { return candidate.id == image_id; });
+                if (sampled == diagnostic_sampled_images.end()) {
+                    diagnostic_sampled_images.emplace_back(DiagnosticSampledImage{
+                        .id = image_id,
+                        .view = image_view.info,
+                    });
+                } else if (sampled->view != image_view.info) {
+                    sampled->view_conflict = true;
                 }
             }
 
@@ -1814,10 +1821,32 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
     if (classify_inputs &&
         diagnostic_sampled_images.size() <= PpTerminalScopeSampledInputs::MaxInputs) {
         for (u32 index = 0; index < diagnostic_sampled_images.size(); ++index) {
-            const auto& sampled_image = texture_cache.GetImage(diagnostic_sampled_images[index]);
+            const auto& sampled = diagnostic_sampled_images[index];
+            const auto& sampled_image = texture_cache.GetImage(sampled.id);
             sampled_input_candidates[index].producer =
                 ClassifyPpTerminalScopePredecessor(sampled_image.PeekDiagnosticProducer(),
                                                    sampled_image.ObserveDiagnosticColorScope());
+            const auto& range = sampled.view.range;
+            const auto mip_dimension = [](u32 dimension, u32 level) {
+                return level < 32 ? std::max(1u, dimension >> level) : 0u;
+            };
+            const bool type_2d = sampled.view.type == AmdGpu::ImageType::Color2D ||
+                                 sampled.view.type == AmdGpu::ImageType::Color2DArray;
+            sampled_input_candidates[index].view = ClassifyPpTerminalScopeSampledInputView({
+                .width = mip_dimension(sampled_image.info.size.width, range.base.level),
+                .height = mip_dimension(sampled_image.info.size.height, range.base.level),
+                .format = TerminalScopeFormat(sampled.view.format),
+                .samples = sampled_image.backing ? sampled_image.backing->num_samples : 0,
+                .base_mip = range.base.level,
+                .mip_count = range.extent.levels,
+                .base_layer = range.base.layer,
+                .layer_count = range.extent.layers,
+                .color = sampled_image.aspect_mask == vk::ImageAspectFlagBits::eColor,
+                .type_2d = type_2d,
+                .uniform_state =
+                    sampled_image.backing && sampled_image.backing->subresource_states.empty(),
+                .view_conflict = sampled.view_conflict,
+            });
         }
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
@@ -1834,7 +1863,8 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
             } else {
                 auto candidates = sampled_input_candidates;
                 for (u32 input = 0; input < diagnostic_sampled_images.size(); ++input) {
-                    candidates[input].aliases_output = diagnostic_sampled_images[input] == image_id;
+                    candidates[input].aliases_output =
+                        diagnostic_sampled_images[input].id == image_id;
                 }
                 sampled_inputs = ClassifyPpTerminalScopeSampledInputs(
                     draw.sampled_images,
@@ -1868,14 +1898,14 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
                 sole_output_attachment_index = index;
             }
             input_alias |= diagnostic_sampled_images.size() == 1 &&
-                           diagnostic_sampled_images.front() == image_id;
+                           diagnostic_sampled_images.front().id == image_id;
         }
     }
     if (writes_color_output && diagnostic_sampled_images.size() == 1) {
-        auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front());
+        auto& input_image = texture_cache.GetImage(diagnostic_sampled_images.front().id);
         sampled_input_image = &input_image;
         draw.sampled_input_image = {
-            .id = diagnostic_sampled_images.front(),
+            .id = diagnostic_sampled_images.front().id,
             .uid = input_image.image_uid,
         };
         const auto input = input_image.ObserveDiagnosticSampledInputProducer();

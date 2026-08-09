@@ -161,7 +161,12 @@ private:
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> storage_written_images;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES>
+    struct DiagnosticSampledImage {
+        VideoCore::ImageId id{};
+        VideoCore::ImageViewInfo view{};
+        bool view_conflict{};
+    };
+    boost::container::static_vector<DiagnosticSampledImage, Shader::NUM_IMAGES>
         diagnostic_sampled_images;
     u32 diagnostic_sampled_bindings{};
     u32 diagnostic_storage_writes{};

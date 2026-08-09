@@ -240,8 +240,100 @@ struct PpTerminalScopePredecessor {
     return result;
 }
 
+struct PpTerminalScopeSampledInputViewDescriptor {
+    u32 width{};
+    u32 height{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    u32 samples{};
+    u32 base_mip{};
+    u32 mip_count{};
+    u32 base_layer{};
+    u32 layer_count{};
+    bool color{};
+    bool type_2d{true};
+    bool uniform_state{};
+    bool view_conflict{};
+};
+
+struct PpTerminalScopeSampledInputView {
+    u32 width{};
+    u32 height{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    u32 samples{};
+    u32 base_mip{};
+    u32 mip_count{};
+    u32 base_layer{};
+    u32 layer_count{};
+    bool color{};
+    bool uniform_state{};
+    bool view_conflict{};
+    bool copy_eligible{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeSampledInputView ClassifyPpTerminalScopeSampledInputView(
+    const PpTerminalScopeSampledInputViewDescriptor& descriptor) noexcept {
+    PpTerminalScopeSampledInputView result{
+        .width = descriptor.width,
+        .height = descriptor.height,
+        .format = descriptor.format,
+        .samples = descriptor.samples,
+        .base_mip = descriptor.base_mip,
+        .mip_count = descriptor.mip_count,
+        .base_layer = descriptor.base_layer,
+        .layer_count = descriptor.layer_count,
+        .color = descriptor.color,
+        .uniform_state = descriptor.uniform_state,
+        .view_conflict = descriptor.view_conflict,
+    };
+    const auto reject = [&result](FinalGuestSurfaceStatus status,
+                                  u32 FinalGuestSurfaceLoss::* member) {
+        result.status = status;
+        result.loss.*member = 1;
+        return result;
+    };
+    if (descriptor.width == 0 || descriptor.height == 0) {
+        return reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                      &FinalGuestSurfaceLoss::invalid_extent);
+    }
+    if (!descriptor.type_2d) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_type);
+    }
+    if (!descriptor.color) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_aspect);
+    }
+    if (descriptor.format != FinalGuestSurfaceFormat::Rgba8 &&
+        descriptor.format != FinalGuestSurfaceFormat::Bgra8) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_format);
+    }
+    if (descriptor.samples != 1) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_samples);
+    }
+    if (descriptor.mip_count != 1) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_mip);
+    }
+    if (descriptor.layer_count != 1 || descriptor.base_layer != 0) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_layer);
+    }
+    if (!descriptor.uniform_state || descriptor.view_conflict) {
+        return reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                      &FinalGuestSurfaceLoss::invalidation);
+    }
+    result.status = FinalGuestSurfaceStatus::Complete;
+    result.copy_eligible = true;
+    return result;
+}
+
 struct PpTerminalScopeSampledInput {
     PpTerminalScopePredecessor producer{};
+    PpTerminalScopeSampledInputView view{};
     bool aliases_output{};
 };
 
@@ -1968,6 +2060,16 @@ private:
                   std::to_string(static_cast<u32>(producer.status)) + "/" +
                   std::to_string(FinalGuestSurfaceLossMask(producer.loss, 0)) + "/" +
                   std::to_string(input.aliases_output);
+        const auto& view = input.view;
+        result += " v" + std::to_string(index) + "=" + std::to_string(view.width) + "/" +
+                  std::to_string(view.height) + "/" +
+                  std::to_string(static_cast<u32>(view.format)) + "/" +
+                  std::to_string(view.samples) + "/" + std::to_string(view.base_mip) + "/" +
+                  std::to_string(view.mip_count) + "/" + std::to_string(view.base_layer) + "/" +
+                  std::to_string(view.layer_count) + "/" + std::to_string(view.color) + "/" +
+                  std::to_string(view.uniform_state) + "/" + std::to_string(view.view_conflict) +
+                  "/" + std::to_string(static_cast<u32>(view.status)) + "/" +
+                  std::to_string(FinalGuestSurfaceLossMask(view.loss, 0));
     }
     return result;
 }

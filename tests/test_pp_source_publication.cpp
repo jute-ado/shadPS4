@@ -2485,8 +2485,8 @@ TEST(PpTerminalScopeContent, SampledInputViewPreservesExactBoundCopyEligibility)
                      .status = FinalGuestSurfaceStatus::Complete},
         .view = view,
     };
-    const auto classified =
-        ClassifyPpTerminalScopeSampledInputs(1, std::span<const PpTerminalScopeSampledInput>{&input, 1});
+    const auto classified = ClassifyPpTerminalScopeSampledInputs(
+        1, std::span<const PpTerminalScopeSampledInput>{&input, 1});
     ASSERT_EQ(classified.status, FinalGuestSurfaceStatus::Complete);
     const auto line = FormatPpTerminalScopeSampledInputs(classified);
     EXPECT_NE(line.find(" v0=1920/1080/2/1/0/1/0/1/1/1/0/0/0"), std::string::npos);
