@@ -379,6 +379,207 @@ struct PpTerminalScopeSampledInputs {
     return result;
 }
 
+struct PpTerminalScopeSampledInputContentDescriptor {
+    bool enabled{};
+    u32 logical_width{};
+    u32 logical_height{};
+    u32 base_offset{};
+    FinalGuestSurfaceWatchOrdinals selector{};
+    std::span<const PpTerminalScopeSampledInputView> views{};
+    u32 buffer_alignment{};
+    u32 max_regions{};
+    u32 max_bytes{};
+};
+
+struct PpTerminalScopeSampledInputContentPlane {
+    static constexpr u32 MaxRegions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals;
+
+    std::array<PpSourceBackingRegion, MaxRegions> regions{};
+    u32 region_count{};
+    u32 plane_offset{};
+    u32 plane_bytes{};
+    u32 base_mip{};
+    u32 base_layer{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+struct PpTerminalScopeSampledInputContentPlan {
+    static constexpr u32 MaxInputs = PpTerminalScopeSampledInputs::MaxInputs;
+
+    std::array<PpTerminalScopeSampledInputContentPlane, MaxInputs> inputs{};
+    u32 input_count{};
+    u32 capture_mask{};
+    u32 unavailable_mask{};
+    u32 copy_region_count{};
+    u32 total_bytes{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool copy{};
+};
+
+[[nodiscard]] inline PpTerminalScopeSampledInputContentPlan PlanPpTerminalScopeSampledInputContent(
+    const PpTerminalScopeSampledInputContentDescriptor& descriptor) noexcept {
+    PpTerminalScopeSampledInputContentPlan result{};
+    if (!descriptor.enabled) {
+        return result;
+    }
+    const auto reject = [](FinalGuestSurfaceStatus status, u32 FinalGuestSurfaceLoss::* member) {
+        PpTerminalScopeSampledInputContentPlan rejected{};
+        rejected.status = status;
+        rejected.loss.*member = 1;
+        return rejected;
+    };
+    if (descriptor.views.empty() ||
+        descriptor.views.size() > PpTerminalScopeSampledInputContentPlan::MaxInputs ||
+        descriptor.logical_width == 0 || descriptor.logical_height == 0 ||
+        descriptor.buffer_alignment == 0) {
+        return reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                      &FinalGuestSurfaceLoss::invalidation);
+    }
+    const u32 window_width =
+        std::min(descriptor.logical_width, FinalGuestSurfaceTilePlan::WindowExtent);
+    const u32 window_height =
+        std::min(descriptor.logical_height, FinalGuestSurfaceTilePlan::WindowExtent);
+    const u32 columns =
+        descriptor.logical_width <= window_width
+            ? 1
+            : (descriptor.logical_width - window_width) / FinalGuestSurfaceTilePlan::WindowStride +
+                  1;
+    const u32 rows = descriptor.logical_height <= window_height
+                         ? 1
+                         : (descriptor.logical_height - window_height) /
+                                   FinalGuestSurfaceTilePlan::WindowStride +
+                               1;
+    const u64 window_count = static_cast<u64>(columns) * rows;
+    const auto selector = ValidateFinalGuestSurfaceWatchOrdinals(
+        descriptor.selector,
+        window_count <= std::numeric_limits<u32>::max() ? static_cast<u32>(window_count) : 0u);
+    if (selector.status != FinalGuestSurfaceStatus::Complete || selector.count == 0) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::ordinal_capacity);
+    }
+    u32 eligible_count{};
+    for (const auto& view : descriptor.views) {
+        eligible_count += view.copy_eligible && view.status == FinalGuestSurfaceStatus::Complete &&
+                          !view.loss.Any();
+    }
+    if (eligible_count == 0) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::unsupported_format);
+    }
+    if (descriptor.max_regions == 0 ||
+        static_cast<u64>(eligible_count) * selector.count > descriptor.max_regions) {
+        return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::tile_capacity);
+    }
+
+    result.input_count = static_cast<u32>(descriptor.views.size());
+    u64 next_offset = descriptor.base_offset;
+    for (u32 input_index = 0; input_index < result.input_count; ++input_index) {
+        const auto& view = descriptor.views[input_index];
+        auto& input = result.inputs[input_index];
+        input.base_mip = view.base_mip;
+        input.base_layer = view.base_layer;
+        input.format = view.format;
+        if (!view.copy_eligible || view.status != FinalGuestSurfaceStatus::Complete ||
+            view.loss.Any()) {
+            input.status = view.status;
+            input.loss = view.loss;
+            result.unavailable_mask |= 1u << input_index;
+            continue;
+        }
+        if (static_cast<u64>(view.width) * descriptor.logical_height !=
+            static_cast<u64>(view.height) * descriptor.logical_width) {
+            input.status = FinalGuestSurfaceStatus::Unsupported;
+            input.loss.logical_mapping = 1;
+            result.unavailable_mask |= 1u << input_index;
+            continue;
+        }
+        next_offset = AlignPpSourceBackingOffset(next_offset, descriptor.buffer_alignment);
+        if (next_offset == std::numeric_limits<u64>::max() ||
+            next_offset > std::numeric_limits<u32>::max()) {
+            return reject(FinalGuestSurfaceStatus::CapacityLoss,
+                          &FinalGuestSurfaceLoss::byte_capacity);
+        }
+        input.plane_offset = static_cast<u32>(next_offset);
+        u64 local_offset{};
+        for (u32 region_index = 0; region_index < selector.count; ++region_index) {
+            const u32 zero_based = selector.ordinals[region_index] - 1;
+            const u32 column = zero_based % columns;
+            const u32 row = zero_based / columns;
+            const u32 logical_x = column * FinalGuestSurfaceTilePlan::WindowStride;
+            const u32 logical_y = row * FinalGuestSurfaceTilePlan::WindowStride;
+            const u32 logical_end_x = logical_x + window_width;
+            const u32 logical_end_y = logical_y + window_height;
+            const auto maps_exactly = [](u32 coordinate, u32 source_extent, u32 logical_extent) {
+                return static_cast<u64>(coordinate) * source_extent % logical_extent == 0;
+            };
+            if (!maps_exactly(logical_x, view.width, descriptor.logical_width) ||
+                !maps_exactly(logical_end_x, view.width, descriptor.logical_width) ||
+                !maps_exactly(logical_y, view.height, descriptor.logical_height) ||
+                !maps_exactly(logical_end_y, view.height, descriptor.logical_height)) {
+                input = {
+                    .base_mip = view.base_mip,
+                    .base_layer = view.base_layer,
+                    .format = view.format,
+                    .status = FinalGuestSurfaceStatus::Unsupported,
+                    .loss = {.logical_mapping = 1},
+                };
+                result.unavailable_mask |= 1u << input_index;
+                break;
+            }
+            const u32 x = static_cast<u32>(static_cast<u64>(logical_x) * view.width /
+                                           descriptor.logical_width);
+            const u32 y = static_cast<u32>(static_cast<u64>(logical_y) * view.height /
+                                           descriptor.logical_height);
+            const u32 end_x = static_cast<u32>(static_cast<u64>(logical_end_x) * view.width /
+                                               descriptor.logical_width);
+            const u32 end_y = static_cast<u32>(static_cast<u64>(logical_end_y) * view.height /
+                                               descriptor.logical_height);
+            local_offset = AlignPpSourceBackingOffset(local_offset, descriptor.buffer_alignment);
+            const u64 byte_size = static_cast<u64>(end_x - x) * (end_y - y) * 4;
+            if (local_offset == std::numeric_limits<u64>::max() ||
+                local_offset + byte_size > std::numeric_limits<u32>::max()) {
+                return reject(FinalGuestSurfaceStatus::CapacityLoss,
+                              &FinalGuestSurfaceLoss::byte_capacity);
+            }
+            input.regions[region_index] = {
+                .logical_ordinal = selector.ordinals[region_index],
+                .x = x,
+                .y = y,
+                .width = end_x - x,
+                .height = end_y - y,
+                .buffer_offset = static_cast<u32>(local_offset),
+                .byte_size = static_cast<u32>(byte_size),
+            };
+            local_offset += byte_size;
+        }
+        if (input.status == FinalGuestSurfaceStatus::Unsupported) {
+            continue;
+        }
+        if (next_offset + local_offset > descriptor.max_bytes ||
+            next_offset + local_offset > std::numeric_limits<u32>::max()) {
+            return reject(FinalGuestSurfaceStatus::CapacityLoss,
+                          &FinalGuestSurfaceLoss::byte_capacity);
+        }
+        input.region_count = selector.count;
+        input.plane_bytes = static_cast<u32>(local_offset);
+        input.status = FinalGuestSurfaceStatus::Complete;
+        result.capture_mask |= 1u << input_index;
+        result.copy_region_count += selector.count;
+        next_offset += local_offset;
+    }
+    if (result.capture_mask == 0) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::logical_mapping);
+    }
+    result.total_bytes = static_cast<u32>(next_offset);
+    result.status = FinalGuestSurfaceStatus::Complete;
+    result.copy = true;
+    return result;
+}
+
 struct PpTerminalScopeRenderingSplitPlan {
     u64 serial{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
