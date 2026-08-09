@@ -119,6 +119,7 @@ public:
                 .layout = MakeHistoryLayout(entry->plan),
                 .status = take.status,
                 .loss = take.loss,
+                .draw_count = take.draw_count,
                 .slot = entry->slot,
                 .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
             };
@@ -222,6 +223,7 @@ private:
         PpTerminalScopeContentHistoryLayout layout{};
         FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss loss{};
+        u32 draw_count{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -422,15 +424,10 @@ private:
                 pending.status == FinalGuestSurfaceStatus::Complete && !pending.loss.Any();
             loss_frames +=
                 pending.status != FinalGuestSurfaceStatus::Complete || pending.loss.Any();
-            LOG_INFO(
-                Render, "{}",
-                FormatPpTerminalScopeContentReport({
-                    .sequence = pending.sequence,
-                    .status = pending.status,
-                    .loss = pending.loss,
-                    .draw_count = pending.status == FinalGuestSurfaceStatus::Complete ? 2u : 0u,
-                    .region_count = pending.layout.region_count,
-                }));
+            LOG_INFO(Render, "{}",
+                     FormatPpTerminalScopeContentReport(MakePpTerminalScopeContentReport(
+                         pending.sequence, pending.status, pending.loss, pending.draw_count,
+                         pending.layout.region_count)));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",

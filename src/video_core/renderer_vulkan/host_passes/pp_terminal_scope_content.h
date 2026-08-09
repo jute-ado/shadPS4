@@ -478,6 +478,18 @@ struct PpTerminalScopeContentReport {
     u32 second_stable{};
 };
 
+[[nodiscard]] constexpr PpTerminalScopeContentReport MakePpTerminalScopeContentReport(
+    u64 sequence, FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss, u32 draw_count,
+    u32 region_count) noexcept {
+    return {
+        .sequence = sequence,
+        .status = status,
+        .loss = loss,
+        .draw_count = draw_count,
+        .region_count = region_count,
+    };
+}
+
 struct PpTerminalScopeContentHistoryRegion {
     u32 logical_ordinal{};
     u32 buffer_offset{};
