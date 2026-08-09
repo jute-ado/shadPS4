@@ -1062,4 +1062,107 @@ TEST(PpTerminalScopeContent, PrivateLinkResolutionNeverIndexesAFreeOrReusedSlot)
     EXPECT_EQ(uid_queries, 2u);
 }
 
+TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesBothDrawPlanesPerOrdinal) {
+    PpTerminalScopeContentReducer reducer{{.start = 100, .count = 3}, 8};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 2,
+        .plane_bytes = 8,
+        .second_plane_offset = 8,
+        .total_bytes = 16,
+        .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
+                     {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
+    };
+    const auto bytes = [](std::array<u8, 4> first0, std::array<u8, 4> first1,
+                          std::array<u8, 4> second0, std::array<u8, 4> second1) {
+        std::array<std::byte, 16> result{};
+        const std::array planes{first0, first1, second0, second1};
+        for (u32 plane = 0; plane < planes.size(); ++plane) {
+            for (u32 index = 0; index < planes[plane].size(); ++index) {
+                result[plane * 4 + index] = std::byte{planes[plane][index]};
+            }
+        }
+        return result;
+    };
+    const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {10, 11, 12, 255});
+    const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {99, 98, 97, 255});
+    const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0}, {10, 11, 12, 255});
+    reducer.ObserveContent(100, layout, a, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(101, layout, b, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(102, layout, c, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].request_ordinal, 3u);
+    EXPECT_EQ(reports[0].sequences, (std::array<u64, 3>{100, 101, 102}));
+    EXPECT_EQ(reports[0].first_aba_ordinals, (std::vector<u32>{11}));
+    EXPECT_EQ(reports[0].first_stable_ordinals, (std::vector<u32>{}));
+    EXPECT_EQ(reports[0].first_ambiguous_ordinals, (std::vector<u32>{12}));
+    EXPECT_EQ(reports[0].second_aba_ordinals, (std::vector<u32>{12}));
+    EXPECT_EQ(reports[0].second_stable_ordinals, (std::vector<u32>{11}));
+    EXPECT_EQ(reports[0].second_ambiguous_ordinals, (std::vector<u32>{}));
+    EXPECT_FALSE(reports[0].loss.Any());
+}
+
+TEST(PpTerminalScopeContent, MissingChangedOrEvictedContentFailsClosed) {
+    PpTerminalScopeContentReducer reducer{{.start = 200, .count = 40}, 2};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 1,
+        .plane_bytes = 4,
+        .second_plane_offset = 4,
+        .total_bytes = 8,
+        .regions = {{{.logical_ordinal = 21, .buffer_offset = 0, .byte_size = 4}}},
+    };
+    const std::array<std::byte, 8> bytes{};
+    reducer.ObserveContent(200, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(201, layout, bytes, FinalGuestSurfaceStatus::GapLoss, {.gap = 1});
+    reducer.ObserveContent(202, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 200, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 201, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 202, .valid = true});
+    auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(reports[0].loss.gap, 1u);
+
+    reducer.ObserveContent(203, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(204, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(205, layout, bytes, FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 4, .sequence = 203, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 5, .sequence = 204, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 6, .sequence = 205, .valid = true});
+    reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::Complete);
+
+    reducer.ObserveCalibration({.request_ordinal = 7, .sequence = 200, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 8, .sequence = 204, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 9, .sequence = 205, .valid = true});
+    reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(reports[0].loss.history, 1u);
+}
+
+TEST(PpTerminalScopeContent, CompactCalibratedOutputContainsOnlyOrdinalsAndStatus) {
+    const PpTerminalScopeCalibratedReport report{
+        .request_ordinal = 19,
+        .sequences = {700, 706, 711},
+        .first_aba_ordinals = {11, 12},
+        .first_stable_ordinals = {13},
+        .second_ambiguous_ordinals = {14},
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const auto line = FormatPpTerminalScopeCalibratedReport(report);
+    EXPECT_NE(line.find("FGSCTST q=19 abc=700/706/711"), std::string::npos);
+    EXPECT_NE(line.find("a0=11,12"), std::string::npos);
+    EXPECT_NE(line.find("s0=13"), std::string::npos);
+    EXPECT_NE(line.find("x1=14"), std::string::npos);
+    EXPECT_EQ(line.find("pixel"), std::string::npos);
+    EXPECT_EQ(line.find("hash"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
 } // namespace
