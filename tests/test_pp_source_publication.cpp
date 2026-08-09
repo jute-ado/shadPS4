@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
+#include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/texture_cache/image_producer.h"
 
 namespace {
@@ -174,6 +175,28 @@ TEST(PpSourceProducer, CoverageCountsEveryFlipAndSeparatesNewProductionFromReuse
     EXPECT_EQ(final->loss, 0u);
     EXPECT_EQ(FormatPpSourceProducerCoverage(*final),
               "FGSCPRC s=4001 n=2/2/2 c=2 s=0 t=0 u=0 x=0 p=1 r=1 l=0");
+}
+
+TEST(PpSourceProducerScope, DistinguishesFlipEndedScopeFromAlreadyEndedProducer) {
+    EXPECT_EQ(ClassifyPpSourceProducerScope(true), PpSourceProducerScopeClass::ActiveAtFlip);
+    EXPECT_EQ(ClassifyPpSourceProducerScope(false), PpSourceProducerScopeClass::EndedEarlier);
+}
+
+TEST(PpSourceProducerScope, CoverageIsExactAndPrivacySafe) {
+    PpSourceProducerScopeCoverage coverage{{.start = 4000, .count = 2}};
+    ASSERT_TRUE(coverage.Observe(4000, PpSourceProducerScopeClass::ActiveAtFlip));
+    const auto final = coverage.Observe(4001, PpSourceProducerScopeClass::EndedEarlier);
+    ASSERT_TRUE(final);
+    EXPECT_TRUE(final->final);
+    EXPECT_EQ(final->active_at_flip, 1u);
+    EXPECT_EQ(final->ended_earlier, 1u);
+    EXPECT_EQ(final->loss, 0u);
+    EXPECT_EQ(FormatPpSourceProducerScopeObservation(
+                  {.sequence = 4001,
+                   .classification = PpSourceProducerScopeClass::EndedEarlier}),
+              "FGSCPS s=4001 r=1");
+    EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final),
+              "FGSCPSC s=4001 n=2/2/2 a=1 e=1 l=0");
 }
 
 } // namespace
