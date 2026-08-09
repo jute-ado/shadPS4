@@ -939,9 +939,16 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     EXPECT_EQ(reset.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_FALSE(reset.loss.Any());
 
-    const auto acquire = PlanPpTerminalScopePlaneSlot(0, false);
-    EXPECT_TRUE(acquire.acquire);
-    EXPECT_FALSE(acquire.reuse);
+    const auto root_input = PlanPpTerminalScopePlaneSlot(4, false);
+    EXPECT_TRUE(root_input.acquire);
+    EXPECT_FALSE(root_input.reuse);
+    const auto root_input_duplicate = PlanPpTerminalScopePlaneSlot(4, true);
+    EXPECT_EQ(root_input_duplicate.status, FinalGuestSurfaceStatus::GapLoss);
+    const auto missing_root_input = PlanPpTerminalScopePlaneSlot(0, false);
+    EXPECT_EQ(missing_root_input.status, FinalGuestSurfaceStatus::GapLoss);
+    const auto acquire = PlanPpTerminalScopePlaneSlot(0, true);
+    EXPECT_FALSE(acquire.acquire);
+    EXPECT_TRUE(acquire.reuse);
     const auto reuse = PlanPpTerminalScopePlaneSlot(0, true);
     EXPECT_FALSE(reuse.acquire);
     EXPECT_TRUE(reuse.reuse);
@@ -959,6 +966,61 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     EXPECT_EQ(output.status, FinalGuestSurfaceStatus::Complete);
     const auto output_without_input = PlanPpTerminalScopePlaneSlot(3, false);
     EXPECT_EQ(output_without_input.status, FinalGuestSurfaceStatus::GapLoss);
+}
+
+TEST(PpTerminalScopeContent, RootInputCaptureRequiresOneCompatibleReadOnlyNonAliasedImage) {
+    const auto complete = PlanPpTerminalScopeRootInputCapture({
+        .capture_first = true,
+        .single_sampled_input = true,
+        .sampled_input_valid = true,
+        .sampled_input_alias = false,
+        .read_only = true,
+        .compatible_layout = true,
+    });
+    EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(complete.capture);
+    EXPECT_EQ(complete.plane, 4u);
+    EXPECT_TRUE(complete.post_draw);
+    EXPECT_FALSE(complete.cpu_wait);
+    EXPECT_FALSE(complete.finish);
+
+    auto invalid = PlanPpTerminalScopeRootInputCapture({
+        .capture_first = true,
+        .single_sampled_input = false,
+        .sampled_input_valid = true,
+        .read_only = true,
+        .compatible_layout = true,
+    });
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(invalid.loss.gap, 1u);
+    invalid = PlanPpTerminalScopeRootInputCapture({
+        .capture_first = true,
+        .single_sampled_input = true,
+        .sampled_input_valid = true,
+        .sampled_input_alias = true,
+        .read_only = true,
+        .compatible_layout = true,
+    });
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(invalid.loss.unsupported_type, 1u);
+    invalid = PlanPpTerminalScopeRootInputCapture({
+        .capture_first = true,
+        .single_sampled_input = true,
+        .sampled_input_valid = true,
+        .read_only = false,
+        .compatible_layout = true,
+    });
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(invalid.loss.unsupported_type, 1u);
+    invalid = PlanPpTerminalScopeRootInputCapture({
+        .capture_first = true,
+        .single_sampled_input = true,
+        .sampled_input_valid = true,
+        .read_only = true,
+        .compatible_layout = false,
+    });
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.loss.invalidation, 1u);
 }
 
 TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
@@ -1072,7 +1134,7 @@ TEST(PpTerminalScopeContent, ExactLateConsumerFreezesAndRequestsThirdPlane) {
     EXPECT_TRUE(take.consumer_frozen);
 }
 
-TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFourBoundedPlanes) {
+TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFiveBoundedPlanes) {
     FinalGuestSurfaceWatchOrdinals selector{};
     selector.status = FinalGuestSurfaceStatus::Complete;
     selector.count = 2;
@@ -1096,11 +1158,12 @@ TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceFourBoundedPlanes) {
     });
     ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_EQ(plan.region_count, 2u);
-    EXPECT_EQ(plan.copy_region_count, 8u);
+    EXPECT_EQ(plan.copy_region_count, 10u);
     EXPECT_EQ(plan.first_plane_offset, 0u);
     EXPECT_GE(plan.second_plane_offset, plan.plane_bytes);
     EXPECT_GE(plan.consumer_plane_offset, plan.second_plane_offset + plan.plane_bytes);
     EXPECT_GE(plan.output_plane_offset, plan.consumer_plane_offset + plan.plane_bytes);
+    EXPECT_GE(plan.root_input_plane_offset, plan.output_plane_offset + plan.plane_bytes);
     EXPECT_LE(plan.total_bytes, PpTerminalScopeSnapshotBytes);
     EXPECT_EQ(plan.image_barriers_per_draw, 2u);
     EXPECT_TRUE(plan.ends_rendering);
@@ -1512,7 +1575,7 @@ TEST(PpTerminalScopeContent, OutputPlaneUsesTheExactLocalizedVisualReturnPredica
 TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturnPredicate) {
     constexpr u32 PixelCount = 32 * 32;
     constexpr u32 RegionBytes = PixelCount * 4;
-    constexpr u32 PlaneBytes = RegionBytes * 2;
+    constexpr u32 PlaneBytes = RegionBytes * 3;
     std::array<std::byte, RegionBytes> departure{};
     std::array<std::byte, RegionBytes> returned{};
     for (u32 pixel = 0; pixel < 300; ++pixel) {
@@ -1532,23 +1595,26 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
         .second_plane_offset = PlaneBytes,
         .consumer_plane_offset = PlaneBytes * 2,
         .output_plane_offset = PlaneBytes * 3,
-        .total_bytes = PlaneBytes * 4,
-        .plane_mask = 0xf,
+        .root_input_plane_offset = PlaneBytes * 4,
+        .total_bytes = PlaneBytes * 5,
+        .plane_mask = 0x1f,
         .regions =
             {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes},
-              {.logical_ordinal = 42, .buffer_offset = RegionBytes, .byte_size = RegionBytes}}},
+              {.logical_ordinal = 42, .buffer_offset = RegionBytes, .byte_size = RegionBytes},
+              {.logical_ordinal = 43, .buffer_offset = RegionBytes * 2, .byte_size = RegionBytes}}},
         .format = FinalGuestSurfaceFormat::Rgba8,
     };
     const auto observation = [&](bool is_departure, bool is_returned) {
-        std::array<std::byte, PlaneBytes * 4> bytes{};
+        std::array<std::byte, PlaneBytes * 5> bytes{};
         const auto& changed = is_departure ? departure : returned;
         if (is_departure || is_returned) {
-            // Plane 0 returns only in region 41; plane 1 only in region 42; plane 2 in both;
-            // plane 3 remains stable. Distinct patterns prove that each field reads its plane.
+            // Planes 0/1 return only in regions 41/42; plane 2 in both; plane 3 is stable; the
+            // upstream root input returns only in region 43. Every plane has a distinct pattern.
             std::ranges::copy(changed, bytes.begin());
             std::ranges::copy(changed, bytes.begin() + PlaneBytes + RegionBytes);
             std::ranges::copy(changed, bytes.begin() + PlaneBytes * 2);
             std::ranges::copy(changed, bytes.begin() + PlaneBytes * 2 + RegionBytes);
+            std::ranges::copy(changed, bytes.begin() + PlaneBytes * 4 + RegionBytes * 2);
         }
         return bytes;
     };
@@ -1570,11 +1636,13 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
     EXPECT_EQ(reports[0].second_localized_visual_return_ordinals, (std::vector<u32>{42}));
     EXPECT_EQ(reports[0].consumer_localized_visual_return_ordinals, (std::vector<u32>{41, 42}));
     EXPECT_TRUE(reports[0].output_localized_visual_return_ordinals.empty());
+    EXPECT_EQ(reports[0].root_input_localized_visual_return_ordinals, (std::vector<u32>{43}));
     const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
     EXPECT_NE(line.find(" y0=41"), std::string::npos);
     EXPECT_NE(line.find(" y1=42"), std::string::npos);
     EXPECT_NE(line.find(" y2=41,42"), std::string::npos);
     EXPECT_NE(line.find(" y3=-"), std::string::npos);
+    EXPECT_NE(line.find(" y4=43"), std::string::npos);
 }
 
 TEST(PpTerminalScopeContent, LocalizedVisualReturnHonorsExactThresholdsAndFailsClosed) {
