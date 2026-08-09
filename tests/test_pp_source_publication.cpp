@@ -6,6 +6,7 @@
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
 #include "video_core/texture_cache/image_producer.h"
 
@@ -3147,6 +3148,113 @@ TEST(PpTerminalScopeContent, FailedPredecessorCandidateCanRestartInALaterScope) 
     EXPECT_TRUE(rolling_slot.reuse);
     EXPECT_TRUE(rolling_slot.requires_write_barrier)
         << "Overwriting an earlier candidate must order its pending transfer writes";
+}
+
+TEST(PpUpstreamFeedbackPrePost, PlansFourBoundedExactPrePostCandidatesInOneSlot) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.count = 13;
+    for (u32 index = 0; index < selector.count; ++index) {
+        selector.ordinals[index] = index + 1;
+    }
+
+    const auto plan = PlanPpUpstreamFeedbackPrePost({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .source_width = 1920,
+        .source_height = 1080,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .base_mip = 0,
+        .mip_count = 1,
+        .base_layer = 0,
+        .layer_count = 1,
+        .color = true,
+        .type_2d = true,
+        .uniform_state = true,
+        .selector = selector,
+        .candidate_capacity = 4,
+        .buffer_alignment = 16,
+        .max_regions = 4 * 2 * 13,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_FALSE(plan.loss.Any());
+    ASSERT_TRUE(plan.copy);
+    ASSERT_EQ(plan.region_count, 13u);
+    ASSERT_EQ(plan.candidate_capacity, 4u);
+    ASSERT_EQ(plan.regions[0].width, 48u);
+    ASSERT_EQ(plan.regions[0].height, 48u);
+    ASSERT_EQ(plan.regions[0].byte_size, 48u * 48u * 4u);
+    EXPECT_LT(plan.total_bytes, PpTerminalScopeSnapshotBytes);
+
+    const auto first_pre = ResolvePpUpstreamFeedbackPrePostCopy(plan, 0, false, 0);
+    const auto first_post = ResolvePpUpstreamFeedbackPrePostCopy(plan, 0, true, 0);
+    const auto last_post = ResolvePpUpstreamFeedbackPrePostCopy(plan, 3, true, 12);
+    ASSERT_TRUE(first_pre.copy);
+    ASSERT_TRUE(first_post.copy);
+    ASSERT_TRUE(last_post.copy);
+    EXPECT_LT(first_pre.buffer_offset, first_post.buffer_offset);
+    EXPECT_LT(last_post.buffer_offset + last_post.byte_size, PpTerminalScopeSnapshotBytes + 1u);
+
+    const auto overflow = PlanPpUpstreamFeedbackPrePost({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .source_width = 1920,
+        .source_height = 1080,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .mip_count = 1,
+        .layer_count = 1,
+        .color = true,
+        .type_2d = true,
+        .uniform_state = true,
+        .selector = selector,
+        .candidate_capacity = 5,
+        .buffer_alignment = 16,
+        .max_regions = 5 * 2 * 13,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    EXPECT_EQ(overflow.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(overflow.loss.byte_capacity, 1u);
+    EXPECT_FALSE(overflow.copy);
+}
+
+TEST(PpUpstreamFeedbackPrePost, ResolvesOnlyOneCompleteExactPrivateCandidate) {
+    const PpTerminalScopeDrawSelector selector{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 4,
+        .instance_count = 1,
+        .sampled_images = 6,
+    };
+    PpUpstreamFeedbackPrePostRegistry registry{selector, 4};
+    const VideoCore::ImageColorScopePrivateLink first{VideoCore::ImageId{81}, 8100};
+    const VideoCore::ImageColorScopePrivateLink second{VideoCore::ImageId{82}, 8200};
+
+    const auto first_pre = registry.Preview(first, selector);
+    ASSERT_TRUE(first_pre.capture);
+    ASSERT_EQ(first_pre.candidate_index, 0u);
+    const auto first_post = registry.Complete(first, selector);
+    ASSERT_TRUE(first_post.capture);
+    ASSERT_EQ(first_post.candidate_index, 0u);
+
+    ASSERT_TRUE(registry.Preview(second, selector).capture);
+    ASSERT_TRUE(registry.Complete(second, selector).capture);
+    const auto resolved = registry.Resolve(second);
+    ASSERT_TRUE(resolved.matched);
+    EXPECT_EQ(resolved.candidate_index, 1u);
+    EXPECT_EQ(resolved.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(resolved.loss.Any());
+
+    EXPECT_EQ(registry.Complete({VideoCore::ImageId{83}, 8300}, selector).status,
+              FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(registry.Resolve({VideoCore::ImageId{82}, 8201}).status,
+              FinalGuestSurfaceStatus::AlreadyConsumed)
+        << "A reused image slot must not inherit an earlier private capture";
+    registry.Reset();
+    EXPECT_FALSE(registry.Resolve(second).matched);
 }
 
 } // namespace
