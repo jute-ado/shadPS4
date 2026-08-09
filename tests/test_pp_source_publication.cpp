@@ -1363,6 +1363,11 @@ TEST(PpTerminalScopeContent, LineageHandoffPropagatesStaleStateAndIgnoresOtherDr
     EXPECT_FALSE(unrelated.publish_flip_alias);
 }
 
+TEST(PpTerminalScopeContent, ConsumedLineageLeavesCapacityForTheNextDiscoveredProducer) {
+    EXPECT_FALSE(ShouldArmPpTerminalScopeFallbackAfterFlip(true));
+    EXPECT_TRUE(ShouldArmPpTerminalScopeFallbackAfterFlip(false));
+}
+
 TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOrdinal) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
