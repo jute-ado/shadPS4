@@ -9,6 +9,7 @@
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_source_backing.h"
 
 namespace Vulkan::HostPasses {
 
@@ -291,6 +292,8 @@ struct FinalGuestSurfaceSampledInputPayload {
     u64 process_time_us{};
     u64 token{};
     FinalGuestSurfaceSampledInputMetadata metadata{};
+    PpSourceBackingFootprintPlan source_backing{};
+    bool source_backing_captured{};
 };
 
 struct FinalGuestSurfaceSampledInputTakeResult {
@@ -391,6 +394,7 @@ struct PpSampledInputTransferPlan {
     u32 copy_regions{};
     bool copy{};
     bool paired_output_and_raw{};
+    bool paired_source_backing_snapshot{};
     bool callback_payload_is_scalar_only{};
     bool cpu_wait{};
     bool finish{};
@@ -406,9 +410,10 @@ struct PpSampledInputTransferPlan {
     }
     return {
         .color_write_to_transfer_barriers = 2,
-        .copy_regions = 2,
+        .copy_regions = 3,
         .copy = true,
         .paired_output_and_raw = true,
+        .paired_source_backing_snapshot = true,
         .callback_payload_is_scalar_only = true,
     };
 }

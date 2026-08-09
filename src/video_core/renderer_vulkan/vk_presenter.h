@@ -7,6 +7,7 @@
 
 #include "core/libraries/videoout/buffer.h"
 #include "imgui/imgui_texture.h"
+#include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
@@ -42,6 +43,7 @@ struct Frame {
     vk::ImageView pp_input_shadow_view{};
     FinalGuestSurfacePpInputFrameState pp_input_shadow_state{};
     FinalGuestSurfaceSampledInputFrameState pp_sampled_input_state{};
+    std::unique_ptr<VideoCore::Buffer> pp_source_backing_snapshot{};
 
     ImTextureID imgui_texture;
 };

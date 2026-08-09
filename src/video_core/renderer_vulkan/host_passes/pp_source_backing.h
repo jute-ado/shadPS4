@@ -14,6 +14,8 @@
 
 namespace Vulkan {
 
+inline constexpr u32 PpSourceBackingSnapshotBytes = 1u << 20;
+
 struct PpSourceBackingRegion {
     u32 logical_ordinal{};
     u32 x{};
@@ -274,6 +276,54 @@ struct PpSourceBackingFootprintPlan {
     plan.sample_bytes = static_cast<u32>(backing_offset + backing.buffer_bytes);
     ++plan.copy_region_count;
     return plan;
+}
+
+struct PpSourceBackingHandoffDescriptor {
+    bool enabled{};
+    bool frame_is_new{};
+    bool metadata_valid{};
+    bool snapshot_buffer_available{};
+    PpSourceBackingFootprintPlan backing{};
+};
+
+struct PpSourceBackingHandoffPlan {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    u32 draw_source_image_barriers{};
+    u32 draw_image_to_snapshot_regions{};
+    u32 draw_snapshot_buffer_barriers{};
+    u32 present_snapshot_to_readback_copies{};
+    bool copy{};
+    bool pp_draw_precedes_source_transition{};
+    bool present_wait_includes_transfer{};
+    bool callback_payload_is_scalar_only{};
+    bool cpu_wait{};
+    bool finish{};
+    bool callback_retains_frame{};
+    bool callback_retains_image{};
+    bool callback_retains_vk_image{};
+};
+
+[[nodiscard]] constexpr PpSourceBackingHandoffPlan PlanPpSourceBackingHandoff(
+    const PpSourceBackingHandoffDescriptor& descriptor) noexcept {
+    if (!descriptor.enabled || !descriptor.frame_is_new) {
+        return {};
+    }
+    if (!descriptor.metadata_valid || !descriptor.snapshot_buffer_available ||
+        descriptor.backing.status != FinalGuestSurfaceStatus::Complete ||
+        descriptor.backing.region_count == 0) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss};
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::Complete,
+        .draw_source_image_barriers = 2,
+        .draw_image_to_snapshot_regions = descriptor.backing.region_count,
+        .draw_snapshot_buffer_barriers = 2,
+        .present_snapshot_to_readback_copies = 1,
+        .copy = true,
+        .pp_draw_precedes_source_transition = true,
+        .present_wait_includes_transfer = true,
+        .callback_payload_is_scalar_only = true,
+    };
 }
 
 struct PpSourceBackingTripletClassification {

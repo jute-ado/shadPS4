@@ -277,7 +277,7 @@ public:
                  "expected_calibrations={}",
                  static_cast<u32>(config.stage), config.window.frame_start,
                  config.window.frame_count, FinalGuestSurfaceTilePlan::MaxTiles,
-                 config.stage == FinalGuestSurfaceStage::PpSampledInput ? 2 : 1,
+                 config.stage == FinalGuestSurfaceStage::PpSampledInput ? 3 : 1,
                  FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
                  config.lag.tolerance_us, config.watch_ordinals.count,
@@ -287,6 +287,10 @@ public:
 
     [[nodiscard]] bool ShouldCapture(u64 sequence) const noexcept {
         return config.window.Contains(sequence);
+    }
+
+    [[nodiscard]] const FinalGuestSurfaceWatchOrdinals& WatchOrdinals() const noexcept {
+        return config.watch_ordinals;
     }
 
     [[nodiscard]] bool IsPostPpStage() const noexcept {
@@ -465,6 +469,7 @@ public:
 
     [[nodiscard]] PendingCapture PreparePpSampledInput(
         FinalGuestSurfaceFrameStamp stamp, const FinalGuestSurfaceSampledInputMetadata& metadata,
+        const PpSourceBackingFootprintPlan& source_backing,
         FinalGuestSurfaceStatus observation_status) {
         ++selected_frames;
         PendingCapture pending{
@@ -507,7 +512,8 @@ public:
             .slot_bytes = slot_stride,
             .alignment = 8,
         });
-        pending.plan = MakePpSampledInputPairedTilePlan(output_plan, pair);
+        pending.plan = MakePpSampledInputSourceBackingTilePlan(
+            MakePpSampledInputPairedTilePlan(output_plan, pair), source_backing, slot_stride, 16);
         pending.plan = ApplyPpSampledInputObservationStatus(pending.plan, observation_status);
         if (!metadata.valid && observation_status == FinalGuestSurfaceStatus::Complete) {
             pending.plan = ApplyPpSampledInputObservationStatus(
@@ -549,8 +555,9 @@ public:
         }
         auto metadata = frame.payload.metadata;
         metadata.valid = false;
-        auto pending = PreparePpSampledInput(
-            {frame.payload.sequence, frame.payload.process_time_us}, metadata, status);
+        auto pending =
+            PreparePpSampledInput({frame.payload.sequence, frame.payload.process_time_us}, metadata,
+                                  frame.payload.source_backing, status);
         ASSERT(!pending.HasCopy());
         DeferReport(std::move(pending));
     }
@@ -610,13 +617,16 @@ public:
     }
 
     void RecordPpSampledInput(PendingCapture pending, vk::Image output_image,
-                              vk::Image sampled_image, vk::CommandBuffer cmdbuf) {
+                              vk::Image sampled_image, vk::Buffer source_backing_snapshot,
+                              vk::CommandBuffer cmdbuf) {
         if (!pending.HasCopy()) {
             DeferReport(std::move(pending));
             return;
         }
         ASSERT(pending.plan.paired_sampled_format == FinalGuestSurfaceFormat::Rgba16Float &&
-               pending.plan.copy_region_count == 2 && pending.plan.paired_sampled_offset != 0);
+               pending.plan.paired_backing_format != FinalGuestSurfaceFormat::Unsupported &&
+               pending.plan.copy_region_count == 3 && pending.plan.paired_sampled_offset != 0 &&
+               pending.plan.paired_backing_offset != 0 && source_backing_snapshot);
         const vk::BufferMemoryBarrier2 pre_barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eHost,
             .srcAccessMask = vk::AccessFlagBits2::eHostRead,
@@ -655,6 +665,12 @@ public:
             make_copy(pending.slot_offset + pending.plan.paired_sampled_offset);
         cmdbuf.copyImageToBuffer(sampled_image, vk::ImageLayout::eTransferSrcOptimal,
                                  download.Handle(), 1, &sampled_copy);
+        const vk::BufferCopy backing_copy{
+            .srcOffset = 0,
+            .dstOffset = pending.slot_offset + pending.plan.paired_backing_offset,
+            .size = pending.plan.paired_backing_bytes,
+        };
+        cmdbuf.copyBuffer(source_backing_snapshot, download.Handle(), 1, &backing_copy);
 
         const vk::BufferMemoryBarrier2 post_barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -1559,6 +1575,97 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const bool shadow_written =
         pp_pass.Render(cmdbuf, image_view, image_size, *frame, frame_pp_settings,
                        diagnostic_metadata_valid ? frame->pp_input_shadow_view : vk::ImageView{});
+    PpSourceBackingFootprintPlan source_backing_plan{};
+    bool source_backing_captured{};
+    if (pp_sampled_input_stage && final_guest_surface_content->ShouldCapture(stamp.sequence)) {
+        source_backing_plan = PlanPpSourceBackingFootprints({
+            .enabled = true,
+            .in_window = true,
+            .pp_draw_encoded = shadow_written,
+            .fsr_bypassed = sampled_input_metadata.fsr_bypassed,
+            .source_width = image_size.width,
+            .source_height = image_size.height,
+            .logical_width = frame->width,
+            .logical_height = frame->height,
+            .source_format = ToFinalGuestSurfaceFormat(image.backing->image.image_ci.format),
+            .samples = image.backing->num_samples,
+            .resolved_base_mip = sampled_input_metadata.resolved_base_mip,
+            .resolved_mip_count = sampled_input_metadata.resolved_mip_count,
+            .resolved_base_layer = sampled_input_metadata.resolved_base_layer,
+            .resolved_layer_count = sampled_input_metadata.resolved_layer_count,
+            .bound_base_mip = sampled_input_metadata.bound_base_mip,
+            .bound_mip_count = sampled_input_metadata.bound_mip_count,
+            .bound_base_layer = sampled_input_metadata.bound_base_layer,
+            .bound_layer_count = sampled_input_metadata.bound_layer_count,
+            .logical_full_fit = true,
+            .logical_top_left = true,
+            .logical_no_y_flip = true,
+            .buffer_alignment = 16,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals,
+            .max_bytes = PpSourceBackingSnapshotBytes,
+            .selector = final_guest_surface_content->WatchOrdinals(),
+        });
+        if (source_backing_plan.status == FinalGuestSurfaceStatus::Complete) {
+            if (!frame->pp_source_backing_snapshot) {
+                frame->pp_source_backing_snapshot = std::make_unique<VideoCore::Buffer>(
+                    instance, draw_scheduler, VideoCore::MemoryUsage::DeviceLocal, 0,
+                    vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eTransferSrc,
+                    PpSourceBackingSnapshotBytes);
+            }
+            const auto handoff = PlanPpSourceBackingHandoff({
+                .enabled = true,
+                .frame_is_new = true,
+                .metadata_valid = sampled_input_metadata.valid,
+                .snapshot_buffer_available = frame->pp_source_backing_snapshot != nullptr,
+                .backing = source_backing_plan,
+            });
+            if (handoff.copy) {
+                if (const auto barrier = frame->pp_source_backing_snapshot->GetBarrier(
+                        vk::AccessFlagBits2::eTransferWrite,
+                        vk::PipelineStageFlagBits2::eTransfer)) {
+                    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                        .bufferMemoryBarrierCount = 1,
+                        .pBufferMemoryBarriers = &*barrier,
+                    });
+                }
+                image.Transit(vk::ImageLayout::eTransferSrcOptimal,
+                              vk::AccessFlagBits2::eTransferRead, source_view.info.range, cmdbuf);
+                std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+                    copies{};
+                for (u32 index = 0; index < source_backing_plan.region_count; ++index) {
+                    const auto& region = source_backing_plan.regions[index];
+                    copies[index] = {
+                        .bufferOffset = region.buffer_offset,
+                        .bufferRowLength = 0,
+                        .bufferImageHeight = 0,
+                        .imageSubresource =
+                            {
+                                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                .mipLevel = sampled_input_metadata.bound_base_mip,
+                                .baseArrayLayer = sampled_input_metadata.bound_base_layer,
+                                .layerCount = 1,
+                            },
+                        .imageOffset = {static_cast<s32>(region.x), static_cast<s32>(region.y), 0},
+                        .imageExtent = {region.width, region.height, 1},
+                    };
+                }
+                cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                         frame->pp_source_backing_snapshot->Handle(),
+                                         source_backing_plan.region_count, copies.data());
+                image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal,
+                              vk::AccessFlagBits2::eShaderRead, source_view.info.range, cmdbuf);
+                if (const auto barrier = frame->pp_source_backing_snapshot->GetBarrier(
+                        vk::AccessFlagBits2::eTransferRead,
+                        vk::PipelineStageFlagBits2::eTransfer)) {
+                    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                        .bufferMemoryBarrierCount = 1,
+                        .pBufferMemoryBarriers = &*barrier,
+                    });
+                }
+                source_backing_captured = true;
+            }
+        }
+    }
     if (pp_input_shadow_stage) {
         if (!shadow_written) {
             pp_input_metadata.valid = false;
@@ -1576,13 +1683,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         const auto observation = PlanPpSampledInputObservation({
             .in_window = in_window,
             .stamp_valid = stamp.sequence != 0 && stamp.process_time_us != 0,
-            .metadata_valid = shadow_written && sampled_input_metadata.valid,
+            .metadata_valid =
+                shadow_written && sampled_input_metadata.valid && source_backing_captured,
         });
         if (observation.emit) {
             const u64 token = next_pp_input_shadow_token++;
             const auto status = frame->pp_sampled_input_state.Assign(
-                observation,
-                {stamp.sequence, stamp.process_time_us, token, sampled_input_metadata});
+                observation, {stamp.sequence, stamp.process_time_us, token, sampled_input_metadata,
+                              source_backing_plan, source_backing_captured});
             if (status != FinalGuestSurfaceStatus::Complete) {
                 LOG_INFO(Render, "PPSampledInputFrameState seq={} st={}", stamp.sequence,
                          static_cast<u32>(status));
@@ -1815,7 +1923,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             pp_sampled_input_capture = final_guest_surface_content->PreparePpSampledInput(
                 {pp_sampled_input_frame.payload.sequence,
                  pp_sampled_input_frame.payload.process_time_us},
-                metadata, pp_sampled_input_frame.status);
+                metadata, pp_sampled_input_frame.payload.source_backing,
+                pp_sampled_input_frame.status);
         }
         const bool copy_frame_before_sampling =
             (post_pp_surface_capture && post_pp_surface_capture->HasCopy()) ||
@@ -1913,7 +2022,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                                            pp_sampled_input_capture->HasCopy());
             ASSERT(transfer.callback_payload_is_scalar_only && !transfer.cpu_wait &&
                    !transfer.finish && !transfer.callback_retains_frame &&
-                   !transfer.callback_retains_image && !transfer.callback_retains_vk_image);
+                   !transfer.callback_retains_image && !transfer.callback_retains_vk_image &&
+                   transfer.paired_source_backing_snapshot && transfer.copy_regions == 3);
             const auto transition = GetPpInputShadowCaptureTransition(transfer.copy);
             if (transition.required) {
                 const vk::ImageMemoryBarrier2 sampled_to_transfer{
@@ -1940,9 +2050,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                     .pImageMemoryBarriers = &sampled_to_transfer,
                 });
             }
-            final_guest_surface_content->RecordPpSampledInput(std::move(*pp_sampled_input_capture),
-                                                              frame->image,
-                                                              frame->pp_input_shadow_image, cmdbuf);
+            final_guest_surface_content->RecordPpSampledInput(
+                std::move(*pp_sampled_input_capture), frame->image, frame->pp_input_shadow_image,
+                frame->pp_source_backing_snapshot ? frame->pp_source_backing_snapshot->Handle()
+                                                  : vk::Buffer{},
+                cmdbuf);
         }
         if (post_pp_surface_capture) {
             final_guest_surface_content->Record(std::move(*post_pp_surface_capture), frame->image,
