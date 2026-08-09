@@ -41,6 +41,8 @@ struct PpUpstreamFeedbackPrePostRegion {
     u32 height{};
     u32 buffer_offset{};
     u32 byte_size{};
+
+    bool operator==(const PpUpstreamFeedbackPrePostRegion&) const = default;
 };
 
 struct PpUpstreamFeedbackPrePostPlan {
@@ -58,6 +60,8 @@ struct PpUpstreamFeedbackPrePostPlan {
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
     bool copy{};
+
+    bool operator==(const PpUpstreamFeedbackPrePostPlan&) const = default;
 };
 
 struct PpUpstreamFeedbackPrePostCopy {
@@ -354,6 +358,169 @@ private:
     u32 capacity{};
     std::array<Entry, PpUpstreamFeedbackPrePostPlan::MaxCandidates> entries{};
     bool capacity_loss{};
+};
+
+struct PpUpstreamFeedbackPrePostTakeResult {
+    PpUpstreamFeedbackPrePostPlan plan{};
+    u32 candidate_index{};
+    u32 recorded_plane_mask{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool copy{};
+    bool cpu_wait{};
+    bool finish{};
+    bool retains_image{};
+    bool retains_vk_image{};
+};
+
+class PpUpstreamFeedbackPrePostFrame {
+public:
+    explicit constexpr PpUpstreamFeedbackPrePostFrame(PpTerminalScopeDrawSelector selector,
+                                                      u32 capacity_) noexcept
+        : registry{selector, capacity_}, capacity{capacity_} {}
+
+    [[nodiscard]] constexpr bool Arm() noexcept {
+        registry.Reset();
+        plan = {};
+        copied_masks = {};
+        selected_index = 0;
+        selected = false;
+        armed = capacity != 0 && capacity <= copied_masks.size();
+        status = armed ? FinalGuestSurfaceStatus::Complete
+                       : FinalGuestSurfaceStatus::InvalidationLoss;
+        loss = armed ? FinalGuestSurfaceLoss{} : FinalGuestSurfaceLoss{.invalidation = 1};
+        return armed;
+    }
+
+    [[nodiscard]] constexpr bool Configure(
+        const PpUpstreamFeedbackPrePostPlan& candidate_plan) noexcept {
+        if (!armed || candidate_plan.status != FinalGuestSurfaceStatus::Complete ||
+            candidate_plan.loss.Any() || !candidate_plan.copy ||
+            candidate_plan.candidate_capacity != capacity) {
+            Fail(FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
+            return false;
+        }
+        if (plan.copy && plan != candidate_plan) {
+            Fail(FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
+            return false;
+        }
+        plan = candidate_plan;
+        return true;
+    }
+
+    [[nodiscard]] constexpr PpUpstreamFeedbackPrePostRegistryAction Preview(
+        VideoCore::ImageColorScopePrivateLink output,
+        const PpTerminalScopeDrawSelector& draw) noexcept {
+        if (!armed || status != FinalGuestSurfaceStatus::Complete || !plan.copy) {
+            return {.status = status, .loss = loss};
+        }
+        const auto action = registry.Preview(output, draw);
+        Apply(action.status, action.loss);
+        return action;
+    }
+
+    [[nodiscard]] constexpr PpUpstreamFeedbackPrePostRegistryAction Complete(
+        VideoCore::ImageColorScopePrivateLink output,
+        const PpTerminalScopeDrawSelector& draw) noexcept {
+        if (!armed || status != FinalGuestSurfaceStatus::Complete || !plan.copy) {
+            return {.status = status, .loss = loss};
+        }
+        const auto action = registry.Complete(output, draw);
+        Apply(action.status, action.loss);
+        return action;
+    }
+
+    constexpr void MarkCopied(u32 candidate_index, bool post) noexcept {
+        if (!armed || candidate_index >= capacity || candidate_index >= copied_masks.size()) {
+            Fail(FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
+            return;
+        }
+        copied_masks[candidate_index] |= post ? 0x2u : 0x1u;
+    }
+
+    [[nodiscard]] constexpr bool Select(VideoCore::ImageColorScopePrivateLink output) noexcept {
+        if (!armed || status != FinalGuestSurfaceStatus::Complete || !plan.copy) {
+            return false;
+        }
+        const auto resolution = registry.Resolve(output);
+        if (!resolution.matched) {
+            const auto failed_status =
+                resolution.status == FinalGuestSurfaceStatus::AlreadyConsumed
+                    ? FinalGuestSurfaceStatus::GapLoss
+                    : resolution.status;
+            auto failed_loss = resolution.loss;
+            if (!failed_loss.Any()) {
+                failed_loss.gap = 1;
+            }
+            Fail(failed_status, failed_loss);
+            return false;
+        }
+        if (resolution.candidate_index >= capacity ||
+            copied_masks[resolution.candidate_index] != 0x3u) {
+            Fail(FinalGuestSurfaceStatus::GapLoss, {.gap = 1});
+            return false;
+        }
+        selected_index = resolution.candidate_index;
+        selected = true;
+        return true;
+    }
+
+    [[nodiscard]] constexpr PpUpstreamFeedbackPrePostTakeResult Take(bool has_slot) noexcept {
+        PpUpstreamFeedbackPrePostTakeResult result{
+            .plan = plan,
+            .candidate_index = selected_index,
+            .recorded_plane_mask =
+                selected_index < copied_masks.size() ? copied_masks[selected_index] : 0,
+            .status = status,
+            .loss = loss,
+        };
+        if (!armed) {
+            result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            result.loss = {.invalidation = 1};
+        } else if (result.status == FinalGuestSurfaceStatus::Complete &&
+                   (!selected || result.recorded_plane_mask != 0x3u)) {
+            result.status = FinalGuestSurfaceStatus::GapLoss;
+            result.loss = {.gap = 1};
+        } else if (result.status == FinalGuestSurfaceStatus::Complete && !has_slot) {
+            result.status = FinalGuestSurfaceStatus::BusyLoss;
+            result.loss = {.busy = 1};
+        }
+        result.copy = result.status == FinalGuestSurfaceStatus::Complete && !result.loss.Any() &&
+                      selected && has_slot && result.plan.copy;
+        armed = false;
+        selected = false;
+        return result;
+    }
+
+private:
+    constexpr void Apply(FinalGuestSurfaceStatus candidate_status,
+                         FinalGuestSurfaceLoss candidate_loss) noexcept {
+        if (candidate_status == FinalGuestSurfaceStatus::Complete ||
+            candidate_status == FinalGuestSurfaceStatus::AlreadyConsumed) {
+            return;
+        }
+        if (!candidate_loss.Any()) {
+            candidate_loss.invalidation = 1;
+        }
+        Fail(candidate_status, candidate_loss);
+    }
+
+    constexpr void Fail(FinalGuestSurfaceStatus failed_status,
+                        FinalGuestSurfaceLoss failed_loss) noexcept {
+        status = failed_status;
+        loss = failed_loss;
+        selected = false;
+    }
+
+    PpUpstreamFeedbackPrePostRegistry registry;
+    u32 capacity{};
+    PpUpstreamFeedbackPrePostPlan plan{};
+    std::array<u32, PpUpstreamFeedbackPrePostPlan::MaxCandidates> copied_masks{};
+    u32 selected_index{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool armed{};
+    bool selected{};
 };
 
 } // namespace Vulkan::HostPasses
