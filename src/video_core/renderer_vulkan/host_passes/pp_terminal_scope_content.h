@@ -140,6 +140,40 @@ enum class PpTerminalScopeContentAction : u8 {
     ShapeLoss,
 };
 
+struct PpTerminalScopeRenderingSplitPlan {
+    u64 serial{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool end_rendering{};
+    bool resume_rendering{};
+    bool force_load{};
+    bool preserve_serial{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeRenderingSplitPlan PlanPpTerminalScopeRenderingSplit(
+    bool is_rendering, u64 current_serial, u64 expected_serial) noexcept {
+    if (!is_rendering || current_serial == 0 || expected_serial == 0) {
+        return {
+            .status = FinalGuestSurfaceStatus::GapLoss,
+            .loss = {.gap = 1},
+        };
+    }
+    if (current_serial != expected_serial) {
+        return {
+            .status = FinalGuestSurfaceStatus::InvalidationLoss,
+            .loss = {.invalidation = 1},
+        };
+    }
+    return {
+        .serial = current_serial,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .end_rendering = true,
+        .resume_rendering = true,
+        .force_load = true,
+        .preserve_serial = true,
+    };
+}
+
 struct PpTerminalScopeContentTakeResult {
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
