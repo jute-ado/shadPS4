@@ -223,6 +223,29 @@ struct PpTerminalScopeDiscoveryCoverage {
     }
 };
 
+class PpTerminalScopeDiscoveryCoverageEmissionGate {
+public:
+    [[nodiscard]] constexpr bool Observe(const FinalGuestSurfaceCaptureWindow& window,
+                                         u64 sequence) noexcept {
+        if (emitted || !window.IsFinal(sequence)) {
+            return false;
+        }
+        emitted = true;
+        return true;
+    }
+
+    [[nodiscard]] constexpr bool Finalize() noexcept {
+        if (emitted) {
+            return false;
+        }
+        emitted = true;
+        return true;
+    }
+
+private:
+    bool emitted{};
+};
+
 [[nodiscard]] constexpr PpTerminalScopeDiscoveryDecision PlanPpTerminalScopeDiscoveryDecision(
     bool enabled, bool already_tracked, bool first_selector_matches, bool mapping_valid,
     bool target_valid, bool target_capacity) noexcept {

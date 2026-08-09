@@ -256,9 +256,8 @@ public:
 
     void Finalize() {
         scheduler.PopPendingOperations();
-        if (!discovery_coverage_logged) {
+        if (discovery_coverage_emission.Finalize()) {
             LOG_INFO(Render, "{}", FormatPpTerminalScopeDiscoveryCoverage(discovery_coverage));
-            discovery_coverage_logged = true;
         }
         std::scoped_lock lock{reducer_mutex};
         LogReports();
@@ -559,6 +558,10 @@ private:
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",
                          pending.sequence, selected_frames, emitted_frames, complete_frames,
                          loss_frames, pending.layout.region_count);
+                if (discovery_coverage_emission.Observe(config.window, pending.sequence)) {
+                    LOG_INFO(Render, "{}",
+                             FormatPpTerminalScopeDiscoveryCoverage(discovery_coverage));
+                }
             }
         }
         if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
@@ -595,13 +598,13 @@ private:
     std::array<std::unique_ptr<Entry>, MaxTargets> entries{};
     MappingTemplate mapping{};
     PpTerminalScopeDiscoveryCoverage discovery_coverage{};
+    PpTerminalScopeDiscoveryCoverageEmissionGate discovery_coverage_emission{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
     u32 emitted_frames{};
     u32 complete_frames{};
     u32 loss_frames{};
     bool calibrated_coverage_logged{};
-    bool discovery_coverage_logged{};
 };
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
