@@ -1509,6 +1509,77 @@ TEST(PpTerminalScopeContent, OutputPlaneUsesTheExactLocalizedVisualReturnPredica
     EXPECT_NE(line.find(" y3=41"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturnPredicate) {
+    constexpr u32 PixelCount = 32 * 32;
+    constexpr u32 RegionBytes = PixelCount * 4;
+    constexpr u32 PlaneBytes = RegionBytes * 2;
+    std::array<std::byte, RegionBytes> baseline{};
+    std::array<std::byte, RegionBytes> departure{};
+    std::array<std::byte, RegionBytes> returned{};
+    for (u32 pixel = 0; pixel < 300; ++pixel) {
+        departure[pixel * 4 + 0] = std::byte{16};
+        departure[pixel * 4 + 1] = std::byte{16};
+        departure[pixel * 4 + 2] = std::byte{16};
+    }
+    for (u32 pixel = 0; pixel < 10; ++pixel) {
+        returned[pixel * 4 + 0] = std::byte{16};
+        returned[pixel * 4 + 1] = std::byte{16};
+        returned[pixel * 4 + 2] = std::byte{16};
+    }
+
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 2,
+        .plane_bytes = PlaneBytes,
+        .second_plane_offset = PlaneBytes,
+        .consumer_plane_offset = PlaneBytes * 2,
+        .output_plane_offset = PlaneBytes * 3,
+        .total_bytes = PlaneBytes * 4,
+        .plane_mask = 0xf,
+        .regions = {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes},
+                     {.logical_ordinal = 42,
+                      .buffer_offset = RegionBytes,
+                      .byte_size = RegionBytes}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const auto observation = [&](bool is_departure, bool is_returned) {
+        std::array<std::byte, PlaneBytes * 4> bytes{};
+        const auto& changed = is_departure ? departure : returned;
+        if (is_departure || is_returned) {
+            // Plane 0 returns only in region 41; plane 1 only in region 42; plane 2 in both;
+            // plane 3 remains stable. Distinct patterns prove that each field reads its plane.
+            std::ranges::copy(changed, bytes.begin());
+            std::ranges::copy(changed, bytes.begin() + PlaneBytes + RegionBytes);
+            std::ranges::copy(changed, bytes.begin() + PlaneBytes * 2);
+            std::ranges::copy(changed, bytes.begin() + PlaneBytes * 2 + RegionBytes);
+        }
+        return bytes;
+    };
+
+    PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
+    reducer.ObserveContent(100, layout, observation(false, false),
+                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(101, layout, observation(true, false),
+                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(102, layout, observation(false, true),
+                           FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
+
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].first_localized_visual_return_ordinals, (std::vector<u32>{41}));
+    EXPECT_EQ(reports[0].second_localized_visual_return_ordinals, (std::vector<u32>{42}));
+    EXPECT_EQ(reports[0].consumer_localized_visual_return_ordinals,
+              (std::vector<u32>{41, 42}));
+    EXPECT_TRUE(reports[0].output_localized_visual_return_ordinals.empty());
+    const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
+    EXPECT_NE(line.find(" y0=41"), std::string::npos);
+    EXPECT_NE(line.find(" y1=42"), std::string::npos);
+    EXPECT_NE(line.find(" y2=41,42"), std::string::npos);
+    EXPECT_NE(line.find(" y3=-"), std::string::npos);
+}
+
 TEST(PpTerminalScopeContent, LocalizedVisualReturnHonorsExactThresholdsAndFailsClosed) {
     constexpr u32 PixelCount = 32 * 32;
     std::array<std::byte, PixelCount * 4> a{};
