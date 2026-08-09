@@ -1405,6 +1405,7 @@ private:
             .input_count = input_plan.input_count,
             .input_capture_mask = input_compact.capture_mask | input_compact.alias_mask,
             .input_unavailable_mask = input_compact.unavailable_mask,
+            .input_alias_mask = input_compact.alias_mask,
             .plane_mask = 0x3,
             .format = plan.format,
         };
@@ -1532,6 +1533,19 @@ private:
                 }
             }
         }
+        const bool had_slot = bool{pending.slot};
+        const bool released = !had_slot || slots.ReleaseAfterCpuConsume(pending.slot);
+        const auto released_publication = HostPasses::ReconcilePpUpstreamInputSlotRelease(
+            had_slot, released, pending.take.status, pending.take.loss, pending.take.copy);
+        pending.take.status = released_publication.status;
+        pending.take.loss = released_publication.loss;
+        pending.take.copy = released_publication.copy;
+        if (!released) {
+            compact_bytes.clear();
+            input_compact = {};
+            LOG_ERROR(Render, "PpUpstreamFeedbackPrePost slot_release_loss=1");
+        }
+        pending.slot = {};
         auto layout =
             MakeUpstreamFeedbackHistoryLayout(pending.take.plan, pending.input_plan, input_compact);
         {
@@ -1561,9 +1575,6 @@ private:
                          upstream_feedback_loss_frames, pending.take.plan.region_count);
             }
         }
-        if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
-            LOG_ERROR(Render, "PpUpstreamFeedbackPrePost slot_release_loss=1");
-        }
     }
 
     void LogUpstreamFeedbackReports() {
@@ -1587,7 +1598,8 @@ private:
                 std::string inputs = "FGSCTUI q=" + std::to_string(report.request_ordinal) +
                                      " im=" + std::to_string(report.input_count) + '/' +
                                      std::to_string(report.input_capture_mask) + '/' +
-                                     std::to_string(report.input_unavailable_mask);
+                                     std::to_string(report.input_unavailable_mask) + '/' +
+                                     std::to_string(report.input_alias_mask);
                 for (u32 input_index = 0; input_index < report.input_count; ++input_index) {
                     if ((report.input_capture_mask & (1u << input_index)) == 0) {
                         continue;

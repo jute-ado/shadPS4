@@ -1796,6 +1796,7 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 input_count{};
     u32 input_capture_mask{};
     u32 input_unavailable_mask{};
+    u32 input_alias_mask{};
     std::array<PpTerminalScopeSampledInputContentHistoryPlane,
                PpTerminalScopeSampledInputContentPlan::MaxInputs>
         input_planes{};
@@ -1924,6 +1925,7 @@ struct PpTerminalScopeCalibratedReport {
     u32 input_count{};
     u32 input_capture_mask{};
     u32 input_unavailable_mask{};
+    u32 input_alias_mask{};
     std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
         sampled_input_aba_ordinals{};
     std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
@@ -2497,6 +2499,7 @@ private:
         report.input_count = a->layout.input_count;
         report.input_capture_mask = a->layout.input_capture_mask;
         report.input_unavailable_mask = a->layout.input_unavailable_mask;
+        report.input_alias_mask = a->layout.input_alias_mask;
         for (u32 input_index = 0; input_index < report.input_count; ++input_index) {
             if ((report.input_capture_mask & (1u << input_index)) == 0) {
                 continue;
@@ -2712,7 +2715,8 @@ private:
         " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
     result += " im=" + std::to_string(report.input_count) + '/' +
               std::to_string(report.input_capture_mask) + '/' +
-              std::to_string(report.input_unavailable_mask);
+              std::to_string(report.input_unavailable_mask) + '/' +
+              std::to_string(report.input_alias_mask);
     for (u32 input_index = 0; input_index < report.input_count; ++input_index) {
         if ((report.input_capture_mask & (1u << input_index)) == 0) {
             continue;

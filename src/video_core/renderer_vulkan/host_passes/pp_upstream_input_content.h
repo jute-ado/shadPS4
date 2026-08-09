@@ -375,6 +375,15 @@ struct PpUpstreamInputPublication {
     return {.status = status, .loss = loss, .copy = true};
 }
 
+[[nodiscard]] constexpr PpUpstreamInputPublication ReconcilePpUpstreamInputSlotRelease(
+    bool had_slot, bool released, FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss,
+    bool copy) noexcept {
+    if (!had_slot || released) {
+        return {.status = status, .loss = loss, .copy = copy};
+    }
+    return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .loss = {.invalidation = 1}};
+}
+
 class PpUpstreamInputCaptureGate {
 public:
     explicit constexpr PpUpstreamInputCaptureGate(u32 candidate_index_) noexcept
