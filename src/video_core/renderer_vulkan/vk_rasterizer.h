@@ -122,6 +122,8 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void CapturePpTerminalScopePreDraw(const RenderState& state,
+                                       const VideoCore::ImageColorScopeDrawDescriptor& draw);
     void MarkEncodedImageProducers(const RenderState& state,
                                    VideoCore::ImageColorScopeDrawDescriptor draw);
     void MarkEncodedStorageImageProducers();

@@ -66,7 +66,7 @@ public:
                  "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
                  "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
                  "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} targets={} slots={} "
-                 "max_bytes={} final_backing_join={}",
+                 "max_bytes={} pre_first={} final_backing_join={}",
                  config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
                  config.expected_calibrations, static_cast<u32>(config.content.first.kind),
                  config.content.first.indexed, config.content.first.element_count,
@@ -79,7 +79,8 @@ public:
                  config.content.consumer.element_count, config.content.consumer.instance_count,
                  config.content.consumer.sampled_images, config.content.consumer.storage_writes,
                  MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots,
-                 PpTerminalScopeSnapshotBytes, config.join_final_backing);
+                 PpTerminalScopeSnapshotBytes, config.content.capture_pre_first,
+                 config.join_final_backing);
     }
 
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
@@ -136,7 +137,7 @@ public:
                             3, true);
             }
             if (entry->status == FinalGuestSurfaceStatus::Complete && !entry->loss.Any() &&
-                entry->recorded_plane_mask == 15 && handoff.publish_flip_alias) {
+                entry->recorded_plane_mask == 31 && handoff.publish_flip_alias) {
                 entry->flip_alias = output_link;
                 entry->flip_alias_ready = true;
             }
@@ -147,9 +148,9 @@ public:
         RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2, true);
     }
 
-    void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
-                     u32 attachment_index, u64 rendering_serial,
-                     const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+    void ObservePreDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
+                        const RenderState& state, u32 attachment_index, u64 rendering_serial,
+                        const VideoCore::ImageColorScopeDrawDescriptor& draw) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -202,9 +203,39 @@ public:
         if (restart) {
             ConfigureEntry(*entry, link, image, true);
         }
+        if (!exact_candidate) {
+            return;
+        }
+        const auto action = entry->gate.PreviewDraw(image.image_uid, rendering_serial, observed);
+        if (action == PpTerminalScopePreDrawAction::ShapeLoss) {
+            entry->status = FinalGuestSurfaceStatus::GapLoss;
+            entry->loss = {.gap = 1};
+            return;
+        }
+        if (action == PpTerminalScopePreDrawAction::CaptureBeforeFirst) {
+            RecordPlane(*entry, image, state, attachment_index, rendering_serial, 4);
+        }
+    }
+
+    void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
+                     u32 attachment_index, u64 rendering_serial,
+                     const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+        const PpTerminalScopeDrawSelector observed{
+            .kind = draw.kind,
+            .indexed = draw.indexed,
+            .element_count = draw.element_count,
+            .instance_count = draw.instance_count,
+            .sampled_images = draw.sampled_images,
+            .storage_writes = draw.storage_writes,
+        };
+        const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
+        Entry* entry = Find(link);
+        if (!entry) {
+            return;
+        }
         const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
-        const auto action_result =
-            ApplyPpTerminalScopeContentAction(entry->status, entry->loss, action);
+        const auto action_result = ApplyPpTerminalScopeContentAction(
+            entry->status, entry->loss, action, config.content.capture_pre_first);
         entry->status = action_result.status;
         entry->loss = action_result.loss;
         if (action != PpTerminalScopeContentAction::CaptureFirst &&
@@ -495,7 +526,7 @@ private:
             .samples = target.backing->num_samples,
             .selector = config.watch_ordinals,
             .buffer_alignment = 16,
-            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 4,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 5,
             .max_bytes = PpTerminalScopeSnapshotBytes,
         });
         entry.status = entry.plan.status;
@@ -525,6 +556,7 @@ private:
             .second_plane_offset = plan.second_plane_offset,
             .consumer_plane_offset = plan.consumer_plane_offset,
             .output_plane_offset = plan.output_plane_offset,
+            .pre_first_plane_offset = plan.pre_first_plane_offset,
             .total_bytes = plan.total_bytes,
             .plane_mask = plane_mask,
             .format = plan.format,
@@ -600,7 +632,8 @@ private:
         const u64 plane_offset = plane == 0   ? entry.plan.first_plane_offset
                                  : plane == 1 ? entry.plan.second_plane_offset
                                  : plane == 2 ? entry.plan.consumer_plane_offset
-                                              : entry.plan.output_plane_offset;
+                                 : plane == 3 ? entry.plan.output_plane_offset
+                                              : entry.plan.pre_first_plane_offset;
         for (u32 index = 0; index < entry.plan.region_count; ++index) {
             const auto& region = entry.plan.regions[index];
             copies[index] = {
@@ -1009,6 +1042,17 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Graphics, pipeline->Handle());
 
+    const VideoCore::ImageColorScopeDrawDescriptor diagnostic_draw{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = is_indexed,
+        .element_count = regs.num_indices,
+        .instance_count = regs.num_instances.NumInstances(),
+        .sampled_bindings = diagnostic_sampled_bindings,
+        .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
+        .storage_writes = diagnostic_storage_writes,
+    };
+    CapturePpTerminalScopePreDraw(state, diagnostic_draw);
+
     if (is_indexed) {
         cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
                            s32(vertex_offset), instance_offset);
@@ -1017,16 +1061,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
-    MarkEncodedImageProducers(
-        state, {
-                   .kind = VideoCore::ImageColorScopeDrawKind::Direct,
-                   .indexed = is_indexed,
-                   .element_count = regs.num_indices,
-                   .instance_count = regs.num_instances.NumInstances(),
-                   .sampled_bindings = diagnostic_sampled_bindings,
-                   .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
-                   .storage_writes = diagnostic_storage_writes,
-               });
+    MarkEncodedImageProducers(state, diagnostic_draw);
 
     ResetBindings();
 }
@@ -1087,6 +1122,15 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Graphics, pipeline->Handle());
 
+    const VideoCore::ImageColorScopeDrawDescriptor diagnostic_draw{
+        .kind = VideoCore::ImageColorScopeDrawKind::Indirect,
+        .indexed = is_indexed,
+        .sampled_bindings = diagnostic_sampled_bindings,
+        .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
+        .storage_writes = diagnostic_storage_writes,
+    };
+    CapturePpTerminalScopePreDraw(state, diagnostic_draw);
+
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
 
@@ -1107,14 +1151,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
-    MarkEncodedImageProducers(
-        state, {
-                   .kind = VideoCore::ImageColorScopeDrawKind::Indirect,
-                   .indexed = is_indexed,
-                   .sampled_bindings = diagnostic_sampled_bindings,
-                   .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
-                   .storage_writes = diagnostic_storage_writes,
-               });
+    MarkEncodedImageProducers(state, diagnostic_draw);
 
     ResetBindings();
 }
@@ -1650,6 +1687,23 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.descriptorCount = 1;
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
+    }
+}
+
+void Rasterizer::CapturePpTerminalScopePreDraw(
+    const RenderState& state, const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+    if (!pp_terminal_scope_content || !VideoCore::IsPpSourceProducerTrackingEnabled()) {
+        return;
+    }
+    const u64 rendering_serial = scheduler.RenderingSerial();
+    for (u32 index = 0; index < state.num_color_attachments; ++index) {
+        const auto image_id = cb_descs[index].first;
+        if (!image_id) {
+            continue;
+        }
+        auto& image = texture_cache.GetImage(image_id);
+        pp_terminal_scope_content->ObservePreDraw(image_id, image, state, index, rendering_serial,
+                                                  draw);
     }
 }
 

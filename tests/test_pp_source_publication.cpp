@@ -921,10 +921,9 @@ TEST(PpTerminalScopeContent, FirstProducerPreviewCapturesBeforeTheDrawWithoutAdv
     EXPECT_EQ(gate.PreviewDraw(16, 90, config.first), PpTerminalScopePreDrawAction::None);
     EXPECT_EQ(gate.PreviewDraw(17, 90, config.first),
               PpTerminalScopePreDrawAction::CaptureBeforeFirst);
-    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first),
-              PpTerminalScopeContentAction::CaptureFirst);
-    EXPECT_EQ(gate.ObserveDraw(17, 90, config.second),
-              PpTerminalScopeContentAction::CaptureSecond);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.PreviewDraw(17, 90, config.second), PpTerminalScopePreDrawAction::None);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
 
     ASSERT_TRUE(gate.Arm(17, 4));
     EXPECT_EQ(gate.ObserveDraw(17, 91, config.first), PpTerminalScopeContentAction::ShapeLoss);
@@ -976,10 +975,17 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
         FinalGuestSurfaceStatus::GapLoss, {.gap = 1}, PpTerminalScopeContentAction::CaptureFirst);
     EXPECT_EQ(reset.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_FALSE(reset.loss.Any());
+    const auto preserve_pre_loss =
+        ApplyPpTerminalScopeContentAction(FinalGuestSurfaceStatus::BusyLoss, {.busy = 1},
+                                          PpTerminalScopeContentAction::CaptureFirst, true);
+    EXPECT_EQ(preserve_pre_loss.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(preserve_pre_loss.loss.busy, 1u);
 
-    const auto acquire = PlanPpTerminalScopePlaneSlot(0, false);
+    const auto acquire = PlanPpTerminalScopePlaneSlot(4, false);
     EXPECT_TRUE(acquire.acquire);
     EXPECT_FALSE(acquire.reuse);
+    const auto missing_pre = PlanPpTerminalScopePlaneSlot(0, false);
+    EXPECT_EQ(missing_pre.status, FinalGuestSurfaceStatus::GapLoss);
     const auto reuse = PlanPpTerminalScopePlaneSlot(0, true);
     EXPECT_FALSE(reuse.acquire);
     EXPECT_TRUE(reuse.reuse);
@@ -1187,10 +1193,8 @@ TEST(PpTerminalScopeContent, PreFirstPlaneUsesTheExactCalibratedVisualPredicate)
     EXPECT_EQ(reports[0].pre_first_aba_ordinals, (std::vector<u32>{77}));
     EXPECT_TRUE(reports[0].pre_first_stable_ordinals.empty());
     EXPECT_TRUE(reports[0].pre_first_ambiguous_ordinals.empty());
-    EXPECT_EQ(reports[0].pre_first_localized_visual_return_ordinals,
-              (std::vector<u32>{77}));
-    EXPECT_NE(FormatPpTerminalScopeCalibratedReport(reports[0]).find(" y4=77"),
-              std::string::npos);
+    EXPECT_EQ(reports[0].pre_first_localized_visual_return_ordinals, (std::vector<u32>{77}));
+    EXPECT_NE(FormatPpTerminalScopeCalibratedReport(reports[0]).find(" y4=77"), std::string::npos);
 }
 
 TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
@@ -1416,9 +1420,9 @@ TEST(PpTerminalScopeContent, PrivateLineageReportFormatsOnlyHopStatusAndLoss) {
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
-TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput) {
+TEST(PpTerminalScopeContent, LineageHandoffRequiresPreAndTwoProducerPlanesAndOneOutput) {
     const auto complete =
-        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, true);
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 0x13, true);
     EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
     EXPECT_TRUE(complete.capture_consumer);
     EXPECT_TRUE(complete.capture_output);
@@ -1433,7 +1437,7 @@ TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput
     EXPECT_FALSE(missing_plane.publish_flip_alias);
 
     const auto ambiguous_output =
-        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, false);
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 0x13, false);
     EXPECT_EQ(ambiguous_output.status, FinalGuestSurfaceStatus::GapLoss);
     EXPECT_EQ(ambiguous_output.loss.gap, 1u);
     EXPECT_FALSE(ambiguous_output.publish_flip_alias);
@@ -1965,6 +1969,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->window.frame_count, 800u);
     EXPECT_EQ(config->expected_calibrations, 300u);
     EXPECT_TRUE(config->join_final_backing);
+    EXPECT_TRUE(config->content.capture_pre_first);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
     EXPECT_EQ(config->content.first,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 696, 1,
