@@ -414,5 +414,29 @@ TEST(PpSourceReconstruction, FlipPublicationStageIsExclusiveCalibratedAndPresent
     EXPECT_FALSE(FinalGuestSurfaceLogPolicy(config->stage).verbose_frame_reports);
 }
 
+TEST(PpSourceReconstruction, ProductionExecutionChoosesExactlyOneSnapshotSideOfVisiblePp) {
+    const auto publication = PlanPpSourceReconstructionExecution(
+        FinalGuestSurfaceStage::PpSourcePublicationReconstruction, true, true, true);
+    EXPECT_TRUE(publication.enabled);
+    EXPECT_TRUE(publication.prepare_resources_before_visible_pp);
+    EXPECT_TRUE(publication.capture_snapshot_before_visible_pp);
+    EXPECT_FALSE(publication.capture_snapshot_after_visible_pp);
+    EXPECT_TRUE(publication.run_reconstruction_after_visible_pp);
+    EXPECT_TRUE(publication.visible_pp_draw_remains_original_source);
+
+    const auto post_sample = PlanPpSourceReconstructionExecution(
+        FinalGuestSurfaceStage::PpSourceReconstruction, true, true, true);
+    EXPECT_FALSE(post_sample.capture_snapshot_before_visible_pp);
+    EXPECT_TRUE(post_sample.capture_snapshot_after_visible_pp);
+    EXPECT_TRUE(post_sample.run_reconstruction_after_visible_pp);
+
+    const auto disabled = PlanPpSourceReconstructionExecution(
+        FinalGuestSurfaceStage::PpSourcePublicationReconstruction, false, true, true);
+    EXPECT_FALSE(disabled.enabled);
+    EXPECT_FALSE(disabled.capture_snapshot_before_visible_pp);
+    EXPECT_FALSE(disabled.capture_snapshot_after_visible_pp);
+    EXPECT_FALSE(disabled.run_reconstruction_after_visible_pp);
+}
+
 } // namespace
 } // namespace Vulkan::HostPasses
