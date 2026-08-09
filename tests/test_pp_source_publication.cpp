@@ -1585,6 +1585,53 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesCapturedInputRegion
     EXPECT_EQ(line.find("uid"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, CapturedInputUsesTheLocalizedVisualPredicateAtItsOwnExtent) {
+    PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
+    constexpr u32 RegionBytes = 4 * 4;
+    const PpTerminalScopeContentHistoryLayout layout{
+        .total_bytes = RegionBytes,
+        .input_count = 2,
+        .input_capture_mask = 0b10,
+        .input_unavailable_mask = 0b01,
+        .input_planes =
+            {{{.status = FinalGuestSurfaceStatus::Unsupported,
+               .loss = {.unsupported_format = 1}},
+              {.region_count = 1,
+               .plane_offset = 0,
+               .plane_bytes = RegionBytes,
+               .regions =
+                   {{{.logical_ordinal = 77, .buffer_offset = 0, .byte_size = RegionBytes}}},
+               .format = FinalGuestSurfaceFormat::Bgra8,
+               .status = FinalGuestSurfaceStatus::Complete}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const auto pixels = [](u8 color) {
+        std::array<std::byte, RegionBytes> bytes{};
+        for (u32 offset = 0; offset < RegionBytes; offset += 4) {
+            bytes[offset + 0] = std::byte{color};
+            bytes[offset + 1] = std::byte{color};
+            bytes[offset + 2] = std::byte{color};
+            bytes[offset + 3] = std::byte{255};
+        }
+        return bytes;
+    };
+    reducer.ObserveContent(300, layout, pixels(10), FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(301, layout, pixels(100), FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveContent(302, layout, pixels(11), FinalGuestSurfaceStatus::Complete, {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 300, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 301, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 302, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].sampled_input_ambiguous_ordinals[1], (std::vector<u32>{77}))
+        << "A and C are deliberately not byte-identical";
+    EXPECT_EQ(reports[0].sampled_input_localized_visual_return_ordinals[1],
+              (std::vector<u32>{77}));
+    EXPECT_FALSE(reports[0].loss.Any());
+    const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
+    EXPECT_NE(line.find(" z1y=77"), std::string::npos);
+}
+
 TEST(PpTerminalScopeContent, OutputPlaneUsesTheExactLocalizedVisualReturnPredicate) {
     constexpr u32 PixelCount = 32 * 32;
     constexpr u32 RegionBytes = PixelCount * 4;
