@@ -521,16 +521,64 @@ struct PpTerminalScopePlaneSlotDecision {
     bool reuse{};
 };
 
+struct PpTerminalScopeRootInputCaptureDescriptor {
+    bool capture_first{};
+    bool single_sampled_input{};
+    bool sampled_input_valid{};
+    bool sampled_input_alias{};
+    bool read_only{};
+    bool compatible_layout{};
+};
+
+struct PpTerminalScopeRootInputCaptureDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    u32 plane{};
+    bool capture{};
+    bool post_draw{};
+    bool cpu_wait{};
+    bool finish{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeRootInputCaptureDecision PlanPpTerminalScopeRootInputCapture(
+    const PpTerminalScopeRootInputCaptureDescriptor& descriptor) noexcept {
+    if (!descriptor.capture_first) {
+        return {};
+    }
+    if (!descriptor.single_sampled_input || !descriptor.sampled_input_valid) {
+        return {.status = FinalGuestSurfaceStatus::GapLoss, .loss = {.gap = 1}};
+    }
+    if (descriptor.sampled_input_alias || !descriptor.read_only) {
+        return {
+            .status = FinalGuestSurfaceStatus::Unsupported,
+            .loss = {.unsupported_type = 1},
+        };
+    }
+    if (!descriptor.compatible_layout) {
+        return {
+            .status = FinalGuestSurfaceStatus::InvalidationLoss,
+            .loss = {.invalidation = 1},
+        };
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::Complete,
+        .plane = 4,
+        .capture = true,
+        .post_draw = true,
+    };
+}
+
 [[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
     u32 plane, bool has_slot) noexcept {
-    if (plane > 3 || ((plane == 1 || plane == 3) && !has_slot)) {
+    if (plane > 4 || (plane == 4 && has_slot) ||
+        ((plane == 0 || plane == 1 || plane == 3) && !has_slot)) {
         return {
             .status = FinalGuestSurfaceStatus::GapLoss,
             .loss = {.gap = 1},
         };
     }
     return {
-        .acquire = (plane == 0 || plane == 2) && !has_slot,
+        .acquire = (plane == 2 || plane == 4) && !has_slot,
         .reuse = has_slot,
     };
 }
@@ -696,11 +744,14 @@ struct PpTerminalScopeContentPlan {
     std::array<PpSourceBackingRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> regions{};
     u32 region_count{};
     u32 copy_region_count{};
+    u32 target_width{};
+    u32 target_height{};
     u32 plane_bytes{};
     u32 first_plane_offset{};
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
     u32 output_plane_offset{};
+    u32 root_input_plane_offset{};
     u32 total_bytes{};
     u32 image_barriers_per_draw{};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
@@ -764,7 +815,7 @@ struct PpTerminalScopeContentPlan {
         plan.loss = footprint.loss;
         return plan;
     }
-    if (footprint.region_count > descriptor.max_regions / 4) {
+    if (footprint.region_count > descriptor.max_regions / 5) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::tile_capacity);
     }
     const u64 second_offset =
@@ -773,19 +824,29 @@ struct PpTerminalScopeContentPlan {
                                                            descriptor.buffer_alignment);
     const u64 output_offset = AlignPpSourceBackingOffset(consumer_offset + footprint.buffer_bytes,
                                                          descriptor.buffer_alignment);
-    const u64 total_bytes = output_offset + footprint.buffer_bytes;
-    if (second_offset == std::numeric_limits<u64>::max() || total_bytes > descriptor.max_bytes ||
-        total_bytes > std::numeric_limits<u32>::max()) {
+    const u64 root_input_offset = AlignPpSourceBackingOffset(output_offset + footprint.buffer_bytes,
+                                                             descriptor.buffer_alignment);
+    const u64 total_bytes = root_input_offset == std::numeric_limits<u64>::max()
+                                ? root_input_offset
+                                : root_input_offset + footprint.buffer_bytes;
+    if (second_offset == std::numeric_limits<u64>::max() ||
+        consumer_offset == std::numeric_limits<u64>::max() ||
+        output_offset == std::numeric_limits<u64>::max() ||
+        root_input_offset == std::numeric_limits<u64>::max() ||
+        total_bytes > descriptor.max_bytes || total_bytes > std::numeric_limits<u32>::max()) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::byte_capacity);
     }
     PpTerminalScopeContentPlan plan{
         .region_count = footprint.region_count,
-        .copy_region_count = footprint.region_count * 4,
+        .copy_region_count = footprint.region_count * 5,
+        .target_width = descriptor.target_width,
+        .target_height = descriptor.target_height,
         .plane_bytes = footprint.buffer_bytes,
         .first_plane_offset = 0,
         .second_plane_offset = static_cast<u32>(second_offset),
         .consumer_plane_offset = static_cast<u32>(consumer_offset),
         .output_plane_offset = static_cast<u32>(output_offset),
+        .root_input_plane_offset = static_cast<u32>(root_input_offset),
         .total_bytes = static_cast<u32>(total_bytes),
         .image_barriers_per_draw = 2,
         .format = footprint.format,
@@ -861,7 +922,7 @@ struct PpTerminalScopeLineageHandoffDecision {
     if (lineage_status != FinalGuestSurfaceStatus::Complete || lineage_loss.Any()) {
         return {.status = lineage_status, .loss = lineage_loss};
     }
-    if ((producer_plane_mask & 3u) != 3u || !single_output) {
+    if ((producer_plane_mask & 19u) != 19u || !single_output) {
         return {.status = FinalGuestSurfaceStatus::GapLoss, .loss = {.gap = 1}};
     }
     return {
@@ -915,6 +976,7 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
     u32 output_plane_offset{};
+    u32 root_input_plane_offset{};
     u32 total_bytes{};
     u32 plane_mask{};
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
@@ -1022,10 +1084,14 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> output_aba_ordinals{};
     std::vector<u32> output_stable_ordinals{};
     std::vector<u32> output_ambiguous_ordinals{};
+    std::vector<u32> root_input_aba_ordinals{};
+    std::vector<u32> root_input_stable_ordinals{};
+    std::vector<u32> root_input_ambiguous_ordinals{};
     std::vector<u32> first_localized_visual_return_ordinals{};
     std::vector<u32> second_localized_visual_return_ordinals{};
     std::vector<u32> consumer_localized_visual_return_ordinals{};
     std::vector<u32> output_localized_visual_return_ordinals{};
+    std::vector<u32> root_input_localized_visual_return_ordinals{};
     std::vector<u32> output_final_backing_equal_ordinals{};
     std::vector<u32> output_final_backing_different_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -1216,7 +1282,7 @@ private:
 
     [[nodiscard]] static bool EqualVisibleRegion(const Observation& left, const Observation& right,
                                                  u32 plane, u32 region_index) noexcept {
-        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 3 ||
+        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 4 ||
             left.layout.bytes_per_pixel != 4) {
             return false;
         }
@@ -1225,7 +1291,8 @@ private:
             return plane == 0   ? 0u
                    : plane == 1 ? layout.second_plane_offset
                    : plane == 2 ? layout.consumer_plane_offset
-                                : layout.output_plane_offset;
+                   : plane == 3 ? layout.output_plane_offset
+                                : layout.root_input_plane_offset;
         };
         const u64 left_offset = region.buffer_offset + plane_offset(left.layout);
         const u64 right_offset = region.buffer_offset + plane_offset(right.layout);
@@ -1266,14 +1333,15 @@ private:
     [[nodiscard]] static bool ClassifyLocalizedPlane(const Observation& a, const Observation& b,
                                                      const Observation& c, u32 plane,
                                                      std::vector<u32>& localized_visual_return) {
-        if (a.layout != b.layout || a.layout != c.layout || plane > 3) {
+        if (a.layout != b.layout || a.layout != c.layout || plane > 4) {
             return false;
         }
         const auto plane_offset = [plane](const PpTerminalScopeContentHistoryLayout& layout) {
             return plane == 0   ? 0u
                    : plane == 1 ? layout.second_plane_offset
                    : plane == 2 ? layout.consumer_plane_offset
-                                : layout.output_plane_offset;
+                   : plane == 3 ? layout.output_plane_offset
+                                : layout.root_input_plane_offset;
         };
         const u64 a_plane_offset = plane_offset(a.layout);
         const u64 b_plane_offset = plane_offset(b.layout);
@@ -1456,6 +1524,16 @@ private:
                 return report;
             }
         }
+        if ((a->layout.plane_mask & (1u << 4)) != 0) {
+            ClassifyPlane(*a, *b, *c, 4, report.root_input_aba_ordinals,
+                          report.root_input_stable_ordinals, report.root_input_ambiguous_ordinals);
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 4,
+                                        report.root_input_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
+        }
         if (join_final_backing &&
             ((a->layout.plane_mask & (1u << 3)) == 0 ||
              !ClassifyFinalBackingJoin(*a, *b, *c, *backing_a, *backing_b, *backing_c,
@@ -1571,6 +1649,11 @@ private:
            FormatPpTerminalScopeOrdinalList(report.consumer_localized_visual_return_ordinals) +
            " y3=" +
            FormatPpTerminalScopeOrdinalList(report.output_localized_visual_return_ordinals) +
+           " a4=" + FormatPpTerminalScopeOrdinalList(report.root_input_aba_ordinals) +
+           " s4=" + FormatPpTerminalScopeOrdinalList(report.root_input_stable_ordinals) +
+           " x4=" + FormatPpTerminalScopeOrdinalList(report.root_input_ambiguous_ordinals) +
+           " y4=" +
+           FormatPpTerminalScopeOrdinalList(report.root_input_localized_visual_return_ordinals) +
            " e3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_equal_ordinals) +
            " d3=" +
            FormatPpTerminalScopeOrdinalList(report.output_final_backing_different_ordinals) +

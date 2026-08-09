@@ -1596,7 +1596,7 @@ TEST(PpTerminalScopeContent, EveryRetainedPlaneUsesTheExactLocalizedVisualReturn
     }
 
     const PpTerminalScopeContentHistoryLayout layout{
-        .region_count = 2,
+        .region_count = 3,
         .plane_bytes = PlaneBytes,
         .second_plane_offset = PlaneBytes,
         .consumer_plane_offset = PlaneBytes * 2,

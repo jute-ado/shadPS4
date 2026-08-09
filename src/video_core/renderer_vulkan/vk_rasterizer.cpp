@@ -136,7 +136,7 @@ public:
                             3, true);
             }
             if (entry->status == FinalGuestSurfaceStatus::Complete && !entry->loss.Any() &&
-                entry->recorded_plane_mask == 15 && handoff.publish_flip_alias) {
+                entry->recorded_plane_mask == 31 && handoff.publish_flip_alias) {
                 entry->flip_alias = output_link;
                 entry->flip_alias_ready = true;
             }
@@ -147,7 +147,8 @@ public:
         RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2, true);
     }
 
-    void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
+    void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
+                     VideoCore::Image* sampled_input, const RenderState& state,
                      u32 attachment_index, u64 rendering_serial,
                      const VideoCore::ImageColorScopeDrawDescriptor& draw) {
         const PpTerminalScopeDrawSelector observed{
@@ -210,6 +211,26 @@ public:
         if (action != PpTerminalScopeContentAction::CaptureFirst &&
             action != PpTerminalScopeContentAction::CaptureSecond) {
             return;
+        }
+        if (action == PpTerminalScopeContentAction::CaptureFirst) {
+            const auto root_input = PlanPpTerminalScopeRootInputCapture({
+                .capture_first = true,
+                .single_sampled_input = draw.sampled_images == 1,
+                .sampled_input_valid = draw.sampled_input_valid && sampled_input,
+                .sampled_input_alias = draw.sampled_input_alias,
+                .read_only = draw.storage_writes == 0,
+                .compatible_layout = IsCompatiblePlane(entry->plan, sampled_input),
+            });
+            if (!root_input.capture) {
+                entry->status = root_input.status;
+                entry->loss = root_input.loss;
+                return;
+            }
+            RecordPlane(*entry, *sampled_input, state, attachment_index, rendering_serial,
+                        root_input.plane);
+            if (entry->status != FinalGuestSurfaceStatus::Complete || entry->loss.Any()) {
+                return;
+            }
         }
         const u32 plane = action == PpTerminalScopeContentAction::CaptureFirst ? 0 : 1;
         RecordPlane(*entry, image, state, attachment_index, rendering_serial, plane);
@@ -480,6 +501,15 @@ private:
                target->backing->subresource_states.empty();
     }
 
+    [[nodiscard]] static bool IsCompatiblePlane(const PpTerminalScopeContentPlan& plan,
+                                                const VideoCore::Image* image) noexcept {
+        return image && image->aspect_mask == vk::ImageAspectFlagBits::eColor && image->backing &&
+               image->backing->subresource_states.empty() && image->info.resources.levels == 1 &&
+               image->info.resources.layers == 1 && image->info.size.width == plan.target_width &&
+               image->info.size.height == plan.target_height && image->backing->num_samples == 1 &&
+               TerminalScopeFormat(image->backing->image.image_ci.format) == plan.format;
+    }
+
     void ConfigureEntry(Entry& entry, VideoCore::ImageColorScopePrivateLink link,
                         VideoCore::Image& target, bool discovered) {
         entry.plan = PlanPpTerminalScopeContent({
@@ -495,7 +525,7 @@ private:
             .samples = target.backing->num_samples,
             .selector = config.watch_ordinals,
             .buffer_alignment = 16,
-            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 4,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 5,
             .max_bytes = PpTerminalScopeSnapshotBytes,
         });
         entry.status = entry.plan.status;
@@ -525,6 +555,7 @@ private:
             .second_plane_offset = plan.second_plane_offset,
             .consumer_plane_offset = plan.consumer_plane_offset,
             .output_plane_offset = plan.output_plane_offset,
+            .root_input_plane_offset = plan.root_input_plane_offset,
             .total_bytes = plan.total_bytes,
             .plane_mask = plane_mask,
             .format = plan.format,
@@ -600,7 +631,8 @@ private:
         const u64 plane_offset = plane == 0   ? entry.plan.first_plane_offset
                                  : plane == 1 ? entry.plan.second_plane_offset
                                  : plane == 2 ? entry.plan.consumer_plane_offset
-                                              : entry.plan.output_plane_offset;
+                                 : plane == 3 ? entry.plan.output_plane_offset
+                                              : entry.plan.root_input_plane_offset;
         for (u32 index = 0; index < entry.plan.region_count; ++index) {
             const auto& region = entry.plan.regions[index];
             copies[index] = {
@@ -1733,8 +1765,8 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             image.MarkDiagnosticColorDraw(rendering_serial, draw);
             image.MarkDiagnosticProducer(VideoCore::ImageProducerClass::ColorAttachment);
             if (pp_terminal_scope_content) {
-                pp_terminal_scope_content->ObserveDraw(image_id, image, state, index,
-                                                       rendering_serial, draw);
+                pp_terminal_scope_content->ObserveDraw(image_id, image, sampled_input_image, state,
+                                                       index, rendering_serial, draw);
             }
         }
     }
