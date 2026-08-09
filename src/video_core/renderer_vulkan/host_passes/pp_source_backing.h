@@ -121,6 +121,11 @@ struct PpSourceBackingFootprintPlan {
         descriptor.logical_width == 0 || descriptor.logical_height == 0) {
         return reject(FinalGuestSurfaceStatus::Unsupported, &FinalGuestSurfaceLoss::invalid_extent);
     }
+    if (descriptor.source_width < descriptor.logical_width ||
+        descriptor.source_height < descriptor.logical_height) {
+        return reject(FinalGuestSurfaceStatus::Unsupported,
+                      &FinalGuestSurfaceLoss::logical_mapping);
+    }
     if (descriptor.resolved_mip_count != 1 || descriptor.resolved_layer_count != 1 ||
         descriptor.bound_mip_count != 1 || descriptor.bound_layer_count != 1 ||
         descriptor.resolved_base_mip != descriptor.bound_base_mip ||
