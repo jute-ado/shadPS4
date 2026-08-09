@@ -1209,4 +1209,24 @@ TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSele
     EXPECT_FALSE(ParsePpTerminalScopeDrawSelector("direct,indexed,696,0,1,0"));
 }
 
+TEST(PpTerminalScopeContent, RenderingSplitResumesWithLoadAndPreservesGuestScopeSerial) {
+    const auto complete = PlanPpTerminalScopeRenderingSplit(true, 77, 77);
+    EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(complete.end_rendering);
+    EXPECT_TRUE(complete.resume_rendering);
+    EXPECT_TRUE(complete.force_load);
+    EXPECT_TRUE(complete.preserve_serial);
+    EXPECT_EQ(complete.serial, 77u);
+
+    const auto not_rendering = PlanPpTerminalScopeRenderingSplit(false, 77, 77);
+    EXPECT_EQ(not_rendering.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(not_rendering.loss.gap, 1u);
+    EXPECT_FALSE(not_rendering.resume_rendering);
+
+    const auto stale = PlanPpTerminalScopeRenderingSplit(true, 78, 77);
+    EXPECT_EQ(stale.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(stale.loss.invalidation, 1u);
+    EXPECT_FALSE(stale.resume_rendering);
+}
+
 } // namespace
