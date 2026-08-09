@@ -1026,4 +1026,40 @@ TEST(PpTerminalScopeContent, ExistingCompactScopeOutputNeverFormatsPrivateLinks)
     EXPECT_EQ(line.find("uid"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, PrivateLinkResolutionNeverIndexesAFreeOrReusedSlot) {
+    const VideoCore::ImageColorScopePrivateLink link{
+        .id = VideoCore::ImageId{17},
+        .uid = 4401,
+    };
+    u32 uid_queries{};
+    const auto free_slot = VideoCore::ResolveImageColorScopePrivateLink(
+        link, [](VideoCore::ImageId) { return false; },
+        [&](VideoCore::ImageId) {
+            ++uid_queries;
+            return 4401;
+        });
+    EXPECT_FALSE(free_slot);
+    EXPECT_EQ(uid_queries, 0u);
+
+    const auto reused_slot = VideoCore::ResolveImageColorScopePrivateLink(
+        link, [](VideoCore::ImageId) { return true; },
+        [&](VideoCore::ImageId id) {
+            ++uid_queries;
+            EXPECT_EQ(id, VideoCore::ImageId{17});
+            return 4402;
+        });
+    EXPECT_FALSE(reused_slot);
+    EXPECT_EQ(uid_queries, 1u);
+
+    const auto current = VideoCore::ResolveImageColorScopePrivateLink(
+        link, [](VideoCore::ImageId) { return true; },
+        [&](VideoCore::ImageId) {
+            ++uid_queries;
+            return 4401;
+        });
+    ASSERT_TRUE(current);
+    EXPECT_EQ(*current, VideoCore::ImageId{17});
+    EXPECT_EQ(uid_queries, 2u);
+}
+
 } // namespace
