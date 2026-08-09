@@ -7,6 +7,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -55,6 +56,9 @@ public:
         : instance{instance_}, scheduler{scheduler_}, config{config_},
           reducer{config.window, 32, config.join_final_backing}, calibration{true},
           upstream_registry{config.content.upstream},
+          upstream_feedback_frame{config.content.upstream,
+                                  HostPasses::PpUpstreamFeedbackPrePostPlan::MaxCandidates},
+          upstream_feedback_reducer{config.window, 32, false},
           slot_stride{Common::AlignUp<u64>(PpTerminalScopeSnapshotBytes,
                                            std::max<u64>(1, instance.NonCoherentAtomSize()))},
           download{instance,
@@ -69,7 +73,8 @@ public:
             "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
             "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
             "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
-            "capture_predecessor={} input_content={} upstream_inputs={} upstream_index={} "
+            "capture_predecessor={} input_content={} upstream_inputs={} upstream_pre_post={} "
+            "upstream_index={} "
             "upstream={}/{}/{}/{}/{}/{} final_backing_join={}",
             config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
             config.expected_calibrations, static_cast<u32>(config.content.first.kind),
@@ -88,10 +93,11 @@ public:
             MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes,
             config.content.capture_pre_first, config.content.capture_predecessor,
             config.content.capture_sampled_input_content, config.content.capture_upstream_inputs,
-            config.content.upstream_input_index, static_cast<u32>(config.content.upstream.kind),
-            config.content.upstream.indexed, config.content.upstream.element_count,
-            config.content.upstream.instance_count, config.content.upstream.sampled_images,
-            config.content.upstream.storage_writes, config.join_final_backing);
+            config.content.capture_upstream_pre_post, config.content.upstream_input_index,
+            static_cast<u32>(config.content.upstream.kind), config.content.upstream.indexed,
+            config.content.upstream.element_count, config.content.upstream.instance_count,
+            config.content.upstream.sampled_images, config.content.upstream.storage_writes,
+            config.join_final_backing);
     }
 
     [[nodiscard]] bool IsPredecessorCandidate(
@@ -217,6 +223,8 @@ public:
         const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
         if (config.content.capture_upstream_inputs &&
             MatchesPpTerminalScopeDraw(config.content.upstream, observed)) {
+            ObserveUpstreamFeedbackPreDraw(link, image, state, attachment_index, rendering_serial,
+                                           observed);
             static_cast<void>(upstream_registry.Observe(link, observed, sampled_inputs));
         }
         Entry* entry = Find(link);
@@ -283,6 +291,9 @@ public:
                                             ? upstream_registry.Resolve(sampled_links[selected])
                                             : PpTerminalScopeUpstreamInputRegistryResolution{};
                 entry->upstream_inputs = resolution.inputs;
+                if (config.content.capture_upstream_pre_post && selected < sampled_links.size()) {
+                    static_cast<void>(upstream_feedback_frame.Select(sampled_links[selected]));
+                }
                 if (!resolution.matched) {
                     entry->status = resolution.status == FinalGuestSurfaceStatus::AlreadyConsumed
                                         ? FinalGuestSurfaceStatus::GapLoss
@@ -349,6 +360,8 @@ public:
             .storage_writes = draw.storage_writes,
         };
         const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
+        ObserveUpstreamFeedbackPostDraw(link, image, state, attachment_index, rendering_serial,
+                                        observed);
         Entry* entry = Find(link);
         if (!entry) {
             return;
@@ -387,6 +400,7 @@ public:
     void ObserveFlip(u64 sequence, u64 process_time_us, VideoCore::ImageColorScopePrivateLink link,
                      VideoCore::Image* target, u32 final_source_width, u32 final_source_height,
                      u32 logical_width, u32 logical_height) {
+        TakeUpstreamFeedbackAtFlip(sequence, process_time_us);
         upstream_registry.Reset();
         mapping = {
             .final_source_width = final_source_width,
@@ -396,6 +410,9 @@ public:
         };
         if (!mapping.Valid()) {
             mapping = {};
+        }
+        if (config.content.capture_upstream_pre_post) {
+            upstream_feedback_armed = upstream_feedback_frame.Arm();
         }
         const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
         const u64 target_generation =
@@ -474,7 +491,7 @@ public:
             if (!report.emit) {
                 continue;
             }
-            reducer.ObserveCalibration({
+            const FinalGuestSurfaceCalibratedStamp calibrated{
                 .request_ordinal = report.request_ordinal,
                 .sequence = report.surface_sequence,
                 .process_time_us = report.surface_process_time_us,
@@ -482,9 +499,15 @@ public:
                          report.surface_process_time_us != 0 && !report.fallback_time &&
                          report.exact_scaled_mapping && report.mapping_loss == 0 &&
                          report.overflow_loss == 0 && !report.overflow_marker,
-            });
+            };
+            reducer.ObserveCalibration(calibrated);
+            if (config.content.capture_upstream_pre_post) {
+                upstream_feedback_reducer.ObserveCalibration(calibrated);
+            }
             LogReports();
+            LogUpstreamFeedbackReports();
             LogCalibratedCoverage();
+            LogUpstreamFeedbackCalibratedCoverage();
         }
     }
 
@@ -530,7 +553,9 @@ public:
         }
         std::scoped_lock lock{reducer_mutex};
         LogReports();
+        LogUpstreamFeedbackReports();
         LogCalibratedCoverage(true);
+        LogUpstreamFeedbackCalibratedCoverage(true);
     }
 
 private:
@@ -583,6 +608,14 @@ private:
         PpTerminalScopePredecessor predecessor{};
         PpTerminalScopeSampledInputs sampled_inputs{};
         PpTerminalScopeSampledInputs upstream_inputs{};
+        FinalGuestSurfaceReadbackSlotPool::Token slot{};
+        u64 slot_offset{};
+    };
+
+    struct PendingUpstreamFeedback {
+        u64 sequence{};
+        u64 process_time_us{};
+        HostPasses::PpUpstreamFeedbackPrePostTakeResult take{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -758,6 +791,200 @@ private:
             }
         }
         return layout;
+    }
+
+    [[nodiscard]] HostPasses::PpUpstreamFeedbackPrePostPlan MakeUpstreamFeedbackPlan(
+        const VideoCore::Image& image) const noexcept {
+        return HostPasses::PlanPpUpstreamFeedbackPrePost({
+            .enabled = config.content.capture_upstream_pre_post,
+            .logical_width = mapping.logical_width,
+            .logical_height = mapping.logical_height,
+            .source_width = image.info.size.width,
+            .source_height = image.info.size.height,
+            .format = image.backing ? TerminalScopeFormat(image.backing->image.image_ci.format)
+                                    : FinalGuestSurfaceFormat::Unsupported,
+            .samples = image.backing ? image.backing->num_samples : 0,
+            .base_mip = 0,
+            .mip_count = image.info.resources.levels,
+            .base_layer = 0,
+            .layer_count = image.info.resources.layers,
+            .color = image.aspect_mask == vk::ImageAspectFlagBits::eColor,
+            .type_2d = image.info.type == AmdGpu::ImageType::Color2D ||
+                       image.info.type == AmdGpu::ImageType::Color2DArray,
+            .uniform_state = image.backing && image.backing->subresource_states.empty(),
+            .selector = config.watch_ordinals,
+            .candidate_capacity = HostPasses::PpUpstreamFeedbackPrePostPlan::MaxCandidates,
+            .buffer_alignment = 16,
+            .max_regions = HostPasses::PpUpstreamFeedbackPrePostPlan::MaxCandidates * 2 *
+                           FinalGuestSurfaceWatchOrdinals::MaxOrdinals,
+            .max_bytes = PpTerminalScopeSnapshotBytes,
+        });
+    }
+
+    void ObserveUpstreamFeedbackPreDraw(VideoCore::ImageColorScopePrivateLink link,
+                                        VideoCore::Image& image, const RenderState& state,
+                                        u32 attachment_index, u64 rendering_serial,
+                                        const PpTerminalScopeDrawSelector& draw) {
+        if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed ||
+            !MatchesPpTerminalScopeDraw(config.content.upstream, draw)) {
+            return;
+        }
+        const auto plan = MakeUpstreamFeedbackPlan(image);
+        if (!upstream_feedback_frame.Configure(plan)) {
+            return;
+        }
+        const auto action = upstream_feedback_frame.Preview(link, draw);
+        if (!action.capture) {
+            return;
+        }
+        bool acquired{};
+        if (!upstream_feedback_slot) {
+            const auto token = slots.TryAcquire();
+            if (!token) {
+                upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::BusyLoss, {.busy = 1});
+                return;
+            }
+            upstream_feedback_slot = *token;
+            acquired = true;
+        }
+        if (RecordUpstreamFeedbackPlane(image, state, attachment_index, rendering_serial,
+                                        action.candidate_index, false, acquired, plan)) {
+            upstream_feedback_frame.MarkCopied(action.candidate_index, false);
+        }
+    }
+
+    void ObserveUpstreamFeedbackPostDraw(VideoCore::ImageColorScopePrivateLink link,
+                                         VideoCore::Image& image, const RenderState& state,
+                                         u32 attachment_index, u64 rendering_serial,
+                                         const PpTerminalScopeDrawSelector& draw) {
+        if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed ||
+            !MatchesPpTerminalScopeDraw(config.content.upstream, draw)) {
+            return;
+        }
+        const auto action = upstream_feedback_frame.Complete(link, draw);
+        if (!action.capture) {
+            return;
+        }
+        const auto plan = MakeUpstreamFeedbackPlan(image);
+        if (!upstream_feedback_frame.Configure(plan) || !upstream_feedback_slot) {
+            upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::GapLoss, {.gap = 1});
+            return;
+        }
+        if (RecordUpstreamFeedbackPlane(image, state, attachment_index, rendering_serial,
+                                        action.candidate_index, true, false, plan)) {
+            upstream_feedback_frame.MarkCopied(action.candidate_index, true);
+        }
+    }
+
+    [[nodiscard]] bool RecordUpstreamFeedbackPlane(
+        VideoCore::Image& image, const RenderState& state, u32 attachment_index,
+        u64 rendering_serial, u32 candidate_index, bool post, bool first_copy,
+        const HostPasses::PpUpstreamFeedbackPrePostPlan& plan) {
+        if (!upstream_feedback_slot || attachment_index >= state.num_color_attachments ||
+            !scheduler.IsRendering() || !image.backing ||
+            image.backing->state.layout == vk::ImageLayout::eUndefined) {
+            upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                                           {.invalidation = 1});
+            return false;
+        }
+        const auto split = PlanPpTerminalScopeRenderingSplit(
+            scheduler.IsRendering(), scheduler.RenderingSerial(), rendering_serial);
+        if (split.status != FinalGuestSurfaceStatus::Complete) {
+            upstream_feedback_frame.Reject(split.status, split.loss);
+            return false;
+        }
+        std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> copies{};
+        for (u32 index = 0; index < plan.region_count; ++index) {
+            const auto copy = HostPasses::ResolvePpUpstreamFeedbackPrePostCopy(
+                plan, candidate_index, post, index);
+            if (!copy.copy) {
+                upstream_feedback_frame.Reject(copy.status, copy.loss);
+                return false;
+            }
+            copies[index] = {
+                .bufferOffset = upstream_feedback_slot.slot * slot_stride + copy.buffer_offset,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource =
+                    {
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .mipLevel = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                .imageOffset = {static_cast<s32>(copy.x), static_cast<s32>(copy.y), 0},
+                .imageExtent = {copy.width, copy.height, 1},
+            };
+        }
+        const u64 slot_offset = upstream_feedback_slot.slot * slot_stride;
+        const auto cmdbuf = scheduler.CommandBuffer();
+        scheduler.EndRendering();
+        const vk::BufferMemoryBarrier2 buffer_pre{
+            .srcStageMask = first_copy ? vk::PipelineStageFlagBits2::eAllCommands |
+                                             vk::PipelineStageFlagBits2::eHost
+                                       : vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask =
+                first_copy ? vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eHostRead
+                           : vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = download.Handle(),
+            .offset = slot_offset,
+            .size = slot_stride,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &buffer_pre,
+        });
+        const auto old_state = image.backing->state;
+        const VideoCore::SubresourceRange range{{.level = 0, .layer = 0},
+                                                {.levels = 1, .layers = 1}};
+        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                      range, cmdbuf);
+        cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                 download.Handle(), plan.region_count, copies.data());
+        const vk::ImageMemoryBarrier2 restore{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = old_state.pl_stage,
+            .dstAccessMask = old_state.access_mask,
+            .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+            .newLayout = old_state.layout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image.GetImage(),
+            .subresourceRange =
+                {
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+        };
+        const vk::BufferMemoryBarrier2 buffer_post{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            .buffer = download.Handle(),
+            .offset = slot_offset,
+            .size = slot_stride,
+        };
+        const std::array image_barriers{restore};
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &buffer_post,
+            .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
+            .pImageMemoryBarriers = image_barriers.data(),
+        });
+        image.backing->state = old_state;
+        if (!scheduler.ResumeRenderingForDiagnostic(state, rendering_serial)) {
+            upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
+                                           {.invalidation = 1});
+            return false;
+        }
+        return true;
     }
 
     void RecordPlane(Entry& entry, VideoCore::Image& image, const RenderState& state,
@@ -1021,6 +1248,133 @@ private:
         }
     }
 
+    [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeUpstreamFeedbackHistoryLayout(
+        const HostPasses::PpUpstreamFeedbackPrePostPlan& plan) noexcept {
+        PpTerminalScopeContentHistoryLayout layout{
+            .region_count = plan.region_count,
+            .plane_bytes = plan.plane_bytes,
+            .second_plane_offset = plan.plane_bytes,
+            .total_bytes = plan.plane_bytes * 2,
+            .plane_mask = 0x3,
+            .format = plan.format,
+        };
+        for (u32 index = 0; index < plan.region_count; ++index) {
+            layout.regions[index] = {
+                .logical_ordinal = plan.regions[index].logical_ordinal,
+                .buffer_offset = plan.regions[index].buffer_offset,
+                .byte_size = plan.regions[index].byte_size,
+            };
+        }
+        return layout;
+    }
+
+    void TakeUpstreamFeedbackAtFlip(u64 sequence, u64 process_time_us) {
+        if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed) {
+            return;
+        }
+        PendingUpstreamFeedback pending{
+            .sequence = sequence,
+            .process_time_us = process_time_us,
+            .take = upstream_feedback_frame.Take(bool{upstream_feedback_slot}),
+            .slot = upstream_feedback_slot,
+            .slot_offset = upstream_feedback_slot ? upstream_feedback_slot.slot * slot_stride : 0,
+        };
+        upstream_feedback_slot = {};
+        upstream_feedback_armed = false;
+        scheduler.DeferOperation([this, pending = std::move(pending)]() mutable {
+            ConsumeUpstreamFeedback(std::move(pending));
+        });
+    }
+
+    void ConsumeUpstreamFeedback(PendingUpstreamFeedback pending) {
+        auto layout = MakeUpstreamFeedbackHistoryLayout(pending.take.plan);
+        std::vector<std::byte> compact_bytes{};
+        if (pending.take.copy && pending.slot) {
+            if (!download.InvalidateMappedRange(pending.slot_offset, slot_stride) ||
+                pending.slot_offset + pending.take.plan.total_bytes > download.mapped_data.size()) {
+                pending.take.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                pending.take.loss = {.invalidation = 1};
+                pending.take.copy = false;
+            } else {
+                const auto mapped = std::as_bytes(download.mapped_data);
+                const auto compact = HostPasses::CompactPpUpstreamFeedbackPrePost(
+                    pending.take.plan, pending.take.candidate_index,
+                    mapped.subspan(pending.slot_offset, pending.take.plan.total_bytes));
+                if (compact.status != FinalGuestSurfaceStatus::Complete || compact.loss.Any()) {
+                    pending.take.status = compact.status;
+                    pending.take.loss = compact.loss;
+                    pending.take.copy = false;
+                } else {
+                    compact_bytes = compact.bytes;
+                }
+            }
+        }
+        {
+            std::scoped_lock lock{reducer_mutex};
+            upstream_feedback_reducer.ObserveContent(pending.sequence, layout, compact_bytes,
+                                                     pending.take.status, pending.take.loss);
+            LogUpstreamFeedbackReports();
+            LogUpstreamFeedbackCalibratedCoverage();
+        }
+        if (config.window.Contains(pending.sequence)) {
+            ++upstream_feedback_selected_frames;
+            ++upstream_feedback_emitted_frames;
+            upstream_feedback_complete_frames +=
+                pending.take.status == FinalGuestSurfaceStatus::Complete &&
+                !pending.take.loss.Any();
+            upstream_feedback_loss_frames +=
+                pending.take.status != FinalGuestSurfaceStatus::Complete || pending.take.loss.Any();
+            LOG_INFO(Render, "FGSCTU s={} st={} lm={} ci={} pm={} r={}", pending.sequence,
+                     static_cast<u32>(pending.take.status),
+                     FinalGuestSurfaceLossMask(pending.take.loss, 0), pending.take.candidate_index,
+                     pending.take.recorded_plane_mask, pending.take.plan.region_count);
+            if (config.window.IsFinal(pending.sequence)) {
+                LOG_INFO(Render,
+                         "FGSCTUC s={} selected={} emitted={} complete={} loss={} regions={}",
+                         pending.sequence, upstream_feedback_selected_frames,
+                         upstream_feedback_emitted_frames, upstream_feedback_complete_frames,
+                         upstream_feedback_loss_frames, pending.take.plan.region_count);
+            }
+        }
+        if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
+            LOG_ERROR(Render, "PpUpstreamFeedbackPrePost slot_release_loss=1");
+        }
+    }
+
+    void LogUpstreamFeedbackReports() {
+        for (const auto& report : upstream_feedback_reducer.TakeReports()) {
+            LOG_INFO(
+                Render,
+                "FGSCTUT q={} abc={}/{}/{} b={} a={} be={} bs={} bx={} ae={} as={} ax={} st={} "
+                "lm={}",
+                report.request_ordinal, report.sequences[0], report.sequences[1],
+                report.sequences[2],
+                FormatPpTerminalScopeOrdinalList(report.first_localized_visual_return_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.second_localized_visual_return_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.first_aba_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.first_stable_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.first_ambiguous_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.second_aba_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.second_stable_ordinals),
+                FormatPpTerminalScopeOrdinalList(report.second_ambiguous_ordinals),
+                static_cast<u32>(report.status), FinalGuestSurfaceLossMask(report.loss, 0));
+        }
+    }
+
+    void LogUpstreamFeedbackCalibratedCoverage(bool force = false) {
+        if (upstream_feedback_coverage_logged) {
+            return;
+        }
+        const auto coverage = upstream_feedback_reducer.GetCoverage(config.expected_calibrations);
+        if (!force && !coverage.ready) {
+            return;
+        }
+        LOG_INFO(Render, "FGSCTUTC c={} o={} e={}/{}/{} lm={}", coverage.calibrations,
+                 coverage.outside, coverage.eligible, coverage.emitted, coverage.complete,
+                 coverage.loss);
+        upstream_feedback_coverage_logged = true;
+    }
+
     void Defer(Pending pending) {
         scheduler.DeferOperation(
             [this, pending = std::move(pending)]() mutable { Consume(std::move(pending)); });
@@ -1107,6 +1461,8 @@ private:
     PpTerminalScopeContentReducer reducer;
     FinalGuestSurfaceScreenshotCalibration calibration;
     PpTerminalScopeUpstreamInputRegistry upstream_registry;
+    HostPasses::PpUpstreamFeedbackPrePostFrame upstream_feedback_frame;
+    PpTerminalScopeContentReducer upstream_feedback_reducer;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
     VideoCore::Buffer download;
@@ -1115,12 +1471,19 @@ private:
     PpTerminalScopeDiscoveryCoverage discovery_coverage{};
     PpTerminalScopeProgressCoverage progress_coverage{};
     PpTerminalScopeDiscoveryCoverageEmissionGate discovery_coverage_emission{};
+    FinalGuestSurfaceReadbackSlotPool::Token upstream_feedback_slot{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
     u32 emitted_frames{};
     u32 complete_frames{};
     u32 loss_frames{};
+    u32 upstream_feedback_selected_frames{};
+    u32 upstream_feedback_emitted_frames{};
+    u32 upstream_feedback_complete_frames{};
+    u32 upstream_feedback_loss_frames{};
     bool calibrated_coverage_logged{};
+    bool upstream_feedback_armed{};
+    bool upstream_feedback_coverage_logged{};
 };
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {

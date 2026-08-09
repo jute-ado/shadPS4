@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <span>
+#include <vector>
 
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 
@@ -83,8 +85,7 @@ struct PpUpstreamFeedbackPrePostCopy {
     if (!descriptor.enabled) {
         return result;
     }
-    const auto reject = [](FinalGuestSurfaceStatus status,
-                           u32 FinalGuestSurfaceLoss::* member) {
+    const auto reject = [](FinalGuestSurfaceStatus status, u32 FinalGuestSurfaceLoss::* member) {
         PpUpstreamFeedbackPrePostPlan rejected{};
         rejected.status = status;
         rejected.loss.*member = 1;
@@ -117,8 +118,7 @@ struct PpUpstreamFeedbackPrePostCopy {
     const u32 columns =
         descriptor.logical_width <= window_width
             ? 1
-            : (descriptor.logical_width - window_width) /
-                      FinalGuestSurfaceTilePlan::WindowStride +
+            : (descriptor.logical_width - window_width) / FinalGuestSurfaceTilePlan::WindowStride +
                   1;
     const u32 rows = descriptor.logical_height <= window_height
                          ? 1
@@ -138,8 +138,7 @@ struct PpUpstreamFeedbackPrePostCopy {
     if (descriptor.candidate_capacity > PpUpstreamFeedbackPrePostPlan::MaxCandidates ||
         descriptor.max_regions == 0 || requested_regions > descriptor.max_regions) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss,
-                      descriptor.candidate_capacity >
-                              PpUpstreamFeedbackPrePostPlan::MaxCandidates
+                      descriptor.candidate_capacity > PpUpstreamFeedbackPrePostPlan::MaxCandidates
                           ? &FinalGuestSurfaceLoss::byte_capacity
                           : &FinalGuestSurfaceLoss::tile_capacity);
     }
@@ -201,10 +200,9 @@ struct PpUpstreamFeedbackPrePostCopy {
         AlignPpSourceBackingOffset(post_offset + plane_bytes, descriptor.buffer_alignment);
     const u64 total_bytes = candidate_stride * descriptor.candidate_capacity;
     if (plane_bytes == std::numeric_limits<u64>::max() ||
-        candidate_stride == std::numeric_limits<u64>::max() ||
-        total_bytes > descriptor.max_bytes || total_bytes > std::numeric_limits<u32>::max()) {
-        return reject(FinalGuestSurfaceStatus::CapacityLoss,
-                      &FinalGuestSurfaceLoss::byte_capacity);
+        candidate_stride == std::numeric_limits<u64>::max() || total_bytes > descriptor.max_bytes ||
+        total_bytes > std::numeric_limits<u32>::max()) {
+        return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::byte_capacity);
     }
     result.plane_bytes = static_cast<u32>(plane_bytes);
     result.post_plane_offset = static_cast<u32>(post_offset);
@@ -238,6 +236,36 @@ struct PpUpstreamFeedbackPrePostCopy {
         .status = FinalGuestSurfaceStatus::Complete,
         .copy = true,
     };
+}
+
+struct PpUpstreamFeedbackPrePostCompactResult {
+    std::vector<std::byte> bytes{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+[[nodiscard]] inline PpUpstreamFeedbackPrePostCompactResult CompactPpUpstreamFeedbackPrePost(
+    const PpUpstreamFeedbackPrePostPlan& plan, u32 candidate_index,
+    std::span<const std::byte> slot) {
+    if (plan.status != FinalGuestSurfaceStatus::Complete || plan.loss.Any() || !plan.copy ||
+        candidate_index >= plan.candidate_capacity) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .loss = {.invalidation = 1}};
+    }
+    const u64 source_base = static_cast<u64>(candidate_index) * plan.candidate_stride;
+    const u64 source_end = source_base + plan.post_plane_offset + plan.plane_bytes;
+    if (plan.plane_bytes == 0 || plan.post_plane_offset < plan.plane_bytes ||
+        source_end > slot.size()) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .loss = {.invalidation = 1}};
+    }
+    PpUpstreamFeedbackPrePostCompactResult result{
+        .bytes = std::vector<std::byte>(plan.plane_bytes * 2u),
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const auto pre = slot.subspan(source_base, plan.plane_bytes);
+    const auto post = slot.subspan(source_base + plan.post_plane_offset, plan.plane_bytes);
+    std::ranges::copy(pre, result.bytes.begin());
+    std::ranges::copy(post, result.bytes.begin() + plan.plane_bytes);
+    return result;
 }
 
 struct PpUpstreamFeedbackPrePostRegistryAction {
@@ -288,8 +316,7 @@ public:
             }
         }
         capacity_loss = true;
-        return {.status = FinalGuestSurfaceStatus::CapacityLoss,
-                .loss = {.tile_capacity = 1}};
+        return {.status = FinalGuestSurfaceStatus::CapacityLoss, .loss = {.tile_capacity = 1}};
     }
 
     [[nodiscard]] constexpr PpUpstreamFeedbackPrePostRegistryAction Complete(
@@ -322,8 +349,7 @@ public:
                     .loss = {.invalidation = 1}};
         }
         if (capacity_loss) {
-            return {.status = FinalGuestSurfaceStatus::CapacityLoss,
-                    .loss = {.tile_capacity = 1}};
+            return {.status = FinalGuestSurfaceStatus::CapacityLoss, .loss = {.tile_capacity = 1}};
         }
         for (u32 index = 0; index < capacity && index < entries.size(); ++index) {
             const auto& entry = entries[index];
@@ -386,8 +412,8 @@ public:
         selected_index = 0;
         selected = false;
         armed = capacity != 0 && capacity <= copied_masks.size();
-        status = armed ? FinalGuestSurfaceStatus::Complete
-                       : FinalGuestSurfaceStatus::InvalidationLoss;
+        status =
+            armed ? FinalGuestSurfaceStatus::Complete : FinalGuestSurfaceStatus::InvalidationLoss;
         loss = armed ? FinalGuestSurfaceLoss{} : FinalGuestSurfaceLoss{.invalidation = 1};
         return armed;
     }
@@ -438,16 +464,24 @@ public:
         copied_masks[candidate_index] |= post ? 0x2u : 0x1u;
     }
 
+    constexpr void Reject(FinalGuestSurfaceStatus failed_status,
+                          FinalGuestSurfaceLoss failed_loss) noexcept {
+        if (failed_status == FinalGuestSurfaceStatus::Complete || !failed_loss.Any()) {
+            failed_status = FinalGuestSurfaceStatus::InvalidationLoss;
+            failed_loss = {.invalidation = 1};
+        }
+        Fail(failed_status, failed_loss);
+    }
+
     [[nodiscard]] constexpr bool Select(VideoCore::ImageColorScopePrivateLink output) noexcept {
         if (!armed || status != FinalGuestSurfaceStatus::Complete || !plan.copy) {
             return false;
         }
         const auto resolution = registry.Resolve(output);
         if (!resolution.matched) {
-            const auto failed_status =
-                resolution.status == FinalGuestSurfaceStatus::AlreadyConsumed
-                    ? FinalGuestSurfaceStatus::GapLoss
-                    : resolution.status;
+            const auto failed_status = resolution.status == FinalGuestSurfaceStatus::AlreadyConsumed
+                                           ? FinalGuestSurfaceStatus::GapLoss
+                                           : resolution.status;
             auto failed_loss = resolution.loss;
             if (!failed_loss.Any()) {
                 failed_loss.gap = 1;
