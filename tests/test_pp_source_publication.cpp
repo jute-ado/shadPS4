@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/renderer_vulkan/attachment_feedback_loop_access.h"
 #include "video_core/renderer_vulkan/attachment_feedback_loop_pipeline.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
@@ -23,6 +24,22 @@ TEST(AttachmentFeedbackLoopPipeline, DeclaresDynamicStateExactlyWhenTheFeatureIs
     const auto disabled = PlanAttachmentFeedbackLoopPipeline(false);
     EXPECT_FALSE(disabled.declare_dynamic_state);
     EXPECT_FALSE(disabled.declare_static_color_feedback);
+}
+
+TEST(AttachmentFeedbackLoopAccess, PreservesEverySimultaneousImageUse) {
+    const auto access = AttachmentFeedbackLoopAccess();
+
+    EXPECT_TRUE(bool(access & vk::AccessFlagBits2::eShaderRead));
+    EXPECT_TRUE(bool(access & vk::AccessFlagBits2::eColorAttachmentRead));
+    EXPECT_TRUE(bool(access & vk::AccessFlagBits2::eColorAttachmentWrite));
+    EXPECT_EQ(access, vk::AccessFlagBits2::eShaderRead |
+                          vk::AccessFlagBits2::eColorAttachmentRead |
+                          vk::AccessFlagBits2::eColorAttachmentWrite);
+}
+
+TEST(AttachmentFeedbackLoopAccess, TextureAndAttachmentPathsUseTheSameContract) {
+    EXPECT_EQ(AttachmentFeedbackLoopTextureAccess(), AttachmentFeedbackLoopAccess());
+    EXPECT_EQ(AttachmentFeedbackLoopRenderTargetAccess(), AttachmentFeedbackLoopAccess());
 }
 
 TEST(PpSourcePublication, ImageRefreshBranchesExposeTheirActualMutationOutcome) {
