@@ -2703,6 +2703,46 @@ TEST(PpTerminalScopeContent, SampledInputContentCapacityRejectsTheWholeCopyPlan)
     EXPECT_EQ(plan.total_bytes, 0u);
 }
 
+TEST(PpTerminalScopeContent, SampledInputCopyRequiresEveryPlannedSourceToRemainExact) {
+    const auto accepted = PlanPpTerminalScopeSampledInputCopyDecision({
+        .enabled = true,
+        .input_count = 3,
+        .capture_mask = 0b110,
+        .pointer_mask = 0b110,
+        .backing_mask = 0b110,
+        .view_match_mask = 0b110,
+    });
+    EXPECT_TRUE(accepted.copy);
+    EXPECT_EQ(accepted.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(accepted.loss.Any());
+
+    for (const u32 missing_mask : {0b100u, 0b010u, 0u}) {
+        const auto rejected = PlanPpTerminalScopeSampledInputCopyDecision({
+            .enabled = true,
+            .input_count = 3,
+            .capture_mask = 0b110,
+            .pointer_mask = missing_mask,
+            .backing_mask = 0b110,
+            .view_match_mask = 0b110,
+        });
+        EXPECT_FALSE(rejected.copy);
+        EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+        EXPECT_EQ(rejected.loss.invalidation, 1u);
+    }
+    const auto alias_rejected = PlanPpTerminalScopeSampledInputCopyDecision({
+        .enabled = true,
+        .input_count = 3,
+        .capture_mask = 0b110,
+        .pointer_mask = 0b110,
+        .backing_mask = 0b110,
+        .view_match_mask = 0b110,
+        .alias_mask = 0b010,
+    });
+    EXPECT_FALSE(alias_rejected.copy);
+    EXPECT_EQ(alias_rejected.loss.invalidation, 1u);
+    EXPECT_FALSE(PlanPpTerminalScopeSampledInputCopyDecision({}).copy);
+}
+
 TEST(PpTerminalScopeContent, NamedPredecessorIsCapturedBeforeAndAfterWithoutReplacingTheLineage) {
     const PpTerminalScopeContentConfig config{
         .enabled = true,
