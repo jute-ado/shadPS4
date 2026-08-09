@@ -1010,21 +1010,22 @@ TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
 }
 
 TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
-    const PpTerminalScopeContentReport report{
-        .sequence = 4100,
-        .status = FinalGuestSurfaceStatus::Complete,
-        .draw_count = 2,
-        .region_count = 14,
-        .first_aba = 1,
-        .first_stable = 2,
-        .second_aba = 3,
-        .second_stable = 4,
-    };
+    auto report =
+        MakePpTerminalScopeContentReport(4100, FinalGuestSurfaceStatus::Complete, {}, 2, 14);
+    report.first_aba = 1;
+    report.first_stable = 2;
+    report.second_aba = 3;
+    report.second_stable = 4;
     const auto line = FormatPpTerminalScopeContentReport(report);
     EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 a0=1 s0=2 a1=3 s1=4 lm=0");
     EXPECT_EQ(line.find("token"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
+
+    const auto shape_loss =
+        MakePpTerminalScopeContentReport(4101, FinalGuestSurfaceStatus::GapLoss, {.gap = 1}, 3, 14);
+    EXPECT_EQ(shape_loss.draw_count, 3u);
+    EXPECT_NE(FormatPpTerminalScopeContentReport(shape_loss).find("st=5 d=3"), std::string::npos);
 }
 
 TEST(PpTerminalScopeContent, PrivateLinksRetainExactSoleInputAndFailClosedOnReuse) {
