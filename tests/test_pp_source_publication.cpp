@@ -2653,6 +2653,18 @@ TEST(PpTerminalScopeContent, FeedbackLoopClassificationRequiresExactVulkanState)
     const auto no_alias = ClassifyPpTerminalScopeFeedbackLoop({});
     EXPECT_EQ(no_alias.mode, PpTerminalScopeFeedbackMode::None);
     EXPECT_EQ(no_alias.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    const PpTerminalScopeSampledInputs logged{
+        .inputs = {{{.feedback = extension, .aliases_output = true}}},
+        .count = 1,
+        .alias_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const auto line = FormatPpTerminalScopeSampledInputs(logged, 'u');
+    EXPECT_NE(line.find(" f0=1/1/0/0"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("handle"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
 TEST(PpTerminalScopeContent, SampledInputViewPreservesExactBoundCopyEligibility) {
