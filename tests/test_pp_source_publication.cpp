@@ -8,6 +8,7 @@
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_input_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_route.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
 #include "video_core/texture_cache/image_producer.h"
 
@@ -3709,6 +3710,152 @@ TEST(PpUpstreamInputContent, SlotReleaseFailureMakesFinalCoverageIncomplete) {
         false, false, FinalGuestSurfaceStatus::GapLoss, FinalGuestSurfaceLoss{.gap = 1}, false);
     EXPECT_EQ(no_slot.status, FinalGuestSurfaceStatus::GapLoss);
     EXPECT_EQ(no_slot.loss.gap, 1u);
+}
+
+TEST(PpUpstreamSampleRoute, SelectsAndOrdersEveryExactBindingWithoutPhysicalIdentity) {
+    using namespace Vulkan::HostPasses;
+    const std::array routes{
+        PpUpstreamSampleRouteObservation{
+            .input_index = 2,
+            .route = {.logical_stage = 4,
+                      .image_resource_index = 3,
+                      .array_element = 1,
+                      .view = {.type = 2,
+                               .format = 37,
+                               .base_mip = 1,
+                               .mip_count = 4,
+                               .base_layer = 0,
+                               .layer_count = 1,
+                               .mapping = {1, 2, 3, 4},
+                               .min_lod = 256},
+                      .samplers = {{{11, 12}, {21, 22}}},
+                      .sampler_count = 2}},
+        PpUpstreamSampleRouteObservation{
+            .input_index = 0,
+            .route = {.logical_stage = 4, .image_resource_index = 0}},
+        PpUpstreamSampleRouteObservation{
+            .input_index = 2,
+            .route = {.logical_stage = 1,
+                      .image_resource_index = 7,
+                      .array_element = 0,
+                      .view = {.type = 2,
+                               .format = 37,
+                               .base_mip = 0,
+                               .mip_count = 1,
+                               .base_layer = 2,
+                               .layer_count = 1,
+                               .mapping = {4, 3, 2, 1}},
+                      .samplers = {{{31, 32}}},
+                      .sampler_count = 1}},
+    };
+
+    const auto selected = PlanPpUpstreamSampleRoutes({
+        .enabled = true,
+        .selected_input_index = 2,
+        .input_count = 6,
+        .observations = routes,
+    });
+    ASSERT_EQ(selected.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(selected.loss.Any());
+    ASSERT_EQ(selected.route_count, 2);
+    EXPECT_EQ(selected.routes[0].logical_stage, 1);
+    EXPECT_EQ(selected.routes[1].logical_stage, 4);
+    EXPECT_EQ(selected.routes[1].samplers[1].raw1, 22);
+    EXPECT_FALSE(selected.retains_image);
+    EXPECT_FALSE(selected.retains_view);
+    EXPECT_FALSE(selected.retains_sampler);
+    EXPECT_FALSE(selected.logs_private_words);
+}
+
+TEST(PpUpstreamSampleRoute, FailsClosedOnMissingInvalidDuplicateOrOverflowRoutes) {
+    using namespace Vulkan::HostPasses;
+    const PpUpstreamSampleRouteObservation invalid{
+        .input_index = 2,
+        .route = {.logical_stage = 4,
+                  .image_resource_index = 3,
+                  .sampler_count = PpUpstreamSampleRoute::MaxSamplers + 1},
+    };
+    auto duplicate_changed = invalid;
+    duplicate_changed.route.sampler_count = 1;
+    duplicate_changed.route.samplers[0] = {1, 2};
+    auto duplicate_changed_again = duplicate_changed;
+    duplicate_changed_again.route.samplers[0] = {1, 3};
+
+    const auto disabled = PlanPpUpstreamSampleRoutes({});
+    EXPECT_EQ(disabled.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_EQ(disabled.route_count, 0);
+
+    const auto missing = PlanPpUpstreamSampleRoutes({
+        .enabled = true, .selected_input_index = 2, .input_count = 6,
+    });
+    EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing.loss.gap, 1);
+
+    const std::array invalid_routes{invalid};
+    const auto rejected = PlanPpUpstreamSampleRoutes({
+        .enabled = true,
+        .selected_input_index = 2,
+        .input_count = 6,
+        .observations = invalid_routes,
+    });
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.loss.invalidation, 1);
+
+    const std::array conflicting{duplicate_changed, duplicate_changed_again};
+    const auto conflict = PlanPpUpstreamSampleRoutes({
+        .enabled = true,
+        .selected_input_index = 2,
+        .input_count = 6,
+        .observations = conflicting,
+    });
+    EXPECT_EQ(conflict.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(conflict.loss.source_conflict, 1);
+
+    std::array<PpUpstreamSampleRouteObservation, PpUpstreamSampleRouteSet::MaxRoutes + 1> many{};
+    for (u32 index = 0; index < many.size(); ++index) {
+        many[index].input_index = 2;
+        many[index].route.logical_stage = 4;
+        many[index].route.image_resource_index = index;
+    }
+    const auto overflow = PlanPpUpstreamSampleRoutes({
+        .enabled = true,
+        .selected_input_index = 2,
+        .input_count = 6,
+        .observations = many,
+    });
+    EXPECT_EQ(overflow.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(overflow.loss.tile_capacity, 1);
+}
+
+TEST(PpUpstreamSampleRoute, ExactPrivateFingerprintParticipatesInHistoryEquality) {
+    using namespace Vulkan::HostPasses;
+    PpUpstreamSampleRouteSet a{
+        .routes = {{{.logical_stage = 4,
+                     .image_resource_index = 2,
+                     .view = {.type = 2,
+                              .format = 37,
+                              .base_mip = 0,
+                              .mip_count = 5,
+                              .base_layer = 0,
+                              .layer_count = 1,
+                              .mapping = {1, 2, 3, 4},
+                              .min_lod = 128},
+                     .samplers = {{{0x1111, 0x2222}}},
+                     .sampler_count = 1}}},
+        .selected_input_index = 2,
+        .route_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    auto b = a;
+    EXPECT_EQ(a, b);
+    b.routes[0].samplers[0].raw1 ^= 1;
+    EXPECT_NE(a, b);
+    b = a;
+    b.routes[0].view.min_lod++;
+    EXPECT_NE(a, b);
+    b = a;
+    b.routes[0].view.mapping[3]++;
+    EXPECT_NE(a, b);
 }
 
 } // namespace
