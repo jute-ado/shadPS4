@@ -1732,6 +1732,8 @@ struct PpTerminalScopeCalibratedReport {
         sampled_input_stable_ordinals{};
     std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
         sampled_input_ambiguous_ordinals{};
+    std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
+        sampled_input_localized_visual_return_ordinals{};
     std::vector<u32> output_final_backing_equal_ordinals{};
     std::vector<u32> output_final_backing_different_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -2025,6 +2027,36 @@ private:
         }
     }
 
+    [[nodiscard]] static bool ClassifyLocalizedSampledInput(
+        const Observation& a, const Observation& b, const Observation& c, u32 input_index,
+        std::vector<u32>& localized_visual_return) {
+        if (a.layout != b.layout || a.layout != c.layout || input_index >= a.layout.input_count) {
+            return false;
+        }
+        const auto& plane = a.layout.input_planes[input_index];
+        for (u32 region_index = 0; region_index < plane.region_count; ++region_index) {
+            const auto& region = plane.regions[region_index];
+            const u64 offset = static_cast<u64>(plane.plane_offset) + region.buffer_offset;
+            if (region.logical_ordinal == 0 || region.byte_size == 0 ||
+                offset + region.byte_size > a.bytes.size() ||
+                offset + region.byte_size > b.bytes.size() ||
+                offset + region.byte_size > c.bytes.size()) {
+                return false;
+            }
+            const auto result = IsPpTerminalScopeLocalizedVisualReturn(
+                plane.format, std::span{a.bytes}.subspan(offset, region.byte_size),
+                std::span{b.bytes}.subspan(offset, region.byte_size),
+                std::span{c.bytes}.subspan(offset, region.byte_size));
+            if (!result) {
+                return false;
+            }
+            if (*result) {
+                localized_visual_return.push_back(region.logical_ordinal);
+            }
+        }
+        return true;
+    }
+
     [[nodiscard]] static bool ClassifyLocalizedPlane(const Observation& a, const Observation& b,
                                                      const Observation& c, u32 plane,
                                                      std::vector<u32>& localized_visual_return) {
@@ -2264,6 +2296,13 @@ private:
                                  report.sampled_input_aba_ordinals[input_index],
                                  report.sampled_input_stable_ordinals[input_index],
                                  report.sampled_input_ambiguous_ordinals[input_index]);
+            if (!ClassifyLocalizedSampledInput(
+                    *a, *b, *c, input_index,
+                    report.sampled_input_localized_visual_return_ordinals[input_index])) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
         }
         if (join_final_backing &&
             ((a->layout.plane_mask & (1u << 3)) == 0 ||
@@ -2465,7 +2504,10 @@ private:
             " z" + std::to_string(input_index) + "s=" +
             FormatPpTerminalScopeOrdinalList(report.sampled_input_stable_ordinals[input_index]) +
             " z" + std::to_string(input_index) + "x=" +
-            FormatPpTerminalScopeOrdinalList(report.sampled_input_ambiguous_ordinals[input_index]);
+            FormatPpTerminalScopeOrdinalList(report.sampled_input_ambiguous_ordinals[input_index]) +
+            " z" + std::to_string(input_index) + "y=" +
+            FormatPpTerminalScopeOrdinalList(
+                report.sampled_input_localized_visual_return_ordinals[input_index]);
     }
     return result;
 }

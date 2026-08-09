@@ -1594,13 +1594,11 @@ TEST(PpTerminalScopeContent, CapturedInputUsesTheLocalizedVisualPredicateAtItsOw
         .input_capture_mask = 0b10,
         .input_unavailable_mask = 0b01,
         .input_planes =
-            {{{.status = FinalGuestSurfaceStatus::Unsupported,
-               .loss = {.unsupported_format = 1}},
+            {{{.status = FinalGuestSurfaceStatus::Unsupported, .loss = {.unsupported_format = 1}},
               {.region_count = 1,
                .plane_offset = 0,
                .plane_bytes = RegionBytes,
-               .regions =
-                   {{{.logical_ordinal = 77, .buffer_offset = 0, .byte_size = RegionBytes}}},
+               .regions = {{{.logical_ordinal = 77, .buffer_offset = 0, .byte_size = RegionBytes}}},
                .format = FinalGuestSurfaceFormat::Bgra8,
                .status = FinalGuestSurfaceStatus::Complete}}},
         .format = FinalGuestSurfaceFormat::Rgba8,
@@ -1625,8 +1623,7 @@ TEST(PpTerminalScopeContent, CapturedInputUsesTheLocalizedVisualPredicateAtItsOw
     ASSERT_EQ(reports.size(), 1u);
     EXPECT_EQ(reports[0].sampled_input_ambiguous_ordinals[1], (std::vector<u32>{77}))
         << "A and C are deliberately not byte-identical";
-    EXPECT_EQ(reports[0].sampled_input_localized_visual_return_ordinals[1],
-              (std::vector<u32>{77}));
+    EXPECT_EQ(reports[0].sampled_input_localized_visual_return_ordinals[1], (std::vector<u32>{77}));
     EXPECT_FALSE(reports[0].loss.Any());
     const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
     EXPECT_NE(line.find(" z1y=77"), std::string::npos);
