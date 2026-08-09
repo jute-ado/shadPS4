@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/renderer_vulkan/host_passes/pp_sampled_input.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_reconstruction.h"
 
 namespace Vulkan::HostPasses {
@@ -169,6 +170,161 @@ TEST(PpSourceReconstruction, PrivacyFormatterContainsOnlyCalibratedOrdinals) {
     EXPECT_EQ(line.find("address"), std::string::npos);
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("hash"), std::string::npos);
+}
+
+TEST(PpSourceReconstruction, ExplicitStageIsCalibratedAndUsesSampledInputPipeline) {
+    const auto config = ResolveFinalGuestSurfaceContentConfig([](std::string_view key) {
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT") {
+            return std::optional<std::string_view>{"1"};
+        }
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_STAGE") {
+            return std::optional<std::string_view>{"pp_source_reconstruction"};
+        }
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS") {
+            return std::optional<std::string_view>{"1"};
+        }
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS") {
+            return std::optional<std::string_view>{"300"};
+        }
+        return std::optional<std::string_view>{};
+    });
+    ASSERT_TRUE(config.has_value());
+    EXPECT_EQ(config->stage, FinalGuestSurfaceStage::PpSourceReconstruction);
+    EXPECT_TRUE(IsPresentFinalGuestSurfaceStage(config->stage));
+    EXPECT_FALSE(FinalGuestSurfaceLogPolicy(config->stage).verbose_frame_reports);
+    EXPECT_EQ(PpDiagnosticModeForStage(config->stage), PpDiagnosticMode::SampledInput);
+}
+
+TEST(PpSourceReconstruction, AttachesFourthFullOutputPlaneWithinOneSlot) {
+    auto output = PlanFinalGuestSurfaceTiles({
+        .width = 1280,
+        .height = 720,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSourceReconstruction,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    output.sample_bytes = ExistingPairedBytes;
+    output.copy_region_count = 3;
+    const auto reconstruction = PlanPpSourceReconstruction(RouteDescriptor());
+    const auto plan = AttachPpSourceReconstructionPlane(output, reconstruction);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(plan.paired_reconstruction_offset, ExistingPairedBytes);
+    EXPECT_EQ(plan.paired_reconstruction_bytes, 1280u * 720u * 4u);
+    EXPECT_EQ(plan.paired_reconstruction_row_bytes, 1280u * 4u);
+    EXPECT_EQ(plan.paired_reconstruction_format, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(plan.sample_bytes, 15'794'176u);
+    EXPECT_EQ(plan.copy_region_count, 4u);
+}
+
+TEST(PpSourceReconstruction, CalibratedReducerUsesExactPredicateOnReconstructionPlane) {
+    constexpr u32 Width = 32;
+    constexpr u32 Height = 32;
+    auto plan = PlanFinalGuestSurfaceTiles({
+        .width = Width,
+        .height = Height,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSourceReconstruction,
+        .logical_width = Width,
+        .logical_height = Height,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    const u32 output_bytes = Width * Height * 4;
+    const auto reconstruction = PlanPpSourceReconstruction({
+        .enabled = true,
+        .in_window = true,
+        .frame_is_new = true,
+        .visible_pp_draw_encoded = true,
+        .sampled_metadata_valid = true,
+        .fsr_bypassed = true,
+        .source_view_matches_baseline = true,
+        .source_view_srgb = true,
+        .source_snapshot_available = true,
+        .source_snapshot_view_available = true,
+        .reconstruction_output_available = true,
+        .source_width = Width,
+        .source_height = Height,
+        .output_width = Width,
+        .output_height = Height,
+        .source_format = FinalGuestSurfaceFormat::Bgra8,
+        .output_format = FinalGuestSurfaceFormat::Bgra8,
+        .existing_readback_bytes = output_bytes,
+        .slot_bytes = 16u << 20,
+        .alignment = 16,
+    });
+    plan = AttachPpSourceReconstructionPlane(plan, reconstruction);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+
+    const auto fill_plane = [&](std::vector<std::byte>& bytes, u32 offset, u8 value,
+                                u32 pixels = Width * Height) {
+        for (u32 pixel = 0; pixel < pixels; ++pixel) {
+            const size_t at = offset + static_cast<size_t>(pixel) * 4;
+            bytes[at] = bytes[at + 1] = bytes[at + 2] = std::byte{value};
+        }
+    };
+    std::vector<std::byte> a(plan.sample_bytes);
+    auto b = a;
+    auto c = a;
+    fill_plane(b, 0, 48, Width * Height / 4);
+    fill_plane(b, plan.paired_reconstruction_offset, 48, Width * Height / 4);
+
+    const auto selector = ParseFinalGuestSurfaceWatchOrdinals("1");
+    const auto transport = FinalGuestSurfaceTransport{
+        .surface_identity = 1,
+        .backing_generation = 1,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .width = Width,
+        .height = Height,
+    };
+    const auto evaluate = [&](const std::vector<std::byte>& middle,
+                              const std::vector<std::byte>& current) {
+        FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(), selector};
+        (void)reducer.Observe(10, 1'000'000, transport, plan, a);
+        (void)reducer.Observe(11, 1'100'000, transport, plan, middle);
+        (void)reducer.Observe(12, 1'200'000, transport, plan, current);
+        return reducer.EvaluateCalibratedTriplet({1, 10, 1'000'000, true}, {2, 11, 1'100'000, true},
+                                                 {3, 12, 1'200'000, true}, true);
+    };
+
+    const auto reproduced = evaluate(b, c);
+    ASSERT_TRUE(reproduced.has_value());
+    ASSERT_EQ(reproduced->matched_ordinal_count, 1u);
+    EXPECT_EQ(reproduced->reconstruction_reproduced_ordinal_count, 1u);
+    EXPECT_EQ(reproduced->reconstruction_reproduced_ordinals[0], 1u);
+    EXPECT_EQ(reproduced->reconstruction_not_reproduced_ordinal_count, 0u);
+
+    auto stable_reconstruction_middle = b;
+    fill_plane(stable_reconstruction_middle, plan.paired_reconstruction_offset, 0);
+    const auto not_reproduced = evaluate(stable_reconstruction_middle, c);
+    ASSERT_TRUE(not_reproduced.has_value());
+    EXPECT_EQ(not_reproduced->matched_ordinal_count, 1u);
+    EXPECT_EQ(not_reproduced->reconstruction_reproduced_ordinal_count, 0u);
+    EXPECT_EQ(not_reproduced->reconstruction_not_reproduced_ordinal_count, 1u);
+    EXPECT_EQ(not_reproduced->reconstruction_not_reproduced_ordinals[0], 1u);
+
+    const auto text = FormatFinalGuestSurfaceCalibratedReport(*reproduced);
+    EXPECT_NE(text.find(" ry=1"), std::string::npos);
+    EXPECT_NE(text.find(" rn="), std::string::npos);
+    EXPECT_EQ(text.find("pixel"), std::string::npos);
 }
 
 } // namespace
