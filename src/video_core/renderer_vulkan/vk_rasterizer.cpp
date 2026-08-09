@@ -62,25 +62,30 @@ public:
                    0,
                    vk::BufferUsageFlagBits::eTransferDst,
                    slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
-        LOG_INFO(Render,
-                 "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
-                 "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
-                 "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} targets={} slots={} "
-                 "max_bytes={} pre_first={} final_backing_join={}",
-                 config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
-                 config.expected_calibrations, static_cast<u32>(config.content.first.kind),
-                 config.content.first.indexed, config.content.first.element_count,
-                 config.content.first.instance_count, config.content.first.sampled_images,
-                 config.content.first.storage_writes, static_cast<u32>(config.content.second.kind),
-                 config.content.second.indexed, config.content.second.element_count,
-                 config.content.second.instance_count, config.content.second.sampled_images,
-                 config.content.second.storage_writes,
-                 static_cast<u32>(config.content.consumer.kind), config.content.consumer.indexed,
-                 config.content.consumer.element_count, config.content.consumer.instance_count,
-                 config.content.consumer.sampled_images, config.content.consumer.storage_writes,
-                 MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots,
-                 PpTerminalScopeSnapshotBytes, config.content.capture_pre_first,
-                 config.join_final_backing);
+        LOG_INFO(
+            Render,
+            "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
+            "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
+            "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
+            "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
+            "capture_predecessor={} final_backing_join={}",
+            config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
+            config.expected_calibrations, static_cast<u32>(config.content.first.kind),
+            config.content.first.indexed, config.content.first.element_count,
+            config.content.first.instance_count, config.content.first.sampled_images,
+            config.content.first.storage_writes, static_cast<u32>(config.content.second.kind),
+            config.content.second.indexed, config.content.second.element_count,
+            config.content.second.instance_count, config.content.second.sampled_images,
+            config.content.second.storage_writes, static_cast<u32>(config.content.consumer.kind),
+            config.content.consumer.indexed, config.content.consumer.element_count,
+            config.content.consumer.instance_count, config.content.consumer.sampled_images,
+            config.content.consumer.storage_writes,
+            static_cast<u32>(config.content.predecessor.kind), config.content.predecessor.indexed,
+            config.content.predecessor.element_count, config.content.predecessor.instance_count,
+            config.content.predecessor.sampled_images, config.content.predecessor.storage_writes,
+            MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes,
+            config.content.capture_pre_first, config.content.capture_predecessor,
+            config.join_final_backing);
     }
 
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
@@ -136,8 +141,9 @@ public:
                 RecordPlane(*entry, *output_image, state, output_attachment_index, rendering_serial,
                             3, true);
             }
+            const u32 complete_mask = config.content.capture_predecessor ? 0x7fu : 0x1fu;
             if (entry->status == FinalGuestSurfaceStatus::Complete && !entry->loss.Any() &&
-                entry->recorded_plane_mask == 31 && handoff.publish_flip_alias) {
+                entry->recorded_plane_mask == complete_mask && handoff.publish_flip_alias) {
                 entry->flip_alias = output_link;
                 entry->flip_alias_ready = true;
             }
@@ -162,7 +168,9 @@ public:
         const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
         Entry* entry = Find(link);
         const bool initially_tracked = entry != nullptr;
-        const bool exact_candidate = MatchesPpTerminalScopeDraw(config.content.first, observed);
+        const auto& allocation_selector =
+            config.content.capture_predecessor ? config.content.predecessor : config.content.first;
+        const bool exact_candidate = MatchesPpTerminalScopeDraw(allocation_selector, observed);
         const bool mapping_valid = mapping.Valid();
         const bool target_valid = IsValidTarget(link, &image);
         const bool target_capacity = HasTargetCapacity();
@@ -203,16 +211,15 @@ public:
         if (restart) {
             ConfigureEntry(*entry, link, image, true);
         }
-        if (!exact_candidate) {
-            return;
-        }
         const auto action = entry->gate.PreviewDraw(image.image_uid, rendering_serial, observed);
         if (action == PpTerminalScopePreDrawAction::ShapeLoss) {
             entry->status = FinalGuestSurfaceStatus::GapLoss;
             entry->loss = {.gap = 1};
             return;
         }
-        if (action == PpTerminalScopePreDrawAction::CaptureBeforeFirst) {
+        if (action == PpTerminalScopePreDrawAction::CaptureBeforePredecessor) {
+            RecordPlane(*entry, image, state, attachment_index, rendering_serial, 5);
+        } else if (action == PpTerminalScopePreDrawAction::CaptureBeforeFirst) {
             entry->predecessor = ClassifyPpTerminalScopePredecessor(
                 image.PeekDiagnosticProducer(), image.ObserveDiagnosticColorScope());
             RecordPlane(*entry, image, state, attachment_index, rendering_serial, 4);
@@ -240,11 +247,14 @@ public:
             entry->status, entry->loss, action, config.content.capture_pre_first);
         entry->status = action_result.status;
         entry->loss = action_result.loss;
-        if (action != PpTerminalScopeContentAction::CaptureFirst &&
+        if (action != PpTerminalScopeContentAction::CapturePredecessor &&
+            action != PpTerminalScopeContentAction::CaptureFirst &&
             action != PpTerminalScopeContentAction::CaptureSecond) {
             return;
         }
-        const u32 plane = action == PpTerminalScopeContentAction::CaptureFirst ? 0 : 1;
+        const u32 plane = action == PpTerminalScopeContentAction::CapturePredecessor ? 6
+                          : action == PpTerminalScopeContentAction::CaptureFirst     ? 0
+                                                                                     : 1;
         RecordPlane(*entry, image, state, attachment_index, rendering_serial, plane);
     }
 
@@ -521,6 +531,7 @@ private:
         entry.plan = PlanPpTerminalScopeContent({
             .enabled = true,
             .armed = true,
+            .capture_predecessor = config.content.capture_predecessor,
             .target_width = target.info.size.width,
             .target_height = target.info.size.height,
             .final_source_width = mapping.final_source_width,
@@ -531,7 +542,8 @@ private:
             .samples = target.backing->num_samples,
             .selector = config.watch_ordinals,
             .buffer_alignment = 16,
-            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 5,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals *
+                           (config.content.capture_predecessor ? 7 : 5),
             .max_bytes = PpTerminalScopeSnapshotBytes,
         });
         entry.status = entry.plan.status;
@@ -563,6 +575,8 @@ private:
             .consumer_plane_offset = plan.consumer_plane_offset,
             .output_plane_offset = plan.output_plane_offset,
             .pre_first_plane_offset = plan.pre_first_plane_offset,
+            .predecessor_pre_plane_offset = plan.predecessor_pre_plane_offset,
+            .predecessor_post_plane_offset = plan.predecessor_post_plane_offset,
             .total_bytes = plan.total_bytes,
             .plane_mask = plane_mask,
             .format = plan.format,
@@ -639,7 +653,9 @@ private:
                                  : plane == 1 ? entry.plan.second_plane_offset
                                  : plane == 2 ? entry.plan.consumer_plane_offset
                                  : plane == 3 ? entry.plan.output_plane_offset
-                                              : entry.plan.pre_first_plane_offset;
+                                 : plane == 4 ? entry.plan.pre_first_plane_offset
+                                 : plane == 5 ? entry.plan.predecessor_pre_plane_offset
+                                              : entry.plan.predecessor_post_plane_offset;
         for (u32 index = 0; index < entry.plan.region_count; ++index) {
             const auto& region = entry.plan.regions[index];
             copies[index] = {

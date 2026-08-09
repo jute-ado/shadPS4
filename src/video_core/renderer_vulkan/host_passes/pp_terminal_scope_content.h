@@ -38,6 +38,8 @@ struct PpTerminalScopeDrawSelector {
 struct PpTerminalScopeContentConfig {
     bool enabled{};
     bool capture_pre_first{};
+    bool capture_predecessor{};
+    PpTerminalScopeDrawSelector predecessor{};
     PpTerminalScopeDrawSelector first{};
     PpTerminalScopeDrawSelector second{};
     PpTerminalScopeDrawSelector consumer{};
@@ -122,6 +124,7 @@ template <typename ReadValue>
     const auto first_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_FIRST");
     const auto second_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_SECOND");
     const auto consumer_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_CONSUMER");
+    const auto predecessor_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
@@ -132,12 +135,17 @@ template <typename ReadValue>
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
     const auto second = ParsePpTerminalScopeDrawSelector(*second_value);
     const auto consumer = ParsePpTerminalScopeDrawSelector(*consumer_value);
-    if (!first || !second || !consumer) {
+    const auto predecessor = predecessor_value
+                                 ? ParsePpTerminalScopeDrawSelector(*predecessor_value)
+                                 : std::optional<PpTerminalScopeDrawSelector>{};
+    if (!first || !second || !consumer || (predecessor_value && !predecessor)) {
         return std::nullopt;
     }
     return PpTerminalScopeRuntimeConfig{
         .content = {.enabled = true,
                     .capture_pre_first = true,
+                    .capture_predecessor = predecessor.has_value(),
+                    .predecessor = predecessor.value_or(PpTerminalScopeDrawSelector{}),
                     .first = *first,
                     .second = *second,
                     .consumer = *consumer},
@@ -150,6 +158,7 @@ template <typename ReadValue>
 
 enum class PpTerminalScopeContentAction : u8 {
     None,
+    CapturePredecessor,
     CaptureFirst,
     CaptureSecond,
     ShapeLoss,
@@ -157,6 +166,7 @@ enum class PpTerminalScopeContentAction : u8 {
 
 enum class PpTerminalScopePreDrawAction : u8 {
     None,
+    CaptureBeforePredecessor,
     CaptureBeforeFirst,
     ShapeLoss,
 };
@@ -563,6 +573,7 @@ struct PpTerminalScopeContentTakeResult {
     u32 consumer_phase_mask{};
     u32 consumer_shape_matches{};
     bool consumer_frozen{};
+    bool predecessor_captured{};
     bool cpu_wait{};
     bool finish{};
     bool retains_image{};
@@ -577,6 +588,9 @@ struct PpTerminalScopeContentActionResult {
 [[nodiscard]] constexpr PpTerminalScopeContentActionResult ApplyPpTerminalScopeContentAction(
     FinalGuestSurfaceStatus current_status, FinalGuestSurfaceLoss current_loss,
     PpTerminalScopeContentAction action, bool preserve_pre_first_loss = false) noexcept {
+    if (action == PpTerminalScopeContentAction::CapturePredecessor) {
+        return {.status = current_status, .loss = current_loss};
+    }
     if (action == PpTerminalScopeContentAction::CaptureFirst) {
         if (preserve_pre_first_loss &&
             (current_status != FinalGuestSurfaceStatus::Complete || current_loss.Any())) {
@@ -602,15 +616,15 @@ struct PpTerminalScopePlaneSlotDecision {
 
 [[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
     u32 plane, bool has_slot) noexcept {
-    if (plane > 4 || ((plane == 0 || plane == 1 || plane == 3) && !has_slot) ||
-        (plane == 4 && has_slot)) {
+    if (plane > 6 || ((plane == 0 || plane == 1 || plane == 3 || plane == 6) && !has_slot) ||
+        (plane == 5 && has_slot)) {
         return {
             .status = FinalGuestSurfaceStatus::GapLoss,
             .loss = {.gap = 1},
         };
     }
     return {
-        .acquire = (plane == 2 || plane == 4) && !has_slot,
+        .acquire = (plane == 2 || plane == 4 || plane == 5) && !has_slot,
         .reuse = has_slot,
     };
 }
@@ -622,6 +636,8 @@ public:
 
     [[nodiscard]] constexpr bool Arm(u64 target_token, u64 generation) noexcept {
         if (!config.enabled || target_token == 0 || generation == 0 ||
+            (config.capture_predecessor &&
+             config.predecessor.kind == VideoCore::ImageColorScopeDrawKind::Unknown) ||
             config.first.kind == VideoCore::ImageColorScopeDrawKind::Unknown ||
             config.second.kind == VideoCore::ImageColorScopeDrawKind::Unknown ||
             config.consumer.kind == VideoCore::ImageColorScopeDrawKind::Unknown) {
@@ -632,6 +648,8 @@ public:
         armed_generation = generation;
         scope_serial = 0;
         phase = 0;
+        predecessor_captured = !config.capture_predecessor;
+        previewed_predecessor = false;
         previewed_first = false;
         frozen = false;
         consumer_observations = 0;
@@ -643,14 +661,32 @@ public:
     [[nodiscard]] constexpr PpTerminalScopePreDrawAction PreviewDraw(
         u64 target_token, u64 observed_scope_serial,
         const PpTerminalScopeDrawSelector& draw) noexcept {
-        if (!config.capture_pre_first || target_token == 0 || target_token != token ||
-            observed_scope_serial == 0 || frozen) {
+        if (target_token == 0 || target_token != token || observed_scope_serial == 0 || frozen) {
             return PpTerminalScopePreDrawAction::None;
         }
         if (scope_serial != observed_scope_serial) {
             scope_serial = observed_scope_serial;
             phase = 0;
+            predecessor_captured = !config.capture_predecessor;
+            previewed_predecessor = false;
             previewed_first = false;
+        }
+        if (!predecessor_captured) {
+            if (!MatchesPpTerminalScopeDraw(config.predecessor, draw)) {
+                return MatchesPpTerminalScopeDraw(config.first, draw)
+                           ? PpTerminalScopePreDrawAction::ShapeLoss
+                           : PpTerminalScopePreDrawAction::None;
+            }
+            if (previewed_predecessor) {
+                phase = 3;
+                previewed_predecessor = false;
+                return PpTerminalScopePreDrawAction::ShapeLoss;
+            }
+            previewed_predecessor = true;
+            return PpTerminalScopePreDrawAction::CaptureBeforePredecessor;
+        }
+        if (!config.capture_pre_first) {
+            return PpTerminalScopePreDrawAction::None;
         }
         if (!MatchesPpTerminalScopeDraw(config.first, draw)) {
             return PpTerminalScopePreDrawAction::None;
@@ -676,7 +712,19 @@ public:
         if (scope_serial != observed_scope_serial) {
             scope_serial = observed_scope_serial;
             phase = 0;
+            predecessor_captured = !config.capture_predecessor;
+            previewed_predecessor = false;
             previewed_first = false;
+        }
+        if (!predecessor_captured) {
+            if (!previewed_predecessor || !MatchesPpTerminalScopeDraw(config.predecessor, draw)) {
+                phase = 3;
+                previewed_predecessor = false;
+                return PpTerminalScopeContentAction::ShapeLoss;
+            }
+            previewed_predecessor = false;
+            predecessor_captured = true;
+            return PpTerminalScopeContentAction::CapturePredecessor;
         }
         if (phase == 0) {
             if (config.capture_pre_first && !previewed_first) {
@@ -710,9 +758,10 @@ public:
     [[nodiscard]] constexpr bool CanRestartAtFirst(
         u64 target_token, u64 observed_scope_serial,
         const PpTerminalScopeDrawSelector& draw) const noexcept {
+        const auto& restart = config.capture_predecessor ? config.predecessor : config.first;
         return target_token != 0 && target_token == token && observed_scope_serial != 0 &&
                observed_scope_serial == scope_serial && phase == 3 && !frozen &&
-               MatchesPpTerminalScopeDraw(config.first, draw);
+               MatchesPpTerminalScopeDraw(restart, draw);
     }
 
     [[nodiscard]] constexpr PpTerminalScopeConsumerAction ObserveConsumer(
@@ -755,8 +804,11 @@ public:
             result.status = FinalGuestSurfaceStatus::Complete;
             result.draw_count = phase;
         }
+        result.predecessor_captured = predecessor_captured;
         scope_serial = 0;
         phase = 0;
+        predecessor_captured = !config.capture_predecessor;
+        previewed_predecessor = false;
         previewed_first = false;
         frozen = false;
         consumer_observations = 0;
@@ -771,6 +823,8 @@ private:
         armed_generation = 0;
         scope_serial = 0;
         phase = 0;
+        predecessor_captured = !config.capture_predecessor;
+        previewed_predecessor = false;
         previewed_first = false;
         frozen = false;
         consumer_observations = 0;
@@ -784,6 +838,8 @@ private:
     u64 scope_serial{};
     u32 phase{};
     bool frozen{};
+    bool predecessor_captured{};
+    bool previewed_predecessor{};
     bool previewed_first{};
     u32 consumer_observations{};
     u32 consumer_phase_mask{};
@@ -793,6 +849,7 @@ private:
 struct PpTerminalScopeContentDescriptor {
     bool enabled{};
     bool armed{};
+    bool capture_predecessor{};
     u32 target_width{};
     u32 target_height{};
     u32 final_source_width{};
@@ -817,6 +874,8 @@ struct PpTerminalScopeContentPlan {
     u32 consumer_plane_offset{};
     u32 output_plane_offset{};
     u32 pre_first_plane_offset{};
+    u32 predecessor_pre_plane_offset{};
+    u32 predecessor_post_plane_offset{};
     u32 total_bytes{};
     u32 image_barriers_per_draw{};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
@@ -880,7 +939,8 @@ struct PpTerminalScopeContentPlan {
         plan.loss = footprint.loss;
         return plan;
     }
-    if (footprint.region_count > descriptor.max_regions / 5) {
+    const u32 plane_count = descriptor.capture_predecessor ? 7u : 5u;
+    if (footprint.region_count > descriptor.max_regions / plane_count) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::tile_capacity);
     }
     const u64 second_offset =
@@ -891,21 +951,38 @@ struct PpTerminalScopeContentPlan {
                                                          descriptor.buffer_alignment);
     const u64 pre_first_offset = AlignPpSourceBackingOffset(output_offset + footprint.buffer_bytes,
                                                             descriptor.buffer_alignment);
-    const u64 total_bytes = pre_first_offset + footprint.buffer_bytes;
+    const u64 predecessor_pre_offset =
+        descriptor.capture_predecessor
+            ? AlignPpSourceBackingOffset(pre_first_offset + footprint.buffer_bytes,
+                                         descriptor.buffer_alignment)
+            : 0;
+    const u64 predecessor_post_offset =
+        descriptor.capture_predecessor
+            ? AlignPpSourceBackingOffset(predecessor_pre_offset + footprint.buffer_bytes,
+                                         descriptor.buffer_alignment)
+            : 0;
+    const u64 total_bytes = descriptor.capture_predecessor
+                                ? predecessor_post_offset + footprint.buffer_bytes
+                                : pre_first_offset + footprint.buffer_bytes;
     if (second_offset == std::numeric_limits<u64>::max() ||
-        pre_first_offset == std::numeric_limits<u64>::max() || total_bytes > descriptor.max_bytes ||
-        total_bytes > std::numeric_limits<u32>::max()) {
+        pre_first_offset == std::numeric_limits<u64>::max() ||
+        (descriptor.capture_predecessor &&
+         (predecessor_pre_offset == std::numeric_limits<u64>::max() ||
+          predecessor_post_offset == std::numeric_limits<u64>::max())) ||
+        total_bytes > descriptor.max_bytes || total_bytes > std::numeric_limits<u32>::max()) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::byte_capacity);
     }
     PpTerminalScopeContentPlan plan{
         .region_count = footprint.region_count,
-        .copy_region_count = footprint.region_count * 5,
+        .copy_region_count = footprint.region_count * plane_count,
         .plane_bytes = footprint.buffer_bytes,
         .first_plane_offset = 0,
         .second_plane_offset = static_cast<u32>(second_offset),
         .consumer_plane_offset = static_cast<u32>(consumer_offset),
         .output_plane_offset = static_cast<u32>(output_offset),
         .pre_first_plane_offset = static_cast<u32>(pre_first_offset),
+        .predecessor_pre_plane_offset = static_cast<u32>(predecessor_pre_offset),
+        .predecessor_post_plane_offset = static_cast<u32>(predecessor_post_offset),
         .total_bytes = static_cast<u32>(total_bytes),
         .image_barriers_per_draw = 2,
         .format = footprint.format,
@@ -1036,6 +1113,8 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 consumer_plane_offset{};
     u32 output_plane_offset{};
     u32 pre_first_plane_offset{};
+    u32 predecessor_pre_plane_offset{};
+    u32 predecessor_post_plane_offset{};
     u32 total_bytes{};
     u32 plane_mask{};
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
@@ -1146,11 +1225,19 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> pre_first_aba_ordinals{};
     std::vector<u32> pre_first_stable_ordinals{};
     std::vector<u32> pre_first_ambiguous_ordinals{};
+    std::vector<u32> predecessor_pre_aba_ordinals{};
+    std::vector<u32> predecessor_pre_stable_ordinals{};
+    std::vector<u32> predecessor_pre_ambiguous_ordinals{};
+    std::vector<u32> predecessor_post_aba_ordinals{};
+    std::vector<u32> predecessor_post_stable_ordinals{};
+    std::vector<u32> predecessor_post_ambiguous_ordinals{};
     std::vector<u32> first_localized_visual_return_ordinals{};
     std::vector<u32> second_localized_visual_return_ordinals{};
     std::vector<u32> consumer_localized_visual_return_ordinals{};
     std::vector<u32> output_localized_visual_return_ordinals{};
     std::vector<u32> pre_first_localized_visual_return_ordinals{};
+    std::vector<u32> predecessor_pre_localized_visual_return_ordinals{};
+    std::vector<u32> predecessor_post_localized_visual_return_ordinals{};
     std::vector<u32> output_final_backing_equal_ordinals{};
     std::vector<u32> output_final_backing_different_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -1341,7 +1428,7 @@ private:
 
     [[nodiscard]] static bool EqualVisibleRegion(const Observation& left, const Observation& right,
                                                  u32 plane, u32 region_index) noexcept {
-        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 4 ||
+        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 6 ||
             left.layout.bytes_per_pixel != 4) {
             return false;
         }
@@ -1351,7 +1438,9 @@ private:
                    : plane == 1 ? layout.second_plane_offset
                    : plane == 2 ? layout.consumer_plane_offset
                    : plane == 3 ? layout.output_plane_offset
-                                : layout.pre_first_plane_offset;
+                   : plane == 4 ? layout.pre_first_plane_offset
+                   : plane == 5 ? layout.predecessor_pre_plane_offset
+                                : layout.predecessor_post_plane_offset;
         };
         const u64 left_offset = region.buffer_offset + plane_offset(left.layout);
         const u64 right_offset = region.buffer_offset + plane_offset(right.layout);
@@ -1392,7 +1481,7 @@ private:
     [[nodiscard]] static bool ClassifyLocalizedPlane(const Observation& a, const Observation& b,
                                                      const Observation& c, u32 plane,
                                                      std::vector<u32>& localized_visual_return) {
-        if (a.layout != b.layout || a.layout != c.layout || plane > 4) {
+        if (a.layout != b.layout || a.layout != c.layout || plane > 6) {
             return false;
         }
         const auto plane_offset = [plane](const PpTerminalScopeContentHistoryLayout& layout) {
@@ -1400,7 +1489,9 @@ private:
                    : plane == 1 ? layout.second_plane_offset
                    : plane == 2 ? layout.consumer_plane_offset
                    : plane == 3 ? layout.output_plane_offset
-                                : layout.pre_first_plane_offset;
+                   : plane == 4 ? layout.pre_first_plane_offset
+                   : plane == 5 ? layout.predecessor_pre_plane_offset
+                                : layout.predecessor_post_plane_offset;
         };
         const u64 a_plane_offset = plane_offset(a.layout);
         const u64 b_plane_offset = plane_offset(b.layout);
@@ -1593,6 +1684,28 @@ private:
                 return report;
             }
         }
+        if ((a->layout.plane_mask & (1u << 5)) != 0) {
+            ClassifyPlane(*a, *b, *c, 5, report.predecessor_pre_aba_ordinals,
+                          report.predecessor_pre_stable_ordinals,
+                          report.predecessor_pre_ambiguous_ordinals);
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 5,
+                                        report.predecessor_pre_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
+        }
+        if ((a->layout.plane_mask & (1u << 6)) != 0) {
+            ClassifyPlane(*a, *b, *c, 6, report.predecessor_post_aba_ordinals,
+                          report.predecessor_post_stable_ordinals,
+                          report.predecessor_post_ambiguous_ordinals);
+            if (!ClassifyLocalizedPlane(*a, *b, *c, 6,
+                                        report.predecessor_post_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
+        }
         if (join_final_backing &&
             ((a->layout.plane_mask & (1u << 3)) == 0 ||
              !ClassifyFinalBackingJoin(*a, *b, *c, *backing_a, *backing_b, *backing_c,
@@ -1733,6 +1846,18 @@ private:
            " s4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_stable_ordinals) +
            " x4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_ambiguous_ordinals) + " y4=" +
            FormatPpTerminalScopeOrdinalList(report.pre_first_localized_visual_return_ordinals) +
+           " a5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_aba_ordinals) +
+           " s5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_stable_ordinals) +
+           " x5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_ambiguous_ordinals) +
+           " yp=" +
+           FormatPpTerminalScopeOrdinalList(
+               report.predecessor_pre_localized_visual_return_ordinals) +
+           " a6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_aba_ordinals) +
+           " s6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_stable_ordinals) +
+           " x6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_ambiguous_ordinals) +
+           " yo=" +
+           FormatPpTerminalScopeOrdinalList(
+               report.predecessor_post_localized_visual_return_ordinals) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
 }
