@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include "common/types.h"
 #include "video_core/texture_cache/image_producer.h"
@@ -33,6 +34,18 @@ struct ImageColorScopePrivateLink {
 [[nodiscard]] constexpr bool ValidateImageColorScopePrivateLink(ImageColorScopePrivateLink link,
                                                                 ImageId id, u64 uid) noexcept {
     return link.Valid() && link.id == id && link.uid == uid;
+}
+
+template <typename IsAllocated, typename UidFor>
+[[nodiscard]] constexpr std::optional<ImageId> ResolveImageColorScopePrivateLink(
+    ImageColorScopePrivateLink link, IsAllocated&& is_allocated, UidFor&& uid_for) noexcept {
+    if (!link.Valid() || !is_allocated(link.id)) {
+        return std::nullopt;
+    }
+    if (uid_for(link.id) != link.uid) {
+        return std::nullopt;
+    }
+    return link.id;
 }
 
 struct ImageColorScopeDrawSummary {

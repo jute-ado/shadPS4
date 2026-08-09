@@ -152,6 +152,14 @@ public:
         return image;
     }
 
+    /// Resolves a diagnostic-only private link without indexing a free or recycled slot.
+    [[nodiscard]] Image* ResolveDiagnosticColorScopeImage(ImageColorScopePrivateLink link) {
+        const auto id = ResolveImageColorScopePrivateLink(
+            link, [this](ImageId candidate) { return slot_images.is_allocated(candidate); },
+            [this](ImageId candidate) { return slot_images[candidate].image_uid; });
+        return id ? &slot_images[*id] : nullptr;
+    }
+
     /// Retrieves the image view with the specified id.
     [[nodiscard]] ImageView& GetImageView(ImageId id) {
         return slot_image_views[id];
