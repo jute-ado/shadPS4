@@ -167,9 +167,10 @@ struct Image {
         }
     }
 
-    void MarkDiagnosticColorDraw(u64 scope_serial, ImageColorScopeDrawKind kind) noexcept {
+    void MarkDiagnosticColorDraw(u64 scope_serial,
+                                 ImageColorScopeDrawDescriptor descriptor) noexcept {
         if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
-            diagnostic_color_scope.MarkDraw(scope_serial, kind);
+            diagnostic_color_scope.MarkDraw(scope_serial, descriptor);
         }
     }
 

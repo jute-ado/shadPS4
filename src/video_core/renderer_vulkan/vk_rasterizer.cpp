@@ -231,7 +231,16 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
-    MarkEncodedImageProducers(state, VideoCore::ImageColorScopeDrawKind::Direct);
+    MarkEncodedImageProducers(
+        state, {
+                   .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = is_indexed,
+                   .element_count = regs.num_indices,
+                   .instance_count = regs.num_instances.NumInstances(),
+                   .sampled_bindings = diagnostic_sampled_bindings,
+                   .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
+                   .storage_writes = diagnostic_storage_writes,
+               });
 
     ResetBindings();
 }
@@ -312,7 +321,14 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
-    MarkEncodedImageProducers(state, VideoCore::ImageColorScopeDrawKind::Indirect);
+    MarkEncodedImageProducers(
+        state, {
+                   .kind = VideoCore::ImageColorScopeDrawKind::Indirect,
+                   .indexed = is_indexed,
+                   .sampled_bindings = diagnostic_sampled_bindings,
+                   .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
+                   .storage_writes = diagnostic_storage_writes,
+               });
 
     ResetBindings();
 }
@@ -415,6 +431,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
+        diagnostic_sampled_images.clear();
+        diagnostic_sampled_bindings = 0;
+        diagnostic_storage_writes = 0;
+    }
 
     bool uses_dma = false;
 
@@ -791,6 +812,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             image.usage.texture |= !is_storage;
             if (is_storage) {
                 storage_written_images.emplace_back(image_id);
+                if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
+                    ++diagnostic_storage_writes;
+                }
+            } else if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
+                ++diagnostic_sampled_bindings;
+                if (std::ranges::find(diagnostic_sampled_images, image_id) ==
+                    diagnostic_sampled_images.end()) {
+                    diagnostic_sampled_images.emplace_back(image_id);
+                }
             }
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
@@ -838,7 +868,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 }
 
 void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
-                                           VideoCore::ImageColorScopeDrawKind draw_kind) {
+                                           VideoCore::ImageColorScopeDrawDescriptor draw) {
     if (!VideoCore::IsPpSourceProducerTrackingEnabled()) {
         return;
     }
@@ -849,7 +879,7 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             auto& image = texture_cache.GetImage(image_id);
             image.BeginDiagnosticColorScope(rendering_serial,
                                             state.color_attachments[index].is_clear);
-            image.MarkDiagnosticColorDraw(rendering_serial, draw_kind);
+            image.MarkDiagnosticColorDraw(rendering_serial, draw);
             image.MarkDiagnosticProducer(VideoCore::ImageProducerClass::ColorAttachment);
         }
     }

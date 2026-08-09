@@ -34,6 +34,10 @@ struct PpSourceProducerScopeObservation {
     u32 valid_draw_scopes{};
     u32 invalid_draw_scopes{};
     u32 overflow_draw_scopes{};
+    u32 single_sampled_input{};
+    u32 zero_sampled_inputs{};
+    u32 multiple_sampled_inputs{};
+    u32 writable_image_draws{};
     u32 loss{};
     bool final{};
 };
@@ -60,6 +64,16 @@ public:
                                                                    : ++ended_earlier;
         if (draw_scope.valid) {
             ++valid_draw_scopes;
+            if (draw_scope.draw_count == 1) {
+                if (draw_scope.sampled_images == 0) {
+                    ++zero_sampled_inputs;
+                } else if (draw_scope.sampled_images == 1) {
+                    ++single_sampled_input;
+                } else {
+                    ++multiple_sampled_inputs;
+                }
+                writable_image_draws += draw_scope.storage_writes != 0;
+            }
         } else if (draw_scope.overflow) {
             ++overflow_draw_scopes;
             ++loss;
@@ -83,6 +97,10 @@ public:
             .valid_draw_scopes = valid_draw_scopes,
             .invalid_draw_scopes = invalid_draw_scopes,
             .overflow_draw_scopes = overflow_draw_scopes,
+            .single_sampled_input = single_sampled_input,
+            .zero_sampled_inputs = zero_sampled_inputs,
+            .multiple_sampled_inputs = multiple_sampled_inputs,
+            .writable_image_draws = writable_image_draws,
             .loss = loss,
             .final = final,
         };
@@ -98,6 +116,10 @@ private:
     u32 valid_draw_scopes{};
     u32 invalid_draw_scopes{};
     u32 overflow_draw_scopes{};
+    u32 single_sampled_input{};
+    u32 zero_sampled_inputs{};
+    u32 multiple_sampled_inputs{};
+    u32 writable_image_draws{};
     u32 loss{};
     bool has_last{};
 };
@@ -109,7 +131,13 @@ private:
            " d=" + std::to_string(observation.draw_scope.draw_count) +
            " k=" + std::to_string(static_cast<u32>(observation.draw_scope.last_draw)) +
            " c=" + std::to_string(observation.draw_scope.clear_at_begin ? 1 : 0) +
-           " x=" + std::to_string(observation.draw_scope.valid ? 0 : 1);
+           " x=" + std::to_string(observation.draw_scope.valid ? 0 : 1) +
+           " j=" + std::to_string(observation.draw_scope.indexed ? 1 : 0) +
+           " e=" + std::to_string(observation.draw_scope.element_count) +
+           " n=" + std::to_string(observation.draw_scope.instance_count) +
+           " b=" + std::to_string(observation.draw_scope.sampled_bindings) +
+           " u=" + std::to_string(observation.draw_scope.sampled_images) +
+           " w=" + std::to_string(observation.draw_scope.storage_writes);
 }
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeCoverage(
@@ -122,6 +150,10 @@ private:
            " v=" + std::to_string(observation.valid_draw_scopes) +
            " i=" + std::to_string(observation.invalid_draw_scopes) +
            " x=" + std::to_string(observation.overflow_draw_scopes) +
+           " s=" + std::to_string(observation.single_sampled_input) +
+           " z=" + std::to_string(observation.zero_sampled_inputs) +
+           " m=" + std::to_string(observation.multiple_sampled_inputs) +
+           " w=" + std::to_string(observation.writable_image_draws) +
            " l=" + std::to_string(observation.loss);
 }
 

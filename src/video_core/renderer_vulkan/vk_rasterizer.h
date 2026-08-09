@@ -104,7 +104,7 @@ private:
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
     void MarkEncodedImageProducers(const RenderState& state,
-                                   VideoCore::ImageColorScopeDrawKind draw_kind);
+                                   VideoCore::ImageColorScopeDrawDescriptor draw);
     void MarkEncodedStorageImageProducers();
 
     void ResetBindings() {
@@ -140,6 +140,10 @@ private:
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> storage_written_images;
+    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES>
+        diagnostic_sampled_images;
+    u32 diagnostic_sampled_bindings{};
+    u32 diagnostic_storage_writes{};
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
