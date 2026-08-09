@@ -246,6 +246,154 @@ private:
     bool emitted{};
 };
 
+struct PpTerminalScopePrivateLineageExtension {
+    VideoCore::ImageColorScopePrivateLink input{};
+    u64 input_generation{};
+    VideoCore::ImageColorScopePrivateLink output{};
+    u64 output_generation{};
+    bool single_input{};
+    bool single_output{};
+};
+
+struct PpTerminalScopePrivateLineageResult {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    u32 hops{};
+    bool matched{};
+    bool retains_pointer{};
+    bool retains_image{};
+    bool retains_vk_image{};
+};
+
+class PpTerminalScopePrivateLineage {
+public:
+    static constexpr u32 MaxDepth = VideoCore::MaxImageColorScopeAncestryDepth;
+
+    [[nodiscard]] constexpr bool Start(VideoCore::ImageColorScopePrivateLink root,
+                                       u64 generation) noexcept {
+        Reset();
+        if (!root.Valid() || generation == 0) {
+            Fail(FinalGuestSurfaceStatus::InvalidationLoss, &FinalGuestSurfaceLoss::invalidation);
+            return false;
+        }
+        nodes[0] = {.link = root, .generation = generation};
+        depth = 1;
+        status = FinalGuestSurfaceStatus::Complete;
+        return true;
+    }
+
+    [[nodiscard]] constexpr PpTerminalScopePrivateLineageResult Extend(
+        const PpTerminalScopePrivateLineageExtension& extension) noexcept {
+        if (status != FinalGuestSurfaceStatus::Complete || depth == 0) {
+            return Result(false);
+        }
+        if (!extension.single_input || !extension.single_output) {
+            Fail(FinalGuestSurfaceStatus::GapLoss, &FinalGuestSurfaceLoss::gap);
+            return Result(false);
+        }
+        const auto& tail = nodes[depth - 1];
+        if (!extension.input.Valid() || extension.input != tail.link ||
+            extension.input_generation == 0 || extension.input_generation != tail.generation ||
+            !extension.output.Valid() || extension.output_generation == 0) {
+            Fail(FinalGuestSurfaceStatus::InvalidationLoss, &FinalGuestSurfaceLoss::invalidation);
+            return Result(false);
+        }
+        for (u32 index = 0; index < depth; ++index) {
+            if (nodes[index].link == extension.output) {
+                Fail(FinalGuestSurfaceStatus::InvalidationLoss,
+                     &FinalGuestSurfaceLoss::invalidation);
+                return Result(false);
+            }
+        }
+        if (depth == MaxDepth) {
+            Fail(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::tile_capacity);
+            return Result(false);
+        }
+        nodes[depth++] = {.link = extension.output, .generation = extension.output_generation};
+        return Result(true);
+    }
+
+    [[nodiscard]] constexpr PpTerminalScopePrivateLineageResult Resolve(
+        VideoCore::ImageColorScopePrivateLink output, u64 generation) const noexcept {
+        if (status != FinalGuestSurfaceStatus::Complete || depth == 0 || !output.Valid() ||
+            generation == 0 || nodes[depth - 1].link != output ||
+            nodes[depth - 1].generation != generation) {
+            PpTerminalScopePrivateLineageResult result = Result(false);
+            if (result.status == FinalGuestSurfaceStatus::Complete) {
+                result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                result.loss = {.invalidation = 1};
+            }
+            return result;
+        }
+        return Result(true);
+    }
+
+    [[nodiscard]] constexpr VideoCore::ImageColorScopePrivateLink Root() const noexcept {
+        return depth == 0 ? VideoCore::ImageColorScopePrivateLink{} : nodes[0].link;
+    }
+
+    [[nodiscard]] constexpr u64 RootGeneration() const noexcept {
+        return depth == 0 ? 0 : nodes[0].generation;
+    }
+
+    [[nodiscard]] constexpr VideoCore::ImageColorScopePrivateLink Tail() const noexcept {
+        return depth == 0 ? VideoCore::ImageColorScopePrivateLink{} : nodes[depth - 1].link;
+    }
+
+    [[nodiscard]] constexpr u32 Hops() const noexcept {
+        return depth == 0 ? 0 : depth - 1;
+    }
+
+    [[nodiscard]] constexpr FinalGuestSurfaceStatus Status() const noexcept {
+        return status;
+    }
+
+    [[nodiscard]] constexpr FinalGuestSurfaceLoss Loss() const noexcept {
+        return loss;
+    }
+
+    constexpr void Reset() noexcept {
+        nodes = {};
+        depth = 0;
+        status = FinalGuestSurfaceStatus::AlreadyConsumed;
+        loss = {};
+    }
+
+private:
+    struct Node {
+        VideoCore::ImageColorScopePrivateLink link{};
+        u64 generation{};
+    };
+
+    [[nodiscard]] constexpr PpTerminalScopePrivateLineageResult Result(
+        bool matched) const noexcept {
+        return {
+            .status = status,
+            .loss = loss,
+            .hops = Hops(),
+            .matched = matched,
+        };
+    }
+
+    constexpr void Fail(FinalGuestSurfaceStatus next_status,
+                        u32 FinalGuestSurfaceLoss::* member) noexcept {
+        status = next_status;
+        loss = {};
+        loss.*member = 1;
+    }
+
+    std::array<Node, MaxDepth> nodes{};
+    u32 depth{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+struct PpTerminalScopePrivateLineageReport {
+    u32 hops{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
 [[nodiscard]] constexpr PpTerminalScopeDiscoveryDecision PlanPpTerminalScopeDiscoveryDecision(
     bool enabled, bool already_tracked, bool first_selector_matches, bool mapping_valid,
     bool target_valid, bool target_capacity) noexcept {
@@ -1036,6 +1184,13 @@ private:
            " m=" + std::to_string(coverage.mapping_rejected) +
            " v=" + std::to_string(coverage.target_rejected) +
            " z=" + std::to_string(coverage.capacity_rejected);
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopePrivateLineageReport(
+    const PpTerminalScopePrivateLineageReport& report) {
+    return "lh=" + std::to_string(report.hops) +
+           " ls=" + std::to_string(static_cast<u32>(report.status)) +
+           " ll=" + std::to_string(report.loss.Any() ? 1 : 0);
 }
 
 } // namespace Vulkan
