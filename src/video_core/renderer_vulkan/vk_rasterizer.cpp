@@ -68,7 +68,7 @@ public:
             "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
             "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
             "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
-            "capture_predecessor={} final_backing_join={}",
+            "capture_predecessor={} input_content={} final_backing_join={}",
             config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
             config.expected_calibrations, static_cast<u32>(config.content.first.kind),
             config.content.first.indexed, config.content.first.element_count,
@@ -85,7 +85,7 @@ public:
             config.content.predecessor.sampled_images, config.content.predecessor.storage_writes,
             MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes,
             config.content.capture_pre_first, config.content.capture_predecessor,
-            config.join_final_backing);
+            config.content.capture_sampled_input_content, config.join_final_backing);
     }
 
     [[nodiscard]] bool IsPredecessorCandidate(
@@ -182,7 +182,8 @@ public:
     void ObservePreDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
                         const RenderState& state, u32 attachment_index, u64 rendering_serial,
                         const VideoCore::ImageColorScopeDrawDescriptor& draw,
-                        const PpTerminalScopeSampledInputs& sampled_inputs) {
+                        const PpTerminalScopeSampledInputs& sampled_inputs,
+                        std::span<VideoCore::Image* const> sampled_images) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -250,7 +251,31 @@ public:
         }
         if (action == PpTerminalScopePreDrawAction::CaptureBeforePredecessor) {
             entry->sampled_inputs = sampled_inputs;
-            RecordPlane(*entry, image, state, attachment_index, rendering_serial, 5);
+            std::array<PpTerminalScopeSampledInputView, PpTerminalScopeSampledInputs::MaxInputs>
+                sampled_views{};
+            for (u32 input = 0; input < sampled_inputs.count; ++input) {
+                sampled_views[input] = sampled_inputs.inputs[input].view;
+            }
+            entry->input_content_plan = PlanPpTerminalScopeSampledInputContent({
+                .enabled = config.content.capture_sampled_input_content,
+                .logical_width = mapping.logical_width,
+                .logical_height = mapping.logical_height,
+                .base_offset = entry->plan.total_bytes,
+                .selector = config.watch_ordinals,
+                .views = std::span{sampled_views.data(), sampled_inputs.count},
+                .buffer_alignment = 16,
+                .max_regions = PpTerminalScopeSampledInputContentPlan::MaxInputs *
+                               FinalGuestSurfaceWatchOrdinals::MaxOrdinals,
+                .max_bytes = PpTerminalScopeSnapshotBytes,
+            });
+            if (config.content.capture_sampled_input_content &&
+                (entry->input_content_plan.status != FinalGuestSurfaceStatus::Complete ||
+                 entry->input_content_plan.loss.Any() || !entry->input_content_plan.copy)) {
+                entry->status = entry->input_content_plan.status;
+                entry->loss = entry->input_content_plan.loss;
+            }
+            RecordPlane(*entry, image, state, attachment_index, rendering_serial, 5, false,
+                        sampled_images);
             if (entry->discovered) {
                 progress_coverage.Observe({
                     .predecessor_before_action = true,
@@ -346,7 +371,8 @@ public:
             Pending pending{
                 .sequence = sequence,
                 .process_time_us = process_time_us,
-                .layout = MakeHistoryLayout(entry->plan, entry->recorded_plane_mask),
+                .layout = MakeHistoryLayout(entry->plan, entry->input_content_plan,
+                                            entry->recorded_plane_mask),
                 .status = take.status,
                 .loss = take.loss,
                 .draw_count = take.draw_count,
@@ -482,6 +508,7 @@ private:
         VideoCore::ImageColorScopePrivateLink link{};
         PpTerminalScopeContentGate gate;
         PpTerminalScopeContentPlan plan{};
+        PpTerminalScopeSampledInputContentPlan input_content_plan{};
         FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss loss{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
@@ -619,6 +646,7 @@ private:
         entry.lineage.Reset();
         entry.predecessor = {};
         entry.sampled_inputs = {};
+        entry.input_content_plan = {};
         const u64 generation = target.EnsureDiagnosticBackingGeneration();
         if (discovered && !entry.lineage.Start(link, generation)) {
             entry.status = entry.lineage.Status();
@@ -638,7 +666,8 @@ private:
     }
 
     [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeHistoryLayout(
-        const PpTerminalScopeContentPlan& plan, u32 plane_mask = 0) noexcept {
+        const PpTerminalScopeContentPlan& plan,
+        const PpTerminalScopeSampledInputContentPlan& input_plan, u32 plane_mask = 0) noexcept {
         PpTerminalScopeContentHistoryLayout layout{
             .region_count = plan.region_count,
             .plane_bytes = plan.plane_bytes,
@@ -648,7 +677,10 @@ private:
             .pre_first_plane_offset = plan.pre_first_plane_offset,
             .predecessor_pre_plane_offset = plan.predecessor_pre_plane_offset,
             .predecessor_post_plane_offset = plan.predecessor_post_plane_offset,
-            .total_bytes = plan.total_bytes,
+            .total_bytes = input_plan.copy ? input_plan.total_bytes : plan.total_bytes,
+            .input_count = input_plan.input_count,
+            .input_capture_mask = input_plan.capture_mask,
+            .input_unavailable_mask = input_plan.unavailable_mask,
             .plane_mask = plane_mask,
             .format = plan.format,
         };
@@ -659,11 +691,31 @@ private:
                 .byte_size = plan.regions[index].byte_size,
             };
         }
+        for (u32 input_index = 0; input_index < input_plan.input_count; ++input_index) {
+            const auto& input = input_plan.inputs[input_index];
+            auto& history_input = layout.input_planes[input_index];
+            history_input = {
+                .region_count = input.region_count,
+                .plane_offset = input.plane_offset,
+                .plane_bytes = input.plane_bytes,
+                .format = input.format,
+                .status = input.status,
+                .loss = input.loss,
+            };
+            for (u32 region_index = 0; region_index < input.region_count; ++region_index) {
+                history_input.regions[region_index] = {
+                    .logical_ordinal = input.regions[region_index].logical_ordinal,
+                    .buffer_offset = input.regions[region_index].buffer_offset,
+                    .byte_size = input.regions[region_index].byte_size,
+                };
+            }
+        }
         return layout;
     }
 
     void RecordPlane(Entry& entry, VideoCore::Image& image, const RenderState& state,
-                     u32 attachment_index, u64 rendering_serial, u32 plane, bool finalize = false) {
+                     u32 attachment_index, u64 rendering_serial, u32 plane, bool finalize = false,
+                     std::span<VideoCore::Image* const> sampled_images = {}) {
         if (entry.status != FinalGuestSurfaceStatus::Complete || entry.loss.Any()) {
             return;
         }
@@ -672,6 +724,59 @@ private:
             entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
             entry.loss = {.invalidation = 1};
             return;
+        }
+        if (plane == 5 && config.content.capture_sampled_input_content) {
+            u32 pointer_mask{};
+            u32 backing_mask{};
+            u32 view_match_mask{};
+            u32 alias_mask{};
+            const auto mip_dimension = [](u32 dimension, u32 level) {
+                return level < 32 ? std::max(1u, dimension >> level) : 0u;
+            };
+            for (u32 input_index = 0; input_index < entry.input_content_plan.input_count;
+                 ++input_index) {
+                const u32 bit = 1u << input_index;
+                VideoCore::Image* sampled =
+                    input_index < sampled_images.size() ? sampled_images[input_index] : nullptr;
+                if (sampled) {
+                    pointer_mask |= bit;
+                }
+                if (sampled && sampled->backing) {
+                    backing_mask |= bit;
+                }
+                const auto& expected = entry.sampled_inputs.inputs[input_index].view;
+                const auto& planned = entry.input_content_plan.inputs[input_index];
+                if (sampled && sampled->backing && expected.copy_eligible &&
+                    expected.status == FinalGuestSurfaceStatus::Complete && !expected.loss.Any() &&
+                    planned.base_mip == expected.base_mip &&
+                    planned.base_layer == expected.base_layer &&
+                    planned.format == expected.format &&
+                    sampled->aspect_mask == vk::ImageAspectFlagBits::eColor &&
+                    sampled->backing->num_samples == expected.samples &&
+                    sampled->backing->subresource_states.empty() &&
+                    sampled->backing->state.layout != vk::ImageLayout::eUndefined &&
+                    mip_dimension(sampled->info.size.width, planned.base_mip) == expected.width &&
+                    mip_dimension(sampled->info.size.height, planned.base_mip) == expected.height) {
+                    view_match_mask |= bit;
+                }
+                if (entry.sampled_inputs.inputs[input_index].aliases_output || sampled == &image) {
+                    alias_mask |= bit;
+                }
+            }
+            const auto copy_decision = PlanPpTerminalScopeSampledInputCopyDecision({
+                .enabled = true,
+                .input_count = entry.input_content_plan.input_count,
+                .capture_mask = entry.input_content_plan.capture_mask,
+                .pointer_mask = pointer_mask,
+                .backing_mask = backing_mask,
+                .view_match_mask = view_match_mask,
+                .alias_mask = alias_mask,
+            });
+            if (!copy_decision.copy) {
+                entry.status = copy_decision.status;
+                entry.loss = copy_decision.loss;
+                return;
+            }
         }
         const auto slot_decision = PlanPpTerminalScopePlaneSlot(plane, bool{entry.slot});
         if (slot_decision.status != FinalGuestSurfaceStatus::Complete) {
@@ -784,6 +889,68 @@ private:
             .pImageMemoryBarriers = &restore,
         });
         image.backing->state = old_state;
+        if (plane == 5 && config.content.capture_sampled_input_content) {
+            for (u32 input_index = 0; input_index < entry.input_content_plan.input_count;
+                 ++input_index) {
+                if ((entry.input_content_plan.capture_mask & (1u << input_index)) == 0) {
+                    continue;
+                }
+                auto& sampled = *sampled_images[input_index];
+                const auto& input = entry.input_content_plan.inputs[input_index];
+                const auto sampled_old_state = sampled.backing->state;
+                const VideoCore::SubresourceRange sampled_range{
+                    {.level = input.base_mip, .layer = input.base_layer},
+                    {.levels = 1, .layers = 1}};
+                sampled.Transit(vk::ImageLayout::eTransferSrcOptimal,
+                                vk::AccessFlagBits2::eTransferRead, sampled_range, cmdbuf);
+                std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+                    input_copies{};
+                for (u32 region_index = 0; region_index < input.region_count; ++region_index) {
+                    const auto& region = input.regions[region_index];
+                    input_copies[region_index] = {
+                        .bufferOffset = slot_offset + input.plane_offset + region.buffer_offset,
+                        .bufferRowLength = 0,
+                        .bufferImageHeight = 0,
+                        .imageSubresource =
+                            {
+                                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                .mipLevel = input.base_mip,
+                                .baseArrayLayer = input.base_layer,
+                                .layerCount = 1,
+                            },
+                        .imageOffset = {static_cast<s32>(region.x), static_cast<s32>(region.y), 0},
+                        .imageExtent = {region.width, region.height, 1},
+                    };
+                }
+                cmdbuf.copyImageToBuffer(sampled.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                         download.Handle(), input.region_count,
+                                         input_copies.data());
+                const vk::ImageMemoryBarrier2 sampled_restore{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                    .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+                    .dstStageMask = sampled_old_state.pl_stage,
+                    .dstAccessMask = sampled_old_state.access_mask,
+                    .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+                    .newLayout = sampled_old_state.layout,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = sampled.GetImage(),
+                    .subresourceRange =
+                        {
+                            .aspectMask = vk::ImageAspectFlagBits::eColor,
+                            .baseMipLevel = input.base_mip,
+                            .levelCount = 1,
+                            .baseArrayLayer = input.base_layer,
+                            .layerCount = 1,
+                        },
+                };
+                cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                    .imageMemoryBarrierCount = 1,
+                    .pImageMemoryBarriers = &sampled_restore,
+                });
+                sampled.backing->state = sampled_old_state;
+            }
+        }
         if (finalize) {
             const vk::BufferMemoryBarrier2 post_barrier{
                 .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -1818,11 +1985,13 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
     const bool classify_inputs = pp_terminal_scope_content->IsPredecessorCandidate(draw);
     std::array<PpTerminalScopeSampledInput, PpTerminalScopeSampledInputs::MaxInputs>
         sampled_input_candidates{};
+    std::array<VideoCore::Image*, PpTerminalScopeSampledInputs::MaxInputs> sampled_input_images{};
     if (classify_inputs &&
         diagnostic_sampled_images.size() <= PpTerminalScopeSampledInputs::MaxInputs) {
         for (u32 index = 0; index < diagnostic_sampled_images.size(); ++index) {
             const auto& sampled = diagnostic_sampled_images[index];
-            const auto& sampled_image = texture_cache.GetImage(sampled.id);
+            auto& sampled_image = texture_cache.GetImage(sampled.id);
+            sampled_input_images[index] = &sampled_image;
             sampled_input_candidates[index].producer =
                 ClassifyPpTerminalScopePredecessor(sampled_image.PeekDiagnosticProducer(),
                                                    sampled_image.ObserveDiagnosticColorScope());
@@ -1871,8 +2040,9 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
                     std::span{candidates.data(), diagnostic_sampled_images.size()});
             }
         }
-        pp_terminal_scope_content->ObservePreDraw(image_id, image, state, index, rendering_serial,
-                                                  draw, sampled_inputs);
+        pp_terminal_scope_content->ObservePreDraw(
+            image_id, image, state, index, rendering_serial, draw, sampled_inputs,
+            std::span{sampled_input_images.data(), sampled_inputs.count});
     }
 }
 

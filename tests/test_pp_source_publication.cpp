@@ -1550,8 +1550,7 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesCapturedInputRegion
         .input_capture_mask = 0b10,
         .input_unavailable_mask = 0b01,
         .input_planes =
-            {{{.status = FinalGuestSurfaceStatus::Unsupported,
-               .loss = {.unsupported_format = 1}},
+            {{{.status = FinalGuestSurfaceStatus::Unsupported, .loss = {.unsupported_format = 1}},
               {.region_count = 1,
                .plane_offset = 0,
                .plane_bytes = 4,

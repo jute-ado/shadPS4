@@ -586,6 +586,43 @@ struct PpTerminalScopeSampledInputContentPlan {
     return result;
 }
 
+struct PpTerminalScopeSampledInputCopyDescriptor {
+    bool enabled{};
+    u32 input_count{};
+    u32 capture_mask{};
+    u32 pointer_mask{};
+    u32 backing_mask{};
+    u32 view_match_mask{};
+    u32 alias_mask{};
+};
+
+struct PpTerminalScopeSampledInputCopyDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool copy{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeSampledInputCopyDecision
+PlanPpTerminalScopeSampledInputCopyDecision(
+    const PpTerminalScopeSampledInputCopyDescriptor& descriptor) noexcept {
+    if (!descriptor.enabled) {
+        return {};
+    }
+    const u32 valid_bits = descriptor.input_count >= 32 ? std::numeric_limits<u32>::max()
+                                                        : (1u << descriptor.input_count) - 1;
+    const u32 capture_mask = descriptor.capture_mask & valid_bits;
+    if (descriptor.input_count == 0 ||
+        descriptor.input_count > PpTerminalScopeSampledInputContentPlan::MaxInputs ||
+        capture_mask == 0 || capture_mask != descriptor.capture_mask ||
+        (descriptor.pointer_mask & capture_mask) != capture_mask ||
+        (descriptor.backing_mask & capture_mask) != capture_mask ||
+        (descriptor.view_match_mask & capture_mask) != capture_mask ||
+        (descriptor.alias_mask & capture_mask) != 0) {
+        return {.status = FinalGuestSurfaceStatus::InvalidationLoss, .loss = {.invalidation = 1}};
+    }
+    return {.status = FinalGuestSurfaceStatus::Complete, .copy = true};
+}
+
 struct PpTerminalScopeRenderingSplitPlan {
     u64 serial{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -1950,11 +1987,9 @@ private:
         }
         const auto& region = plane.regions[region_index];
         const u64 left_offset = static_cast<u64>(plane.plane_offset) + region.buffer_offset;
-        const u64 right_offset = static_cast<u64>(
-                                     right.layout.input_planes[input_index].plane_offset) +
-                                 right.layout.input_planes[input_index]
-                                     .regions[region_index]
-                                     .buffer_offset;
+        const u64 right_offset =
+            static_cast<u64>(right.layout.input_planes[input_index].plane_offset) +
+            right.layout.input_planes[input_index].regions[region_index].buffer_offset;
         if (region.byte_size == 0 || region.byte_size % 4 != 0 ||
             left_offset + region.byte_size > left.bytes.size() ||
             right_offset + region.byte_size > right.bytes.size()) {
@@ -1972,9 +2007,8 @@ private:
     }
 
     static void ClassifySampledInput(const Observation& a, const Observation& b,
-                                     const Observation& c, u32 input_index,
-                                     std::vector<u32>& aba, std::vector<u32>& stable,
-                                     std::vector<u32>& ambiguous) {
+                                     const Observation& c, u32 input_index, std::vector<u32>& aba,
+                                     std::vector<u32>& stable, std::vector<u32>& ambiguous) {
         const auto& plane = a.layout.input_planes[input_index];
         for (u32 region_index = 0; region_index < plane.region_count; ++region_index) {
             const bool ab = EqualSampledInputRegion(a, b, input_index, region_index);
@@ -2379,49 +2413,45 @@ private:
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedReport(
     const PpTerminalScopeCalibratedReport& report) {
-    auto result = "FGSCTST q=" + std::to_string(report.request_ordinal) +
-           " abc=" + std::to_string(report.sequences[0]) + '/' +
-           std::to_string(report.sequences[1]) + '/' + std::to_string(report.sequences[2]) +
-           " a0=" + FormatPpTerminalScopeOrdinalList(report.first_aba_ordinals) +
-           " s0=" + FormatPpTerminalScopeOrdinalList(report.first_stable_ordinals) +
-           " x0=" + FormatPpTerminalScopeOrdinalList(report.first_ambiguous_ordinals) +
-           " a1=" + FormatPpTerminalScopeOrdinalList(report.second_aba_ordinals) +
-           " s1=" + FormatPpTerminalScopeOrdinalList(report.second_stable_ordinals) +
-           " x1=" + FormatPpTerminalScopeOrdinalList(report.second_ambiguous_ordinals) +
-           " a2=" + FormatPpTerminalScopeOrdinalList(report.consumer_aba_ordinals) +
-           " s2=" + FormatPpTerminalScopeOrdinalList(report.consumer_stable_ordinals) +
-           " x2=" + FormatPpTerminalScopeOrdinalList(report.consumer_ambiguous_ordinals) +
-           " a3=" + FormatPpTerminalScopeOrdinalList(report.output_aba_ordinals) +
-           " s3=" + FormatPpTerminalScopeOrdinalList(report.output_stable_ordinals) +
-           " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) + " y0=" +
-           FormatPpTerminalScopeOrdinalList(report.first_localized_visual_return_ordinals) +
-           " y1=" +
-           FormatPpTerminalScopeOrdinalList(report.second_localized_visual_return_ordinals) +
-           " y2=" +
-           FormatPpTerminalScopeOrdinalList(report.consumer_localized_visual_return_ordinals) +
-           " y3=" +
-           FormatPpTerminalScopeOrdinalList(report.output_localized_visual_return_ordinals) +
-           " e3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_equal_ordinals) +
-           " d3=" +
-           FormatPpTerminalScopeOrdinalList(report.output_final_backing_different_ordinals) +
-           " a4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_aba_ordinals) +
-           " s4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_stable_ordinals) +
-           " x4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_ambiguous_ordinals) + " y4=" +
-           FormatPpTerminalScopeOrdinalList(report.pre_first_localized_visual_return_ordinals) +
-           " a5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_aba_ordinals) +
-           " s5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_stable_ordinals) +
-           " x5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_ambiguous_ordinals) +
-           " yp=" +
-           FormatPpTerminalScopeOrdinalList(
-               report.predecessor_pre_localized_visual_return_ordinals) +
-           " a6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_aba_ordinals) +
-           " s6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_stable_ordinals) +
-           " x6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_ambiguous_ordinals) +
-           " yo=" +
-           FormatPpTerminalScopeOrdinalList(
-               report.predecessor_post_localized_visual_return_ordinals) +
-           " st=" + std::to_string(static_cast<u32>(report.status)) +
-           " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
+    auto result =
+        "FGSCTST q=" + std::to_string(report.request_ordinal) +
+        " abc=" + std::to_string(report.sequences[0]) + '/' + std::to_string(report.sequences[1]) +
+        '/' + std::to_string(report.sequences[2]) +
+        " a0=" + FormatPpTerminalScopeOrdinalList(report.first_aba_ordinals) +
+        " s0=" + FormatPpTerminalScopeOrdinalList(report.first_stable_ordinals) +
+        " x0=" + FormatPpTerminalScopeOrdinalList(report.first_ambiguous_ordinals) +
+        " a1=" + FormatPpTerminalScopeOrdinalList(report.second_aba_ordinals) +
+        " s1=" + FormatPpTerminalScopeOrdinalList(report.second_stable_ordinals) +
+        " x1=" + FormatPpTerminalScopeOrdinalList(report.second_ambiguous_ordinals) +
+        " a2=" + FormatPpTerminalScopeOrdinalList(report.consumer_aba_ordinals) +
+        " s2=" + FormatPpTerminalScopeOrdinalList(report.consumer_stable_ordinals) +
+        " x2=" + FormatPpTerminalScopeOrdinalList(report.consumer_ambiguous_ordinals) +
+        " a3=" + FormatPpTerminalScopeOrdinalList(report.output_aba_ordinals) +
+        " s3=" + FormatPpTerminalScopeOrdinalList(report.output_stable_ordinals) +
+        " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) +
+        " y0=" + FormatPpTerminalScopeOrdinalList(report.first_localized_visual_return_ordinals) +
+        " y1=" + FormatPpTerminalScopeOrdinalList(report.second_localized_visual_return_ordinals) +
+        " y2=" +
+        FormatPpTerminalScopeOrdinalList(report.consumer_localized_visual_return_ordinals) +
+        " y3=" + FormatPpTerminalScopeOrdinalList(report.output_localized_visual_return_ordinals) +
+        " e3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_equal_ordinals) +
+        " d3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_different_ordinals) +
+        " a4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_aba_ordinals) +
+        " s4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_stable_ordinals) +
+        " x4=" + FormatPpTerminalScopeOrdinalList(report.pre_first_ambiguous_ordinals) + " y4=" +
+        FormatPpTerminalScopeOrdinalList(report.pre_first_localized_visual_return_ordinals) +
+        " a5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_aba_ordinals) +
+        " s5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_stable_ordinals) +
+        " x5=" + FormatPpTerminalScopeOrdinalList(report.predecessor_pre_ambiguous_ordinals) +
+        " yp=" +
+        FormatPpTerminalScopeOrdinalList(report.predecessor_pre_localized_visual_return_ordinals) +
+        " a6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_aba_ordinals) +
+        " s6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_stable_ordinals) +
+        " x6=" + FormatPpTerminalScopeOrdinalList(report.predecessor_post_ambiguous_ordinals) +
+        " yo=" +
+        FormatPpTerminalScopeOrdinalList(report.predecessor_post_localized_visual_return_ordinals) +
+        " st=" + std::to_string(static_cast<u32>(report.status)) +
+        " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
     result += " im=" + std::to_string(report.input_count) + '/' +
               std::to_string(report.input_capture_mask) + '/' +
               std::to_string(report.input_unavailable_mask);
@@ -2429,15 +2459,13 @@ private:
         if ((report.input_capture_mask & (1u << input_index)) == 0) {
             continue;
         }
-        result += " z" + std::to_string(input_index) + "a=" +
-                  FormatPpTerminalScopeOrdinalList(
-                      report.sampled_input_aba_ordinals[input_index]) +
-                  " z" + std::to_string(input_index) + "s=" +
-                  FormatPpTerminalScopeOrdinalList(
-                      report.sampled_input_stable_ordinals[input_index]) +
-                  " z" + std::to_string(input_index) + "x=" +
-                  FormatPpTerminalScopeOrdinalList(
-                      report.sampled_input_ambiguous_ordinals[input_index]);
+        result +=
+            " z" + std::to_string(input_index) + "a=" +
+            FormatPpTerminalScopeOrdinalList(report.sampled_input_aba_ordinals[input_index]) +
+            " z" + std::to_string(input_index) + "s=" +
+            FormatPpTerminalScopeOrdinalList(report.sampled_input_stable_ordinals[input_index]) +
+            " z" + std::to_string(input_index) + "x=" +
+            FormatPpTerminalScopeOrdinalList(report.sampled_input_ambiguous_ordinals[input_index]);
     }
     return result;
 }
