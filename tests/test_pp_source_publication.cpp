@@ -1769,8 +1769,14 @@ TEST(PpTerminalScopeContent, FinalBackingCallbacksDrainBeforeTerminalCoverageFin
 
     const auto present_owned = PlanPpTerminalScopeFinalizeOrder(true, false);
     EXPECT_FALSE(present_owned.drain_draw_callbacks_before_terminal);
+    EXPECT_TRUE(present_owned.finish_present_before_terminal);
+    EXPECT_TRUE(present_owned.drain_present_callbacks_before_terminal);
     EXPECT_TRUE(present_owned.finalize_terminal);
     EXPECT_FALSE(present_owned.drain_draw_callbacks_after_terminal);
+
+    const auto legacy_present_owned = PlanPpTerminalScopeFinalizeOrder(false, false);
+    EXPECT_FALSE(legacy_present_owned.finish_present_before_terminal);
+    EXPECT_FALSE(legacy_present_owned.drain_present_callbacks_before_terminal);
 }
 
 TEST(PpTerminalScopeContent, RuntimeConfigRejectsDisabledMalformedOrImplicitSelection) {
