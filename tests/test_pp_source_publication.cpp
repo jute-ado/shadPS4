@@ -32,8 +32,7 @@ TEST(AttachmentFeedbackLoopAccess, PreservesEverySimultaneousImageUse) {
     EXPECT_TRUE(bool(access & vk::AccessFlagBits2::eShaderRead));
     EXPECT_TRUE(bool(access & vk::AccessFlagBits2::eColorAttachmentRead));
     EXPECT_TRUE(bool(access & vk::AccessFlagBits2::eColorAttachmentWrite));
-    EXPECT_EQ(access, vk::AccessFlagBits2::eShaderRead |
-                          vk::AccessFlagBits2::eColorAttachmentRead |
+    EXPECT_EQ(access, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eColorAttachmentRead |
                           vk::AccessFlagBits2::eColorAttachmentWrite);
 }
 

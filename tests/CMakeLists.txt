@@ -143,6 +143,9 @@ add_executable(shadps4_pp_source_publication_test
 )
 target_include_directories(shadps4_pp_source_publication_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/externals/vulkan-headers/include
+    ${CMAKE_SOURCE_DIR}/externals/spdlog/include
+    ${CMAKE_SOURCE_DIR}/externals/fmt/include
 )
 target_compile_features(shadps4_pp_source_publication_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_pp_source_publication_test PRIVATE GTest::gtest_main)

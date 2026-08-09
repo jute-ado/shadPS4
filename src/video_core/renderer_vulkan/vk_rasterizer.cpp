@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/attachment_feedback_loop_access.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -1938,15 +1939,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // storage and feedback loop doesn't make sense for them
             if ((image.binding.force_general || image.binding.is_target) &&
                 !image.info.props.is_depth) {
-                image.Transit(instance.IsAttachmentFeedbackLoopLayoutSupported() &&
-                                      image.binding.is_target
-                                  ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
-                                  : vk::ImageLayout::eGeneral,
-                              vk::AccessFlagBits2::eShaderRead |
-                                  (image.info.props.is_depth
-                                       ? vk::AccessFlagBits2::eDepthStencilAttachmentWrite
-                                       : vk::AccessFlagBits2::eColorAttachmentWrite |
-                                             vk::AccessFlagBits2::eColorAttachmentRead),
+                const bool feedback =
+                    instance.IsAttachmentFeedbackLoopLayoutSupported() && image.binding.is_target;
+                image.Transit(feedback ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
+                                       : vk::ImageLayout::eGeneral,
+                              feedback ? AttachmentFeedbackLoopTextureAccess()
+                                       : vk::AccessFlagBits2::eShaderRead |
+                                             vk::AccessFlagBits2::eColorAttachmentWrite |
+                                             vk::AccessFlagBits2::eColorAttachmentRead,
                               {});
             } else {
                 if (is_storage) {
@@ -2262,7 +2262,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             image->Transit(instance.IsAttachmentFeedbackLoopLayoutSupported()
                                ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
                                : vk::ImageLayout::eGeneral,
-                           vk::AccessFlagBits2::eColorAttachmentWrite, {});
+                           AttachmentFeedbackLoopRenderTargetAccess(), {});
             attachment_feedback_loop = true;
         } else {
             image->Transit(vk::ImageLayout::eColorAttachmentOptimal,
