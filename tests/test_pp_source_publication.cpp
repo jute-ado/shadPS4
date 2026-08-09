@@ -2538,4 +2538,60 @@ TEST(PpTerminalScopeContent, PredecessorMayBeTheImmediatelyPreviousColorScopeOnl
         << "The predecessor must not bridge an unrelated next color scope";
 }
 
+TEST(PpTerminalScopeContent, FailedPredecessorCandidateCanRestartInALaterScope) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .capture_pre_first = true,
+        .capture_predecessor = true,
+        .predecessor = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                        .indexed = true,
+                        .element_count = 4,
+                        .instance_count = 1,
+                        .sampled_images = 3},
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 9));
+    ASSERT_EQ(gate.PreviewDraw(17, 80, config.predecessor),
+              PpTerminalScopePreDrawAction::CaptureBeforePredecessor);
+    ASSERT_EQ(gate.ObserveDraw(17, 80, config.predecessor),
+              PpTerminalScopeContentAction::CapturePredecessor);
+    auto unrelated = config.first;
+    unrelated.element_count = 12;
+    ASSERT_EQ(gate.PreviewDraw(17, 81, unrelated), PpTerminalScopePreDrawAction::ShapeLoss);
+
+    EXPECT_TRUE(gate.CanRestartAtFirst(17, 89, config.predecessor));
+    ASSERT_TRUE(gate.Arm(17, 9));
+    EXPECT_EQ(gate.PreviewDraw(17, 89, config.predecessor),
+              PpTerminalScopePreDrawAction::CaptureBeforePredecessor);
+    EXPECT_EQ(gate.ObserveDraw(17, 89, config.predecessor),
+              PpTerminalScopeContentAction::CapturePredecessor);
+    EXPECT_EQ(gate.PreviewDraw(17, 90, config.first),
+              PpTerminalScopePreDrawAction::CaptureBeforeFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    EXPECT_EQ(gate.ObserveConsumer(17, config.consumer),
+              PpTerminalScopeConsumerAction::CaptureConsumer);
+
+    const auto rolling_slot = PlanPpTerminalScopePlaneSlot(5, true);
+    EXPECT_EQ(rolling_slot.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(rolling_slot.reuse);
+    EXPECT_TRUE(rolling_slot.requires_write_barrier)
+        << "Overwriting an earlier candidate must order its pending transfer writes";
+}
+
 } // namespace
