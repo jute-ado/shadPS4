@@ -1562,6 +1562,35 @@ TEST(PpTerminalScopeContent, ExactFirstDrawCanRestartOnlyAnUnfrozenPoisonedGate)
     EXPECT_FALSE(gate.CanRestartAtFirst(17, 91, config.first));
 }
 
+TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReasons) {
+    PpTerminalScopeDiscoveryCoverage coverage{};
+    coverage.Observe({.exact_candidate = true, .tracked = true});
+    coverage.Observe({.exact_candidate = true, .mapping_valid = false});
+    coverage.Observe({.exact_candidate = true, .mapping_valid = true, .target_valid = false});
+    coverage.Observe(
+        {.exact_candidate = true, .mapping_valid = true, .target_valid = true, .capacity = false});
+    coverage.Observe({.exact_candidate = true,
+                      .mapping_valid = true,
+                      .target_valid = true,
+                      .capacity = true,
+                      .allocated = true});
+    coverage.Observe({.exact_candidate = true, .tracked = true, .restarted = true});
+    coverage.Observe({});
+
+    EXPECT_EQ(coverage.candidates, 6u);
+    EXPECT_EQ(coverage.tracked, 2u);
+    EXPECT_EQ(coverage.allocated, 1u);
+    EXPECT_EQ(coverage.restarted, 1u);
+    EXPECT_EQ(coverage.mapping_rejected, 1u);
+    EXPECT_EQ(coverage.target_rejected, 1u);
+    EXPECT_EQ(coverage.capacity_rejected, 1u);
+    const auto line = FormatPpTerminalScopeDiscoveryCoverage(coverage);
+    EXPECT_EQ(line, "FGSCTSD c=6 t=2 a=1 r=1 m=1 v=1 z=1");
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("image"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
 TEST(PpTerminalScopeContent, CalibratedCoverageIsExactAndFailsClosedWhenIncomplete) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
