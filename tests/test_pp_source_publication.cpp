@@ -2457,6 +2457,94 @@ TEST(PpTerminalScopeContent, PredecessorSampledInputsFailClosedOnCountCapacityOr
     EXPECT_EQ(rejected.count, 2u);
 }
 
+TEST(PpTerminalScopeContent, SampledInputViewPreservesExactBoundCopyEligibility) {
+    const auto view = ClassifyPpTerminalScopeSampledInputView({
+        .width = 1920,
+        .height = 1080,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .base_mip = 0,
+        .mip_count = 1,
+        .base_layer = 0,
+        .layer_count = 1,
+        .color = true,
+        .uniform_state = true,
+    });
+    EXPECT_EQ(view.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(view.loss.Any());
+    EXPECT_TRUE(view.copy_eligible);
+    EXPECT_EQ(view.width, 1920u);
+    EXPECT_EQ(view.height, 1080u);
+    EXPECT_EQ(view.format, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(view.base_mip, 0u);
+    EXPECT_EQ(view.base_layer, 0u);
+
+    PpTerminalScopeSampledInput input{
+        .producer = {.producer = VideoCore::ImageProducerClass::Transfer,
+                     .fresh = true,
+                     .status = FinalGuestSurfaceStatus::Complete},
+        .view = view,
+    };
+    const auto classified =
+        ClassifyPpTerminalScopeSampledInputs(1, std::span<const PpTerminalScopeSampledInput>{&input, 1});
+    ASSERT_EQ(classified.status, FinalGuestSurfaceStatus::Complete);
+    const auto line = FormatPpTerminalScopeSampledInputs(classified);
+    EXPECT_NE(line.find(" v0=1920/1080/2/1/0/1/0/1/1/1/0/0/0"), std::string::npos);
+    EXPECT_EQ(line.find("uid"), std::string::npos);
+    EXPECT_EQ(line.find("handle"), std::string::npos);
+    EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
+TEST(PpTerminalScopeContent, SampledInputViewFailsClosedForEveryUnsafeCopyClass) {
+    PpTerminalScopeSampledInputViewDescriptor descriptor{
+        .width = 1280,
+        .height = 720,
+        .format = FinalGuestSurfaceFormat::Rgba8,
+        .samples = 1,
+        .base_mip = 0,
+        .mip_count = 1,
+        .base_layer = 0,
+        .layer_count = 1,
+        .color = true,
+        .uniform_state = true,
+    };
+
+    auto invalid = descriptor;
+    invalid.width = 0;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(invalid).loss.invalid_extent, 1u);
+
+    auto format = descriptor;
+    format.format = FinalGuestSurfaceFormat::Unsupported;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(format).loss.unsupported_format, 1u);
+
+    auto samples = descriptor;
+    samples.samples = 4;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(samples).loss.unsupported_samples, 1u);
+
+    auto mip = descriptor;
+    mip.mip_count = 2;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(mip).loss.unsupported_mip, 1u);
+
+    auto layer = descriptor;
+    layer.base_layer = 2;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(layer).loss.unsupported_layer, 1u);
+
+    auto aspect = descriptor;
+    aspect.color = false;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(aspect).loss.unsupported_aspect, 1u);
+
+    auto mixed = descriptor;
+    mixed.uniform_state = false;
+    EXPECT_EQ(ClassifyPpTerminalScopeSampledInputView(mixed).loss.invalidation, 1u);
+
+    auto conflict = descriptor;
+    conflict.view_conflict = true;
+    const auto rejected = ClassifyPpTerminalScopeSampledInputView(conflict);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.loss.invalidation, 1u);
+    EXPECT_FALSE(rejected.copy_eligible);
+}
+
 TEST(PpTerminalScopeContent, NamedPredecessorIsCapturedBeforeAndAfterWithoutReplacingTheLineage) {
     const PpTerminalScopeContentConfig config{
         .enabled = true,
