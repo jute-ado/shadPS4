@@ -798,6 +798,7 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     if (!backing || backing->num_samples == num_samples) {
         return;
     }
+    ResetDiagnosticProducer();
     ASSERT_MSG(!info.props.is_depth, "Swapping samples is only valid for color images");
     BackingImage* new_backing;
     auto it = std::ranges::find(backing_images, num_samples, &BackingImage::num_samples);
@@ -869,6 +870,9 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     }
 
     backing = new_backing;
+    if (copy_backing) {
+        MarkDiagnosticProducer(ImageProducerClass::Transfer);
+    }
 }
 
 } // namespace VideoCore

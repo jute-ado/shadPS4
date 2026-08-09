@@ -160,6 +160,12 @@ struct Image {
         return diagnostic_producer.Observe();
     }
 
+    void ResetDiagnosticProducer() noexcept {
+        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+            diagnostic_producer.Reset();
+        }
+    }
+
 public:
     const Vulkan::Instance* instance;
     Vulkan::Scheduler* scheduler;
