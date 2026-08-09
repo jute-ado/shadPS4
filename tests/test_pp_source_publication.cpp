@@ -3880,8 +3880,8 @@ TEST(PpUpstreamSampleRoute, CalibratedHistoryPublishesOnlyBoundedRouteShape) {
         .status = FinalGuestSurfaceStatus::Complete,
     };
     const PpTerminalScopeContentHistoryLayout layout{
-        .total_bytes = 4,
         .region_count = 1,
+        .total_bytes = 4,
         .plane_mask = 1,
         .regions = {{{.logical_ordinal = 1299, .buffer_offset = 0, .byte_size = 4}}},
         .format = FinalGuestSurfaceFormat::Rgba8,

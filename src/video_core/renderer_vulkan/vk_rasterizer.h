@@ -10,6 +10,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_route.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -168,6 +169,9 @@ private:
     };
     boost::container::static_vector<DiagnosticSampledImage, Shader::NUM_IMAGES>
         diagnostic_sampled_images;
+    boost::container::static_vector<HostPasses::PpUpstreamSampleRouteObservation,
+                                    Shader::NUM_IMAGES * Shader::MaxStageTypes>
+        diagnostic_sampled_routes;
     u32 diagnostic_sampled_bindings{};
     u32 diagnostic_storage_writes{};
 

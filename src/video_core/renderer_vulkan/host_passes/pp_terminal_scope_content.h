@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "video_core/renderer_vulkan/host_passes/pp_source_backing.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_route.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
 
 namespace Vulkan {
@@ -43,8 +44,10 @@ struct PpTerminalScopeContentConfig {
     bool capture_upstream_inputs{};
     bool capture_upstream_pre_post{};
     bool capture_upstream_input_content{};
+    bool capture_upstream_sample_routes{};
     u32 upstream_input_index{};
     u32 upstream_candidate_index{};
+    u32 upstream_sample_route_input_index{};
     PpTerminalScopeDrawSelector upstream{};
     PpTerminalScopeDrawSelector predecessor{};
     PpTerminalScopeDrawSelector first{};
@@ -140,6 +143,8 @@ template <typename ReadValue>
         read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_CONTENT");
     const auto upstream_candidate_value =
         read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE");
+    const auto upstream_sample_route_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_ROUTE_INPUT");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
@@ -160,6 +165,9 @@ template <typename ReadValue>
     if (upstream_input_content_value.has_value() != upstream_candidate_value.has_value() ||
         (upstream_input_content_value &&
          (*upstream_input_content_value != "1" || !upstream_pre_post_value))) {
+        return std::nullopt;
+    }
+    if (upstream_sample_route_value && !upstream_input_content_value) {
         return std::nullopt;
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
@@ -188,9 +196,20 @@ template <typename ReadValue>
             return std::nullopt;
         }
     }
+    u32 upstream_sample_route_input_index{};
+    if (upstream_sample_route_value) {
+        const auto* begin = upstream_sample_route_value->data();
+        const auto* end = begin + upstream_sample_route_value->size();
+        const auto [ptr, error] = std::from_chars(begin, end, upstream_sample_route_input_index);
+        if (error != std::errc{} || ptr != end || upstream_sample_route_input_index >= 8) {
+            return std::nullopt;
+        }
+    }
     if (!first || !second || !consumer || (predecessor_value && !predecessor) ||
         (upstream_value &&
-         (!predecessor || !upstream || upstream_input_index >= predecessor->sampled_images))) {
+         (!predecessor || !upstream || upstream_input_index >= predecessor->sampled_images)) ||
+        (upstream_sample_route_value &&
+         (!upstream || upstream_sample_route_input_index >= upstream->sampled_images))) {
         return std::nullopt;
     }
     return PpTerminalScopeRuntimeConfig{
@@ -201,8 +220,10 @@ template <typename ReadValue>
                     .capture_upstream_inputs = upstream.has_value(),
                     .capture_upstream_pre_post = upstream_pre_post_value.has_value(),
                     .capture_upstream_input_content = upstream_input_content_value.has_value(),
+                    .capture_upstream_sample_routes = upstream_sample_route_value.has_value(),
                     .upstream_input_index = upstream_input_index,
                     .upstream_candidate_index = upstream_candidate_index,
+                    .upstream_sample_route_input_index = upstream_sample_route_input_index,
                     .upstream = upstream.value_or(PpTerminalScopeDrawSelector{}),
                     .predecessor = predecessor.value_or(PpTerminalScopeDrawSelector{}),
                     .first = *first,
@@ -1805,6 +1826,7 @@ struct PpTerminalScopeContentHistoryLayout {
         regions{};
     u32 bytes_per_pixel{4};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    HostPasses::PpUpstreamSampleRouteSet upstream_sample_routes{};
 
     bool operator==(const PpTerminalScopeContentHistoryLayout&) const = default;
 };
@@ -1926,6 +1948,10 @@ struct PpTerminalScopeCalibratedReport {
     u32 input_capture_mask{};
     u32 input_unavailable_mask{};
     u32 input_alias_mask{};
+    u32 upstream_sample_route_input_index{};
+    u32 upstream_sample_route_count{};
+    u32 upstream_sample_route_sampler_count{};
+    u32 upstream_sample_route_stage_mask{};
     std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
         sampled_input_aba_ordinals{};
     std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
@@ -2423,6 +2449,18 @@ private:
             report.status = FinalGuestSurfaceStatus::InvalidationLoss;
             report.loss.invalidation = 1;
             return report;
+        }
+        const auto& sample_routes = a->layout.upstream_sample_routes;
+        if (sample_routes.status == FinalGuestSurfaceStatus::Complete) {
+            report.upstream_sample_route_input_index = sample_routes.selected_input_index;
+            report.upstream_sample_route_count = sample_routes.route_count;
+            for (u32 index = 0; index < sample_routes.route_count; ++index) {
+                const auto& route = sample_routes.routes[index];
+                report.upstream_sample_route_sampler_count += route.sampler_count;
+                if (route.logical_stage < 32) {
+                    report.upstream_sample_route_stage_mask |= 1u << route.logical_stage;
+                }
+            }
         }
         if ((a->layout.plane_mask & (1u << 0)) != 0) {
             ClassifyPlane(*a, *b, *c, 0, report.first_aba_ordinals, report.first_stable_ordinals,

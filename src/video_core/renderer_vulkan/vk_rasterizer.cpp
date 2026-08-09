@@ -78,7 +78,8 @@ public:
             "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
             "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
             "capture_predecessor={} input_content={} upstream_inputs={} upstream_pre_post={} "
-            "upstream_input_content={} upstream_index={} upstream_candidate={} "
+            "upstream_input_content={} upstream_sample_routes={} upstream_index={} "
+            "upstream_candidate={} upstream_sample_route_input={} "
             "upstream={}/{}/{}/{}/{}/{} final_backing_join={}",
             config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
             config.expected_calibrations, static_cast<u32>(config.content.first.kind),
@@ -98,7 +99,9 @@ public:
             config.content.capture_pre_first, config.content.capture_predecessor,
             config.content.capture_sampled_input_content, config.content.capture_upstream_inputs,
             config.content.capture_upstream_pre_post, config.content.capture_upstream_input_content,
-            config.content.upstream_input_index, config.content.upstream_candidate_index,
+            config.content.capture_upstream_sample_routes, config.content.upstream_input_index,
+            config.content.upstream_candidate_index,
+            config.content.upstream_sample_route_input_index,
             static_cast<u32>(config.content.upstream.kind), config.content.upstream.indexed,
             config.content.upstream.element_count, config.content.upstream.instance_count,
             config.content.upstream.sampled_images, config.content.upstream.storage_writes,
@@ -211,13 +214,15 @@ public:
         RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2, true);
     }
 
-    void ObservePreDraw(VideoCore::ImageId image_id, VideoCore::Image& image,
-                        const RenderState& state, u32 attachment_index, u64 rendering_serial,
-                        const VideoCore::ImageColorScopeDrawDescriptor& draw,
-                        const PpTerminalScopeSampledInputs& sampled_inputs,
-                        std::span<VideoCore::Image* const> sampled_images,
-                        std::span<const VideoCore::ImageColorScopePrivateLink> sampled_links,
-                        std::span<const HostPasses::PpUpstreamInputContentView> upstream_views) {
+    void ObservePreDraw(
+        VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
+        u32 attachment_index, u64 rendering_serial,
+        const VideoCore::ImageColorScopeDrawDescriptor& draw,
+        const PpTerminalScopeSampledInputs& sampled_inputs,
+        std::span<VideoCore::Image* const> sampled_images,
+        std::span<const VideoCore::ImageColorScopePrivateLink> sampled_links,
+        std::span<const HostPasses::PpUpstreamInputContentView> upstream_views,
+        std::span<const HostPasses::PpUpstreamSampleRouteObservation> upstream_sample_routes) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -230,7 +235,8 @@ public:
         if (config.content.capture_upstream_inputs &&
             MatchesPpTerminalScopeDraw(config.content.upstream, observed)) {
             ObserveUpstreamFeedbackPreDraw(link, image, state, attachment_index, rendering_serial,
-                                           observed, upstream_views, sampled_images);
+                                           observed, upstream_views, sampled_images,
+                                           upstream_sample_routes);
             static_cast<void>(upstream_registry.Observe(link, observed, sampled_inputs));
         }
         Entry* entry = Find(link);
@@ -422,6 +428,7 @@ public:
             upstream_input_gate.Reset();
             upstream_input_plan = {};
             upstream_input_ready = false;
+            upstream_sample_routes = {};
         }
         const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
         const u64 target_generation =
@@ -626,6 +633,7 @@ private:
         u64 process_time_us{};
         HostPasses::PpUpstreamFeedbackPrePostTakeResult take{};
         HostPasses::PpUpstreamInputContentPlan input_plan{};
+        HostPasses::PpUpstreamSampleRouteSet sample_routes{};
         bool input_ready{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
@@ -837,7 +845,8 @@ private:
         const RenderState& state, u32 attachment_index, u64 rendering_serial,
         const PpTerminalScopeDrawSelector& draw,
         std::span<const HostPasses::PpUpstreamInputContentView> upstream_views,
-        std::span<VideoCore::Image* const> sampled_images) {
+        std::span<VideoCore::Image* const> sampled_images,
+        std::span<const HostPasses::PpUpstreamSampleRouteObservation> sample_routes) {
         if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed ||
             !MatchesPpTerminalScopeDraw(config.content.upstream, draw)) {
             return;
@@ -873,6 +882,23 @@ private:
                 upstream_feedback_frame.Reject(upstream_input_plan.status,
                                                upstream_input_plan.loss);
                 static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
+                return;
+            }
+        }
+        if (config.content.capture_upstream_sample_routes) {
+            upstream_sample_routes = HostPasses::PlanPpUpstreamSampleRoutes({
+                .enabled = true,
+                .selected_input_index = config.content.upstream_sample_route_input_index,
+                .input_count = static_cast<u32>(upstream_views.size()),
+                .observations = sample_routes,
+            });
+            if (upstream_sample_routes.status != FinalGuestSurfaceStatus::Complete ||
+                upstream_sample_routes.loss.Any()) {
+                upstream_feedback_frame.Reject(upstream_sample_routes.status,
+                                               upstream_sample_routes.loss);
+                if (capture_inputs) {
+                    static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
+                }
                 return;
             }
         }
@@ -1396,7 +1422,8 @@ private:
     [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeUpstreamFeedbackHistoryLayout(
         const HostPasses::PpUpstreamFeedbackPrePostPlan& plan,
         const HostPasses::PpUpstreamInputContentPlan& input_plan,
-        const HostPasses::PpUpstreamInputContentCompactResult& input_compact) noexcept {
+        const HostPasses::PpUpstreamInputContentCompactResult& input_compact,
+        const HostPasses::PpUpstreamSampleRouteSet& sample_routes) noexcept {
         PpTerminalScopeContentHistoryLayout layout{
             .region_count = plan.region_count,
             .plane_bytes = plan.plane_bytes,
@@ -1408,6 +1435,7 @@ private:
             .input_alias_mask = input_compact.alias_mask,
             .plane_mask = 0x3,
             .format = plan.format,
+            .upstream_sample_routes = sample_routes,
         };
         for (u32 index = 0; index < plan.region_count; ++index) {
             layout.regions[index] = {
@@ -1474,6 +1502,7 @@ private:
             .process_time_us = process_time_us,
             .take = upstream_feedback_frame.Take(bool{upstream_feedback_slot}),
             .input_plan = upstream_input_plan,
+            .sample_routes = upstream_sample_routes,
             .input_ready = upstream_input_ready,
             .slot = upstream_feedback_slot,
             .slot_offset = upstream_feedback_slot ? upstream_feedback_slot.slot * slot_stride : 0,
@@ -1481,6 +1510,7 @@ private:
         upstream_feedback_slot = {};
         upstream_input_plan = {};
         upstream_input_ready = false;
+        upstream_sample_routes = {};
         upstream_feedback_armed = false;
         scheduler.DeferOperation([this, pending = std::move(pending)]() mutable {
             ConsumeUpstreamFeedback(std::move(pending));
@@ -1546,8 +1576,8 @@ private:
             LOG_ERROR(Render, "PpUpstreamFeedbackPrePost slot_release_loss=1");
         }
         pending.slot = {};
-        auto layout =
-            MakeUpstreamFeedbackHistoryLayout(pending.take.plan, pending.input_plan, input_compact);
+        auto layout = MakeUpstreamFeedbackHistoryLayout(pending.take.plan, pending.input_plan,
+                                                        input_compact, pending.sample_routes);
         {
             std::scoped_lock lock{reducer_mutex};
             upstream_feedback_reducer.ObserveContent(pending.sequence, layout, compact_bytes,
@@ -1621,6 +1651,14 @@ private:
                 inputs += " st=" + std::to_string(static_cast<u32>(report.status)) +
                           " lm=" + std::to_string(FinalGuestSurfaceLossMask(report.loss, 0));
                 LOG_INFO(Render, "{}", inputs);
+            }
+            if (config.content.capture_upstream_sample_routes) {
+                LOG_INFO(Render, "FGSCTUR q={} i={} r={} sm={} sg={} st={} lm={}",
+                         report.request_ordinal, report.upstream_sample_route_input_index,
+                         report.upstream_sample_route_count,
+                         report.upstream_sample_route_sampler_count,
+                         report.upstream_sample_route_stage_mask, static_cast<u32>(report.status),
+                         FinalGuestSurfaceLossMask(report.loss, 0));
             }
         }
     }
@@ -1738,6 +1776,7 @@ private:
     PpTerminalScopeDiscoveryCoverageEmissionGate discovery_coverage_emission{};
     FinalGuestSurfaceReadbackSlotPool::Token upstream_feedback_slot{};
     HostPasses::PpUpstreamInputContentPlan upstream_input_plan{};
+    HostPasses::PpUpstreamSampleRouteSet upstream_sample_routes{};
     bool upstream_input_ready{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
@@ -2217,6 +2256,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     image_infos.clear();
     if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
         diagnostic_sampled_images.clear();
+        diagnostic_sampled_routes.clear();
         diagnostic_sampled_bindings = 0;
         diagnostic_storage_writes = 0;
     }
@@ -2496,8 +2536,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This array holds the size of each consecutive array with the number of bindings consumed.
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
+    boost::container::static_vector<u32, Shader::NUM_IMAGES> image_resource_indices;
+    boost::container::static_vector<u32, Shader::NUM_IMAGES> image_array_elements;
 
-    for (const auto& image_desc : stage.images) {
+    for (u32 image_resource_index = 0; image_resource_index < stage.images.size();
+         ++image_resource_index) {
+        const auto& image_desc = stage.images[image_resource_index];
         const auto tsharp = image_desc.GetSharp(stage);
         if (texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
@@ -2505,6 +2549,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         if (tsharp.Address() == 0 || tsharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid) {
             image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+            image_resource_indices.emplace_back(image_resource_index);
+            image_array_elements.emplace_back(0);
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
@@ -2515,6 +2561,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings.emplace_back(
                 std::piecewise_construct, std::tuple{}, std::tuple{tsharp, image_desc});
+            image_resource_indices.emplace_back(image_resource_index);
+            image_array_elements.emplace_back(i);
 
             if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
                 ASSERT(num_bindings == 1);
@@ -2546,8 +2594,21 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         image_descriptor_array_sizes.push_back(num_bindings);
     }
 
+    boost::container::static_vector<AmdGpu::Sampler, Shader::NUM_SAMPLERS> effective_samplers;
+    for (const auto& sampler : stage.samplers) {
+        auto ssharp = sampler.GetSharp(stage);
+        if (sampler.disable_aniso) {
+            const auto& tsharp = stage.images[sampler.associated_image].GetSharp(stage);
+            if (tsharp.base_level == 0 && tsharp.last_level == 0) {
+                ssharp.max_aniso.Assign(AmdGpu::AnisoRatio::One);
+            }
+        }
+        effective_samplers.emplace_back(ssharp);
+    }
+
     // Second pass to re-bind images that were updated after binding
-    for (auto& [image_id, desc] : image_bindings) {
+    for (u32 flat_index = 0; flat_index < image_bindings.size(); ++flat_index) {
+        auto& [image_id, desc] = image_bindings[flat_index];
         bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
@@ -2612,6 +2673,56 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 } else if (sampled->view != image_view.info) {
                     sampled->view_conflict = true;
                 }
+                const auto selected = std::ranges::find_if(
+                    diagnostic_sampled_images,
+                    [image_id](const auto& candidate) { return candidate.id == image_id; });
+                ASSERT(selected != diagnostic_sampled_images.end());
+                const u32 resource_index = image_resource_indices[flat_index];
+                HostPasses::PpUpstreamSampleRoute route{
+                    .logical_stage = static_cast<u32>(stage.l_stage),
+                    .image_resource_index = resource_index,
+                    .array_element = image_array_elements[flat_index],
+                    .view =
+                        {
+                            .type = static_cast<u32>(image_view.info.type),
+                            .format = static_cast<u32>(image_view.info.format),
+                            .base_mip = image_view.info.range.base.level,
+                            .mip_count = image_view.info.range.extent.levels,
+                            .base_layer = image_view.info.range.base.layer,
+                            .layer_count = image_view.info.range.extent.layers,
+                            .mapping = {static_cast<u32>(image_view.info.mapping.r),
+                                        static_cast<u32>(image_view.info.mapping.g),
+                                        static_cast<u32>(image_view.info.mapping.b),
+                                        static_cast<u32>(image_view.info.mapping.a)},
+                            .min_lod = image_view.info.min_lod,
+                            .storage = image_view.info.is_storage,
+                        },
+                };
+                for (u32 sampler_index = 0; sampler_index < stage.samplers.size();
+                     ++sampler_index) {
+                    if (stage.samplers[sampler_index].associated_image != resource_index) {
+                        continue;
+                    }
+                    if (route.sampler_count == route.MaxSamplers) {
+                        route.valid = false;
+                        break;
+                    }
+                    const auto& ssharp = effective_samplers[sampler_index];
+                    route.samplers[route.sampler_count++] = {
+                        .raw0 = ssharp.raw0,
+                        .raw1 = ssharp.raw1,
+                    };
+                }
+                if (diagnostic_sampled_routes.size() == diagnostic_sampled_routes.capacity()) {
+                    route.valid = false;
+                } else {
+                    diagnostic_sampled_routes.emplace_back(
+                        HostPasses::PpUpstreamSampleRouteObservation{
+                            .input_index = static_cast<u32>(
+                                std::distance(diagnostic_sampled_images.begin(), selected)),
+                            .route = route,
+                        });
+                }
             }
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
@@ -2638,14 +2749,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         binding.unified += array_size;
     }
 
-    for (const auto& sampler : stage.samplers) {
-        auto ssharp = sampler.GetSharp(stage);
-        if (sampler.disable_aniso) {
-            const auto& tsharp = stage.images[sampler.associated_image].GetSharp(stage);
-            if (tsharp.base_level == 0 && tsharp.last_level == 0) {
-                ssharp.max_aniso.Assign(AmdGpu::AnisoRatio::One);
-            }
-        }
+    for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
+        const auto& ssharp = effective_samplers[sampler_index];
         const auto vk_sampler = texture_cache.GetSampler(ssharp, liverpool->regs.ta_bc_base);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[set_write_index++];
@@ -2773,7 +2878,9 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
             image_id, image, state, index, rendering_serial, draw, sampled_inputs,
             std::span{sampled_input_images.data(), sampled_inputs.count},
             std::span{sampled_input_links.data(), sampled_inputs.count},
-            std::span{upstream_input_views.data(), sampled_inputs.count});
+            std::span{upstream_input_views.data(), sampled_inputs.count},
+            std::span<const HostPasses::PpUpstreamSampleRouteObservation>{
+                diagnostic_sampled_routes.data(), diagnostic_sampled_routes.size()});
     }
 }
 
