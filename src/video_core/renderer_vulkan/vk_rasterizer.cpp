@@ -85,8 +85,8 @@ public:
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
                          VideoCore::Image* sampled_input,
                          VideoCore::ImageColorScopePrivateLink output_link,
-                         VideoCore::Image* output_image, bool single_output,
-                         const RenderState& state, u64 rendering_serial) {
+                         VideoCore::Image* output_image, u32 output_attachment_index,
+                         bool single_output, const RenderState& state, u64 rendering_serial) {
         Entry* entry = FindLineageTail(draw.sampled_input_image);
         if (!entry) {
             entry = Find(draw.sampled_input_image);
@@ -131,7 +131,12 @@ public:
             }
             RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2);
             if (entry->status == FinalGuestSurfaceStatus::Complete && !entry->loss.Any() &&
-                entry->recorded_plane_mask == 7 && handoff.publish_flip_alias) {
+                handoff.capture_output) {
+                RecordPlane(*entry, *output_image, state, output_attachment_index, rendering_serial,
+                            3, true);
+            }
+            if (entry->status == FinalGuestSurfaceStatus::Complete && !entry->loss.Any() &&
+                entry->recorded_plane_mask == 15 && handoff.publish_flip_alias) {
                 entry->flip_alias = output_link;
                 entry->flip_alias_ready = true;
             }
@@ -139,7 +144,7 @@ public:
         }
         entry->status = FinalGuestSurfaceStatus::Complete;
         entry->loss = {};
-        RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2);
+        RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2, true);
     }
 
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
@@ -456,7 +461,7 @@ private:
             .samples = target.backing->num_samples,
             .selector = config.watch_ordinals,
             .buffer_alignment = 16,
-            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 3,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 4,
             .max_bytes = PpTerminalScopeSnapshotBytes,
         });
         entry.status = entry.plan.status;
@@ -485,6 +490,7 @@ private:
             .plane_bytes = plan.plane_bytes,
             .second_plane_offset = plan.second_plane_offset,
             .consumer_plane_offset = plan.consumer_plane_offset,
+            .output_plane_offset = plan.output_plane_offset,
             .total_bytes = plan.total_bytes,
             .plane_mask = plane_mask,
         };
@@ -499,7 +505,7 @@ private:
     }
 
     void RecordPlane(Entry& entry, VideoCore::Image& image, const RenderState& state,
-                     u32 attachment_index, u64 rendering_serial, u32 plane) {
+                     u32 attachment_index, u64 rendering_serial, u32 plane, bool finalize = false) {
         if (entry.status != FinalGuestSurfaceStatus::Complete || entry.loss.Any()) {
             return;
         }
@@ -558,7 +564,8 @@ private:
         std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> copies{};
         const u64 plane_offset = plane == 0   ? entry.plan.first_plane_offset
                                  : plane == 1 ? entry.plan.second_plane_offset
-                                              : entry.plan.consumer_plane_offset;
+                                 : plane == 2 ? entry.plan.consumer_plane_offset
+                                              : entry.plan.output_plane_offset;
         for (u32 index = 0; index < entry.plan.region_count; ++index) {
             const auto& region = entry.plan.regions[index];
             copies[index] = {
@@ -602,7 +609,7 @@ private:
             .pImageMemoryBarriers = &restore,
         });
         image.backing->state = old_state;
-        if (plane == 2) {
+        if (finalize) {
             const vk::BufferMemoryBarrier2 post_barrier{
                 .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
                 .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
@@ -1607,6 +1614,7 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     bool input_alias{};
     VideoCore::Image* sampled_input_image{};
     VideoCore::ImageId sole_output_id{};
+    u32 sole_output_attachment_index{};
     u32 output_count{};
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
@@ -1615,6 +1623,7 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             ++output_count;
             if (output_count == 1) {
                 sole_output_id = image_id;
+                sole_output_attachment_index = index;
             }
             input_alias |= diagnostic_sampled_images.size() == 1 &&
                            diagnostic_sampled_images.front() == image_id;
@@ -1663,8 +1672,8 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             output_link = {.id = sole_output_id, .uid = output_image->image_uid};
         }
         pp_terminal_scope_content->ObserveConsumer(draw, sampled_input_image, output_link,
-                                                   output_image, output_count == 1, state,
-                                                   rendering_serial);
+                                                   output_image, sole_output_attachment_index,
+                                                   output_count == 1, state, rendering_serial);
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;

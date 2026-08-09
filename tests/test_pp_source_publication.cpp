@@ -956,7 +956,7 @@ TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape)
     EXPECT_FALSE(consumer_only.reuse);
     const auto output = PlanPpTerminalScopePlaneSlot(3, true);
     EXPECT_TRUE(output.reuse);
-    EXPECT_EQ(output.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_EQ(output.status, FinalGuestSurfaceStatus::Complete);
     const auto output_without_input = PlanPpTerminalScopePlaneSlot(3, false);
     EXPECT_EQ(output_without_input.status, FinalGuestSurfaceStatus::GapLoss);
 }
@@ -1391,11 +1391,11 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrd
     };
     const auto bytes = [](std::array<u8, 4> first0, std::array<u8, 4> first1,
                           std::array<u8, 4> second0, std::array<u8, 4> second1,
-                           std::array<u8, 4> consumer0, std::array<u8, 4> consumer1,
-                           std::array<u8, 4> output0, std::array<u8, 4> output1) {
+                          std::array<u8, 4> consumer0, std::array<u8, 4> consumer1,
+                          std::array<u8, 4> output0, std::array<u8, 4> output1) {
         std::array<std::byte, 32> result{};
-        const std::array planes{first0, first1, second0, second1, consumer0, consumer1, output0,
-                                output1};
+        const std::array planes{first0,    first1,    second0, second1,
+                                consumer0, consumer1, output0, output1};
         for (u32 plane = 0; plane < planes.size(); ++plane) {
             for (u32 index = 0; index < planes[plane].size(); ++index) {
                 result[plane * 4 + index] = std::byte{planes[plane][index]};
@@ -1403,15 +1403,14 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrd
         }
         return result;
     };
-    const auto a = bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {10, 11, 12, 255},
-                         {13, 14, 15, 255}, {16, 17, 18, 255}, {21, 22, 23, 255},
-                         {24, 25, 26, 255});
-    const auto b = bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {99, 98, 97, 255},
-                         {88, 87, 86, 255}, {16, 17, 18, 255}, {77, 76, 75, 255},
-                         {24, 25, 26, 255});
+    const auto a =
+        bytes({1, 2, 3, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {10, 11, 12, 255}, {13, 14, 15, 255},
+              {16, 17, 18, 255}, {21, 22, 23, 255}, {24, 25, 26, 255});
+    const auto b =
+        bytes({9, 9, 9, 255}, {4, 5, 6, 255}, {7, 8, 9, 255}, {99, 98, 97, 255}, {88, 87, 86, 255},
+              {16, 17, 18, 255}, {77, 76, 75, 255}, {24, 25, 26, 255});
     const auto c = bytes({1, 2, 3, 1}, {8, 8, 8, 255}, {7, 8, 9, 0}, {10, 11, 12, 255},
-                         {13, 14, 15, 0}, {19, 20, 21, 255}, {21, 22, 23, 0},
-                         {24, 25, 26, 255});
+                         {13, 14, 15, 0}, {19, 20, 21, 255}, {21, 22, 23, 0}, {24, 25, 26, 255});
     reducer.ObserveContent(100, layout, a, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(101, layout, b, FinalGuestSurfaceStatus::Complete, {});
     reducer.ObserveContent(102, layout, c, FinalGuestSurfaceStatus::Complete, {});

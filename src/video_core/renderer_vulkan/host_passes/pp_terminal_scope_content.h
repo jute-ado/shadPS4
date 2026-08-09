@@ -517,7 +517,7 @@ struct PpTerminalScopePlaneSlotDecision {
 
 [[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
     u32 plane, bool has_slot) noexcept {
-    if (plane > 2 || (plane == 1 && !has_slot)) {
+    if (plane > 3 || ((plane == 1 || plane == 3) && !has_slot)) {
         return {
             .status = FinalGuestSurfaceStatus::GapLoss,
             .loss = {.gap = 1},
@@ -694,6 +694,7 @@ struct PpTerminalScopeContentPlan {
     u32 first_plane_offset{};
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
+    u32 output_plane_offset{};
     u32 total_bytes{};
     u32 image_barriers_per_draw{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -756,25 +757,28 @@ struct PpTerminalScopeContentPlan {
         plan.loss = footprint.loss;
         return plan;
     }
-    if (footprint.region_count > descriptor.max_regions / 3) {
+    if (footprint.region_count > descriptor.max_regions / 4) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::tile_capacity);
     }
     const u64 second_offset =
         AlignPpSourceBackingOffset(footprint.buffer_bytes, descriptor.buffer_alignment);
     const u64 consumer_offset = AlignPpSourceBackingOffset(second_offset + footprint.buffer_bytes,
                                                            descriptor.buffer_alignment);
-    const u64 total_bytes = consumer_offset + footprint.buffer_bytes;
+    const u64 output_offset = AlignPpSourceBackingOffset(consumer_offset + footprint.buffer_bytes,
+                                                         descriptor.buffer_alignment);
+    const u64 total_bytes = output_offset + footprint.buffer_bytes;
     if (second_offset == std::numeric_limits<u64>::max() || total_bytes > descriptor.max_bytes ||
         total_bytes > std::numeric_limits<u32>::max()) {
         return reject(FinalGuestSurfaceStatus::CapacityLoss, &FinalGuestSurfaceLoss::byte_capacity);
     }
     PpTerminalScopeContentPlan plan{
         .region_count = footprint.region_count,
-        .copy_region_count = footprint.region_count * 3,
+        .copy_region_count = footprint.region_count * 4,
         .plane_bytes = footprint.buffer_bytes,
         .first_plane_offset = 0,
         .second_plane_offset = static_cast<u32>(second_offset),
         .consumer_plane_offset = static_cast<u32>(consumer_offset),
+        .output_plane_offset = static_cast<u32>(output_offset),
         .total_bytes = static_cast<u32>(total_bytes),
         .image_barriers_per_draw = 2,
         .status = FinalGuestSurfaceStatus::Complete,
@@ -814,6 +818,7 @@ struct PpTerminalScopeLineageHandoffDecision {
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
     bool capture_consumer{};
+    bool capture_output{};
     bool publish_flip_alias{};
 };
 
@@ -832,6 +837,7 @@ struct PpTerminalScopeLineageHandoffDecision {
     return {
         .status = FinalGuestSurfaceStatus::Complete,
         .capture_consumer = true,
+        .capture_output = true,
         .publish_flip_alias = true,
     };
 }
@@ -878,6 +884,7 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 plane_bytes{};
     u32 second_plane_offset{};
     u32 consumer_plane_offset{};
+    u32 output_plane_offset{};
     u32 total_bytes{};
     u32 plane_mask{};
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
@@ -899,6 +906,9 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> consumer_aba_ordinals{};
     std::vector<u32> consumer_stable_ordinals{};
     std::vector<u32> consumer_ambiguous_ordinals{};
+    std::vector<u32> output_aba_ordinals{};
+    std::vector<u32> output_stable_ordinals{};
+    std::vector<u32> output_ambiguous_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
 };
@@ -1012,15 +1022,16 @@ private:
 
     [[nodiscard]] static bool EqualVisibleRegion(const Observation& left, const Observation& right,
                                                  u32 plane, u32 region_index) noexcept {
-        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 2 ||
+        if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 3 ||
             left.layout.bytes_per_pixel != 4) {
             return false;
         }
         const auto& region = left.layout.regions[region_index];
         const auto plane_offset = [plane](const PpTerminalScopeContentHistoryLayout& layout) {
-            return plane == 0
-                       ? 0u
-                       : (plane == 1 ? layout.second_plane_offset : layout.consumer_plane_offset);
+            return plane == 0   ? 0u
+                   : plane == 1 ? layout.second_plane_offset
+                   : plane == 2 ? layout.consumer_plane_offset
+                                : layout.output_plane_offset;
         };
         const u64 left_offset = region.buffer_offset + plane_offset(left.layout);
         const u64 right_offset = region.buffer_offset + plane_offset(right.layout);
@@ -1102,6 +1113,10 @@ private:
         if ((a->layout.plane_mask & (1u << 2)) != 0) {
             ClassifyPlane(*a, *b, *c, 2, report.consumer_aba_ordinals,
                           report.consumer_stable_ordinals, report.consumer_ambiguous_ordinals);
+        }
+        if ((a->layout.plane_mask & (1u << 3)) != 0) {
+            ClassifyPlane(*a, *b, *c, 3, report.output_aba_ordinals, report.output_stable_ordinals,
+                          report.output_ambiguous_ordinals);
         }
         return report;
     }
@@ -1187,6 +1202,9 @@ private:
            " a2=" + FormatPpTerminalScopeOrdinalList(report.consumer_aba_ordinals) +
            " s2=" + FormatPpTerminalScopeOrdinalList(report.consumer_stable_ordinals) +
            " x2=" + FormatPpTerminalScopeOrdinalList(report.consumer_ambiguous_ordinals) +
+           " a3=" + FormatPpTerminalScopeOrdinalList(report.output_aba_ordinals) +
+           " s3=" + FormatPpTerminalScopeOrdinalList(report.output_stable_ordinals) +
+           " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
 }
