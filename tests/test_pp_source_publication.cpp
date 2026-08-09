@@ -2546,6 +2546,40 @@ TEST(PpTerminalScopeContent, PredecessorSampledInputsFailClosedOnCountCapacityOr
     EXPECT_EQ(rejected.count, 2u);
 }
 
+TEST(PpTerminalScopeContent, UpstreamInputRegistryJoinsOnlyTheExactPrivateProducerOutput) {
+    const PpTerminalScopeDrawSelector upstream{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 4,
+        .instance_count = 1,
+        .sampled_images = 6,
+    };
+    PpTerminalScopeUpstreamInputRegistry registry{upstream};
+    PpTerminalScopeSampledInputs inputs{
+        .count = 6,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    for (u32 index = 0; index < inputs.count; ++index) {
+        inputs.inputs[index].producer.status = FinalGuestSurfaceStatus::Complete;
+        inputs.inputs[index].view.status = FinalGuestSurfaceStatus::Complete;
+    }
+    const VideoCore::ImageColorScopePrivateLink output{VideoCore::ImageId{81}, 8100};
+    EXPECT_TRUE(registry.Observe(output, upstream, inputs).stored);
+    const auto joined = registry.Resolve(output);
+    ASSERT_TRUE(joined.matched);
+    EXPECT_EQ(joined.inputs.count, 6u);
+    EXPECT_EQ(joined.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(joined.loss.Any());
+
+    auto wrong_shape = upstream;
+    wrong_shape.sampled_images = 5;
+    EXPECT_FALSE(registry.Observe({VideoCore::ImageId{82}, 8200}, wrong_shape, inputs).stored);
+    EXPECT_FALSE(registry.Resolve({VideoCore::ImageId{81}, 8101}).matched)
+        << "A reused image slot must not inherit the prior producer inputs";
+    registry.Reset();
+    EXPECT_FALSE(registry.Resolve(output).matched);
+}
+
 TEST(PpTerminalScopeContent, SampledInputViewPreservesExactBoundCopyEligibility) {
     const auto view = ClassifyPpTerminalScopeSampledInputView({
         .width = 1920,
