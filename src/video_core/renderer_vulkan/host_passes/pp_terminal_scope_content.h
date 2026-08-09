@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <charconv>
 #include <deque>
 #include <span>
 #include <string>
@@ -38,6 +39,99 @@ struct PpTerminalScopeContentConfig {
     PpTerminalScopeDrawSelector first{};
     PpTerminalScopeDrawSelector second{};
 };
+
+struct PpTerminalScopeRuntimeConfig {
+    PpTerminalScopeContentConfig content{};
+    FinalGuestSurfaceCaptureWindow window{};
+    FinalGuestSurfaceWatchOrdinals watch_ordinals{};
+    u32 expected_calibrations{};
+};
+
+[[nodiscard]] inline std::optional<PpTerminalScopeDrawSelector> ParsePpTerminalScopeDrawSelector(
+    std::string_view value) noexcept {
+    std::array<std::string_view, 6> fields{};
+    for (u32 index = 0; index < fields.size(); ++index) {
+        const size_t separator = value.find(',');
+        if (separator == std::string_view::npos) {
+            if (index != fields.size() - 1) {
+                return std::nullopt;
+            }
+            fields[index] = value;
+            value = {};
+        } else {
+            fields[index] = value.substr(0, separator);
+            value.remove_prefix(separator + 1);
+        }
+        if (fields[index].empty()) {
+            return std::nullopt;
+        }
+    }
+    if (!value.empty()) {
+        return std::nullopt;
+    }
+    PpTerminalScopeDrawSelector selector{};
+    if (fields[0] == "direct") {
+        selector.kind = VideoCore::ImageColorScopeDrawKind::Direct;
+    } else if (fields[0] == "indirect") {
+        selector.kind = VideoCore::ImageColorScopeDrawKind::Indirect;
+    } else {
+        return std::nullopt;
+    }
+    if (fields[1] == "indexed") {
+        selector.indexed = true;
+    } else if (fields[1] == "nonindexed") {
+        selector.indexed = false;
+    } else {
+        return std::nullopt;
+    }
+    const auto parse_u32 = [](std::string_view field, u32& output) {
+        const auto result = std::from_chars(field.data(), field.data() + field.size(), output);
+        return result.ec == std::errc{} && result.ptr == field.data() + field.size();
+    };
+    if (!parse_u32(fields[2], selector.element_count) ||
+        !parse_u32(fields[3], selector.instance_count) ||
+        !parse_u32(fields[4], selector.sampled_images) ||
+        !parse_u32(fields[5], selector.storage_writes) || selector.instance_count == 0 ||
+        selector.sampled_images == 0 ||
+        (selector.kind == VideoCore::ImageColorScopeDrawKind::Direct &&
+         selector.element_count == 0)) {
+        return std::nullopt;
+    }
+    return selector;
+}
+
+template <typename ReadValue>
+[[nodiscard]] std::optional<PpTerminalScopeRuntimeConfig> ResolvePpTerminalScopeRuntimeConfig(
+    ReadValue&& read_value) {
+    const auto enabled = read_value("SHADPS4_PP_TERMINAL_SCOPE_CONTENT");
+    if (!enabled || *enabled != "1") {
+        return std::nullopt;
+    }
+    const auto final_config = ResolveFinalGuestSurfaceContentConfig(read_value);
+    if (!final_config ||
+        final_config->stage != FinalGuestSurfaceStage::PpSourcePublicationReconstruction ||
+        !final_config->calibrated_triplets || final_config->expected_calibrations == 0 ||
+        final_config->watch_ordinals.status != FinalGuestSurfaceStatus::Complete ||
+        final_config->watch_ordinals.loss != 0 || final_config->watch_ordinals.count == 0) {
+        return std::nullopt;
+    }
+    const auto first_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_FIRST");
+    const auto second_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_SECOND");
+    if (!first_value || !second_value) {
+        return std::nullopt;
+    }
+    const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
+    const auto second = ParsePpTerminalScopeDrawSelector(*second_value);
+    if (!first || !second) {
+        return std::nullopt;
+    }
+    return PpTerminalScopeRuntimeConfig{
+        .content = {.enabled = true, .first = *first, .second = *second},
+        .window = final_config->window,
+        .watch_ordinals = final_config->watch_ordinals,
+        .expected_calibrations = final_config->expected_calibrations,
+    };
+}
 
 enum class PpTerminalScopeContentAction : u8 {
     None,
