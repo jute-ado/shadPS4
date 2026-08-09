@@ -374,5 +374,45 @@ TEST(PpSourceReconstruction, PresentTransitionsReconstructionFromGeneralAfterCol
     EXPECT_FALSE(GetPpSourceReconstructionCaptureTransition(false).required);
 }
 
+TEST(PpSourceReconstruction, FlipPublicationSnapshotPrecedesVisiblePpAfterGuestRenderingEnds) {
+    auto descriptor = RouteDescriptor();
+    descriptor.snapshot_point = PpSourceSnapshotPoint::FlipPublication;
+    const auto plan = PlanPpSourceReconstruction(descriptor);
+
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(plan.guest_rendering_ended_before_snapshot);
+    EXPECT_TRUE(plan.source_snapshot_precedes_visible_draw);
+    EXPECT_FALSE(plan.visible_draw_precedes_source_snapshot);
+    EXPECT_TRUE(plan.source_snapshot_precedes_reconstruction_draw);
+    EXPECT_TRUE(plan.snapshot_visibility_transition_can_perturb_visible_pp);
+    EXPECT_EQ(plan.source_copy_count, 1u);
+    EXPECT_EQ(plan.total_pp_draw_count, 2u);
+    EXPECT_FALSE(plan.cpu_wait);
+    EXPECT_FALSE(plan.finish);
+}
+
+TEST(PpSourceReconstruction, FlipPublicationStageIsExclusiveCalibratedAndPresentOwned) {
+    const auto read = [](const char* name) -> std::optional<std::string_view> {
+        const std::string_view key{name};
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_CONTENT" ||
+            key == "SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS") {
+            return "1";
+        }
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_STAGE") {
+            return "pp_source_publication_reconstruction";
+        }
+        if (key == "SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS") {
+            return "300";
+        }
+        return std::nullopt;
+    };
+    const auto config = ResolveFinalGuestSurfaceContentConfig(read);
+    ASSERT_TRUE(config.has_value());
+    EXPECT_EQ(config->stage, FinalGuestSurfaceStage::PpSourcePublicationReconstruction);
+    EXPECT_TRUE(config->calibrated_triplets);
+    EXPECT_TRUE(IsPresentFinalGuestSurfaceStage(config->stage));
+    EXPECT_FALSE(FinalGuestSurfaceLogPolicy(config->stage).verbose_frame_reports);
+}
+
 } // namespace
 } // namespace Vulkan::HostPasses
