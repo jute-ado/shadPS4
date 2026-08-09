@@ -239,6 +239,160 @@ namespace {
     }
 }
 
+void DestroyPpSourceReconstructionResources(const Instance& instance, Frame& frame) {
+    const auto device = instance.GetDevice();
+    if (frame.pp_source_reconstruction_snapshot_view) {
+        device.destroyImageView(frame.pp_source_reconstruction_snapshot_view);
+        frame.pp_source_reconstruction_snapshot_view = nullptr;
+    }
+    if (frame.pp_source_reconstruction_snapshot_image) {
+        vmaDestroyImage(instance.GetAllocator(), frame.pp_source_reconstruction_snapshot_image,
+                        frame.pp_source_reconstruction_snapshot_allocation);
+        frame.pp_source_reconstruction_snapshot_image = nullptr;
+        frame.pp_source_reconstruction_snapshot_allocation = {};
+    }
+    if (frame.pp_source_reconstruction_output_view) {
+        device.destroyImageView(frame.pp_source_reconstruction_output_view);
+        frame.pp_source_reconstruction_output_view = nullptr;
+    }
+    if (frame.pp_source_reconstruction_output_image) {
+        vmaDestroyImage(instance.GetAllocator(), frame.pp_source_reconstruction_output_image,
+                        frame.pp_source_reconstruction_output_allocation);
+        frame.pp_source_reconstruction_output_image = nullptr;
+        frame.pp_source_reconstruction_output_allocation = {};
+    }
+    frame.pp_source_reconstruction_image_format = {};
+    frame.pp_source_reconstruction_view_format = {};
+    frame.pp_source_reconstruction_mapping = {};
+    frame.pp_source_reconstruction_source_extent = {};
+    frame.pp_source_reconstruction_output_format = {};
+    frame.pp_source_reconstruction_output_extent = {};
+}
+
+[[nodiscard]] bool EnsurePpSourceReconstructionResources(
+    const Instance& instance, Frame& frame, vk::Format source_image_format,
+    vk::Format source_view_format, vk::ComponentMapping source_mapping, vk::Extent2D source_extent,
+    vk::Format output_format, vk::Extent2D output_extent) {
+    const bool matches = frame.pp_source_reconstruction_snapshot_image &&
+                         frame.pp_source_reconstruction_snapshot_view &&
+                         frame.pp_source_reconstruction_output_image &&
+                         frame.pp_source_reconstruction_output_view &&
+                         frame.pp_source_reconstruction_image_format == source_image_format &&
+                         frame.pp_source_reconstruction_view_format == source_view_format &&
+                         frame.pp_source_reconstruction_mapping == source_mapping &&
+                         frame.pp_source_reconstruction_source_extent == source_extent &&
+                         frame.pp_source_reconstruction_output_format == output_format &&
+                         frame.pp_source_reconstruction_output_extent == output_extent;
+    if (matches) {
+        return true;
+    }
+    DestroyPpSourceReconstructionResources(instance, frame);
+    if (source_extent.width == 0 || source_extent.height == 0 || output_extent.width == 0 ||
+        output_extent.height == 0) {
+        return false;
+    }
+
+    const VmaAllocationCreateInfo allocation_info{
+        .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+    const auto create_image = [&](const vk::ImageCreateInfo& image_info, vk::Image& image,
+                                  VmaAllocation& allocation) {
+        VkImage unsafe_image{};
+        auto unsafe_info = static_cast<VkImageCreateInfo>(image_info);
+        const auto result = vmaCreateImage(instance.GetAllocator(), &unsafe_info, &allocation_info,
+                                           &unsafe_image, &allocation, nullptr);
+        if (result != VK_SUCCESS) {
+            return false;
+        }
+        image = vk::Image{unsafe_image};
+        return true;
+    };
+
+    const vk::ImageCreateInfo source_info{
+        .flags = vk::ImageCreateFlagBits::eMutableFormat,
+        .imageType = vk::ImageType::e2D,
+        .format = source_image_format,
+        .extent = {source_extent.width, source_extent.height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+        .sharingMode = vk::SharingMode::eExclusive,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    };
+    if (!create_image(source_info, frame.pp_source_reconstruction_snapshot_image,
+                      frame.pp_source_reconstruction_snapshot_allocation)) {
+        DestroyPpSourceReconstructionResources(instance, frame);
+        return false;
+    }
+    const vk::ImageViewCreateInfo source_view_info{
+        .image = frame.pp_source_reconstruction_snapshot_image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = source_view_format,
+        .components = source_mapping,
+        .subresourceRange{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    const auto [source_view_result, source_view] =
+        instance.GetDevice().createImageView(source_view_info);
+    if (source_view_result != vk::Result::eSuccess) {
+        DestroyPpSourceReconstructionResources(instance, frame);
+        return false;
+    }
+    frame.pp_source_reconstruction_snapshot_view = source_view;
+
+    const vk::ImageCreateInfo output_info{
+        .imageType = vk::ImageType::e2D,
+        .format = output_format,
+        .extent = {output_extent.width, output_extent.height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc,
+        .sharingMode = vk::SharingMode::eExclusive,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    };
+    if (!create_image(output_info, frame.pp_source_reconstruction_output_image,
+                      frame.pp_source_reconstruction_output_allocation)) {
+        DestroyPpSourceReconstructionResources(instance, frame);
+        return false;
+    }
+    const vk::ImageViewCreateInfo output_view_info{
+        .image = frame.pp_source_reconstruction_output_image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = output_format,
+        .subresourceRange{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    const auto [output_view_result, output_view] =
+        instance.GetDevice().createImageView(output_view_info);
+    if (output_view_result != vk::Result::eSuccess) {
+        DestroyPpSourceReconstructionResources(instance, frame);
+        return false;
+    }
+    frame.pp_source_reconstruction_output_view = output_view;
+    frame.pp_source_reconstruction_image_format = source_image_format;
+    frame.pp_source_reconstruction_view_format = source_view_format;
+    frame.pp_source_reconstruction_mapping = source_mapping;
+    frame.pp_source_reconstruction_source_extent = source_extent;
+    frame.pp_source_reconstruction_output_format = output_format;
+    frame.pp_source_reconstruction_output_extent = output_extent;
+    return true;
+}
+
 } // namespace
 
 class FinalGuestSurfaceContentState {
@@ -277,7 +431,9 @@ public:
                  "expected_calibrations={}",
                  static_cast<u32>(config.stage), config.window.frame_start,
                  config.window.frame_count, FinalGuestSurfaceTilePlan::MaxTiles,
-                 config.stage == FinalGuestSurfaceStage::PpSampledInput ? 3 : 1,
+                 config.stage == FinalGuestSurfaceStage::PpSourceReconstruction ? 4
+                 : config.stage == FinalGuestSurfaceStage::PpSampledInput       ? 3
+                                                                                : 1,
                  FinalGuestSurfaceTileLimits{}.max_bytes,
                  FinalGuestSurfaceReadbackSlotPool::MaxSlots, config.lag.cadence_us,
                  config.lag.tolerance_us, config.watch_ordinals.count,
@@ -302,7 +458,12 @@ public:
     }
 
     [[nodiscard]] bool IsPpSampledInputStage() const noexcept {
-        return config.stage == FinalGuestSurfaceStage::PpSampledInput;
+        return config.stage == FinalGuestSurfaceStage::PpSampledInput ||
+               config.stage == FinalGuestSurfaceStage::PpSourceReconstruction;
+    }
+
+    [[nodiscard]] bool IsPpSourceReconstructionStage() const noexcept {
+        return config.stage == FinalGuestSurfaceStage::PpSourceReconstruction;
     }
 
     [[nodiscard]] bool IsPresentStage() const noexcept {
@@ -470,6 +631,7 @@ public:
     [[nodiscard]] PendingCapture PreparePpSampledInput(
         FinalGuestSurfaceFrameStamp stamp, const FinalGuestSurfaceSampledInputMetadata& metadata,
         const PpSourceBackingFootprintPlan& source_backing,
+        const HostPasses::PpSourceReconstructionPlan& source_reconstruction,
         FinalGuestSurfaceStatus observation_status) {
         ++selected_frames;
         PendingCapture pending{
@@ -496,7 +658,7 @@ public:
             .aspect = FinalGuestSurfaceAspect::Color,
             .format = metadata.output_format,
             .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
-            .stage = FinalGuestSurfaceStage::PpSampledInput,
+            .stage = config.stage,
             .logical_width = metadata.output_width,
             .logical_height = metadata.output_height,
             .logical_full_fit = true,
@@ -514,6 +676,10 @@ public:
         });
         pending.plan = MakePpSampledInputSourceBackingTilePlan(
             MakePpSampledInputPairedTilePlan(output_plan, pair), source_backing, slot_stride, 16);
+        if (IsPpSourceReconstructionStage()) {
+            pending.plan =
+                HostPasses::AttachPpSourceReconstructionPlane(pending.plan, source_reconstruction);
+        }
         pending.plan = ApplyPpSampledInputObservationStatus(pending.plan, observation_status);
         if (!metadata.valid && observation_status == FinalGuestSurfaceStatus::Complete) {
             pending.plan = ApplyPpSampledInputObservationStatus(
@@ -555,9 +721,9 @@ public:
         }
         auto metadata = frame.payload.metadata;
         metadata.valid = false;
-        auto pending =
-            PreparePpSampledInput({frame.payload.sequence, frame.payload.process_time_us}, metadata,
-                                  frame.payload.source_backing, status);
+        auto pending = PreparePpSampledInput(
+            {frame.payload.sequence, frame.payload.process_time_us}, metadata,
+            frame.payload.source_backing, frame.payload.source_reconstruction, status);
         ASSERT(!pending.HasCopy());
         DeferReport(std::move(pending));
     }
@@ -618,15 +784,18 @@ public:
 
     void RecordPpSampledInput(PendingCapture pending, vk::Image output_image,
                               vk::Image sampled_image, vk::Buffer source_backing_snapshot,
-                              vk::CommandBuffer cmdbuf) {
+                              vk::Image source_reconstruction_image, vk::CommandBuffer cmdbuf) {
         if (!pending.HasCopy()) {
             DeferReport(std::move(pending));
             return;
         }
+        const bool has_reconstruction =
+            pending.plan.paired_reconstruction_format != FinalGuestSurfaceFormat::Unsupported;
         ASSERT(pending.plan.paired_sampled_format == FinalGuestSurfaceFormat::Rgba16Float &&
                pending.plan.paired_backing_format != FinalGuestSurfaceFormat::Unsupported &&
-               pending.plan.copy_region_count == 3 && pending.plan.paired_sampled_offset != 0 &&
-               pending.plan.paired_backing_offset != 0 && source_backing_snapshot);
+               pending.plan.copy_region_count == (has_reconstruction ? 4u : 3u) &&
+               pending.plan.paired_sampled_offset != 0 && pending.plan.paired_backing_offset != 0 &&
+               source_backing_snapshot && (!has_reconstruction || source_reconstruction_image));
         const vk::BufferMemoryBarrier2 pre_barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eHost,
             .srcAccessMask = vk::AccessFlagBits2::eHostRead,
@@ -671,6 +840,13 @@ public:
             .size = pending.plan.paired_backing_bytes,
         };
         cmdbuf.copyBuffer(source_backing_snapshot, download.Handle(), 1, &backing_copy);
+        if (has_reconstruction) {
+            const auto reconstruction_copy =
+                make_copy(pending.slot_offset + pending.plan.paired_reconstruction_offset);
+            cmdbuf.copyImageToBuffer(source_reconstruction_image,
+                                     vk::ImageLayout::eTransferSrcOptimal, download.Handle(), 1,
+                                     &reconstruction_copy);
+        }
 
         const vk::BufferMemoryBarrier2 post_barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -1225,6 +1401,7 @@ Presenter::~Presenter() {
 
     const vk::Device device = instance.GetDevice();
     for (auto& frame : present_frames) {
+        DestroyPpSourceReconstructionResources(instance, frame);
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
         device.destroyImageView(frame.image_view);
         if (frame.pp_input_shadow_image) {
@@ -1244,6 +1421,7 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     const vk::Device device = instance.GetDevice();
     frame->pp_input_shadow_state.Clear();
     frame->pp_sampled_input_state.Clear();
+    DestroyPpSourceReconstructionResources(instance, *frame);
     if (frame->pp_input_shadow_view) {
         device.destroyImageView(frame->pp_input_shadow_view);
         frame->pp_input_shadow_view = nullptr;
@@ -1424,6 +1602,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         final_guest_surface_content && final_guest_surface_content->IsPpInputShadowStage();
     const bool pp_sampled_input_stage =
         final_guest_surface_content && final_guest_surface_content->IsPpSampledInputStage();
+    const bool pp_source_reconstruction_stage =
+        final_guest_surface_content && final_guest_surface_content->IsPpSourceReconstructionStage();
     const bool pp_diagnostic_stage = pp_input_shadow_stage || pp_sampled_input_stage;
     if (pp_diagnostic_stage && frame->pp_input_shadow_image) {
         pre_barriers[pre_barrier_count++] = vk::ImageMemoryBarrier2{
@@ -1666,6 +1846,135 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             }
         }
     }
+    HostPasses::PpSourceReconstructionPlan source_reconstruction_plan{};
+    bool source_reconstruction_captured{};
+    if (pp_source_reconstruction_stage && source_backing_captured &&
+        final_guest_surface_content->ShouldCapture(stamp.sequence)) {
+        const auto pair = PlanPpSampledInputPairedCapture({
+            .enabled = true,
+            .width = frame->width,
+            .height = frame->height,
+            .output_format = sampled_input_metadata.output_format,
+            .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+            .slot_bytes = FinalGuestSurfaceTileLimits{}.max_bytes,
+            .alignment = 8,
+        });
+        const u64 existing_readback_bytes =
+            HostPasses::AlignPpSourceReconstructionOffset(pair.total_bytes, 16) +
+            PpSourceBackingSnapshotBytes;
+        auto reconstruction_descriptor = HostPasses::PpSourceReconstructionDescriptor{
+            .enabled = true,
+            .in_window = true,
+            .frame_is_new = true,
+            .visible_pp_draw_encoded = shadow_written,
+            .sampled_metadata_valid = sampled_input_metadata.valid,
+            .fsr_bypassed = sampled_input_metadata.fsr_bypassed,
+            .source_view_matches_baseline = !sampled_input_metadata.resolved_range_mismatch,
+            .source_view_srgb = sampled_input_metadata.source_view_srgb,
+            .source_snapshot_available = true,
+            .source_snapshot_view_available = true,
+            .reconstruction_output_available = true,
+            .source_width = image_size.width,
+            .source_height = image_size.height,
+            .output_width = frame->width,
+            .output_height = frame->height,
+            .bound_base_mip = sampled_input_metadata.bound_base_mip,
+            .bound_mip_count = sampled_input_metadata.bound_mip_count,
+            .bound_base_layer = sampled_input_metadata.bound_base_layer,
+            .bound_layer_count = sampled_input_metadata.bound_layer_count,
+            .source_format = ToFinalGuestSurfaceFormat(source_view.info.format),
+            .output_format = sampled_input_metadata.output_format,
+            .existing_readback_bytes = existing_readback_bytes,
+            .slot_bytes = FinalGuestSurfaceTileLimits{}.max_bytes,
+            .alignment = 16,
+        };
+        source_reconstruction_plan =
+            HostPasses::PlanPpSourceReconstruction(reconstruction_descriptor);
+        if (source_reconstruction_plan.status == FinalGuestSurfaceStatus::Complete) {
+            const bool resources_available = EnsurePpSourceReconstructionResources(
+                instance, *frame, image.backing->image.image_ci.format, source_view.info.format,
+                source_view.info.mapping, image_size, swapchain.GetSurfaceFormat().format,
+                {frame->width, frame->height});
+            if (!resources_available) {
+                reconstruction_descriptor.source_snapshot_available = false;
+                reconstruction_descriptor.source_snapshot_view_available = false;
+                reconstruction_descriptor.reconstruction_output_available = false;
+                source_reconstruction_plan =
+                    HostPasses::PlanPpSourceReconstruction(reconstruction_descriptor);
+            }
+        }
+        if (source_reconstruction_plan.status == FinalGuestSurfaceStatus::Complete) {
+            const vk::ImageSubresourceRange simple_range{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            };
+            image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                          source_view.info.range, cmdbuf);
+            const vk::ImageMemoryBarrier2 snapshot_to_transfer{
+                .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+                .srcAccessMask = vk::AccessFlagBits2::eNone,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .oldLayout = vk::ImageLayout::eUndefined,
+                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                .image = frame->pp_source_reconstruction_snapshot_image,
+                .subresourceRange = simple_range,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &snapshot_to_transfer,
+            });
+            const vk::ImageCopy source_copy{
+                .srcSubresource = MakeImageSubresourceLayers(),
+                .srcOffset = {0, 0, 0},
+                .dstSubresource = MakeImageSubresourceLayers(),
+                .dstOffset = {0, 0, 0},
+                .extent = {image_size.width, image_size.height, 1},
+            };
+            cmdbuf.copyImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                             frame->pp_source_reconstruction_snapshot_image,
+                             vk::ImageLayout::eTransferDstOptimal, 1, &source_copy);
+            image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+                          source_view.info.range, cmdbuf);
+            const std::array reconstruction_barriers{
+                vk::ImageMemoryBarrier2{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                    .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                    .dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
+                    .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+                    .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                    .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                    .image = frame->pp_source_reconstruction_snapshot_image,
+                    .subresourceRange = simple_range,
+                },
+                vk::ImageMemoryBarrier2{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+                    .srcAccessMask = vk::AccessFlagBits2::eNone,
+                    .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                    .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+                    .oldLayout = vk::ImageLayout::eUndefined,
+                    .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                    .image = frame->pp_source_reconstruction_output_image,
+                    .subresourceRange = simple_range,
+                },
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .imageMemoryBarrierCount = reconstruction_barriers.size(),
+                .pImageMemoryBarriers = reconstruction_barriers.data(),
+            });
+            Frame reconstruction_target{};
+            reconstruction_target.width = frame->width;
+            reconstruction_target.height = frame->height;
+            reconstruction_target.image = frame->pp_source_reconstruction_output_image;
+            reconstruction_target.image_view = frame->pp_source_reconstruction_output_view;
+            (void)pp_pass.Render(cmdbuf, frame->pp_source_reconstruction_snapshot_view, image_size,
+                                 reconstruction_target, frame_pp_settings);
+            source_reconstruction_captured = true;
+        }
+    }
     if (pp_input_shadow_stage) {
         if (!shadow_written) {
             pp_input_metadata.valid = false;
@@ -1683,14 +1992,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         const auto observation = PlanPpSampledInputObservation({
             .in_window = in_window,
             .stamp_valid = stamp.sequence != 0 && stamp.process_time_us != 0,
-            .metadata_valid =
-                shadow_written && sampled_input_metadata.valid && source_backing_captured,
+            .metadata_valid = shadow_written && sampled_input_metadata.valid &&
+                              source_backing_captured &&
+                              (!pp_source_reconstruction_stage || source_reconstruction_captured),
         });
         if (observation.emit) {
             const u64 token = next_pp_input_shadow_token++;
             const auto status = frame->pp_sampled_input_state.Assign(
                 observation, {stamp.sequence, stamp.process_time_us, token, sampled_input_metadata,
-                              source_backing_plan, source_backing_captured});
+                              source_backing_plan, source_reconstruction_plan,
+                              source_backing_captured, source_reconstruction_captured});
             if (status != FinalGuestSurfaceStatus::Complete) {
                 LOG_INFO(Render, "PPSampledInputFrameState seq={} st={}", stamp.sequence,
                          static_cast<u32>(status));
@@ -1819,6 +2130,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         final_guest_surface_content && final_guest_surface_content->IsPpInputShadowStage();
     const bool pp_sampled_input_stage =
         final_guest_surface_content && final_guest_surface_content->IsPpSampledInputStage();
+    const bool pp_source_reconstruction_stage =
+        final_guest_surface_content && final_guest_surface_content->IsPpSourceReconstructionStage();
     FinalGuestSurfacePpInputTakeResult pp_input_shadow_frame{};
     if (pp_input_shadow_stage) {
         pp_input_shadow_frame = frame->pp_input_shadow_state.TakeForPresent(is_reusing_frame);
@@ -1924,6 +2237,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                 {pp_sampled_input_frame.payload.sequence,
                  pp_sampled_input_frame.payload.process_time_us},
                 metadata, pp_sampled_input_frame.payload.source_backing,
+                pp_sampled_input_frame.payload.source_reconstruction,
                 pp_sampled_input_frame.status);
         }
         const bool copy_frame_before_sampling =
@@ -2017,9 +2331,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                                                 frame->pp_input_shadow_image, cmdbuf);
         }
         if (pp_sampled_input_capture) {
-            const auto transfer =
-                PlanPpSampledInputTransfer(true, is_reusing_frame, pp_sampled_input_frame.emit,
-                                           pp_sampled_input_capture->HasCopy());
+            const auto transfer = PlanPpSampledInputTransfer(
+                true, is_reusing_frame, pp_sampled_input_frame.emit,
+                pp_sampled_input_capture->HasCopy(), pp_source_reconstruction_stage);
             ASSERT(IsPpSampledInputTransferContractValid(transfer));
             const auto transition = GetPpInputShadowCaptureTransition(transfer.copy);
             if (transition.required) {
@@ -2047,11 +2361,38 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                     .pImageMemoryBarriers = &sampled_to_transfer,
                 });
             }
+            const auto reconstruction_transition = GetPpSourceReconstructionCaptureTransition(
+                transfer.copy && transfer.paired_source_reconstruction);
+            if (reconstruction_transition.required) {
+                const vk::ImageMemoryBarrier2 reconstruction_to_transfer{
+                    .srcStageMask = reconstruction_transition.src_stage,
+                    .srcAccessMask = reconstruction_transition.src_access,
+                    .dstStageMask = reconstruction_transition.dst_stage,
+                    .dstAccessMask = reconstruction_transition.dst_access,
+                    .oldLayout = reconstruction_transition.old_layout,
+                    .newLayout = reconstruction_transition.new_layout,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = frame->pp_source_reconstruction_output_image,
+                    .subresourceRange{
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                };
+                cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                    .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+                    .imageMemoryBarrierCount = 1,
+                    .pImageMemoryBarriers = &reconstruction_to_transfer,
+                });
+            }
             final_guest_surface_content->RecordPpSampledInput(
                 std::move(*pp_sampled_input_capture), frame->image, frame->pp_input_shadow_image,
                 frame->pp_source_backing_snapshot ? frame->pp_source_backing_snapshot->Handle()
                                                   : vk::Buffer{},
-                cmdbuf);
+                frame->pp_source_reconstruction_output_image, cmdbuf);
         }
         if (post_pp_surface_capture) {
             final_guest_surface_content->Record(std::move(*post_pp_surface_capture), frame->image,

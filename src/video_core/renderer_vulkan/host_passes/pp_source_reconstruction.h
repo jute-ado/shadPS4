@@ -28,6 +28,10 @@ struct PpSourceReconstructionDescriptor {
     u32 source_height{};
     u32 output_width{};
     u32 output_height{};
+    u32 bound_base_mip{};
+    u32 bound_mip_count{};
+    u32 bound_base_layer{};
+    u32 bound_layer_count{};
     FinalGuestSurfaceFormat source_format{FinalGuestSurfaceFormat::Unsupported};
     FinalGuestSurfaceFormat output_format{FinalGuestSurfaceFormat::Unsupported};
     u64 existing_readback_bytes{};
@@ -99,6 +103,10 @@ struct PpSourceReconstructionPlan {
         descriptor.output_format == FinalGuestSurfaceFormat::Rgba8 ||
         descriptor.output_format == FinalGuestSurfaceFormat::Bgra8;
     if (!source_format_supported || !output_format_supported || !descriptor.source_view_srgb) {
+        return reject(FinalGuestSurfaceStatus::Unsupported);
+    }
+    if (descriptor.bound_base_mip != 0 || descriptor.bound_mip_count != 1 ||
+        descriptor.bound_base_layer != 0 || descriptor.bound_layer_count != 1) {
         return reject(FinalGuestSurfaceStatus::Unsupported);
     }
     if (descriptor.alignment == 0) {

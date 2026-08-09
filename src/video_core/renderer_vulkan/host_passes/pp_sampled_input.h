@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_backing.h"
+#include "video_core/renderer_vulkan/host_passes/pp_source_reconstruction.h"
 
 namespace Vulkan::HostPasses {
 
@@ -294,7 +295,9 @@ struct FinalGuestSurfaceSampledInputPayload {
     u64 token{};
     FinalGuestSurfaceSampledInputMetadata metadata{};
     PpSourceBackingFootprintPlan source_backing{};
+    HostPasses::PpSourceReconstructionPlan source_reconstruction{};
     bool source_backing_captured{};
+    bool source_reconstruction_captured{};
 };
 
 struct FinalGuestSurfaceSampledInputTakeResult {

@@ -44,6 +44,18 @@ struct Frame {
     FinalGuestSurfacePpInputFrameState pp_input_shadow_state{};
     FinalGuestSurfaceSampledInputFrameState pp_sampled_input_state{};
     std::unique_ptr<VideoCore::Buffer> pp_source_backing_snapshot{};
+    VmaAllocation pp_source_reconstruction_snapshot_allocation{};
+    vk::Image pp_source_reconstruction_snapshot_image{};
+    vk::ImageView pp_source_reconstruction_snapshot_view{};
+    VmaAllocation pp_source_reconstruction_output_allocation{};
+    vk::Image pp_source_reconstruction_output_image{};
+    vk::ImageView pp_source_reconstruction_output_view{};
+    vk::Format pp_source_reconstruction_image_format{};
+    vk::Format pp_source_reconstruction_view_format{};
+    vk::ComponentMapping pp_source_reconstruction_mapping{};
+    vk::Extent2D pp_source_reconstruction_source_extent{};
+    vk::Format pp_source_reconstruction_output_format{};
+    vk::Extent2D pp_source_reconstruction_output_extent{};
 
     ImTextureID imgui_texture;
 };
