@@ -150,6 +150,44 @@ struct PpTerminalScopeRenderingSplitPlan {
     bool preserve_serial{};
 };
 
+struct PpTerminalScopeFlipDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool use_existing_capture{};
+    bool synthesize_loss{};
+    bool arm_next{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeFlipDecision PlanPpTerminalScopeFlipDecision(
+    bool has_existing_capture, bool target_valid, bool target_capacity, bool in_window) noexcept {
+    if (has_existing_capture) {
+        return {
+            .use_existing_capture = true,
+            .arm_next = target_valid && target_capacity,
+        };
+    }
+    if (!target_valid) {
+        return {
+            .status = FinalGuestSurfaceStatus::InvalidationLoss,
+            .loss = {.invalidation = 1},
+            .synthesize_loss = in_window,
+        };
+    }
+    if (!target_capacity) {
+        return {
+            .status = FinalGuestSurfaceStatus::CapacityLoss,
+            .loss = {.tile_capacity = 1},
+            .synthesize_loss = in_window,
+        };
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::GapLoss,
+        .loss = {.gap = 1},
+        .synthesize_loss = in_window,
+        .arm_next = true,
+    };
+}
+
 [[nodiscard]] constexpr PpTerminalScopeRenderingSplitPlan PlanPpTerminalScopeRenderingSplit(
     bool is_rendering, u64 current_serial, u64 expected_serial) noexcept {
     if (!is_rendering || current_serial == 0 || expected_serial == 0) {
@@ -426,6 +464,16 @@ struct PpTerminalScopeCalibratedReport {
     FinalGuestSurfaceLoss loss{};
 };
 
+struct PpTerminalScopeCalibratedCoverage {
+    u32 calibrations{};
+    u32 outside{};
+    u32 eligible{};
+    u32 emitted{};
+    u32 complete{};
+    u32 loss{};
+    bool ready{};
+};
+
 class PpTerminalScopeContentReducer {
 public:
     static constexpr u32 MaxCalibrations = FinalGuestSurfaceMaxScreenshotRequests;
@@ -457,9 +505,11 @@ public:
     void ObserveCalibration(FinalGuestSurfaceCalibratedStamp stamp) {
         if (stamp.request_ordinal == 0 || stamp.request_ordinal > MaxCalibrations ||
             calibrations[stamp.request_ordinal].has_value()) {
+            ++coverage_loss;
             return;
         }
         calibrations[stamp.request_ordinal] = stamp;
+        ++calibration_count;
         Reconcile();
     }
 
@@ -467,6 +517,25 @@ public:
         auto result = std::move(reports);
         reports.clear();
         return result;
+    }
+
+    [[nodiscard]] PpTerminalScopeCalibratedCoverage GetCoverage(
+        u32 expected_calibrations) const noexcept {
+        const u32 bounded_expected = std::min(expected_calibrations, MaxCalibrations);
+        const u32 missing =
+            bounded_expected > calibration_count ? bounded_expected - calibration_count : 0;
+        const u32 loss =
+            coverage_loss + missing +
+            (expected_calibrations > MaxCalibrations ? expected_calibrations - MaxCalibrations : 0);
+        return {
+            .calibrations = calibration_count,
+            .outside = outside_count,
+            .eligible = eligible_count,
+            .emitted = emitted_count,
+            .complete = complete_count,
+            .loss = loss,
+            .ready = missing == 0 && loss == 0 && emitted_count == eligible_count,
+        };
     }
 
 private:
@@ -600,7 +669,12 @@ private:
                 !window.Contains(a_stamp.sequence) || !window.Contains(b_stamp.sequence) ||
                 !window.Contains(c_stamp.sequence)) {
                 classified[request] = true;
+                ++outside_count;
                 continue;
+            }
+            if (!eligible_request[request]) {
+                eligible_request[request] = true;
+                ++eligible_count;
             }
             const auto* a = Find(a_stamp.sequence);
             const auto* b = Find(b_stamp.sequence);
@@ -608,7 +682,13 @@ private:
             if ((!a || !b || !c) && last_content_sequence < c_stamp.sequence) {
                 continue;
             }
-            reports.push_back(Evaluate(request, a, b, c));
+            auto report = Evaluate(request, a, b, c);
+            ++emitted_count;
+            complete_count +=
+                report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any();
+            coverage_loss +=
+                report.status != FinalGuestSurfaceStatus::Complete || report.loss.Any();
+            reports.push_back(std::move(report));
             classified[request] = true;
         }
     }
@@ -618,8 +698,15 @@ private:
     std::deque<Observation> history{};
     std::array<std::optional<FinalGuestSurfaceCalibratedStamp>, MaxCalibrations + 1> calibrations{};
     std::array<bool, MaxCalibrations + 1> classified{};
+    std::array<bool, MaxCalibrations + 1> eligible_request{};
     std::vector<PpTerminalScopeCalibratedReport> reports{};
     u64 last_content_sequence{};
+    u32 calibration_count{};
+    u32 outside_count{};
+    u32 eligible_count{};
+    u32 emitted_count{};
+    u32 complete_count{};
+    u32 coverage_loss{};
 };
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeOrdinalList(std::span<const u32> ordinals) {
@@ -649,6 +736,14 @@ private:
            " x1=" + FormatPpTerminalScopeOrdinalList(report.second_ambiguous_ordinals) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
+}
+
+[[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedCoverage(
+    const PpTerminalScopeCalibratedCoverage& coverage) {
+    return "FGSCTSTC c=" + std::to_string(coverage.calibrations) +
+           " o=" + std::to_string(coverage.outside) + " e=" + std::to_string(coverage.eligible) +
+           '/' + std::to_string(coverage.emitted) + '/' + std::to_string(coverage.complete) +
+           " lm=" + std::to_string(coverage.loss);
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeContentReport(

@@ -1495,6 +1495,7 @@ Presenter::~Presenter() {
     const bool present_surface =
         final_guest_surface_content && final_guest_surface_content->IsPresentStage();
     draw_scheduler.Finish();
+    rasterizer->FinalizePpTerminalScopeContent();
     if (final_guest_surface_content && !present_surface) {
         draw_scheduler.PopPendingOperations();
     }
@@ -1733,10 +1734,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         };
     }
 
+    const auto source_draw_scope = image.ObserveDiagnosticColorScope();
     if (final_guest_surface_content) {
         final_guest_surface_content->ObservePpSourceProducerScope(
-            stamp.sequence, draw_scheduler.IsRendering(), image.ObserveDiagnosticColorScope());
+            stamp.sequence, draw_scheduler.IsRendering(), source_draw_scope);
     }
+    rasterizer->ObservePpTerminalScopeFlip(stamp.sequence, stamp.process_time_us, source_draw_scope,
+                                           image.info.size.width, image.info.size.height,
+                                           frame->width, frame->height);
     draw_scheduler.EndRendering();
     const auto cmdbuf = draw_scheduler.CommandBuffer();
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
@@ -2624,6 +2629,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
                 capture_with_overlays.notifying_count, capture_with_overlays.silent_count);
             if (final_guest_surface_content && calibration_count != 0) {
                 final_guest_surface_content->CalibrateScreenshots(
+                    frame->final_surface_diagnostic, final_surface_mapping, calibration_count,
+                    Libraries::Kernel::sceKernelGetProcessTime());
+            }
+            if (calibration_count != 0) {
+                rasterizer->CalibratePpTerminalScopeScreenshots(
                     frame->final_surface_diagnostic, final_surface_mapping, calibration_count,
                     Libraries::Kernel::sceKernelGetProcessTime());
             }

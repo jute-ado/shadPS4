@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -20,6 +21,462 @@
 #endif
 
 namespace Vulkan {
+
+namespace {
+
+[[nodiscard]] std::optional<PpTerminalScopeRuntimeConfig> ReadPpTerminalScopeRuntimeConfig() {
+    return ResolvePpTerminalScopeRuntimeConfig([](const char* name) {
+        const char* value = std::getenv(name);
+        return value ? std::optional<std::string_view>{value} : std::optional<std::string_view>{};
+    });
+}
+
+[[nodiscard]] FinalGuestSurfaceFormat TerminalScopeFormat(vk::Format format) noexcept {
+    switch (format) {
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+        return FinalGuestSurfaceFormat::Rgba8;
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+        return FinalGuestSurfaceFormat::Bgra8;
+    default:
+        return FinalGuestSurfaceFormat::Unsupported;
+    }
+}
+
+} // namespace
+
+class PpTerminalScopeContentRuntime {
+public:
+    static constexpr u32 MaxTargets = 8;
+
+    PpTerminalScopeContentRuntime(const Instance& instance_, Scheduler& scheduler_,
+                                  PpTerminalScopeRuntimeConfig config_)
+        : instance{instance_}, scheduler{scheduler_}, config{config_}, reducer{config.window, 32},
+          calibration{true},
+          slot_stride{Common::AlignUp<u64>(PpTerminalScopeSnapshotBytes,
+                                           std::max<u64>(1, instance.NonCoherentAtomSize()))},
+          download{instance,
+                   scheduler,
+                   VideoCore::MemoryUsage::Download,
+                   0,
+                   vk::BufferUsageFlagBits::eTransferDst,
+                   slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
+        LOG_INFO(Render,
+                 "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
+                 "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
+                 "second={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={}",
+                 config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
+                 config.expected_calibrations, static_cast<u32>(config.content.first.kind),
+                 config.content.first.indexed, config.content.first.element_count,
+                 config.content.first.instance_count, config.content.first.sampled_images,
+                 config.content.first.storage_writes, static_cast<u32>(config.content.second.kind),
+                 config.content.second.indexed, config.content.second.element_count,
+                 config.content.second.instance_count, config.content.second.sampled_images,
+                 config.content.second.storage_writes, MaxTargets,
+                 FinalGuestSurfaceReadbackSlotPool::MaxSlots, PpTerminalScopeSnapshotBytes);
+    }
+
+    void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
+                     u32 attachment_index, u64 rendering_serial,
+                     const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+        Entry* entry = Find({.id = image_id, .uid = image.image_uid});
+        if (!entry) {
+            return;
+        }
+        const PpTerminalScopeDrawSelector observed{
+            .kind = draw.kind,
+            .indexed = draw.indexed,
+            .element_count = draw.element_count,
+            .instance_count = draw.instance_count,
+            .sampled_images = draw.sampled_images,
+            .storage_writes = draw.storage_writes,
+        };
+        const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
+        if (action == PpTerminalScopeContentAction::ShapeLoss) {
+            entry->status = FinalGuestSurfaceStatus::GapLoss;
+            entry->loss = {.gap = 1};
+            return;
+        }
+        if (action != PpTerminalScopeContentAction::CaptureFirst &&
+            action != PpTerminalScopeContentAction::CaptureSecond) {
+            return;
+        }
+        const u32 plane = action == PpTerminalScopeContentAction::CaptureFirst ? 0 : 1;
+        RecordPlane(*entry, image, state, attachment_index, rendering_serial, plane);
+    }
+
+    void ObserveFlip(u64 sequence, u64 process_time_us, VideoCore::ImageColorScopePrivateLink link,
+                     VideoCore::Image* target, u32 final_source_width, u32 final_source_height,
+                     u32 logical_width, u32 logical_height) {
+        Entry* entry = Find(link);
+        const bool had_entry = entry != nullptr;
+        if (entry) {
+            const auto take = entry->gate.Take(
+                link.uid, target ? target->EnsureDiagnosticBackingGeneration() : 0);
+            Pending pending{
+                .sequence = sequence,
+                .process_time_us = process_time_us,
+                .layout = MakeHistoryLayout(entry->plan),
+                .status = take.status,
+                .loss = take.loss,
+                .slot = entry->slot,
+                .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
+            };
+            if (entry->status != FinalGuestSurfaceStatus::Complete || entry->loss.Any()) {
+                pending.status = entry->status;
+                pending.loss = entry->loss;
+            }
+            entry->slot = {};
+            Defer(std::move(pending));
+        }
+
+        const bool target_valid =
+            target && link.Valid() && target->aspect_mask == vk::ImageAspectFlagBits::eColor &&
+            target->info.resources.levels == 1 && target->info.resources.layers == 1 &&
+            target->backing && target->backing->subresource_states.empty();
+        entry = target_valid ? FindOrAllocate(link) : nullptr;
+        const auto decision = PlanPpTerminalScopeFlipDecision(
+            had_entry, target_valid, entry != nullptr, config.window.Contains(sequence));
+        if (decision.synthesize_loss) {
+            Defer({
+                .sequence = sequence,
+                .process_time_us = process_time_us,
+                .status = decision.status,
+                .loss = decision.loss,
+            });
+        }
+        if (!decision.arm_next || !entry) {
+            return;
+        }
+        entry->plan = PlanPpTerminalScopeContent({
+            .enabled = true,
+            .armed = true,
+            .target_width = target->info.size.width,
+            .target_height = target->info.size.height,
+            .final_source_width = final_source_width,
+            .final_source_height = final_source_height,
+            .logical_width = logical_width,
+            .logical_height = logical_height,
+            .format = TerminalScopeFormat(target->backing->image.image_ci.format),
+            .samples = target->backing->num_samples,
+            .selector = config.watch_ordinals,
+            .buffer_alignment = 16,
+            .max_regions = FinalGuestSurfaceWatchOrdinals::MaxOrdinals * 2,
+            .max_bytes = PpTerminalScopeSnapshotBytes,
+        });
+        entry->status = entry->plan.status;
+        entry->loss = entry->plan.loss;
+        entry->slot = {};
+        const u64 generation = target->EnsureDiagnosticBackingGeneration();
+        if (!entry->gate.Arm(link.uid, generation)) {
+            entry->status = FinalGuestSurfaceStatus::InvalidationLoss;
+            entry->loss = {.invalidation = 1};
+        }
+    }
+
+    void Calibrate(const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
+                   FinalGuestSurfacePresentationMapping mapping, u32 count,
+                   u64 fallback_process_time_us) {
+        std::scoped_lock lock{reducer_mutex};
+        for (u32 index = 0; index < count; ++index) {
+            const auto report = calibration.Observe(stamp, mapping, fallback_process_time_us);
+            if (!report.emit) {
+                continue;
+            }
+            reducer.ObserveCalibration({
+                .request_ordinal = report.request_ordinal,
+                .sequence = report.surface_sequence,
+                .process_time_us = report.surface_process_time_us,
+                .valid = stamp.valid && report.surface_sequence != 0 &&
+                         report.surface_process_time_us != 0 && !report.fallback_time &&
+                         report.exact_scaled_mapping && report.mapping_loss == 0 &&
+                         report.overflow_loss == 0 && !report.overflow_marker,
+            });
+            LogReports();
+            LogCalibratedCoverage();
+        }
+    }
+
+    void Finalize() {
+        scheduler.PopPendingOperations();
+        std::scoped_lock lock{reducer_mutex};
+        LogReports();
+        LogCalibratedCoverage(true);
+    }
+
+private:
+    struct Entry {
+        explicit Entry(PpTerminalScopeContentConfig config_) : gate{config_} {}
+
+        VideoCore::ImageColorScopePrivateLink link{};
+        PpTerminalScopeContentGate gate;
+        PpTerminalScopeContentPlan plan{};
+        FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+        FinalGuestSurfaceLoss loss{};
+        FinalGuestSurfaceReadbackSlotPool::Token slot{};
+    };
+
+    struct Pending {
+        u64 sequence{};
+        u64 process_time_us{};
+        PpTerminalScopeContentHistoryLayout layout{};
+        FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+        FinalGuestSurfaceLoss loss{};
+        FinalGuestSurfaceReadbackSlotPool::Token slot{};
+        u64 slot_offset{};
+    };
+
+    [[nodiscard]] Entry* Find(VideoCore::ImageColorScopePrivateLink link) noexcept {
+        for (auto& entry : entries) {
+            if (entry && entry->link == link) {
+                return entry.get();
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] Entry* FindOrAllocate(VideoCore::ImageColorScopePrivateLink link) {
+        if (auto* entry = Find(link)) {
+            return entry;
+        }
+        for (auto& entry : entries) {
+            if (!entry) {
+                entry = std::make_unique<Entry>(config.content);
+                entry->link = link;
+                return entry.get();
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] static PpTerminalScopeContentHistoryLayout MakeHistoryLayout(
+        const PpTerminalScopeContentPlan& plan) noexcept {
+        PpTerminalScopeContentHistoryLayout layout{
+            .region_count = plan.region_count,
+            .plane_bytes = plan.plane_bytes,
+            .second_plane_offset = plan.second_plane_offset,
+            .total_bytes = plan.total_bytes,
+        };
+        for (u32 index = 0; index < plan.region_count; ++index) {
+            layout.regions[index] = {
+                .logical_ordinal = plan.regions[index].logical_ordinal,
+                .buffer_offset = plan.regions[index].buffer_offset,
+                .byte_size = plan.regions[index].byte_size,
+            };
+        }
+        return layout;
+    }
+
+    void RecordPlane(Entry& entry, VideoCore::Image& image, const RenderState& state,
+                     u32 attachment_index, u64 rendering_serial, u32 plane) {
+        if (entry.status != FinalGuestSurfaceStatus::Complete || entry.loss.Any()) {
+            return;
+        }
+        if (entry.plan.status != FinalGuestSurfaceStatus::Complete || !entry.plan.copy ||
+            attachment_index >= state.num_color_attachments || !scheduler.IsRendering()) {
+            entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            entry.loss = {.invalidation = 1};
+            return;
+        }
+        if (plane == 0) {
+            const auto token = slots.TryAcquire();
+            if (!token) {
+                entry.status = FinalGuestSurfaceStatus::BusyLoss;
+                entry.loss = {.busy = 1};
+                return;
+            }
+            entry.slot = *token;
+        }
+        if (!entry.slot) {
+            entry.status = FinalGuestSurfaceStatus::GapLoss;
+            entry.loss = {.gap = 1};
+            return;
+        }
+        const auto split = PlanPpTerminalScopeRenderingSplit(
+            scheduler.IsRendering(), scheduler.RenderingSerial(), rendering_serial);
+        if (split.status != FinalGuestSurfaceStatus::Complete) {
+            entry.status = split.status;
+            entry.loss = split.loss;
+            return;
+        }
+        const u64 slot_offset = entry.slot.slot * slot_stride;
+        const auto cmdbuf = scheduler.CommandBuffer();
+        scheduler.EndRendering();
+        if (plane == 0) {
+            const vk::BufferMemoryBarrier2 pre_barrier{
+                .srcStageMask =
+                    vk::PipelineStageFlagBits2::eAllCommands | vk::PipelineStageFlagBits2::eHost,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eHostRead,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .buffer = download.Handle(),
+                .offset = slot_offset,
+                .size = slot_stride,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &pre_barrier,
+            });
+        }
+        const auto old_state = image.backing->state;
+        const VideoCore::SubresourceRange range{{.level = 0, .layer = 0},
+                                                {.levels = 1, .layers = 1}};
+        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                      range, cmdbuf);
+        std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> copies{};
+        const u64 plane_offset =
+            plane == 0 ? entry.plan.first_plane_offset : entry.plan.second_plane_offset;
+        for (u32 index = 0; index < entry.plan.region_count; ++index) {
+            const auto& region = entry.plan.regions[index];
+            copies[index] = {
+                .bufferOffset = slot_offset + plane_offset + region.buffer_offset,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource =
+                    {
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .mipLevel = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                .imageOffset = {static_cast<s32>(region.x), static_cast<s32>(region.y), 0},
+                .imageExtent = {region.width, region.height, 1},
+            };
+        }
+        cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                 download.Handle(), entry.plan.region_count, copies.data());
+        const vk::ImageMemoryBarrier2 restore{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = old_state.pl_stage,
+            .dstAccessMask = old_state.access_mask,
+            .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+            .newLayout = old_state.layout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image.GetImage(),
+            .subresourceRange =
+                {
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &restore,
+        });
+        image.backing->state = old_state;
+        if (plane == 1) {
+            const vk::BufferMemoryBarrier2 post_barrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+                .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+                .buffer = download.Handle(),
+                .offset = slot_offset,
+                .size = slot_stride,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &post_barrier,
+            });
+        }
+        if (!scheduler.ResumeRenderingForDiagnostic(state, rendering_serial)) {
+            entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
+            entry.loss = {.invalidation = 1};
+        }
+    }
+
+    void Defer(Pending pending) {
+        scheduler.DeferOperation(
+            [this, pending = std::move(pending)]() mutable { Consume(std::move(pending)); });
+    }
+
+    void Consume(Pending pending) {
+        std::span<const std::byte> bytes{};
+        if (pending.status == FinalGuestSurfaceStatus::Complete && pending.slot) {
+            if (!download.InvalidateMappedRange(pending.slot_offset, slot_stride) ||
+                pending.slot_offset + pending.layout.total_bytes > download.mapped_data.size()) {
+                pending.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                pending.loss = {.invalidation = 1};
+            } else {
+                bytes = std::as_bytes(
+                    download.mapped_data.subspan(pending.slot_offset, pending.layout.total_bytes));
+            }
+        }
+        {
+            std::scoped_lock lock{reducer_mutex};
+            reducer.ObserveContent(pending.sequence, pending.layout, bytes, pending.status,
+                                   pending.loss);
+            LogReports();
+            LogCalibratedCoverage();
+        }
+        if (config.window.Contains(pending.sequence)) {
+            ++selected_frames;
+            ++emitted_frames;
+            complete_frames +=
+                pending.status == FinalGuestSurfaceStatus::Complete && !pending.loss.Any();
+            loss_frames +=
+                pending.status != FinalGuestSurfaceStatus::Complete || pending.loss.Any();
+            LOG_INFO(
+                Render, "{}",
+                FormatPpTerminalScopeContentReport({
+                    .sequence = pending.sequence,
+                    .status = pending.status,
+                    .loss = pending.loss,
+                    .draw_count = pending.status == FinalGuestSurfaceStatus::Complete ? 2u : 0u,
+                    .region_count = pending.layout.region_count,
+                }));
+            if (config.window.IsFinal(pending.sequence)) {
+                LOG_INFO(Render,
+                         "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",
+                         pending.sequence, selected_frames, emitted_frames, complete_frames,
+                         loss_frames, pending.layout.region_count);
+            }
+        }
+        if (pending.slot && !slots.ReleaseAfterCpuConsume(pending.slot)) {
+            LOG_ERROR(Render, "PpTerminalScopeContent slot_release_loss=1");
+        }
+    }
+
+    void LogReports() {
+        for (const auto& report : reducer.TakeReports()) {
+            LOG_INFO(Render, "{}", FormatPpTerminalScopeCalibratedReport(report));
+        }
+    }
+
+    void LogCalibratedCoverage(bool force = false) {
+        if (calibrated_coverage_logged) {
+            return;
+        }
+        const auto coverage = reducer.GetCoverage(config.expected_calibrations);
+        if (!force && !coverage.ready) {
+            return;
+        }
+        LOG_INFO(Render, "{}", FormatPpTerminalScopeCalibratedCoverage(coverage));
+        calibrated_coverage_logged = true;
+    }
+
+    const Instance& instance;
+    Scheduler& scheduler;
+    PpTerminalScopeRuntimeConfig config{};
+    PpTerminalScopeContentReducer reducer;
+    FinalGuestSurfaceScreenshotCalibration calibration;
+    FinalGuestSurfaceReadbackSlotPool slots{};
+    u64 slot_stride{};
+    VideoCore::Buffer download;
+    std::array<std::unique_ptr<Entry>, MaxTargets> entries{};
+    std::mutex reducer_mutex{};
+    u32 selected_frames{};
+    u32 emitted_frames{};
+    u32 complete_frames{};
+    u32 loss_frames{};
+    bool calibrated_coverage_logged{};
+};
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -39,6 +496,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
+    if (const auto config = ReadPpTerminalScopeRuntimeConfig()) {
+        pp_terminal_scope_content =
+            std::make_unique<PpTerminalScopeContentRuntime>(instance, scheduler, *config);
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -46,6 +507,36 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
 }
 
 Rasterizer::~Rasterizer() = default;
+
+void Rasterizer::ObservePpTerminalScopeFlip(
+    u64 sequence, u64 process_time_us, const VideoCore::ImageColorScopeProducerObservation& scope,
+    u32 final_source_width, u32 final_source_height, u32 logical_width, u32 logical_height) {
+    if (!pp_terminal_scope_content) {
+        return;
+    }
+    auto* target = texture_cache.ResolveDiagnosticColorScopeImage(scope.sampled_input_image);
+    pp_terminal_scope_content->ObserveFlip(sequence, process_time_us, scope.sampled_input_image,
+                                           target, final_source_width, final_source_height,
+                                           logical_width, logical_height);
+}
+
+void Rasterizer::CalibratePpTerminalScopeScreenshots(
+    const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
+    FinalGuestSurfacePresentationMapping mapping, u32 count, u64 fallback_process_time_us) {
+    if (pp_terminal_scope_content) {
+        pp_terminal_scope_content->Calibrate(stamp, mapping, count, fallback_process_time_us);
+    }
+}
+
+bool Rasterizer::HasPpTerminalScopeContent() const noexcept {
+    return pp_terminal_scope_content != nullptr;
+}
+
+void Rasterizer::FinalizePpTerminalScopeContent() {
+    if (pp_terminal_scope_content) {
+        pp_terminal_scope_content->Finalize();
+    }
+}
 
 void Rasterizer::CpSync() {
     scheduler.EndRendering();
@@ -925,6 +1416,10 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
                                             state.color_attachments[index].is_clear);
             image.MarkDiagnosticColorDraw(rendering_serial, draw);
             image.MarkDiagnosticProducer(VideoCore::ImageProducerClass::ColorAttachment);
+            if (pp_terminal_scope_content) {
+                pp_terminal_scope_content->ObserveDraw(image_id, image, state, index,
+                                                       rendering_serial, draw);
+            }
         }
     }
     MarkEncodedStorageImageProducers();

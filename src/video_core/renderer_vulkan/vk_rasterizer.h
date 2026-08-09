@@ -7,6 +7,7 @@
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/final_guest_surface_content.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -23,6 +24,7 @@ namespace Vulkan {
 class Scheduler;
 class RenderState;
 class GraphicsPipeline;
+class PpTerminalScopeContentRuntime;
 
 class Rasterizer {
 public:
@@ -69,6 +71,16 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+
+    void ObservePpTerminalScopeFlip(u64 sequence, u64 process_time_us,
+                                    const VideoCore::ImageColorScopeProducerObservation& scope,
+                                    u32 final_source_width, u32 final_source_height,
+                                    u32 logical_width, u32 logical_height);
+    void CalibratePpTerminalScopeScreenshots(const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
+                                             FinalGuestSurfacePresentationMapping mapping,
+                                             u32 count, u64 fallback_process_time_us);
+    [[nodiscard]] bool HasPpTerminalScopeContent() const noexcept;
+    void FinalizePpTerminalScopeContent();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -156,6 +168,7 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+    std::unique_ptr<PpTerminalScopeContentRuntime> pp_terminal_scope_content;
 };
 
 } // namespace Vulkan

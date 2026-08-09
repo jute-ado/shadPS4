@@ -384,6 +384,9 @@ public:
     /// Ends current rendering scope.
     void EndRendering();
 
+    /// Resumes a diagnostically split scope with load operations without advancing guest serial.
+    [[nodiscard]] bool ResumeRenderingForDiagnostic(const RenderState& state, u64 expected_serial);
+
     [[nodiscard]] bool IsRendering() const noexcept {
         return is_rendering;
     }

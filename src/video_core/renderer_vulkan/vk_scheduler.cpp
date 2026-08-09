@@ -92,6 +92,21 @@ void Scheduler::EndRendering() {
     current_cmdbuf.endRendering();
 }
 
+bool Scheduler::ResumeRenderingForDiagnostic(const RenderState& state, u64 expected_serial) {
+    if (is_rendering || expected_serial == 0 || rendering_serial != expected_serial) {
+        return false;
+    }
+    RenderState load_state = state;
+    for (u32 index = 0; index < load_state.num_color_attachments; ++index) {
+        load_state.color_attachments[index].is_clear = false;
+    }
+    load_state.depth_stencil_attachment.depth_clear = false;
+    load_state.depth_stencil_attachment.stencil_clear = false;
+    BeginRendering(load_state);
+    rendering_serial = expected_serial;
+    return is_rendering;
+}
+
 void Scheduler::Flush(SubmitInfo& info) {
     // When flushing, we only send data to the driver; no waiting is necessary.
     SubmitExecution(info);
