@@ -412,6 +412,7 @@ TEST(PpSourceReconstruction, FlipPublicationStageIsExclusiveCalibratedAndPresent
     EXPECT_TRUE(config->calibrated_triplets);
     EXPECT_TRUE(IsPresentFinalGuestSurfaceStage(config->stage));
     EXPECT_FALSE(FinalGuestSurfaceLogPolicy(config->stage).verbose_frame_reports);
+    EXPECT_EQ(PpDiagnosticModeForStage(config->stage), PpDiagnosticMode::SampledInput);
 }
 
 TEST(PpSourceReconstruction, ProductionExecutionChoosesExactlyOneSnapshotSideOfVisiblePp) {
