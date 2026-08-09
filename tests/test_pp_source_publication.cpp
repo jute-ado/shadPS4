@@ -2545,6 +2545,118 @@ TEST(PpTerminalScopeContent, SampledInputViewFailsClosedForEveryUnsafeCopyClass)
     EXPECT_FALSE(rejected.copy_eligible);
 }
 
+TEST(PpTerminalScopeContent, SampledInputContentPlansEveryEligibleNormalizedRegionTransactionally) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.ordinals[0] = 2031;
+    selector.count = 1;
+    const std::array<PpTerminalScopeSampledInputView, 3> views{{
+        ClassifyPpTerminalScopeSampledInputView({
+            .width = 480,
+            .height = 270,
+            .format = FinalGuestSurfaceFormat::Unsupported,
+            .samples = 1,
+            .mip_count = 1,
+            .layer_count = 1,
+            .color = true,
+            .uniform_state = true,
+        }),
+        ClassifyPpTerminalScopeSampledInputView({
+            .width = 1920,
+            .height = 1080,
+            .format = FinalGuestSurfaceFormat::Rgba8,
+            .samples = 1,
+            .mip_count = 1,
+            .layer_count = 1,
+            .color = true,
+            .uniform_state = true,
+        }),
+        ClassifyPpTerminalScopeSampledInputView({
+            .width = 960,
+            .height = 540,
+            .format = FinalGuestSurfaceFormat::Rgba8,
+            .samples = 1,
+            .mip_count = 1,
+            .layer_count = 1,
+            .color = true,
+            .uniform_state = true,
+        }),
+    }};
+    const auto plan = PlanPpTerminalScopeSampledInputContent({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .base_offset = 0x1000,
+        .selector = selector,
+        .views = views,
+        .buffer_alignment = 16,
+        .max_regions = 8,
+        .max_bytes = 1u << 20,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(plan.loss.Any());
+    EXPECT_TRUE(plan.copy);
+    EXPECT_EQ(plan.input_count, 3u);
+    EXPECT_EQ(plan.capture_mask, 0b110u);
+    EXPECT_EQ(plan.unavailable_mask, 0b001u);
+    EXPECT_EQ(plan.copy_region_count, 2u);
+    EXPECT_EQ(plan.inputs[0].loss.unsupported_format, 1u);
+
+    ASSERT_EQ(plan.inputs[1].status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_EQ(plan.inputs[1].region_count, 1u);
+    EXPECT_EQ(plan.inputs[1].regions[0].logical_ordinal, 2031u);
+    EXPECT_EQ(plan.inputs[1].regions[0].x, 1320u);
+    EXPECT_EQ(plan.inputs[1].regions[0].y, 600u);
+    EXPECT_EQ(plan.inputs[1].regions[0].width, 48u);
+    EXPECT_EQ(plan.inputs[1].regions[0].height, 48u);
+    EXPECT_EQ(plan.inputs[1].plane_bytes, 48u * 48u * 4u);
+    EXPECT_EQ(plan.inputs[1].plane_offset, 0x1000u);
+
+    ASSERT_EQ(plan.inputs[2].status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_EQ(plan.inputs[2].region_count, 1u);
+    EXPECT_EQ(plan.inputs[2].regions[0].x, 660u);
+    EXPECT_EQ(plan.inputs[2].regions[0].y, 300u);
+    EXPECT_EQ(plan.inputs[2].regions[0].width, 24u);
+    EXPECT_EQ(plan.inputs[2].regions[0].height, 24u);
+    EXPECT_EQ(plan.inputs[2].plane_bytes, 24u * 24u * 4u);
+    EXPECT_EQ(plan.inputs[2].plane_offset, 0x3400u);
+    EXPECT_EQ(plan.total_bytes, 0x3D00u);
+}
+
+TEST(PpTerminalScopeContent, SampledInputContentCapacityRejectsTheWholeCopyPlan) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.ordinals[0] = 1;
+    selector.count = 1;
+    const std::array views{
+        ClassifyPpTerminalScopeSampledInputView({
+            .width = 1920,
+            .height = 1080,
+            .format = FinalGuestSurfaceFormat::Rgba8,
+            .samples = 1,
+            .mip_count = 1,
+            .layer_count = 1,
+            .color = true,
+            .uniform_state = true,
+        }),
+    };
+    const auto plan = PlanPpTerminalScopeSampledInputContent({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .base_offset = 4096,
+        .selector = selector,
+        .views = views,
+        .buffer_alignment = 16,
+        .max_regions = 0,
+        .max_bytes = 4096,
+    });
+    EXPECT_EQ(plan.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_TRUE(plan.loss.Any());
+    EXPECT_FALSE(plan.copy);
+    EXPECT_EQ(plan.capture_mask, 0u);
+    EXPECT_EQ(plan.copy_region_count, 0u);
+    EXPECT_EQ(plan.total_bytes, 0u);
+}
+
 TEST(PpTerminalScopeContent, NamedPredecessorIsCapturedBeforeAndAfterWithoutReplacingTheLineage) {
     const PpTerminalScopeContentConfig config{
         .enabled = true,
