@@ -3655,4 +3655,20 @@ TEST(PpUpstreamInputContent, ReducerTreatsAllMipsAsOneOpaqueLogicalRegion) {
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
+TEST(PpUpstreamInputContent, RestoresTheExactUniformTrackerAfterAPartialCopy) {
+    struct TrackerState {
+        u32 layout{};
+        u32 access{};
+
+        auto operator<=>(const TrackerState&) const = default;
+    };
+
+    const TrackerState original{.layout = 7, .access = 11};
+    TrackerState current{.layout = 13, .access = 17};
+    std::vector<TrackerState> transient_subresources(7, current);
+    RestorePpUpstreamInputUniformTracker(current, transient_subresources, original);
+    EXPECT_EQ(current, original);
+    EXPECT_TRUE(transient_subresources.empty());
+}
+
 } // namespace
