@@ -2061,6 +2061,9 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
         {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "390,1024,1299"},
         {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_INPUT_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR", "direct,indexed,4,1,3,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM", "direct,indexed,4,1,6,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX", "1"},
         {"SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN", "1"},
         {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
         {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
@@ -2077,7 +2080,11 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->expected_calibrations, 300u);
     EXPECT_TRUE(config->join_final_backing);
     EXPECT_TRUE(config->content.capture_pre_first);
+    EXPECT_TRUE(config->content.capture_predecessor);
     EXPECT_TRUE(config->content.capture_sampled_input_content);
+    EXPECT_TRUE(config->content.capture_upstream_inputs);
+    EXPECT_EQ(config->content.upstream_input_index, 1u);
+    EXPECT_EQ(config->content.upstream.sampled_images, 6u);
     EXPECT_EQ(config->watch_ordinals.count, 3u);
     EXPECT_EQ(config->content.first,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 696, 1,
