@@ -703,6 +703,7 @@ struct PpTerminalScopeContentPlan {
     u32 output_plane_offset{};
     u32 total_bytes{};
     u32 image_barriers_per_draw{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
     bool copy{};
@@ -787,6 +788,7 @@ struct PpTerminalScopeContentPlan {
         .output_plane_offset = static_cast<u32>(output_offset),
         .total_bytes = static_cast<u32>(total_bytes),
         .image_barriers_per_draw = 2,
+        .format = footprint.format,
         .status = FinalGuestSurfaceStatus::Complete,
         .copy = true,
         .ends_rendering = true,
@@ -798,6 +800,28 @@ struct PpTerminalScopeContentPlan {
         plan.regions[index] = footprint.regions[index];
     }
     return plan;
+}
+
+struct PpTerminalScopeFinalizeOrder {
+    bool drain_draw_callbacks_before_terminal{};
+    bool finish_present_before_terminal{};
+    bool drain_present_callbacks_before_terminal{};
+    bool finalize_terminal{true};
+    bool drain_draw_callbacks_after_terminal{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeFinalizeOrder PlanPpTerminalScopeFinalizeOrder(
+    bool join_final_backing, bool final_surface_uses_draw_scheduler) noexcept {
+    return {
+        .drain_draw_callbacks_before_terminal =
+            join_final_backing && final_surface_uses_draw_scheduler,
+        .finish_present_before_terminal = join_final_backing && !final_surface_uses_draw_scheduler,
+        .drain_present_callbacks_before_terminal =
+            join_final_backing && !final_surface_uses_draw_scheduler,
+        .finalize_terminal = true,
+        .drain_draw_callbacks_after_terminal =
+            !join_final_backing && final_surface_uses_draw_scheduler,
+    };
 }
 
 struct PpTerminalScopeContentReport {

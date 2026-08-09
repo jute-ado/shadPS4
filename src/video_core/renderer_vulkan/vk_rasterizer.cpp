@@ -52,8 +52,8 @@ public:
 
     PpTerminalScopeContentRuntime(const Instance& instance_, Scheduler& scheduler_,
                                   PpTerminalScopeRuntimeConfig config_)
-        : instance{instance_}, scheduler{scheduler_}, config{config_}, reducer{config.window, 32},
-          calibration{true},
+        : instance{instance_}, scheduler{scheduler_}, config{config_},
+          reducer{config.window, 32, config.join_final_backing}, calibration{true},
           slot_stride{Common::AlignUp<u64>(PpTerminalScopeSnapshotBytes,
                                            std::max<u64>(1, instance.NonCoherentAtomSize()))},
           download{instance,
@@ -66,7 +66,7 @@ public:
                  "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
                  "selector_count={} expected_calibrations={} first={}/{}/{}/{}/{}/{} "
                  "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} targets={} slots={} "
-                 "max_bytes={}",
+                 "max_bytes={} final_backing_join={}",
                  config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
                  config.expected_calibrations, static_cast<u32>(config.content.first.kind),
                  config.content.first.indexed, config.content.first.element_count,
@@ -79,7 +79,7 @@ public:
                  config.content.consumer.element_count, config.content.consumer.instance_count,
                  config.content.consumer.sampled_images, config.content.consumer.storage_writes,
                  MaxTargets, FinalGuestSurfaceReadbackSlotPool::MaxSlots,
-                 PpTerminalScopeSnapshotBytes);
+                 PpTerminalScopeSnapshotBytes, config.join_final_backing);
     }
 
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
@@ -314,6 +314,40 @@ public:
         }
     }
 
+    [[nodiscard]] bool HasFinalBackingJoin() const noexcept {
+        return config.join_final_backing;
+    }
+
+    void ObserveFinalBacking(u64 sequence, FinalGuestSurfaceStage stage,
+                             const FinalGuestSurfaceTilePlan& plan,
+                             std::span<const std::byte> bytes, FinalGuestSurfaceStatus status,
+                             FinalGuestSurfaceLoss loss) {
+        if (!config.join_final_backing || !config.window.Contains(sequence)) {
+            return;
+        }
+        std::scoped_lock lock{reducer_mutex};
+        if (status != FinalGuestSurfaceStatus::Complete || loss.Any()) {
+            reducer.ObserveFinalBacking(sequence, {}, {}, status, loss);
+            LogReports();
+            LogCalibratedCoverage();
+            return;
+        }
+        const auto decision = PlanPpTerminalScopeFinalBackingObservation(
+            true, stage, plan,
+            static_cast<u64>(plan.paired_backing_offset) + plan.paired_backing_bytes <=
+                bytes.size());
+        if (!decision.observe) {
+            reducer.ObserveFinalBacking(sequence, {}, {}, decision.status, decision.loss);
+        } else {
+            reducer.ObserveFinalBacking(
+                sequence, decision.layout,
+                bytes.subspan(decision.source_offset, decision.source_bytes), decision.status,
+                decision.loss);
+        }
+        LogReports();
+        LogCalibratedCoverage();
+    }
+
     void Finalize() {
         scheduler.PopPendingOperations();
         if (discovery_coverage_emission.Finalize()) {
@@ -493,6 +527,7 @@ private:
             .output_plane_offset = plan.output_plane_offset,
             .total_bytes = plan.total_bytes,
             .plane_mask = plane_mask,
+            .format = plan.format,
         };
         for (u32 index = 0; index < plan.region_count; ++index) {
             layout.regions[index] = {
@@ -776,6 +811,20 @@ void Rasterizer::CalibratePpTerminalScopeScreenshots(
 
 bool Rasterizer::HasPpTerminalScopeContent() const noexcept {
     return pp_terminal_scope_content != nullptr;
+}
+
+bool Rasterizer::HasPpTerminalFinalBackingJoin() const noexcept {
+    return pp_terminal_scope_content && pp_terminal_scope_content->HasFinalBackingJoin();
+}
+
+void Rasterizer::ObservePpTerminalFinalBacking(u64 sequence, FinalGuestSurfaceStage stage,
+                                               const FinalGuestSurfaceTilePlan& plan,
+                                               std::span<const std::byte> bytes,
+                                               FinalGuestSurfaceStatus status,
+                                               FinalGuestSurfaceLoss loss) {
+    if (pp_terminal_scope_content) {
+        pp_terminal_scope_content->ObserveFinalBacking(sequence, stage, plan, bytes, status, loss);
+    }
 }
 
 void Rasterizer::FinalizePpTerminalScopeContent() {

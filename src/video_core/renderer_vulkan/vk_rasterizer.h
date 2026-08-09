@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <span>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -80,6 +82,11 @@ public:
                                              FinalGuestSurfacePresentationMapping mapping,
                                              u32 count, u64 fallback_process_time_us);
     [[nodiscard]] bool HasPpTerminalScopeContent() const noexcept;
+    [[nodiscard]] bool HasPpTerminalFinalBackingJoin() const noexcept;
+    void ObservePpTerminalFinalBacking(u64 sequence, FinalGuestSurfaceStage stage,
+                                       const FinalGuestSurfaceTilePlan& plan,
+                                       std::span<const std::byte> bytes,
+                                       FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss);
     void FinalizePpTerminalScopeContent();
 
     PipelineCache& GetPipelineCache() {

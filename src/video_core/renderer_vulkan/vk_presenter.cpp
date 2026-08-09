@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
+#include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/present_frame_transition.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
@@ -458,8 +459,9 @@ public:
     };
 
     FinalGuestSurfaceContentState(const Instance& instance_, Scheduler& scheduler_,
-                                  FinalGuestSurfaceContentConfig config_)
-        : scheduler{scheduler_}, config{config_}, reducer{config.lag, config.watch_ordinals},
+                                  Rasterizer* rasterizer_, FinalGuestSurfaceContentConfig config_)
+        : scheduler{scheduler_}, rasterizer{rasterizer_}, config{config_},
+          reducer{config.lag, config.watch_ordinals},
           calibrated_triplets{config.calibrated_triplets, config.watch_ordinals, config.window,
                               config.expected_calibrations},
           screenshot_calibration{true},
@@ -1039,6 +1041,11 @@ private:
         }
         const auto report = reducer.Observe(pending.stamp.sequence, pending.stamp.process_time_us,
                                             pending.transport, pending.plan, bytes);
+        if (rasterizer && rasterizer->HasPpTerminalFinalBackingJoin()) {
+            rasterizer->ObservePpTerminalFinalBacking(pending.stamp.sequence, config.stage,
+                                                      pending.plan, bytes, pending.plan.status,
+                                                      pending.plan.loss);
+        }
         calibrated_triplets.Reconcile(reducer);
         LogCalibratedReports();
         ++emitted_frames;
@@ -1072,6 +1079,7 @@ private:
     }
 
     Scheduler& scheduler;
+    Rasterizer* rasterizer{};
     FinalGuestSurfaceContentConfig config{};
     FinalGuestSurfaceReducer reducer;
     FinalGuestSurfaceCalibratedTriplets calibrated_triplets;
@@ -1452,8 +1460,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     if (const auto config = ReadFinalGuestSurfaceContentConfig()) {
         auto& content_scheduler =
             IsPresentFinalGuestSurfaceStage(config->stage) ? present_scheduler : draw_scheduler;
-        final_guest_surface_content =
-            std::make_unique<FinalGuestSurfaceContentState>(instance, content_scheduler, *config);
+        final_guest_surface_content = std::make_unique<FinalGuestSurfaceContentState>(
+            instance, content_scheduler, rasterizer.get(), *config);
     }
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
@@ -1495,12 +1503,28 @@ Presenter::~Presenter() {
     const bool present_surface =
         final_guest_surface_content && final_guest_surface_content->IsPresentStage();
     draw_scheduler.Finish();
-    rasterizer->FinalizePpTerminalScopeContent();
-    if (final_guest_surface_content && !present_surface) {
+    const auto terminal_finalize_order =
+        PlanPpTerminalScopeFinalizeOrder(rasterizer->HasPpTerminalFinalBackingJoin(),
+                                         final_guest_surface_content && !present_surface);
+    if (terminal_finalize_order.drain_draw_callbacks_before_terminal) {
         draw_scheduler.PopPendingOperations();
     }
-    present_scheduler.Finish();
-    if (present_surface) {
+    if (terminal_finalize_order.finish_present_before_terminal) {
+        present_scheduler.Finish();
+    }
+    if (terminal_finalize_order.drain_present_callbacks_before_terminal) {
+        present_scheduler.PopPendingOperations();
+    }
+    if (terminal_finalize_order.finalize_terminal) {
+        rasterizer->FinalizePpTerminalScopeContent();
+    }
+    if (terminal_finalize_order.drain_draw_callbacks_after_terminal) {
+        draw_scheduler.PopPendingOperations();
+    }
+    if (!terminal_finalize_order.finish_present_before_terminal) {
+        present_scheduler.Finish();
+    }
+    if (present_surface && !terminal_finalize_order.drain_present_callbacks_before_terminal) {
         present_scheduler.PopPendingOperations();
     }
     Check(draw_scheduler.CommandBuffer().reset());
