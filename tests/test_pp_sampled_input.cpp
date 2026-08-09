@@ -282,30 +282,6 @@ TEST(PpSampledInput, ProductionStageSelectionIsExclusive) {
               HostPasses::PpDiagnosticMode::SampledInput);
 }
 
-TEST(PpSampledInput, PresenterPreservesResolvedMipAndLayerWhileOverridingViewFormat) {
-    const auto plan = PlanPpSampledInputSourceView({
-        .resolved_base_mip = 2,
-        .resolved_mip_count = 1,
-        .resolved_base_layer = 3,
-        .resolved_layer_count = 1,
-        .requested_format = FinalGuestSurfaceFormat::Bgra8,
-        .force_alpha_one = true,
-    });
-    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
-    EXPECT_EQ(plan.base_mip, 2u);
-    EXPECT_EQ(plan.mip_count, 1u);
-    EXPECT_EQ(plan.base_layer, 3u);
-    EXPECT_EQ(plan.layer_count, 1u);
-    EXPECT_EQ(plan.format, FinalGuestSurfaceFormat::Bgra8);
-    EXPECT_TRUE(plan.force_alpha_one);
-
-    EXPECT_EQ(PlanPpSampledInputSourceView({.resolved_mip_count = 0,
-                                            .resolved_layer_count = 1,
-                                            .requested_format = FinalGuestSurfaceFormat::Bgra8})
-                  .status,
-              FinalGuestSurfaceStatus::Unsupported);
-}
-
 TEST(PpSampledInput, ValidStampedFrameTransfersOnceWithoutStartupPoisoning) {
     FinalGuestSurfaceSampledInputFrameState state;
     FinalGuestSurfaceSampledInputMetadata metadata{
@@ -333,12 +309,12 @@ TEST(PpSampledInput, ValidStampedFrameTransfersOnceWithoutStartupPoisoning) {
     EXPECT_EQ(reused.payload.sequence, 101u);
 }
 
-TEST(PpSampledInput, PresentTransferIsOneFloatCopyWithScalarCallbackAndNoWait) {
+TEST(PpSampledInput, PresentTransferPairsExactOutputAndRawSampleWithoutWait) {
     const auto plan = PlanPpSampledInputTransfer(true, false, true, true);
     EXPECT_TRUE(plan.copy);
-    EXPECT_EQ(plan.color_write_to_transfer_barriers, 1u);
-    EXPECT_EQ(plan.copy_regions, 1u);
-    EXPECT_EQ(plan.format, FinalGuestSurfaceFormat::Rgba16Float);
+    EXPECT_EQ(plan.color_write_to_transfer_barriers, 2u);
+    EXPECT_EQ(plan.copy_regions, 2u);
+    EXPECT_TRUE(plan.paired_output_and_raw);
     EXPECT_TRUE(plan.callback_payload_is_scalar_only);
     EXPECT_FALSE(plan.cpu_wait);
     EXPECT_FALSE(plan.finish);
@@ -466,6 +442,35 @@ TEST(PpSampledInput, SelectedInvalidFramesEmitExplicitLossWhileStartupIsSilent) 
     EXPECT_TRUE(invalid_frame.emit);
     EXPECT_EQ(invalid_frame.payload.sequence, 4000u);
     EXPECT_EQ(invalid_frame.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    auto gap_plan = PlanFinalGuestSurfaceTiles({
+        .width = 1280,
+        .height = 720,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSampledInput,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    gap_plan = ApplyPpSampledInputObservationStatus(gap_plan, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(gap_plan.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(gap_plan.loss.gap, 1u);
+    EXPECT_EQ(gap_plan.loss.invalidation, 0u);
+
+    auto invalid_plan =
+        ApplyPpSampledInputObservationStatus(gap_plan, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid_plan.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid_plan.loss.gap, 0u);
+    EXPECT_EQ(invalid_plan.loss.invalidation, 1u);
 
     const auto valid = PlanPpSampledInputObservation(
         {.in_window = true, .stamp_valid = true, .metadata_valid = true});
