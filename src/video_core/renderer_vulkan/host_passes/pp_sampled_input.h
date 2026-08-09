@@ -418,6 +418,22 @@ struct PpSampledInputTransferPlan {
     };
 }
 
+[[nodiscard]] constexpr bool IsPpSampledInputTransferContractValid(
+    const PpSampledInputTransferPlan& plan) noexcept {
+    if (!plan.copy) {
+        return plan.color_write_to_transfer_barriers == 0 && plan.copy_regions == 0 &&
+               !plan.paired_output_and_raw && !plan.paired_source_backing_snapshot &&
+               !plan.callback_payload_is_scalar_only && !plan.cpu_wait && !plan.finish &&
+               !plan.callback_retains_frame && !plan.callback_retains_image &&
+               !plan.callback_retains_vk_image;
+    }
+    return plan.color_write_to_transfer_barriers == 2 && plan.copy_regions == 3 &&
+           plan.paired_output_and_raw && plan.paired_source_backing_snapshot &&
+           plan.callback_payload_is_scalar_only && !plan.cpu_wait && !plan.finish &&
+           !plan.callback_retains_frame && !plan.callback_retains_image &&
+           !plan.callback_retains_vk_image;
+}
+
 struct PpSampledInputPairedCaptureDescriptor {
     bool enabled{};
     u32 width{};

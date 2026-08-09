@@ -2020,10 +2020,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             const auto transfer =
                 PlanPpSampledInputTransfer(true, is_reusing_frame, pp_sampled_input_frame.emit,
                                            pp_sampled_input_capture->HasCopy());
-            ASSERT(transfer.callback_payload_is_scalar_only && !transfer.cpu_wait &&
-                   !transfer.finish && !transfer.callback_retains_frame &&
-                   !transfer.callback_retains_image && !transfer.callback_retains_vk_image &&
-                   transfer.paired_source_backing_snapshot && transfer.copy_regions == 3);
+            ASSERT(IsPpSampledInputTransferContractValid(transfer));
             const auto transition = GetPpInputShadowCaptureTransition(transfer.copy);
             if (transition.required) {
                 const vk::ImageMemoryBarrier2 sampled_to_transfer{
