@@ -1151,9 +1151,11 @@ TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
     report.first_stable = 2;
     report.second_aba = 3;
     report.second_stable = 4;
+    report.lineage_hops = 1;
+    report.lineage_status = FinalGuestSurfaceStatus::Complete;
     const auto line = FormatPpTerminalScopeContentReport(report);
     EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 pm=7 co=3 cp=5 cm=2 cf=1 a0=1 s0=2 a1=3 "
-                    "s1=4 lm=0");
+                    "s1=4 lh=1 ls=0 ll=0 lm=0");
     EXPECT_EQ(line.find("token"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
@@ -1324,6 +1326,41 @@ TEST(PpTerminalScopeContent, PrivateLineageReportFormatsOnlyHopStatusAndLoss) {
     EXPECT_EQ(line.find("image"), std::string::npos);
     EXPECT_EQ(line.find("generation"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
+}
+
+TEST(PpTerminalScopeContent, LineageHandoffRequiresTwoProducerPlanesAndOneOutput) {
+    const auto complete =
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, true);
+    EXPECT_EQ(complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(complete.capture_consumer);
+    EXPECT_TRUE(complete.publish_flip_alias);
+
+    const auto missing_plane =
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 1, true);
+    EXPECT_EQ(missing_plane.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing_plane.loss.gap, 1u);
+    EXPECT_FALSE(missing_plane.capture_consumer);
+    EXPECT_FALSE(missing_plane.publish_flip_alias);
+
+    const auto ambiguous_output =
+        PlanPpTerminalScopeLineageHandoff(true, FinalGuestSurfaceStatus::Complete, {}, 3, false);
+    EXPECT_EQ(ambiguous_output.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(ambiguous_output.loss.gap, 1u);
+    EXPECT_FALSE(ambiguous_output.publish_flip_alias);
+}
+
+TEST(PpTerminalScopeContent, LineageHandoffPropagatesStaleStateAndIgnoresOtherDraws) {
+    const auto stale = PlanPpTerminalScopeLineageHandoff(
+        true, FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1}, 3, true);
+    EXPECT_EQ(stale.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(stale.loss.invalidation, 1u);
+    EXPECT_FALSE(stale.capture_consumer);
+
+    const auto unrelated =
+        PlanPpTerminalScopeLineageHandoff(false, FinalGuestSurfaceStatus::Complete, {}, 3, true);
+    EXPECT_EQ(unrelated.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_FALSE(unrelated.capture_consumer);
+    EXPECT_FALSE(unrelated.publish_flip_alias);
 }
 
 TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllThreePlanesPerOrdinal) {
