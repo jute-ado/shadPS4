@@ -7,6 +7,7 @@
 #include "common/incremental_id.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/texture_cache/image_color_scope_producer.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_producer.h"
 #include "video_core/texture_cache/image_view.h"
@@ -160,9 +161,26 @@ struct Image {
         return diagnostic_producer.Observe();
     }
 
+    void BeginDiagnosticColorScope(u64 scope_serial, bool clear_at_begin) noexcept {
+        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+            diagnostic_color_scope.BeginScope(scope_serial, clear_at_begin);
+        }
+    }
+
+    void MarkDiagnosticColorDraw(u64 scope_serial, ImageColorScopeDrawKind kind) noexcept {
+        if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
+            diagnostic_color_scope.MarkDraw(scope_serial, kind);
+        }
+    }
+
+    [[nodiscard]] ImageColorScopeProducerObservation ObserveDiagnosticColorScope() const noexcept {
+        return diagnostic_color_scope.Observe();
+    }
+
     void ResetDiagnosticProducer() noexcept {
         if (usage.vo_surface && IsPpSourceProducerTrackingEnabled()) {
             diagnostic_producer.Reset();
+            diagnostic_color_scope.Reset();
         }
     }
 
@@ -205,6 +223,7 @@ public:
     u64 tick_accessed_last{};
     u64 hash{};
     ImageProducerState diagnostic_producer{};
+    ImageColorScopeProducerState diagnostic_color_scope{};
 
     struct {
         u32 texture : 1;

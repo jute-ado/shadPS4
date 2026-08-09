@@ -231,7 +231,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
-    MarkEncodedImageProducers(state.num_color_attachments);
+    MarkEncodedImageProducers(state, VideoCore::ImageColorScopeDrawKind::Direct);
 
     ResetBindings();
 }
@@ -312,7 +312,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
-    MarkEncodedImageProducers(state.num_color_attachments);
+    MarkEncodedImageProducers(state, VideoCore::ImageColorScopeDrawKind::Indirect);
 
     ResetBindings();
 }
@@ -344,7 +344,7 @@ void Rasterizer::DispatchDirect() {
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
-    MarkEncodedImageProducers(0);
+    MarkEncodedStorageImageProducers();
 
     ResetBindings();
 }
@@ -378,7 +378,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
-    MarkEncodedImageProducers(0);
+    MarkEncodedStorageImageProducers();
 
     ResetBindings();
 }
@@ -837,16 +837,28 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 }
 
-void Rasterizer::MarkEncodedImageProducers(u32 num_color_attachments) {
+void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
+                                           VideoCore::ImageColorScopeDrawKind draw_kind) {
     if (!VideoCore::IsPpSourceProducerTrackingEnabled()) {
         return;
     }
-    for (u32 index = 0; index < num_color_attachments; ++index) {
+    const u64 rendering_serial = scheduler.RenderingSerial();
+    for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
         if (image_id) {
-            texture_cache.GetImage(image_id).MarkDiagnosticProducer(
-                VideoCore::ImageProducerClass::ColorAttachment);
+            auto& image = texture_cache.GetImage(image_id);
+            image.BeginDiagnosticColorScope(rendering_serial,
+                                            state.color_attachments[index].is_clear);
+            image.MarkDiagnosticColorDraw(rendering_serial, draw_kind);
+            image.MarkDiagnosticProducer(VideoCore::ImageProducerClass::ColorAttachment);
         }
+    }
+    MarkEncodedStorageImageProducers();
+}
+
+void Rasterizer::MarkEncodedStorageImageProducers() {
+    if (!VideoCore::IsPpSourceProducerTrackingEnabled()) {
+        return;
     }
     for (const auto image_id : storage_written_images) {
         if (image_id) {

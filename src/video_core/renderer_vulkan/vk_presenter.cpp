@@ -561,12 +561,13 @@ public:
         }
     }
 
-    void ObservePpSourceProducerScope(u64 sequence, bool rendering_before_flip) {
+    void ObservePpSourceProducerScope(u64 sequence, bool rendering_before_flip,
+                                      VideoCore::ImageColorScopeProducerObservation draw_scope) {
         if (!IsPpSourcePublicationReconstructionStage()) {
             return;
         }
         const auto report = source_producer_scope_coverage.Observe(
-            sequence, HostPasses::ClassifyPpSourceProducerScope(rendering_before_flip));
+            sequence, HostPasses::ClassifyPpSourceProducerScope(rendering_before_flip), draw_scope);
         if (!report) {
             return;
         }
@@ -1733,8 +1734,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
 
     if (final_guest_surface_content) {
-        final_guest_surface_content->ObservePpSourceProducerScope(stamp.sequence,
-                                                                  draw_scheduler.IsRendering());
+        final_guest_surface_content->ObservePpSourceProducerScope(
+            stamp.sequence, draw_scheduler.IsRendering(), image.ObserveDiagnosticColorScope());
     }
     draw_scheduler.EndRendering();
     const auto cmdbuf = draw_scheduler.CommandBuffer();

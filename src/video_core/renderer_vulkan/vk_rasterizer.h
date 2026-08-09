@@ -103,7 +103,9 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
-    void MarkEncodedImageProducers(u32 num_color_attachments);
+    void MarkEncodedImageProducers(const RenderState& state,
+                                   VideoCore::ImageColorScopeDrawKind draw_kind);
+    void MarkEncodedStorageImageProducers();
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {

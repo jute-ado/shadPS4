@@ -34,6 +34,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     }
     EndRendering();
     is_rendering = true;
+    ++rendering_serial;
     render_state = new_state;
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;

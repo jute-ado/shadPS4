@@ -7,6 +7,7 @@
 #include <string>
 
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
+#include "video_core/texture_cache/image_color_scope_producer.h"
 
 namespace Vulkan::HostPasses {
 
@@ -24,11 +25,15 @@ enum class PpSourceProducerScopeClass : u8 {
 struct PpSourceProducerScopeObservation {
     u64 sequence{};
     PpSourceProducerScopeClass classification{PpSourceProducerScopeClass::EndedEarlier};
+    VideoCore::ImageColorScopeProducerObservation draw_scope{};
     u32 selected{};
     u32 emitted{};
     u32 expected{};
     u32 active_at_flip{};
     u32 ended_earlier{};
+    u32 valid_draw_scopes{};
+    u32 invalid_draw_scopes{};
+    u32 overflow_draw_scopes{};
     u32 loss{};
     bool final{};
 };
@@ -39,7 +44,8 @@ public:
         : window{window_} {}
 
     [[nodiscard]] std::optional<PpSourceProducerScopeObservation> Observe(
-        u64 sequence, PpSourceProducerScopeClass classification) noexcept {
+        u64 sequence, PpSourceProducerScopeClass classification,
+        VideoCore::ImageColorScopeProducerObservation draw_scope) noexcept {
         if (!window.Contains(sequence)) {
             return std::nullopt;
         }
@@ -52,6 +58,15 @@ public:
         last_sequence = sequence;
         classification == PpSourceProducerScopeClass::ActiveAtFlip ? ++active_at_flip
                                                                    : ++ended_earlier;
+        if (draw_scope.valid) {
+            ++valid_draw_scopes;
+        } else if (draw_scope.overflow) {
+            ++overflow_draw_scopes;
+            ++loss;
+        } else {
+            ++invalid_draw_scopes;
+            ++loss;
+        }
         const bool final = window.IsFinal(sequence);
         if (final && emitted != window.count) {
             ++loss;
@@ -59,11 +74,15 @@ public:
         return PpSourceProducerScopeObservation{
             .sequence = sequence,
             .classification = classification,
+            .draw_scope = draw_scope,
             .selected = selected,
             .emitted = emitted,
             .expected = window.count,
             .active_at_flip = active_at_flip,
             .ended_earlier = ended_earlier,
+            .valid_draw_scopes = valid_draw_scopes,
+            .invalid_draw_scopes = invalid_draw_scopes,
+            .overflow_draw_scopes = overflow_draw_scopes,
             .loss = loss,
             .final = final,
         };
@@ -76,6 +95,9 @@ private:
     u32 emitted{};
     u32 active_at_flip{};
     u32 ended_earlier{};
+    u32 valid_draw_scopes{};
+    u32 invalid_draw_scopes{};
+    u32 overflow_draw_scopes{};
     u32 loss{};
     bool has_last{};
 };
@@ -83,7 +105,11 @@ private:
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeObservation(
     const PpSourceProducerScopeObservation& observation) {
     return "FGSCPS s=" + std::to_string(observation.sequence) +
-           " r=" + std::to_string(static_cast<u32>(observation.classification));
+           " r=" + std::to_string(static_cast<u32>(observation.classification)) +
+           " d=" + std::to_string(observation.draw_scope.draw_count) +
+           " k=" + std::to_string(static_cast<u32>(observation.draw_scope.last_draw)) +
+           " c=" + std::to_string(observation.draw_scope.clear_at_begin ? 1 : 0) +
+           " x=" + std::to_string(observation.draw_scope.valid ? 0 : 1);
 }
 
 [[nodiscard]] inline std::string FormatPpSourceProducerScopeCoverage(
@@ -93,6 +119,9 @@ private:
            std::to_string(observation.selected) + '/' + std::to_string(observation.expected) +
            " a=" + std::to_string(observation.active_at_flip) +
            " e=" + std::to_string(observation.ended_earlier) +
+           " v=" + std::to_string(observation.valid_draw_scopes) +
+           " i=" + std::to_string(observation.invalid_draw_scopes) +
+           " x=" + std::to_string(observation.overflow_draw_scopes) +
            " l=" + std::to_string(observation.loss);
 }
 

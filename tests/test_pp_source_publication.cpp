@@ -185,17 +185,15 @@ TEST(PpSourceProducerScope, DistinguishesFlipEndedScopeFromAlreadyEndedProducer)
 
 TEST(PpSourceProducerScope, CoverageIsExactAndPrivacySafe) {
     PpSourceProducerScopeCoverage coverage{{.start = 4000, .count = 2}};
-    ASSERT_TRUE(coverage.Observe(
-        4000, PpSourceProducerScopeClass::ActiveAtFlip,
-        {.draw_count = 3,
-         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
-         .clear_at_begin = true,
-         .valid = true}));
-    const auto final = coverage.Observe(
-        4001, PpSourceProducerScopeClass::EndedEarlier,
-        {.draw_count = 2,
-         .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
-         .valid = true});
+    ASSERT_TRUE(coverage.Observe(4000, PpSourceProducerScopeClass::ActiveAtFlip,
+                                 {.draw_count = 3,
+                                  .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                                  .clear_at_begin = true,
+                                  .valid = true}));
+    const auto final = coverage.Observe(4001, PpSourceProducerScopeClass::EndedEarlier,
+                                        {.draw_count = 2,
+                                         .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
+                                         .valid = true});
     ASSERT_TRUE(final);
     EXPECT_TRUE(final->final);
     EXPECT_EQ(final->active_at_flip, 1u);
@@ -221,22 +219,20 @@ TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
     state.MarkDraw(11, VideoCore::ImageColorScopeDrawKind::Direct);
     state.MarkDraw(11, VideoCore::ImageColorScopeDrawKind::Indirect);
 
-    EXPECT_EQ(state.Observe(),
-              (VideoCore::ImageColorScopeProducerObservation{
-                  .draw_count = 2,
-                  .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
-                  .clear_at_begin = true,
-                  .valid = true,
-              }));
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageColorScopeProducerObservation{
+                                   .draw_count = 2,
+                                   .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
+                                   .clear_at_begin = true,
+                                   .valid = true,
+                               }));
 
     state.BeginScope(12, false);
-    EXPECT_EQ(state.Observe(),
-              (VideoCore::ImageColorScopeProducerObservation{
-                  .draw_count = 0,
-                  .last_draw = VideoCore::ImageColorScopeDrawKind::Unknown,
-                  .clear_at_begin = false,
-                  .valid = true,
-              }));
+    EXPECT_EQ(state.Observe(), (VideoCore::ImageColorScopeProducerObservation{
+                                   .draw_count = 0,
+                                   .last_draw = VideoCore::ImageColorScopeDrawKind::Unknown,
+                                   .clear_at_begin = false,
+                                   .valid = true,
+                               }));
 }
 
 TEST(PpSourceColorScopeDraw, StaleScopeAndCapacityOverflowFailClosed) {
@@ -261,17 +257,16 @@ TEST(PpSourceColorScopeDraw, StaleScopeAndCapacityOverflowFailClosed) {
 
 TEST(PpSourceColorScopeDraw, InvalidAndOverflowScopesAreExplicitCoverageLoss) {
     PpSourceProducerScopeCoverage coverage{{.start = 10, .count = 2}};
-    ASSERT_TRUE(coverage.Observe(
-        10, PpSourceProducerScopeClass::ActiveAtFlip,
-        {.draw_count = 1,
-         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
-         .valid = false}));
-    const auto final = coverage.Observe(
-        11, PpSourceProducerScopeClass::ActiveAtFlip,
-        {.draw_count = VideoCore::ImageColorScopeProducerState::MaxTrackedDraws,
-         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
-         .valid = false,
-         .overflow = true});
+    ASSERT_TRUE(coverage.Observe(10, PpSourceProducerScopeClass::ActiveAtFlip,
+                                 {.draw_count = 1,
+                                  .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                                  .valid = false}));
+    const auto final =
+        coverage.Observe(11, PpSourceProducerScopeClass::ActiveAtFlip,
+                         {.draw_count = VideoCore::ImageColorScopeProducerState::MaxTrackedDraws,
+                          .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+                          .valid = false,
+                          .overflow = true});
     ASSERT_TRUE(final);
     EXPECT_EQ(final->valid_draw_scopes, 0u);
     EXPECT_EQ(final->invalid_draw_scopes, 1u);

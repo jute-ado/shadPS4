@@ -388,6 +388,10 @@ public:
         return is_rendering;
     }
 
+    [[nodiscard]] u64 RenderingSerial() const noexcept {
+        return rendering_serial;
+    }
+
     /// Returns the current render state.
     const RenderState& GetRenderState() const {
         return render_state;
@@ -475,6 +479,7 @@ private:
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
+    u64 rendering_serial{};
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};
 };
