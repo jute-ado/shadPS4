@@ -384,6 +384,10 @@ public:
     /// Ends current rendering scope.
     void EndRendering();
 
+    [[nodiscard]] bool IsRendering() const noexcept {
+        return is_rendering;
+    }
+
     /// Returns the current render state.
     const RenderState& GetRenderState() const {
         return render_state;

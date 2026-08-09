@@ -24,6 +24,7 @@
 #include "video_core/completed_readback.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/present_frame_transition.h"
@@ -464,6 +465,7 @@ public:
           screenshot_calibration{true},
           source_publication_coverage{{config.window.frame_start, config.window.frame_count}},
           source_producer_coverage{{config.window.frame_start, config.window.frame_count}},
+          source_producer_scope_coverage{{config.window.frame_start, config.window.frame_count}},
           slot_stride{Common::AlignUp<u64>(FinalGuestSurfaceTileLimits{}.max_bytes,
                                            std::max<u64>(1, instance_.NonCoherentAtomSize()))},
           download{instance_,
@@ -556,6 +558,21 @@ public:
                      {.sequence = sequence, .producer = producer}));
         if (report->final) {
             LOG_INFO(Render, "{}", HostPasses::FormatPpSourceProducerCoverage(*report));
+        }
+    }
+
+    void ObservePpSourceProducerScope(u64 sequence, bool rendering_before_flip) {
+        if (!IsPpSourcePublicationReconstructionStage()) {
+            return;
+        }
+        const auto report = source_producer_scope_coverage.Observe(
+            sequence, HostPasses::ClassifyPpSourceProducerScope(rendering_before_flip));
+        if (!report) {
+            return;
+        }
+        LOG_INFO(Render, "{}", HostPasses::FormatPpSourceProducerScopeObservation(*report));
+        if (report->final) {
+            LOG_INFO(Render, "{}", HostPasses::FormatPpSourceProducerScopeCoverage(*report));
         }
     }
 
@@ -1060,6 +1077,7 @@ private:
     FinalGuestSurfaceScreenshotCalibration screenshot_calibration;
     HostPasses::PpSourcePublicationCoverage source_publication_coverage;
     HostPasses::PpSourceProducerCoverage source_producer_coverage;
+    HostPasses::PpSourceProducerScopeCoverage source_producer_scope_coverage;
     FinalGuestSurfacePostPpTransportTracker post_pp_transport;
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
@@ -1714,6 +1732,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         };
     }
 
+    if (final_guest_surface_content) {
+        final_guest_surface_content->ObservePpSourceProducerScope(stamp.sequence,
+                                                                  draw_scheduler.IsRendering());
+    }
     draw_scheduler.EndRendering();
     const auto cmdbuf = draw_scheduler.CommandBuffer();
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{

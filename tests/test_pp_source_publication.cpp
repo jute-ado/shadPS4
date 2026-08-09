@@ -3,8 +3,8 @@
 
 #include <gtest/gtest.h>
 
-#include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
+#include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/texture_cache/image_producer.h"
 
 namespace {
@@ -192,11 +192,9 @@ TEST(PpSourceProducerScope, CoverageIsExactAndPrivacySafe) {
     EXPECT_EQ(final->ended_earlier, 1u);
     EXPECT_EQ(final->loss, 0u);
     EXPECT_EQ(FormatPpSourceProducerScopeObservation(
-                  {.sequence = 4001,
-                   .classification = PpSourceProducerScopeClass::EndedEarlier}),
+                  {.sequence = 4001, .classification = PpSourceProducerScopeClass::EndedEarlier}),
               "FGSCPS s=4001 r=1");
-    EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final),
-              "FGSCPSC s=4001 n=2/2/2 a=1 e=1 l=0");
+    EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final), "FGSCPSC s=4001 n=2/2/2 a=1 e=1 l=0");
 }
 
 } // namespace
