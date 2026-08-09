@@ -216,12 +216,26 @@ TEST(PpSourceProducerScope, CoverageIsExactAndPrivacySafe) {
 TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
     VideoCore::ImageColorScopeProducerState state;
     state.BeginScope(11, true);
-    state.MarkDraw(11, VideoCore::ImageColorScopeDrawKind::Direct);
-    state.MarkDraw(11, VideoCore::ImageColorScopeDrawKind::Indirect);
+    state.MarkDraw(11, {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                        .indexed = true,
+                        .element_count = 36,
+                        .instance_count = 2,
+                        .sampled_bindings = 2,
+                        .sampled_images = 1});
+    state.MarkDraw(11, {.kind = VideoCore::ImageColorScopeDrawKind::Indirect,
+                        .sampled_bindings = 3,
+                        .sampled_images = 2,
+                        .storage_writes = 1});
 
     EXPECT_EQ(state.Observe(), (VideoCore::ImageColorScopeProducerObservation{
                                    .draw_count = 2,
                                    .last_draw = VideoCore::ImageColorScopeDrawKind::Indirect,
+                                   .indexed = false,
+                                   .element_count = 0,
+                                   .instance_count = 0,
+                                   .sampled_bindings = 3,
+                                   .sampled_images = 2,
+                                   .storage_writes = 1,
                                    .clear_at_begin = true,
                                    .valid = true,
                                }));
@@ -238,13 +252,13 @@ TEST(PpSourceColorScopeDraw, CountsOnlyEncodedDrawsInTheCurrentScope) {
 TEST(PpSourceColorScopeDraw, StaleScopeAndCapacityOverflowFailClosed) {
     VideoCore::ImageColorScopeProducerState state;
     state.BeginScope(21, false);
-    state.MarkDraw(20, VideoCore::ImageColorScopeDrawKind::Direct);
+    state.MarkDraw(20, {.kind = VideoCore::ImageColorScopeDrawKind::Direct});
     EXPECT_FALSE(state.Observe().valid);
 
     state.BeginScope(22, false);
     for (u32 index = 0; index <= VideoCore::ImageColorScopeProducerState::MaxTrackedDraws;
          ++index) {
-        state.MarkDraw(22, VideoCore::ImageColorScopeDrawKind::Direct);
+        state.MarkDraw(22, {.kind = VideoCore::ImageColorScopeDrawKind::Direct});
     }
     const auto overflow = state.Observe();
     EXPECT_EQ(overflow.draw_count, VideoCore::ImageColorScopeProducerState::MaxTrackedDraws);
@@ -253,6 +267,54 @@ TEST(PpSourceColorScopeDraw, StaleScopeAndCapacityOverflowFailClosed) {
 
     state.Reset();
     EXPECT_EQ(state.Observe(), VideoCore::ImageColorScopeProducerObservation{});
+}
+
+TEST(PpSourceColorScopeDraw, InvalidDrawShapeFailsClosedWithoutIdentity) {
+    VideoCore::ImageColorScopeProducerState state;
+    state.BeginScope(31, false);
+    state.MarkDraw(31, {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                        .sampled_bindings = 1,
+                        .sampled_images = 2});
+    EXPECT_FALSE(state.Observe().valid);
+
+    state.BeginScope(32, false);
+    state.MarkDraw(32, {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                        .sampled_bindings =
+                            VideoCore::ImageColorScopeProducerState::MaxTrackedImageBindings + 1,
+                        .sampled_images = 1});
+    EXPECT_FALSE(state.Observe().valid);
+}
+
+TEST(PpSourceColorScopeDraw, CompactOutputAndCoverageClassifySingleSampledInput) {
+    PpSourceProducerScopeCoverage coverage{{.start = 50, .count = 2}};
+    ASSERT_TRUE(coverage.Observe(
+        50, PpSourceProducerScopeClass::ActiveAtFlip,
+        {.draw_count = 1,
+         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+         .element_count = 3,
+         .instance_count = 1,
+         .sampled_bindings = 1,
+         .sampled_images = 1,
+         .valid = true}));
+    const auto final = coverage.Observe(
+        51, PpSourceProducerScopeClass::ActiveAtFlip,
+        {.draw_count = 1,
+         .last_draw = VideoCore::ImageColorScopeDrawKind::Direct,
+         .indexed = true,
+         .element_count = 6,
+         .instance_count = 1,
+         .sampled_bindings = 2,
+         .sampled_images = 2,
+         .storage_writes = 1,
+         .valid = true});
+    ASSERT_TRUE(final);
+    EXPECT_EQ(final->single_sampled_input, 1u);
+    EXPECT_EQ(final->multiple_sampled_inputs, 1u);
+    EXPECT_EQ(final->writable_image_draws, 1u);
+    EXPECT_EQ(FormatPpSourceProducerScopeObservation(*final),
+              "FGSCPS s=51 r=0 d=1 k=1 c=0 x=0 j=1 e=6 n=1 b=2 u=2 w=1");
+    EXPECT_EQ(FormatPpSourceProducerScopeCoverage(*final),
+              "FGSCPSC s=51 n=2/2/2 a=2 e=0 v=2 i=0 x=0 s=1 z=0 m=1 w=1 l=0");
 }
 
 TEST(PpSourceColorScopeDraw, InvalidAndOverflowScopesAreExplicitCoverageLoss) {
