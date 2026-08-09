@@ -982,7 +982,47 @@ TEST(PpTerminalScopeContent, ExactConsumerFreezesTheReferencedEarlierScope) {
         .sampled_images = 1,
     };
     EXPECT_EQ(gate.ObserveDraw(17, 91, later_scope), PpTerminalScopeContentAction::None);
-    EXPECT_EQ(gate.Take(17, 4).status, FinalGuestSurfaceStatus::Complete);
+    const auto take = gate.Take(17, 4);
+    EXPECT_EQ(take.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(take.consumer_observations, 2u);
+    EXPECT_EQ(take.consumer_phase_mask, 1u << 2);
+    EXPECT_EQ(take.consumer_shape_matches, 1u);
+    EXPECT_TRUE(take.consumer_frozen);
+}
+
+TEST(PpTerminalScopeContent, ConsumerProbePreservesOrderingAndMismatchWithoutPrivateIdentity) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+        .consumer = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                     .indexed = true,
+                     .element_count = 4,
+                     .instance_count = 1,
+                     .sampled_images = 1},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 4));
+    EXPECT_FALSE(gate.ObserveConsumer(17, config.consumer));
+    ASSERT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    ASSERT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    auto mismatch = config.consumer;
+    mismatch.element_count = 5;
+    EXPECT_FALSE(gate.ObserveConsumer(17, mismatch));
+
+    const auto take = gate.Take(17, 4);
+    EXPECT_EQ(take.consumer_observations, 2u);
+    EXPECT_EQ(take.consumer_phase_mask, (1u << 0) | (1u << 2));
+    EXPECT_EQ(take.consumer_shape_matches, 1u);
+    EXPECT_FALSE(take.consumer_frozen);
 }
 
 TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceTwoBoundedPlanes) {
@@ -1061,14 +1101,16 @@ TEST(PpTerminalScopeContent, MappingCapacityAndStaleArmFailClosed) {
 }
 
 TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
-    auto report =
-        MakePpTerminalScopeContentReport(4100, FinalGuestSurfaceStatus::Complete, {}, 2, 14);
+    auto report = MakePpTerminalScopeContentReport(4100, FinalGuestSurfaceStatus::Complete, {}, 2,
+                                                   14, 3, 5, 2, true);
     report.first_aba = 1;
     report.first_stable = 2;
     report.second_aba = 3;
     report.second_stable = 4;
     const auto line = FormatPpTerminalScopeContentReport(report);
-    EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 a0=1 s0=2 a1=3 s1=4 lm=0");
+    EXPECT_EQ(line,
+              "FGSCTS s=4100 st=0 d=2 r=14 co=3 cp=5 cm=2 cf=1 a0=1 s0=2 a1=3 "
+              "s1=4 lm=0");
     EXPECT_EQ(line.find("token"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
