@@ -102,16 +102,13 @@ TEST(PpSourceReconstruction, BaselineMetadataAndExactFormatsFailClosed) {
               FinalGuestSurfaceStatus::InvalidationLoss);
     descriptor = RouteDescriptor();
     descriptor.source_view_srgb = false;
-    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status,
-              FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
     descriptor = RouteDescriptor();
     descriptor.source_format = FinalGuestSurfaceFormat::Rgba16Float;
-    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status,
-              FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
     descriptor = RouteDescriptor();
     descriptor.output_format = FinalGuestSurfaceFormat::A2R10G10B10;
-    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status,
-              FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(PlanPpSourceReconstruction(descriptor).status, FinalGuestSurfaceStatus::Unsupported);
 }
 
 TEST(PpSourceReconstruction, MissingResourcesAndOverflowFailClosedTransactionally) {
@@ -150,8 +147,7 @@ TEST(PpSourceReconstruction, ClassificationSeparatesReproducedCleanAndAmbiguous)
               PpSourceReconstructionClass::ReproducedFromSnapshot);
     EXPECT_EQ(ClassifyPpSourceReconstruction(true, false),
               PpSourceReconstructionClass::NotReproducedFromSnapshot);
-    EXPECT_EQ(ClassifyPpSourceReconstruction(false, true),
-              PpSourceReconstructionClass::Unassessed);
+    EXPECT_EQ(ClassifyPpSourceReconstruction(false, true), PpSourceReconstructionClass::Unassessed);
     EXPECT_EQ(ClassifyPpSourceReconstruction(false, false),
               PpSourceReconstructionClass::Unassessed);
 }
