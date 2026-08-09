@@ -888,6 +888,53 @@ TEST(PpTerminalScopeContent, ExternalShapeSelectorArmsExactlyTwoOrderedDraws) {
     EXPECT_FALSE(complete.retains_vk_image);
 }
 
+TEST(PpTerminalScopeContent, LatestScopeSupersedesEarlierCompleteOrInvalidShape) {
+    const PpTerminalScopeContentConfig config{
+        .enabled = true,
+        .first = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                  .indexed = true,
+                  .element_count = 696,
+                  .instance_count = 1,
+                  .sampled_images = 1},
+        .second = {.kind = VideoCore::ImageColorScopeDrawKind::Direct,
+                   .indexed = true,
+                   .element_count = 24,
+                   .instance_count = 1,
+                   .sampled_images = 2},
+    };
+    PpTerminalScopeContentGate gate{config};
+    ASSERT_TRUE(gate.Arm(17, 4));
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 90, config.second), PpTerminalScopeContentAction::CaptureSecond);
+
+    const PpTerminalScopeDrawSelector unrelated{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 3,
+        .instance_count = 1,
+        .sampled_images = 1,
+    };
+    EXPECT_EQ(gate.ObserveDraw(17, 91, unrelated), PpTerminalScopeContentAction::ShapeLoss);
+    EXPECT_EQ(gate.ObserveDraw(17, 92, config.first), PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(gate.ObserveDraw(17, 92, config.second), PpTerminalScopeContentAction::CaptureSecond);
+    EXPECT_EQ(gate.Take(17, 4).status, FinalGuestSurfaceStatus::Complete);
+
+    const auto reset = ApplyPpTerminalScopeContentAction(
+        FinalGuestSurfaceStatus::GapLoss, {.gap = 1}, PpTerminalScopeContentAction::CaptureFirst);
+    EXPECT_EQ(reset.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(reset.loss.Any());
+
+    const auto acquire = PlanPpTerminalScopePlaneSlot(0, false);
+    EXPECT_TRUE(acquire.acquire);
+    EXPECT_FALSE(acquire.reuse);
+    const auto reuse = PlanPpTerminalScopePlaneSlot(0, true);
+    EXPECT_FALSE(reuse.acquire);
+    EXPECT_TRUE(reuse.reuse);
+    const auto missing = PlanPpTerminalScopePlaneSlot(1, false);
+    EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing.loss.gap, 1u);
+}
+
 TEST(PpTerminalScopeContent, SelectedLogicalWindowsProduceTwoBoundedPlanes) {
     FinalGuestSurfaceWatchOrdinals selector{};
     selector.status = FinalGuestSurfaceStatus::Complete;
