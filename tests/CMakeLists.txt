@@ -138,6 +138,16 @@ target_compile_features(shadps4_pp_source_reconstruction_test PRIVATE cxx_std_23
 target_link_libraries(shadps4_pp_source_reconstruction_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pp_source_reconstruction_test)
 
+add_executable(shadps4_pp_source_publication_test
+    test_pp_source_publication.cpp
+)
+target_include_directories(shadps4_pp_source_publication_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pp_source_publication_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pp_source_publication_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pp_source_publication_test)
+
 add_executable(shadps4_submit_info_test
     test_submit_info.cpp
 )

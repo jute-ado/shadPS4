@@ -1,0 +1,84 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <gtest/gtest.h>
+
+#include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
+
+namespace {
+
+using namespace Vulkan::HostPasses;
+
+TEST(PpSourcePublication, ClassifiesWhetherFlipRefreshMutatedTheSource) {
+    EXPECT_EQ(ClassifyPpSourcePublication(
+                  {VideoCore::ImageRefreshResult::Clean, .gpu_modified_before = true}),
+              PpSourcePublicationClass::CleanGpuProduced);
+    EXPECT_EQ(ClassifyPpSourcePublication(
+                  {VideoCore::ImageRefreshResult::Clean, .gpu_modified_before = false}),
+              PpSourcePublicationClass::CleanResident);
+    EXPECT_EQ(ClassifyPpSourcePublication(
+                  {VideoCore::ImageRefreshResult::MaybeCpuDirtyUnchanged,
+                   .gpu_modified_before = true}),
+              PpSourcePublicationClass::DirtyNoUpload);
+    EXPECT_EQ(ClassifyPpSourcePublication(
+                  {VideoCore::ImageRefreshResult::GpuModifiedUnchanged,
+                   .gpu_modified_before = true}),
+              PpSourcePublicationClass::DirtyNoUpload);
+    EXPECT_EQ(ClassifyPpSourcePublication(
+                  {VideoCore::ImageRefreshResult::Uploaded, .gpu_modified_before = true}),
+              PpSourcePublicationClass::CpuUpload);
+    EXPECT_EQ(ClassifyPpSourcePublication(
+                  {VideoCore::ImageRefreshResult::MultisampledDirty,
+                   .gpu_modified_before = true}),
+              PpSourcePublicationClass::Unsupported);
+}
+
+TEST(PpSourcePublication, ReportsEverySelectedSequenceExactlyOnce) {
+    PpSourcePublicationCoverage coverage{{.start = 4000, .count = 4}};
+    const auto first = coverage.Observe(3999, PpSourcePublicationClass::CleanResident);
+    EXPECT_FALSE(first.has_value());
+
+    ASSERT_TRUE(coverage.Observe(4000, PpSourcePublicationClass::CleanGpuProduced));
+    ASSERT_TRUE(coverage.Observe(4001, PpSourcePublicationClass::CleanGpuProduced));
+    ASSERT_TRUE(coverage.Observe(4002, PpSourcePublicationClass::DirtyNoUpload));
+    const auto final = coverage.Observe(4003, PpSourcePublicationClass::CpuUpload);
+    ASSERT_TRUE(final);
+    EXPECT_TRUE(final->final);
+    EXPECT_EQ(final->sequence, 4003);
+    EXPECT_EQ(final->selected, 4);
+    EXPECT_EQ(final->emitted, 4);
+    EXPECT_EQ(final->clean_gpu_produced, 2);
+    EXPECT_EQ(final->clean_resident, 0);
+    EXPECT_EQ(final->dirty_no_upload, 1);
+    EXPECT_EQ(final->cpu_upload, 1);
+    EXPECT_EQ(final->unsupported, 0);
+    EXPECT_EQ(final->loss, 0);
+}
+
+TEST(PpSourcePublication, GapsAndDuplicatesFailClosed) {
+    PpSourcePublicationCoverage coverage{{.start = 10, .count = 3}};
+    ASSERT_TRUE(coverage.Observe(10, PpSourcePublicationClass::CleanGpuProduced));
+    ASSERT_TRUE(coverage.Observe(10, PpSourcePublicationClass::CleanGpuProduced));
+    const auto final = coverage.Observe(12, PpSourcePublicationClass::Unsupported);
+    ASSERT_TRUE(final);
+    EXPECT_EQ(final->selected, 3);
+    EXPECT_EQ(final->emitted, 3);
+    EXPECT_EQ(final->unsupported, 1);
+    EXPECT_EQ(final->loss, 2);
+}
+
+TEST(PpSourcePublication, CompactOutputContainsOnlySequenceClassAndCounts) {
+    const auto line = FormatPpSourcePublicationObservation(
+        {.sequence = 4579, .classification = PpSourcePublicationClass::CleanGpuProduced});
+    EXPECT_EQ(line, "FGSCP s=4579 r=0");
+
+    PpSourcePublicationCoverage coverage{{.start = 1, .count = 1}};
+    const auto final = coverage.Observe(1, PpSourcePublicationClass::CleanResident);
+    ASSERT_TRUE(final);
+    const auto coverage_line = FormatPpSourcePublicationCoverage(*final);
+    EXPECT_EQ(coverage_line, "FGSCPC s=1 n=1/1 g=0 r=1 d=0 u=0 x=0 l=0");
+    EXPECT_LT(line.size(), 40);
+    EXPECT_LT(coverage_line.size(), 100);
+}
+
+} // namespace
