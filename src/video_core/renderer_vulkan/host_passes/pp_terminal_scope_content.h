@@ -222,6 +222,47 @@ struct PpTerminalScopeContentTakeResult {
     bool retains_vk_image{};
 };
 
+struct PpTerminalScopeContentActionResult {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeContentActionResult ApplyPpTerminalScopeContentAction(
+    FinalGuestSurfaceStatus current_status, FinalGuestSurfaceLoss current_loss,
+    PpTerminalScopeContentAction action) noexcept {
+    if (action == PpTerminalScopeContentAction::CaptureFirst) {
+        return {.status = FinalGuestSurfaceStatus::Complete};
+    }
+    if (action == PpTerminalScopeContentAction::ShapeLoss) {
+        return {
+            .status = FinalGuestSurfaceStatus::GapLoss,
+            .loss = {.gap = 1},
+        };
+    }
+    return {.status = current_status, .loss = current_loss};
+}
+
+struct PpTerminalScopePlaneSlotDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::Complete};
+    FinalGuestSurfaceLoss loss{};
+    bool acquire{};
+    bool reuse{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopePlaneSlotDecision PlanPpTerminalScopePlaneSlot(
+    u32 plane, bool has_slot) noexcept {
+    if (plane > 1 || (plane == 1 && !has_slot)) {
+        return {
+            .status = FinalGuestSurfaceStatus::GapLoss,
+            .loss = {.gap = 1},
+        };
+    }
+    return {
+        .acquire = plane == 0 && !has_slot,
+        .reuse = has_slot,
+    };
+}
+
 class PpTerminalScopeContentGate {
 public:
     explicit constexpr PpTerminalScopeContentGate(PpTerminalScopeContentConfig config_) noexcept
@@ -247,23 +288,29 @@ public:
         if (target_token == 0 || target_token != token || observed_scope_serial == 0) {
             return PpTerminalScopeContentAction::None;
         }
+        if (scope_serial != observed_scope_serial) {
+            scope_serial = observed_scope_serial;
+            phase = 0;
+        }
         if (phase == 0) {
             if (!MatchesPpTerminalScopeDraw(config.first, draw)) {
-                return PpTerminalScopeContentAction::None;
+                phase = 3;
+                return PpTerminalScopeContentAction::ShapeLoss;
             }
-            scope_serial = observed_scope_serial;
             phase = 1;
             return PpTerminalScopeContentAction::CaptureFirst;
         }
         if (phase == 1) {
-            if (scope_serial != observed_scope_serial ||
-                !MatchesPpTerminalScopeDraw(config.second, draw)) {
-                scope_serial = 0;
-                phase = 0;
+            if (!MatchesPpTerminalScopeDraw(config.second, draw)) {
+                phase = 3;
                 return PpTerminalScopeContentAction::ShapeLoss;
             }
             phase = 2;
             return PpTerminalScopeContentAction::CaptureSecond;
+        }
+        if (phase == 2) {
+            phase = 3;
+            return PpTerminalScopeContentAction::ShapeLoss;
         }
         return PpTerminalScopeContentAction::None;
     }

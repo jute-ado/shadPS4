@@ -93,11 +93,10 @@ public:
             .storage_writes = draw.storage_writes,
         };
         const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
-        if (action == PpTerminalScopeContentAction::ShapeLoss) {
-            entry->status = FinalGuestSurfaceStatus::GapLoss;
-            entry->loss = {.gap = 1};
-            return;
-        }
+        const auto action_result =
+            ApplyPpTerminalScopeContentAction(entry->status, entry->loss, action);
+        entry->status = action_result.status;
+        entry->loss = action_result.loss;
         if (action != PpTerminalScopeContentAction::CaptureFirst &&
             action != PpTerminalScopeContentAction::CaptureSecond) {
             return;
@@ -279,7 +278,13 @@ private:
             entry.loss = {.invalidation = 1};
             return;
         }
-        if (plane == 0) {
+        const auto slot_decision = PlanPpTerminalScopePlaneSlot(plane, bool{entry.slot});
+        if (slot_decision.status != FinalGuestSurfaceStatus::Complete) {
+            entry.status = slot_decision.status;
+            entry.loss = slot_decision.loss;
+            return;
+        }
+        if (slot_decision.acquire) {
             const auto token = slots.TryAcquire();
             if (!token) {
                 entry.status = FinalGuestSurfaceStatus::BusyLoss;
@@ -287,11 +292,6 @@ private:
                 return;
             }
             entry.slot = *token;
-        }
-        if (!entry.slot) {
-            entry.status = FinalGuestSurfaceStatus::GapLoss;
-            entry.loss = {.gap = 1};
-            return;
         }
         const auto split = PlanPpTerminalScopeRenderingSplit(
             scheduler.IsRendering(), scheduler.RenderingSerial(), rendering_serial);
