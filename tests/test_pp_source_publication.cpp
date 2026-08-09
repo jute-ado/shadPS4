@@ -83,6 +83,18 @@ TEST(PpSourcePublication, GapsAndDuplicatesFailClosed) {
     EXPECT_EQ(final->loss, 2u);
 }
 
+TEST(PpSourcePublication, MissingWindowPrefixFailsFinalCoverage) {
+    PpSourcePublicationCoverage coverage{{.start = 10, .count = 3}};
+    ASSERT_TRUE(coverage.Observe(11, PpSourcePublicationClass::CleanGpuTracked));
+    const auto final = coverage.Observe(12, PpSourcePublicationClass::CleanGpuTracked);
+    ASSERT_TRUE(final);
+    EXPECT_TRUE(final->final);
+    EXPECT_EQ(final->expected, 3u);
+    EXPECT_EQ(final->selected, 2u);
+    EXPECT_EQ(final->emitted, 2u);
+    EXPECT_EQ(final->loss, 1u);
+}
+
 TEST(PpSourcePublication, CompactOutputContainsOnlySequenceClassAndCounts) {
     const auto line = FormatPpSourcePublicationObservation(
         {.sequence = 4579, .classification = PpSourcePublicationClass::CleanGpuTracked});
@@ -92,7 +104,7 @@ TEST(PpSourcePublication, CompactOutputContainsOnlySequenceClassAndCounts) {
     const auto final = coverage.Observe(1, PpSourcePublicationClass::CleanResident);
     ASSERT_TRUE(final);
     const auto coverage_line = FormatPpSourcePublicationCoverage(*final);
-    EXPECT_EQ(coverage_line, "FGSCPC s=1 n=1/1 g=0 r=1 d=0 u=0 x=0 l=0");
+    EXPECT_EQ(coverage_line, "FGSCPC s=1 n=1/1/1 g=0 r=1 d=0 u=0 x=0 l=0");
     EXPECT_LT(line.size(), size_t{40});
     EXPECT_LT(coverage_line.size(), size_t{100});
 }
