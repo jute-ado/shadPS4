@@ -370,6 +370,14 @@ public:
         return PpTerminalScopeContentAction::None;
     }
 
+    [[nodiscard]] constexpr bool CanRestartAtFirst(
+        u64 target_token, u64 observed_scope_serial,
+        const PpTerminalScopeDrawSelector& draw) const noexcept {
+        return target_token != 0 && target_token == token && observed_scope_serial != 0 &&
+               observed_scope_serial == scope_serial && phase == 3 && !frozen &&
+               MatchesPpTerminalScopeDraw(config.first, draw);
+    }
+
     [[nodiscard]] constexpr PpTerminalScopeConsumerAction ObserveConsumer(
         u64 target_token, const PpTerminalScopeDrawSelector& consumer) noexcept {
         if (target_token == 0 || target_token != token || frozen) {

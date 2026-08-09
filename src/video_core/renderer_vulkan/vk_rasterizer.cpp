@@ -132,6 +132,11 @@ public:
         if (!entry) {
             return;
         }
+        if (!entry->slot && entry->recorded_plane_mask == 0 && mapping.Valid() &&
+            IsValidTarget(link, &image) &&
+            entry->gate.CanRestartAtFirst(image.image_uid, rendering_serial, observed)) {
+            ConfigureEntry(*entry, link, image);
+        }
         const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
         const auto action_result =
             ApplyPpTerminalScopeContentAction(entry->status, entry->loss, action);
