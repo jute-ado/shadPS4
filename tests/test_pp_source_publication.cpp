@@ -1108,9 +1108,8 @@ TEST(PpTerminalScopeContent, CompactGrammarNeverExposesPrivateTargetToken) {
     report.second_aba = 3;
     report.second_stable = 4;
     const auto line = FormatPpTerminalScopeContentReport(report);
-    EXPECT_EQ(line,
-              "FGSCTS s=4100 st=0 d=2 r=14 co=3 cp=5 cm=2 cf=1 a0=1 s0=2 a1=3 "
-              "s1=4 lm=0");
+    EXPECT_EQ(line, "FGSCTS s=4100 st=0 d=2 r=14 co=3 cp=5 cm=2 cf=1 a0=1 s0=2 a1=3 "
+                    "s1=4 lm=0");
     EXPECT_EQ(line.find("token"), std::string::npos);
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("address"), std::string::npos);
