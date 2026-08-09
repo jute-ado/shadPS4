@@ -1388,6 +1388,7 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrd
         .plane_mask = 15,
         .regions = {{{.logical_ordinal = 11, .buffer_offset = 0, .byte_size = 4},
                      {.logical_ordinal = 12, .buffer_offset = 4, .byte_size = 4}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
     };
     const auto bytes = [](std::array<u8, 4> first0, std::array<u8, 4> first1,
                           std::array<u8, 4> second0, std::array<u8, 4> second1,
@@ -1525,6 +1526,11 @@ TEST(PpTerminalScopeContent, LocalizedVisualReturnHonorsExactThresholdsAndFailsC
     EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Bgra8, a, b, c),
               std::optional<bool>{true});
 
+    b = {};
+    set_changed(b, 255, 16, 16, 16); // One pixel below the exact 25% floor.
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, a, b, c),
+              std::optional<bool>{false});
+    b = {};
     set_changed(b, 256, 16, 16, 15); // RGB sum 47 is below the per-pixel threshold.
     EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, a, b, c),
               std::optional<bool>{false});
@@ -1541,8 +1547,7 @@ TEST(PpTerminalScopeContent, LocalizedVisualReturnHonorsExactThresholdsAndFailsC
     }
     EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, a, b, c),
               std::optional<bool>{true});
-    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Unsupported, a, b,
-                                                     c),
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Unsupported, a, b, c),
               std::nullopt);
     EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8,
                                                      std::span{a}.first(a.size() - 1), b, c),

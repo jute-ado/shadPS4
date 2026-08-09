@@ -1022,11 +1022,42 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> output_aba_ordinals{};
     std::vector<u32> output_stable_ordinals{};
     std::vector<u32> output_ambiguous_ordinals{};
+    std::vector<u32> output_localized_visual_return_ordinals{};
     std::vector<u32> output_final_backing_equal_ordinals{};
     std::vector<u32> output_final_backing_different_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
 };
+
+[[nodiscard]] inline std::optional<bool> IsPpTerminalScopeLocalizedVisualReturn(
+    FinalGuestSurfaceFormat format, std::span<const std::byte> baseline,
+    std::span<const std::byte> departure, std::span<const std::byte> returned) noexcept {
+    if ((format != FinalGuestSurfaceFormat::Rgba8 && format != FinalGuestSurfaceFormat::Bgra8) ||
+        baseline.empty() || baseline.size() != departure.size() ||
+        baseline.size() != returned.size() || baseline.size() % 4 != 0) {
+        return std::nullopt;
+    }
+    const auto changed_pixels = [](std::span<const std::byte> left,
+                                   std::span<const std::byte> right) {
+        u32 changed{};
+        for (size_t offset = 0; offset < left.size(); offset += 4) {
+            u32 difference{};
+            for (u32 channel = 0; channel < 3; ++channel) {
+                const u8 first = std::to_integer<u8>(left[offset + channel]);
+                const u8 second = std::to_integer<u8>(right[offset + channel]);
+                difference += first > second ? first - second : second - first;
+            }
+            changed += difference >= 48;
+        }
+        return changed;
+    };
+    const u64 pixels = baseline.size() / 4;
+    const u64 baseline_to_departure = changed_pixels(baseline, departure);
+    const u64 departure_to_returned = changed_pixels(departure, returned);
+    const u64 baseline_to_returned = changed_pixels(baseline, returned);
+    return baseline_to_departure * 4 >= pixels && departure_to_returned * 4 >= pixels &&
+           baseline_to_returned * 100 <= pixels;
+}
 
 struct PpTerminalScopeCalibratedCoverage {
     u32 calibrations{};
@@ -1229,6 +1260,39 @@ private:
         }
     }
 
+    [[nodiscard]] static bool ClassifyLocalizedOutput(const Observation& a, const Observation& b,
+                                                      const Observation& c,
+                                                      std::vector<u32>& localized_visual_return) {
+        if (a.layout != b.layout || a.layout != c.layout ||
+            a.layout.output_plane_offset > a.bytes.size() ||
+            b.layout.output_plane_offset > b.bytes.size() ||
+            c.layout.output_plane_offset > c.bytes.size()) {
+            return false;
+        }
+        for (u32 index = 0; index < a.layout.region_count; ++index) {
+            const auto& region = a.layout.regions[index];
+            const u64 offset =
+                static_cast<u64>(a.layout.output_plane_offset) + region.buffer_offset;
+            if (region.logical_ordinal == 0 || region.byte_size == 0 ||
+                offset + region.byte_size > a.bytes.size() ||
+                offset + region.byte_size > b.bytes.size() ||
+                offset + region.byte_size > c.bytes.size()) {
+                return false;
+            }
+            const auto result = IsPpTerminalScopeLocalizedVisualReturn(
+                a.layout.format, std::span{a.bytes}.subspan(offset, region.byte_size),
+                std::span{b.bytes}.subspan(offset, region.byte_size),
+                std::span{c.bytes}.subspan(offset, region.byte_size));
+            if (!result) {
+                return false;
+            }
+            if (*result) {
+                localized_visual_return.push_back(region.logical_ordinal);
+            }
+        }
+        return true;
+    }
+
     [[nodiscard]] static std::optional<bool> EqualOutputToFinalBacking(
         const Observation& output, const FinalBackingObservation& backing,
         u32 region_index) noexcept {
@@ -1354,6 +1418,12 @@ private:
         if ((a->layout.plane_mask & (1u << 3)) != 0) {
             ClassifyPlane(*a, *b, *c, 3, report.output_aba_ordinals, report.output_stable_ordinals,
                           report.output_ambiguous_ordinals);
+            if (!ClassifyLocalizedOutput(*a, *b, *c,
+                                         report.output_localized_visual_return_ordinals)) {
+                report.status = FinalGuestSurfaceStatus::InvalidationLoss;
+                report.loss.invalidation = 1;
+                return report;
+            }
         }
         if (join_final_backing &&
             ((a->layout.plane_mask & (1u << 3)) == 0 ||
@@ -1462,7 +1532,8 @@ private:
            " x2=" + FormatPpTerminalScopeOrdinalList(report.consumer_ambiguous_ordinals) +
            " a3=" + FormatPpTerminalScopeOrdinalList(report.output_aba_ordinals) +
            " s3=" + FormatPpTerminalScopeOrdinalList(report.output_stable_ordinals) +
-           " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) +
+           " x3=" + FormatPpTerminalScopeOrdinalList(report.output_ambiguous_ordinals) + " y3=" +
+           FormatPpTerminalScopeOrdinalList(report.output_localized_visual_return_ordinals) +
            " e3=" + FormatPpTerminalScopeOrdinalList(report.output_final_backing_equal_ordinals) +
            " d3=" +
            FormatPpTerminalScopeOrdinalList(report.output_final_backing_different_ordinals) +
