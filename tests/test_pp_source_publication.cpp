@@ -1591,6 +1591,19 @@ TEST(PpTerminalScopeContent, DiscoveryCoverageCountsOnlyBoundedPrivacySafeReason
     EXPECT_EQ(line.find("address"), std::string::npos);
 }
 
+TEST(PpTerminalScopeContent, DiscoveryCoverageEmitsAtFinalSequenceWithFinalizeFallback) {
+    PpTerminalScopeDiscoveryCoverageEmissionGate final_sequence{};
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 4000, .frame_count = 800};
+    EXPECT_FALSE(final_sequence.Observe(window, 4798));
+    EXPECT_TRUE(final_sequence.Observe(window, 4799));
+    EXPECT_FALSE(final_sequence.Observe(window, 4799));
+    EXPECT_FALSE(final_sequence.Finalize());
+
+    PpTerminalScopeDiscoveryCoverageEmissionGate fallback{};
+    EXPECT_TRUE(fallback.Finalize());
+    EXPECT_FALSE(fallback.Finalize());
+}
+
 TEST(PpTerminalScopeContent, CalibratedCoverageIsExactAndFailsClosedWhenIncomplete) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 300, .frame_count = 3}, 8};
     const PpTerminalScopeContentHistoryLayout layout{
