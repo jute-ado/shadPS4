@@ -1436,6 +1436,119 @@ TEST(PpTerminalScopeContent, ExactCalibratedTripletClassifiesAllFourPlanesPerOrd
     EXPECT_FALSE(reports[0].loss.Any());
 }
 
+TEST(PpTerminalScopeContent, OutputPlaneUsesTheExactLocalizedVisualReturnPredicate) {
+    constexpr u32 PixelCount = 32 * 32;
+    constexpr u32 RegionBytes = PixelCount * 4;
+    std::array<std::byte, RegionBytes> baseline{};
+    std::array<std::byte, RegionBytes> departure{};
+    std::array<std::byte, RegionBytes> returned{};
+    for (u32 pixel = 0; pixel < PixelCount; ++pixel) {
+        const u32 offset = pixel * 4;
+        baseline[offset + 0] = std::byte{10};
+        baseline[offset + 1] = std::byte{20};
+        baseline[offset + 2] = std::byte{30};
+        baseline[offset + 3] = std::byte{255};
+        departure[offset + 0] = std::byte{10};
+        departure[offset + 1] = std::byte{20};
+        departure[offset + 2] = std::byte{30};
+        departure[offset + 3] = std::byte{0};
+        returned[offset + 0] = std::byte{10};
+        returned[offset + 1] = std::byte{20};
+        returned[offset + 2] = std::byte{30};
+        returned[offset + 3] = std::byte{1};
+    }
+    // Three hundred departure pixels leave enough headroom for ten legitimate return-motion
+    // pixels while satisfying the exact 25% / 25% / 1% Test Lab predicate.
+    for (u32 pixel = 0; pixel < 300; ++pixel) {
+        departure[pixel * 4 + 0] = std::byte{26};
+        departure[pixel * 4 + 1] = std::byte{36};
+        departure[pixel * 4 + 2] = std::byte{46};
+    }
+    for (u32 pixel = 0; pixel < 10; ++pixel) {
+        returned[pixel * 4 + 0] = std::byte{26};
+        returned[pixel * 4 + 1] = std::byte{36};
+        returned[pixel * 4 + 2] = std::byte{46};
+    }
+
+    ASSERT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, baseline,
+                                                     departure, returned),
+              std::optional<bool>{true});
+
+    PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8};
+    const PpTerminalScopeContentHistoryLayout layout{
+        .region_count = 1,
+        .plane_bytes = RegionBytes,
+        .second_plane_offset = RegionBytes,
+        .consumer_plane_offset = RegionBytes * 2,
+        .output_plane_offset = RegionBytes * 3,
+        .total_bytes = RegionBytes * 4,
+        .plane_mask = 1u << 3,
+        .regions = {{{.logical_ordinal = 41, .buffer_offset = 0, .byte_size = RegionBytes}}},
+        .format = FinalGuestSurfaceFormat::Rgba8,
+    };
+    const auto observation = [](const auto& output) {
+        std::array<std::byte, RegionBytes * 4> bytes{};
+        std::ranges::copy(output, bytes.begin() + RegionBytes * 3);
+        return bytes;
+    };
+    reducer.ObserveContent(100, layout, observation(baseline), FinalGuestSurfaceStatus::Complete,
+                           {});
+    reducer.ObserveContent(101, layout, observation(departure), FinalGuestSurfaceStatus::Complete,
+                           {});
+    reducer.ObserveContent(102, layout, observation(returned), FinalGuestSurfaceStatus::Complete,
+                           {});
+    reducer.ObserveCalibration({.request_ordinal = 1, .sequence = 100, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 2, .sequence = 101, .valid = true});
+    reducer.ObserveCalibration({.request_ordinal = 3, .sequence = 102, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].output_ambiguous_ordinals, (std::vector<u32>{41}));
+    EXPECT_EQ(reports[0].output_localized_visual_return_ordinals, (std::vector<u32>{41}));
+    const auto line = FormatPpTerminalScopeCalibratedReport(reports[0]);
+    EXPECT_NE(line.find(" y3=41"), std::string::npos);
+}
+
+TEST(PpTerminalScopeContent, LocalizedVisualReturnHonorsExactThresholdsAndFailsClosed) {
+    constexpr u32 PixelCount = 32 * 32;
+    std::array<std::byte, PixelCount * 4> a{};
+    std::array<std::byte, PixelCount * 4> b{};
+    std::array<std::byte, PixelCount * 4> c{};
+    const auto set_changed = [](auto& bytes, u32 pixels, u8 red, u8 green, u8 blue) {
+        for (u32 pixel = 0; pixel < pixels; ++pixel) {
+            bytes[pixel * 4 + 0] = std::byte{red};
+            bytes[pixel * 4 + 1] = std::byte{green};
+            bytes[pixel * 4 + 2] = std::byte{blue};
+        }
+    };
+
+    set_changed(b, 256, 16, 16, 16);
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Bgra8, a, b, c),
+              std::optional<bool>{true});
+
+    set_changed(b, 256, 16, 16, 15); // RGB sum 47 is below the per-pixel threshold.
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, a, b, c),
+              std::optional<bool>{false});
+    set_changed(b, 256, 16, 16, 16);
+    set_changed(c, 11, 16, 16, 16); // Eleven of 1024 pixels exceed the 1% return ceiling.
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, a, b, c),
+              std::optional<bool>{false});
+
+    c = {};
+    for (u32 pixel = 0; pixel < PixelCount; ++pixel) {
+        a[pixel * 4 + 3] = std::byte{255};
+        b[pixel * 4 + 3] = std::byte{1};
+        c[pixel * 4 + 3] = std::byte{127};
+    }
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8, a, b, c),
+              std::optional<bool>{true});
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Unsupported, a, b,
+                                                     c),
+              std::nullopt);
+    EXPECT_EQ(IsPpTerminalScopeLocalizedVisualReturn(FinalGuestSurfaceFormat::Rgba8,
+                                                     std::span{a}.first(a.size() - 1), b, c),
+              std::nullopt);
+}
+
 TEST(PpTerminalScopeContent, ExactFinalBackingJoinCoversEveryCalibratedOutputEndpoint) {
     PpTerminalScopeContentReducer reducer{{.frame_start = 100, .frame_count = 3}, 8, true};
     const PpTerminalScopeContentHistoryLayout content_layout{
