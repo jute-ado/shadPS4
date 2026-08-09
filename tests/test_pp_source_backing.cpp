@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/renderer_vulkan/host_passes/pp_sampled_input.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_backing.h"
 
 namespace Vulkan {
@@ -131,7 +132,9 @@ TEST(PpSourceBacking, InvalidViewFormatScaleOrOrderingFailsClosed) {
     EXPECT_EQ(PlanPpSourceBackingFootprints(descriptor).status,
               FinalGuestSurfaceStatus::InvalidationLoss);
     descriptor.bound_base_mip = 1;
-    EXPECT_EQ(PlanPpSourceBackingFootprints(descriptor).status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(PlanPpSourceBackingFootprints(descriptor).status,
+              FinalGuestSurfaceStatus::Unsupported)
+        << "Phase A must not apply base-level extent math to a nonzero bound mip";
     descriptor.samples = 2;
     EXPECT_EQ(PlanPpSourceBackingFootprints(descriptor).status,
               FinalGuestSurfaceStatus::Unsupported);
@@ -255,6 +258,186 @@ TEST(PpSourceBacking, PrivacyFormatterContainsOnlyOrdinalsCountsAndStatus) {
     EXPECT_EQ(line.find("uid"), std::string::npos);
     EXPECT_EQ(line.find("generation"), std::string::npos);
     EXPECT_LT(line.size(), 256u);
+}
+
+TEST(PpSourceBacking, AttachesCompactBackingPlaneToExistingOutputAndRawSlot) {
+    constexpr u32 Width = 32;
+    constexpr u32 Height = 32;
+    const auto output = PlanFinalGuestSurfaceTiles({
+        .width = Width,
+        .height = Height,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSampledInput,
+        .logical_width = Width,
+        .logical_height = Height,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    const auto pair = PlanPpSampledInputPairedCapture({
+        .enabled = true,
+        .width = Width,
+        .height = Height,
+        .output_format = FinalGuestSurfaceFormat::Bgra8,
+        .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+        .slot_bytes = 16ull << 20,
+        .alignment = 256,
+    });
+    const auto backing = PlanPpSourceBackingFootprints(PpSourceBackingFootprintDescriptor{
+        .enabled = true,
+        .in_window = true,
+        .pp_draw_encoded = true,
+        .fsr_bypassed = true,
+        .source_width = Width,
+        .source_height = Height,
+        .logical_width = Width,
+        .logical_height = Height,
+        .source_format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .resolved_mip_count = 1,
+        .resolved_layer_count = 1,
+        .bound_mip_count = 1,
+        .bound_layer_count = 1,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = 1u << 20,
+        .selector = Watch("1"),
+    });
+    ASSERT_EQ(backing.status, FinalGuestSurfaceStatus::Complete);
+    const auto plan = MakePpSampledInputSourceBackingTilePlan(
+        MakePpSampledInputPairedTilePlan(output, pair), backing, 16ull << 20, 16);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(plan.copy_region_count, 3u);
+    EXPECT_EQ(plan.paired_backing_format, FinalGuestSurfaceFormat::Bgra8);
+    EXPECT_EQ(plan.paired_backing_region_count, 1u);
+    EXPECT_EQ(plan.paired_backing_regions[0].logical_ordinal, 1u);
+    EXPECT_GE(plan.paired_backing_offset, pair.total_bytes);
+    EXPECT_EQ(plan.paired_backing_bytes, backing.buffer_bytes);
+    EXPECT_EQ(plan.sample_bytes, plan.paired_backing_offset + backing.buffer_bytes);
+}
+
+TEST(PpSourceBacking, CalibratedOutputReturnClassifiesExactBackingPerOrdinal) {
+    constexpr u32 Width = 32;
+    constexpr u32 Height = 32;
+    const auto output = PlanFinalGuestSurfaceTiles({
+        .width = Width,
+        .height = Height,
+        .depth = 1,
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = 1,
+        .type = FinalGuestSurfaceImageType::Color2D,
+        .aspect = FinalGuestSurfaceAspect::Color,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .comparison = FinalGuestSurfaceComparison::LocalizedVisualReturn,
+        .stage = FinalGuestSurfaceStage::PpSampledInput,
+        .logical_width = Width,
+        .logical_height = Height,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+    });
+    const auto pair = PlanPpSampledInputPairedCapture({
+        .enabled = true,
+        .width = Width,
+        .height = Height,
+        .output_format = FinalGuestSurfaceFormat::Bgra8,
+        .sampled_format = FinalGuestSurfaceFormat::Rgba16Float,
+        .slot_bytes = 16ull << 20,
+        .alignment = 256,
+    });
+    const auto backing = PlanPpSourceBackingFootprints(PpSourceBackingFootprintDescriptor{
+        .enabled = true,
+        .in_window = true,
+        .pp_draw_encoded = true,
+        .fsr_bypassed = true,
+        .source_width = Width,
+        .source_height = Height,
+        .logical_width = Width,
+        .logical_height = Height,
+        .source_format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .resolved_mip_count = 1,
+        .resolved_layer_count = 1,
+        .bound_mip_count = 1,
+        .bound_layer_count = 1,
+        .logical_full_fit = true,
+        .logical_top_left = true,
+        .logical_no_y_flip = true,
+        .buffer_alignment = 16,
+        .max_regions = 32,
+        .max_bytes = 1u << 20,
+        .selector = Watch("1"),
+    });
+    const auto plan = MakePpSampledInputSourceBackingTilePlan(
+        MakePpSampledInputPairedTilePlan(output, pair), backing, 16ull << 20, 16);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+
+    std::vector<std::byte> a(plan.sample_bytes, std::byte{0x20});
+    auto b = a;
+    auto c = a;
+    for (u32 pixel = 0; pixel < Width * Height / 4; ++pixel) {
+        const size_t output_offset = static_cast<size_t>(pixel) * 4;
+        b[output_offset] = b[output_offset + 1] = b[output_offset + 2] = std::byte{0xff};
+    }
+    const size_t backing_offset = plan.paired_backing_offset;
+    b[backing_offset] = std::byte{0x80};
+
+    const auto selector = Watch("1");
+    const auto transport = FinalGuestSurfaceTransport{
+        .surface_identity = 1,
+        .backing_generation = 1,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .width = Width,
+        .height = Height,
+    };
+    const auto evaluate = [&](const std::vector<std::byte>& middle,
+                              const std::vector<std::byte>& current) {
+        FinalGuestSurfaceReducer reducer{FinalGuestSurfaceLagConfig::Defaults(), selector};
+        (void)reducer.Observe(10, 1'000'000, transport, plan, a);
+        (void)reducer.Observe(11, 1'100'000, transport, plan, middle);
+        (void)reducer.Observe(12, 1'200'000, transport, plan, current);
+        return reducer.EvaluateCalibratedTriplet({1, 10, 1'000'000, true}, {2, 11, 1'100'000, true},
+                                                 {3, 12, 1'200'000, true}, true);
+    };
+
+    const auto aba = evaluate(b, c);
+    ASSERT_TRUE(aba.has_value());
+    EXPECT_EQ(aba->matched_ordinal_count, 1u);
+    EXPECT_EQ(aba->backing_aba_ordinal_count, 1u);
+    EXPECT_EQ(aba->backing_aba_ordinals[0], 1u);
+    EXPECT_EQ(aba->backing_stable_ordinal_count, 0u);
+    EXPECT_EQ(aba->backing_ambiguous_ordinal_count, 0u);
+
+    auto stable_middle = b;
+    stable_middle[backing_offset] = a[backing_offset];
+    const auto stable = evaluate(stable_middle, c);
+    ASSERT_TRUE(stable.has_value());
+    EXPECT_EQ(stable->backing_stable_ordinal_count, 1u);
+    EXPECT_EQ(stable->backing_stable_ordinals[0], 1u);
+
+    auto changed = c;
+    changed[backing_offset] = std::byte{0x21};
+    const auto ambiguous = evaluate(b, changed);
+    ASSERT_TRUE(ambiguous.has_value());
+    EXPECT_EQ(ambiguous->backing_ambiguous_ordinal_count, 1u);
+    EXPECT_EQ(ambiguous->backing_ambiguous_ordinals[0], 1u);
+
+    const std::string compact = FormatFinalGuestSurfaceCalibratedReport(*aba);
+    EXPECT_NE(compact.find(" ba=1"), std::string::npos);
+    EXPECT_NE(compact.find(" bs="), std::string::npos);
+    EXPECT_NE(compact.find(" bx="), std::string::npos);
+    EXPECT_LT(compact.size(), 320u);
 }
 
 } // namespace
