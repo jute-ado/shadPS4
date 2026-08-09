@@ -542,6 +542,19 @@ public:
         return pending;
     }
 
+    void ReportPpSampledInputLoss(const FinalGuestSurfaceSampledInputTakeResult& frame,
+                                  FinalGuestSurfaceStatus status) {
+        if (!frame.emit || !ShouldCapture(frame.payload.sequence)) {
+            return;
+        }
+        auto metadata = frame.payload.metadata;
+        metadata.valid = false;
+        auto pending = PreparePpSampledInput(
+            {frame.payload.sequence, frame.payload.process_time_us}, metadata, status);
+        ASSERT(!pending.HasCopy());
+        DeferReport(std::move(pending));
+    }
+
     void Record(PendingCapture pending, vk::Image image, vk::CommandBuffer cmdbuf) {
         if (!pending.HasCopy()) {
             DeferReport(std::move(pending));
@@ -1605,10 +1618,11 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
         LOG_INFO(Render, "PPInputShadowFrameState blank_discard=1 st={}",
                  static_cast<u32>(discarded_shadow.status));
     }
-    const auto discarded_sample = frame->pp_sampled_input_state.TakeForPresent(true);
-    if (discarded_sample.status == FinalGuestSurfaceStatus::GapLoss) {
+    const auto discarded_sample =
+        frame->pp_sampled_input_state.MarkPendingLoss(FinalGuestSurfaceStatus::GapLoss);
+    if (discarded_sample == FinalGuestSurfaceStatus::GapLoss) {
         LOG_INFO(Render, "PPSampledInputFrameState blank_discard=1 st={}",
-                 static_cast<u32>(discarded_sample.status));
+                 static_cast<u32>(discarded_sample));
     }
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
@@ -1728,6 +1742,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            if (pp_sampled_input_stage) {
+                final_guest_surface_content->ReportPpSampledInputLoss(
+                    pp_sampled_input_frame, FinalGuestSurfaceStatus::GapLoss);
+            }
             complete_frame(false);
             return;
         }

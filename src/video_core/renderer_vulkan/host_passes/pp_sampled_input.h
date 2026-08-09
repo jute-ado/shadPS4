@@ -270,8 +270,7 @@ struct PpSampledInputObservationPlan {
     if (observation_status == FinalGuestSurfaceStatus::Complete) {
         return plan;
     }
-    plan.loss.gap = 0;
-    plan.loss.invalidation = 0;
+    plan.loss = {};
     if (observation_status == FinalGuestSurfaceStatus::GapLoss) {
         plan.status = observation_status;
         plan.loss.gap = 1;
@@ -357,6 +356,16 @@ public:
         };
         ClearPending();
         return result;
+    }
+
+    [[nodiscard]] FinalGuestSurfaceStatus MarkPendingLoss(FinalGuestSurfaceStatus status) noexcept {
+        if (!pending) {
+            return FinalGuestSurfaceStatus::AlreadyConsumed;
+        }
+        pending_status = status == FinalGuestSurfaceStatus::GapLoss
+                             ? status
+                             : FinalGuestSurfaceStatus::InvalidationLoss;
+        return pending_status;
     }
 
     void Clear() noexcept {
