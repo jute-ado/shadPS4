@@ -805,12 +805,49 @@ struct PpTerminalScopeContentReport {
     u32 first_stable{};
     u32 second_aba{};
     u32 second_stable{};
+    u32 lineage_hops{};
+    FinalGuestSurfaceStatus lineage_status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss lineage_loss{};
 };
+
+struct PpTerminalScopeLineageHandoffDecision {
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool capture_consumer{};
+    bool publish_flip_alias{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeLineageHandoffDecision PlanPpTerminalScopeLineageHandoff(
+    bool exact_consumer, FinalGuestSurfaceStatus lineage_status, FinalGuestSurfaceLoss lineage_loss,
+    u32 producer_plane_mask, bool single_output) noexcept {
+    if (!exact_consumer) {
+        return {};
+    }
+    if (lineage_status != FinalGuestSurfaceStatus::Complete || lineage_loss.Any()) {
+        return {.status = lineage_status, .loss = lineage_loss};
+    }
+    if ((producer_plane_mask & 3u) != 3u || !single_output) {
+        return {.status = FinalGuestSurfaceStatus::GapLoss, .loss = {.gap = 1}};
+    }
+    return {
+        .status = FinalGuestSurfaceStatus::Complete,
+        .capture_consumer = true,
+        .publish_flip_alias = true,
+    };
+}
+
+[[nodiscard]] constexpr bool ShouldArmPpTerminalScopeFallbackAfterFlip(
+    bool consumed_lineage) noexcept {
+    return !consumed_lineage;
+}
 
 [[nodiscard]] constexpr PpTerminalScopeContentReport MakePpTerminalScopeContentReport(
     u64 sequence, FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss, u32 draw_count,
     u32 region_count, u32 consumer_observations = 0, u32 consumer_phase_mask = 0,
-    u32 consumer_shape_matches = 0, bool consumer_frozen = false, u32 plane_mask = 0) noexcept {
+    u32 consumer_shape_matches = 0, bool consumer_frozen = false, u32 plane_mask = 0,
+    u32 lineage_hops = 0,
+    FinalGuestSurfaceStatus lineage_status = FinalGuestSurfaceStatus::AlreadyConsumed,
+    FinalGuestSurfaceLoss lineage_loss = {}) noexcept {
     return {
         .sequence = sequence,
         .status = status,
@@ -822,6 +859,9 @@ struct PpTerminalScopeContentReport {
         .consumer_phase_mask = consumer_phase_mask,
         .consumer_shape_matches = consumer_shape_matches,
         .consumer_frozen = consumer_frozen,
+        .lineage_hops = lineage_hops,
+        .lineage_status = lineage_status,
+        .lineage_loss = lineage_loss,
     };
 }
 
@@ -1173,6 +1213,9 @@ private:
            " s0=" + std::to_string(report.first_stable) +
            " a1=" + std::to_string(report.second_aba) +
            " s1=" + std::to_string(report.second_stable) +
+           " lh=" + std::to_string(report.lineage_hops) +
+           " ls=" + std::to_string(static_cast<u32>(report.lineage_status)) +
+           " ll=" + std::to_string(report.lineage_loss.Any() ? 1 : 0) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
 }
 

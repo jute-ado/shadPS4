@@ -83,22 +83,58 @@ public:
     }
 
     void ObserveConsumer(const VideoCore::ImageColorScopeDrawDescriptor& draw,
-                         VideoCore::Image* sampled_input, const RenderState& state,
-                         u64 rendering_serial) {
-        Entry* entry = Find(draw.sampled_input_image);
+                         VideoCore::Image* sampled_input,
+                         VideoCore::ImageColorScopePrivateLink output_link,
+                         VideoCore::Image* output_image, bool single_output,
+                         const RenderState& state, u64 rendering_serial) {
+        Entry* entry = FindLineageTail(draw.sampled_input_image);
+        if (!entry) {
+            entry = Find(draw.sampled_input_image);
+        }
         if (!entry) {
             return;
         }
-        const auto action = entry->gate.ObserveConsumer(draw.sampled_input_image.uid,
-                                                        {
-                                                            .kind = draw.kind,
-                                                            .indexed = draw.indexed,
-                                                            .element_count = draw.element_count,
-                                                            .instance_count = draw.instance_count,
-                                                            .sampled_images = draw.sampled_images,
-                                                            .storage_writes = draw.storage_writes,
-                                                        });
+        const auto gate_link = entry->discovered ? entry->lineage.Root() : draw.sampled_input_image;
+        const auto action =
+            entry->gate.ObserveConsumer(gate_link.uid, {
+                                                           .kind = draw.kind,
+                                                           .indexed = draw.indexed,
+                                                           .element_count = draw.element_count,
+                                                           .instance_count = draw.instance_count,
+                                                           .sampled_images = draw.sampled_images,
+                                                           .storage_writes = draw.storage_writes,
+                                                       });
         if (action != PpTerminalScopeConsumerAction::CaptureConsumer || !sampled_input) {
+            return;
+        }
+        if (entry->discovered) {
+            auto handoff = PlanPpTerminalScopeLineageHandoff(
+                true, entry->lineage.Status(), entry->lineage.Loss(), entry->recorded_plane_mask,
+                single_output && output_link.Valid() && output_image);
+            if (handoff.status == FinalGuestSurfaceStatus::Complete) {
+                const auto extension = entry->lineage.Extend({
+                    .input = draw.sampled_input_image,
+                    .input_generation = sampled_input->EnsureDiagnosticBackingGeneration(),
+                    .output = output_link,
+                    .output_generation = output_image->EnsureDiagnosticBackingGeneration(),
+                    .single_input = draw.sampled_images == 1,
+                    .single_output = single_output,
+                });
+                handoff =
+                    PlanPpTerminalScopeLineageHandoff(true, extension.status, extension.loss,
+                                                      entry->recorded_plane_mask, single_output);
+            }
+            if (!handoff.capture_consumer) {
+                entry->status = handoff.status;
+                entry->loss = handoff.loss;
+                return;
+            }
+            RecordPlane(*entry, *sampled_input, state, 0, rendering_serial, 2);
+            if (entry->status == FinalGuestSurfaceStatus::Complete && !entry->loss.Any() &&
+                entry->recorded_plane_mask == 7 && handoff.publish_flip_alias) {
+                entry->flip_alias = output_link;
+                entry->flip_alias_ready = true;
+            }
             return;
         }
         entry->status = FinalGuestSurfaceStatus::Complete;
@@ -132,7 +168,7 @@ public:
             entry = FindOrAllocate(link);
             if (entry) {
                 allocated = true;
-                ConfigureEntry(*entry, link, image);
+                ConfigureEntry(*entry, link, image, true);
             }
         }
         if (!entry) {
@@ -159,7 +195,7 @@ public:
             .restarted = restart,
         });
         if (restart) {
-            ConfigureEntry(*entry, link, image);
+            ConfigureEntry(*entry, link, image, true);
         }
         const auto action = entry->gate.ObserveDraw(image.image_uid, rendering_serial, observed);
         const auto action_result =
@@ -186,11 +222,20 @@ public:
         if (!mapping.Valid()) {
             mapping = {};
         }
-        Entry* entry = Find(link);
+        const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
+        const u64 target_generation =
+            target_valid ? target->EnsureDiagnosticBackingGeneration() : 0;
+        Entry* entry = target_valid ? FindFlipAlias(link, target_generation) : nullptr;
+        const bool lineage_entry = entry != nullptr;
+        if (!entry) {
+            entry = Find(link);
+        }
         const bool had_entry = entry != nullptr;
         if (entry) {
-            const auto take = entry->gate.Take(
-                link.uid, target ? target->EnsureDiagnosticBackingGeneration() : 0);
+            const auto gate_link = lineage_entry ? entry->lineage.Root() : link;
+            const u64 gate_generation =
+                lineage_entry ? entry->lineage.RootGeneration() : target_generation;
+            const auto take = entry->gate.Take(gate_link.uid, gate_generation);
             Pending pending{
                 .sequence = sequence,
                 .process_time_us = process_time_us,
@@ -202,6 +247,10 @@ public:
                 .consumer_phase_mask = take.consumer_phase_mask,
                 .consumer_shape_matches = take.consumer_shape_matches,
                 .consumer_frozen = take.consumer_frozen,
+                .lineage_hops = lineage_entry ? entry->lineage.Hops() : 0,
+                .lineage_status = lineage_entry ? entry->lineage.Status()
+                                                : FinalGuestSurfaceStatus::AlreadyConsumed,
+                .lineage_loss = lineage_entry ? entry->lineage.Loss() : FinalGuestSurfaceLoss{},
                 .slot = entry->slot,
                 .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
             };
@@ -211,9 +260,15 @@ public:
             }
             entry->slot = {};
             Defer(std::move(pending));
+            if (lineage_entry) {
+                ReleaseEntry(entry);
+            }
         }
 
-        const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
+        if (!ShouldArmPpTerminalScopeFallbackAfterFlip(lineage_entry)) {
+            return;
+        }
+
         entry = target_valid ? FindOrAllocate(link) : nullptr;
         const auto decision = PlanPpTerminalScopeFlipDecision(
             had_entry, target_valid, entry != nullptr, config.window.Contains(sequence));
@@ -228,7 +283,7 @@ public:
         if (!decision.arm_next || !entry) {
             return;
         }
-        ConfigureEntry(*entry, link, *target);
+        ConfigureEntry(*entry, link, *target, false);
     }
 
     void Calibrate(const FinalGuestSurfaceFrameDiagnosticStamp& stamp,
@@ -287,6 +342,10 @@ private:
         FinalGuestSurfaceLoss loss{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u32 recorded_plane_mask{};
+        PpTerminalScopePrivateLineage lineage{};
+        VideoCore::ImageColorScopePrivateLink flip_alias{};
+        bool discovered{};
+        bool flip_alias_ready{};
     };
 
     struct Pending {
@@ -300,6 +359,9 @@ private:
         u32 consumer_phase_mask{};
         u32 consumer_shape_matches{};
         bool consumer_frozen{};
+        u32 lineage_hops{};
+        FinalGuestSurfaceStatus lineage_status{FinalGuestSurfaceStatus::AlreadyConsumed};
+        FinalGuestSurfaceLoss lineage_loss{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -327,6 +389,45 @@ private:
         return nullptr;
     }
 
+    [[nodiscard]] Entry* FindLineageTail(VideoCore::ImageColorScopePrivateLink link) noexcept {
+        Entry* match{};
+        for (auto& entry : entries) {
+            if (!entry || !entry->discovered || entry->lineage.Tail() != link) {
+                continue;
+            }
+            if (match) {
+                return nullptr;
+            }
+            match = entry.get();
+        }
+        return match;
+    }
+
+    [[nodiscard]] Entry* FindFlipAlias(VideoCore::ImageColorScopePrivateLink link,
+                                       u64 generation) noexcept {
+        Entry* match{};
+        for (auto& entry : entries) {
+            if (!entry || !entry->flip_alias_ready || entry->flip_alias != link ||
+                !entry->lineage.Resolve(link, generation).matched) {
+                continue;
+            }
+            if (match) {
+                return nullptr;
+            }
+            match = entry.get();
+        }
+        return match;
+    }
+
+    void ReleaseEntry(Entry* target) noexcept {
+        for (auto& entry : entries) {
+            if (entry.get() == target) {
+                entry.reset();
+                return;
+            }
+        }
+    }
+
     [[nodiscard]] bool HasTargetCapacity() const noexcept {
         return std::ranges::any_of(entries, [](const auto& entry) { return !entry; });
     }
@@ -341,7 +442,7 @@ private:
     }
 
     void ConfigureEntry(Entry& entry, VideoCore::ImageColorScopePrivateLink link,
-                        VideoCore::Image& target) {
+                        VideoCore::Image& target, bool discovered) {
         entry.plan = PlanPpTerminalScopeContent({
             .enabled = true,
             .armed = true,
@@ -362,7 +463,15 @@ private:
         entry.loss = entry.plan.loss;
         entry.slot = {};
         entry.recorded_plane_mask = 0;
+        entry.discovered = discovered;
+        entry.flip_alias = {};
+        entry.flip_alias_ready = false;
+        entry.lineage.Reset();
         const u64 generation = target.EnsureDiagnosticBackingGeneration();
+        if (discovered && !entry.lineage.Start(link, generation)) {
+            entry.status = entry.lineage.Status();
+            entry.loss = entry.lineage.Loss();
+        }
         if (!entry.gate.Arm(link.uid, generation)) {
             entry.status = FinalGuestSurfaceStatus::InvalidationLoss;
             entry.loss = {.invalidation = 1};
@@ -552,7 +661,8 @@ private:
                          pending.sequence, pending.status, pending.loss, pending.draw_count,
                          pending.layout.region_count, pending.consumer_observations,
                          pending.consumer_phase_mask, pending.consumer_shape_matches,
-                         pending.consumer_frozen, pending.layout.plane_mask)));
+                         pending.consumer_frozen, pending.layout.plane_mask, pending.lineage_hops,
+                         pending.lineage_status, pending.lineage_loss)));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",
@@ -1496,10 +1606,16 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
     bool writes_color_output{};
     bool input_alias{};
     VideoCore::Image* sampled_input_image{};
+    VideoCore::ImageId sole_output_id{};
+    u32 output_count{};
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
         const auto image_id = cb_descs[index].first;
         if (image_id) {
             writes_color_output = true;
+            ++output_count;
+            if (output_count == 1) {
+                sole_output_id = image_id;
+            }
             input_alias |= diagnostic_sampled_images.size() == 1 &&
                            diagnostic_sampled_images.front() == image_id;
         }
@@ -1540,7 +1656,14 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
         }
     }
     if (pp_terminal_scope_content) {
-        pp_terminal_scope_content->ObserveConsumer(draw, sampled_input_image, state,
+        VideoCore::Image* output_image{};
+        VideoCore::ImageColorScopePrivateLink output_link{};
+        if (output_count == 1) {
+            output_image = &texture_cache.GetImage(sole_output_id);
+            output_link = {.id = sole_output_id, .uid = output_image->image_uid};
+        }
+        pp_terminal_scope_content->ObserveConsumer(draw, sampled_input_image, output_link,
+                                                   output_image, output_count == 1, state,
                                                    rendering_serial);
     }
     for (u32 index = 0; index < state.num_color_attachments; ++index) {
