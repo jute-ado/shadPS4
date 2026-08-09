@@ -39,6 +39,7 @@ struct PpTerminalScopeContentConfig {
     bool enabled{};
     bool capture_pre_first{};
     bool capture_predecessor{};
+    bool capture_sampled_input_content{};
     PpTerminalScopeDrawSelector predecessor{};
     PpTerminalScopeDrawSelector first{};
     PpTerminalScopeDrawSelector second{};
@@ -125,11 +126,15 @@ template <typename ReadValue>
     const auto second_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_SECOND");
     const auto consumer_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_CONSUMER");
     const auto predecessor_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR");
+    const auto input_content_value = read_value("SHADPS4_PP_TERMINAL_SCOPE_INPUT_CONTENT");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
     }
     if (final_backing_join_value && *final_backing_join_value != "1") {
+        return std::nullopt;
+    }
+    if (input_content_value && *input_content_value != "1") {
         return std::nullopt;
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
@@ -145,6 +150,7 @@ template <typename ReadValue>
         .content = {.enabled = true,
                     .capture_pre_first = true,
                     .capture_predecessor = predecessor.has_value(),
+                    .capture_sampled_input_content = input_content_value.has_value(),
                     .predecessor = predecessor.value_or(PpTerminalScopeDrawSelector{}),
                     .first = *first,
                     .second = *second,
@@ -1529,6 +1535,19 @@ struct PpTerminalScopeContentHistoryRegion {
     auto operator<=>(const PpTerminalScopeContentHistoryRegion&) const = default;
 };
 
+struct PpTerminalScopeSampledInputContentHistoryPlane {
+    u32 region_count{};
+    u32 plane_offset{};
+    u32 plane_bytes{};
+    std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
+        regions{};
+    FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+
+    bool operator==(const PpTerminalScopeSampledInputContentHistoryPlane&) const = default;
+};
+
 struct PpTerminalScopeContentHistoryLayout {
     u32 region_count{};
     u32 plane_bytes{};
@@ -1539,13 +1558,19 @@ struct PpTerminalScopeContentHistoryLayout {
     u32 predecessor_pre_plane_offset{};
     u32 predecessor_post_plane_offset{};
     u32 total_bytes{};
+    u32 input_count{};
+    u32 input_capture_mask{};
+    u32 input_unavailable_mask{};
+    std::array<PpTerminalScopeSampledInputContentHistoryPlane,
+               PpTerminalScopeSampledInputContentPlan::MaxInputs>
+        input_planes{};
     u32 plane_mask{};
     std::array<PpTerminalScopeContentHistoryRegion, FinalGuestSurfaceWatchOrdinals::MaxOrdinals>
         regions{};
     u32 bytes_per_pixel{4};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
 
-    auto operator<=>(const PpTerminalScopeContentHistoryLayout&) const = default;
+    bool operator==(const PpTerminalScopeContentHistoryLayout&) const = default;
 };
 
 struct PpTerminalScopeFinalBackingLayout {
@@ -1661,6 +1686,15 @@ struct PpTerminalScopeCalibratedReport {
     std::vector<u32> pre_first_localized_visual_return_ordinals{};
     std::vector<u32> predecessor_pre_localized_visual_return_ordinals{};
     std::vector<u32> predecessor_post_localized_visual_return_ordinals{};
+    u32 input_count{};
+    u32 input_capture_mask{};
+    u32 input_unavailable_mask{};
+    std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
+        sampled_input_aba_ordinals{};
+    std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
+        sampled_input_stable_ordinals{};
+    std::array<std::vector<u32>, PpTerminalScopeSampledInputContentPlan::MaxInputs>
+        sampled_input_ambiguous_ordinals{};
     std::vector<u32> output_final_backing_equal_ordinals{};
     std::vector<u32> output_final_backing_different_ordinals{};
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
@@ -1901,6 +1935,62 @@ private:
         }
     }
 
+    [[nodiscard]] static bool EqualSampledInputRegion(const Observation& left,
+                                                      const Observation& right, u32 input_index,
+                                                      u32 region_index) noexcept {
+        if (left.layout != right.layout || input_index >= left.layout.input_count ||
+            input_index >= left.layout.input_planes.size()) {
+            return false;
+        }
+        const auto& plane = left.layout.input_planes[input_index];
+        if (region_index >= plane.region_count ||
+            (plane.format != FinalGuestSurfaceFormat::Rgba8 &&
+             plane.format != FinalGuestSurfaceFormat::Bgra8)) {
+            return false;
+        }
+        const auto& region = plane.regions[region_index];
+        const u64 left_offset = static_cast<u64>(plane.plane_offset) + region.buffer_offset;
+        const u64 right_offset = static_cast<u64>(
+                                     right.layout.input_planes[input_index].plane_offset) +
+                                 right.layout.input_planes[input_index]
+                                     .regions[region_index]
+                                     .buffer_offset;
+        if (region.byte_size == 0 || region.byte_size % 4 != 0 ||
+            left_offset + region.byte_size > left.bytes.size() ||
+            right_offset + region.byte_size > right.bytes.size()) {
+            return false;
+        }
+        for (u32 offset = 0; offset < region.byte_size; ++offset) {
+            if (offset % 4 == 3) {
+                continue;
+            }
+            if (left.bytes[left_offset + offset] != right.bytes[right_offset + offset]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static void ClassifySampledInput(const Observation& a, const Observation& b,
+                                     const Observation& c, u32 input_index,
+                                     std::vector<u32>& aba, std::vector<u32>& stable,
+                                     std::vector<u32>& ambiguous) {
+        const auto& plane = a.layout.input_planes[input_index];
+        for (u32 region_index = 0; region_index < plane.region_count; ++region_index) {
+            const bool ab = EqualSampledInputRegion(a, b, input_index, region_index);
+            const bool bc = EqualSampledInputRegion(b, c, input_index, region_index);
+            const bool ac = EqualSampledInputRegion(a, c, input_index, region_index);
+            const u32 ordinal = plane.regions[region_index].logical_ordinal;
+            if (ac && !ab) {
+                aba.push_back(ordinal);
+            } else if (ab && bc) {
+                stable.push_back(ordinal);
+            } else {
+                ambiguous.push_back(ordinal);
+            }
+        }
+    }
+
     [[nodiscard]] static bool ClassifyLocalizedPlane(const Observation& a, const Observation& b,
                                                      const Observation& c, u32 plane,
                                                      std::vector<u32>& localized_visual_return) {
@@ -2129,6 +2219,18 @@ private:
                 return report;
             }
         }
+        report.input_count = a->layout.input_count;
+        report.input_capture_mask = a->layout.input_capture_mask;
+        report.input_unavailable_mask = a->layout.input_unavailable_mask;
+        for (u32 input_index = 0; input_index < report.input_count; ++input_index) {
+            if ((report.input_capture_mask & (1u << input_index)) == 0) {
+                continue;
+            }
+            ClassifySampledInput(*a, *b, *c, input_index,
+                                 report.sampled_input_aba_ordinals[input_index],
+                                 report.sampled_input_stable_ordinals[input_index],
+                                 report.sampled_input_ambiguous_ordinals[input_index]);
+        }
         if (join_final_backing &&
             ((a->layout.plane_mask & (1u << 3)) == 0 ||
              !ClassifyFinalBackingJoin(*a, *b, *c, *backing_a, *backing_b, *backing_c,
@@ -2277,7 +2379,7 @@ private:
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedReport(
     const PpTerminalScopeCalibratedReport& report) {
-    return "FGSCTST q=" + std::to_string(report.request_ordinal) +
+    auto result = "FGSCTST q=" + std::to_string(report.request_ordinal) +
            " abc=" + std::to_string(report.sequences[0]) + '/' +
            std::to_string(report.sequences[1]) + '/' + std::to_string(report.sequences[2]) +
            " a0=" + FormatPpTerminalScopeOrdinalList(report.first_aba_ordinals) +
@@ -2320,6 +2422,24 @@ private:
                report.predecessor_post_localized_visual_return_ordinals) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " lm=" + std::to_string(report.loss.Any() ? 1 : 0);
+    result += " im=" + std::to_string(report.input_count) + '/' +
+              std::to_string(report.input_capture_mask) + '/' +
+              std::to_string(report.input_unavailable_mask);
+    for (u32 input_index = 0; input_index < report.input_count; ++input_index) {
+        if ((report.input_capture_mask & (1u << input_index)) == 0) {
+            continue;
+        }
+        result += " z" + std::to_string(input_index) + "a=" +
+                  FormatPpTerminalScopeOrdinalList(
+                      report.sampled_input_aba_ordinals[input_index]) +
+                  " z" + std::to_string(input_index) + "s=" +
+                  FormatPpTerminalScopeOrdinalList(
+                      report.sampled_input_stable_ordinals[input_index]) +
+                  " z" + std::to_string(input_index) + "x=" +
+                  FormatPpTerminalScopeOrdinalList(
+                      report.sampled_input_ambiguous_ordinals[input_index]);
+    }
+    return result;
 }
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeCalibratedCoverage(
