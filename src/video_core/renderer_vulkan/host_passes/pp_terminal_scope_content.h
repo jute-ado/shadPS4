@@ -6,6 +6,7 @@
 #include <array>
 #include <charconv>
 #include <deque>
+#include <limits>
 #include <span>
 #include <string>
 #include <vector>
@@ -219,6 +220,10 @@ struct PpTerminalScopeContentTakeResult {
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
     u32 draw_count{};
+    u32 consumer_observations{};
+    u32 consumer_phase_mask{};
+    u32 consumer_shape_matches{};
+    bool consumer_frozen{};
     bool cpu_wait{};
     bool finish{};
     bool retains_image{};
@@ -284,6 +289,9 @@ public:
         scope_serial = 0;
         phase = 0;
         frozen = false;
+        consumer_observations = 0;
+        consumer_phase_mask = 0;
+        consumer_shape_matches = 0;
         return true;
     }
 
@@ -325,8 +333,18 @@ public:
 
     [[nodiscard]] constexpr bool ObserveConsumer(
         u64 target_token, const PpTerminalScopeDrawSelector& consumer) noexcept {
-        if (target_token == 0 || target_token != token || phase != 2 || frozen ||
-            !MatchesPpTerminalScopeDraw(config.consumer, consumer)) {
+        if (target_token == 0 || target_token != token || frozen) {
+            return false;
+        }
+        if (consumer_observations != std::numeric_limits<u32>::max()) {
+            ++consumer_observations;
+        }
+        consumer_phase_mask |= 1u << std::min(phase, 3u);
+        const bool shape_matches = MatchesPpTerminalScopeDraw(config.consumer, consumer);
+        if (shape_matches && consumer_shape_matches != std::numeric_limits<u32>::max()) {
+            ++consumer_shape_matches;
+        }
+        if (phase != 2 || !shape_matches) {
             return false;
         }
         frozen = true;
@@ -336,6 +354,10 @@ public:
     [[nodiscard]] constexpr PpTerminalScopeContentTakeResult Take(u64 target_token,
                                                                   u64 generation) noexcept {
         PpTerminalScopeContentTakeResult result{};
+        result.consumer_observations = consumer_observations;
+        result.consumer_phase_mask = consumer_phase_mask;
+        result.consumer_shape_matches = consumer_shape_matches;
+        result.consumer_frozen = frozen;
         if (target_token != token || generation != armed_generation) {
             result.status = FinalGuestSurfaceStatus::InvalidationLoss;
             result.loss.invalidation = 1;
@@ -350,6 +372,9 @@ public:
         scope_serial = 0;
         phase = 0;
         frozen = false;
+        consumer_observations = 0;
+        consumer_phase_mask = 0;
+        consumer_shape_matches = 0;
         return result;
     }
 
@@ -360,6 +385,9 @@ private:
         scope_serial = 0;
         phase = 0;
         frozen = false;
+        consumer_observations = 0;
+        consumer_phase_mask = 0;
+        consumer_shape_matches = 0;
     }
 
     PpTerminalScopeContentConfig config{};
@@ -368,6 +396,9 @@ private:
     u64 scope_serial{};
     u32 phase{};
     bool frozen{};
+    u32 consumer_observations{};
+    u32 consumer_phase_mask{};
+    u32 consumer_shape_matches{};
 };
 
 struct PpTerminalScopeContentDescriptor {
@@ -493,6 +524,10 @@ struct PpTerminalScopeContentReport {
     FinalGuestSurfaceLoss loss{};
     u32 draw_count{};
     u32 region_count{};
+    u32 consumer_observations{};
+    u32 consumer_phase_mask{};
+    u32 consumer_shape_matches{};
+    bool consumer_frozen{};
     u32 first_aba{};
     u32 first_stable{};
     u32 second_aba{};
@@ -501,13 +536,18 @@ struct PpTerminalScopeContentReport {
 
 [[nodiscard]] constexpr PpTerminalScopeContentReport MakePpTerminalScopeContentReport(
     u64 sequence, FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss, u32 draw_count,
-    u32 region_count) noexcept {
+    u32 region_count, u32 consumer_observations = 0, u32 consumer_phase_mask = 0,
+    u32 consumer_shape_matches = 0, bool consumer_frozen = false) noexcept {
     return {
         .sequence = sequence,
         .status = status,
         .loss = loss,
         .draw_count = draw_count,
         .region_count = region_count,
+        .consumer_observations = consumer_observations,
+        .consumer_phase_mask = consumer_phase_mask,
+        .consumer_shape_matches = consumer_shape_matches,
+        .consumer_frozen = consumer_frozen,
     };
 }
 
@@ -831,6 +871,10 @@ private:
     return "FGSCTS s=" + std::to_string(report.sequence) +
            " st=" + std::to_string(static_cast<u32>(report.status)) +
            " d=" + std::to_string(report.draw_count) + " r=" + std::to_string(report.region_count) +
+           " co=" + std::to_string(report.consumer_observations) +
+           " cp=" + std::to_string(report.consumer_phase_mask) +
+           " cm=" + std::to_string(report.consumer_shape_matches) +
+           " cf=" + std::to_string(report.consumer_frozen ? 1 : 0) +
            " a0=" + std::to_string(report.first_aba) +
            " s0=" + std::to_string(report.first_stable) +
            " a1=" + std::to_string(report.second_aba) +

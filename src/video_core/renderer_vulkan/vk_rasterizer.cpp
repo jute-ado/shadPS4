@@ -141,6 +141,10 @@ public:
                 .status = take.status,
                 .loss = take.loss,
                 .draw_count = take.draw_count,
+                .consumer_observations = take.consumer_observations,
+                .consumer_phase_mask = take.consumer_phase_mask,
+                .consumer_shape_matches = take.consumer_shape_matches,
+                .consumer_frozen = take.consumer_frozen,
                 .slot = entry->slot,
                 .slot_offset = entry->slot ? entry->slot.slot * slot_stride : 0,
             };
@@ -245,6 +249,10 @@ private:
         FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss loss{};
         u32 draw_count{};
+        u32 consumer_observations{};
+        u32 consumer_phase_mask{};
+        u32 consumer_shape_matches{};
+        bool consumer_frozen{};
         FinalGuestSurfaceReadbackSlotPool::Token slot{};
         u64 slot_offset{};
     };
@@ -448,7 +456,9 @@ private:
             LOG_INFO(Render, "{}",
                      FormatPpTerminalScopeContentReport(MakePpTerminalScopeContentReport(
                          pending.sequence, pending.status, pending.loss, pending.draw_count,
-                         pending.layout.region_count)));
+                         pending.layout.region_count, pending.consumer_observations,
+                         pending.consumer_phase_mask, pending.consumer_shape_matches,
+                         pending.consumer_frozen)));
             if (config.window.IsFinal(pending.sequence)) {
                 LOG_INFO(Render,
                          "FGSCTSC s={} selected={} emitted={} complete={} loss={} regions={}",
