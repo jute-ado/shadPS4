@@ -327,7 +327,10 @@ TEST(PpSampledInput, ValidStampedFrameTransfersOnceWithoutStartupPoisoning) {
 
     EXPECT_EQ(state.AssignIfValid(true, {101, 2'100'000, 8, metadata}),
               FinalGuestSurfaceStatus::Complete);
-    EXPECT_EQ(state.TakeForPresent(true).status, FinalGuestSurfaceStatus::GapLoss);
+    const auto reused = state.TakeForPresent(true);
+    EXPECT_EQ(reused.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_TRUE(reused.emit);
+    EXPECT_EQ(reused.payload.sequence, 101u);
 }
 
 TEST(PpSampledInput, PresentTransferIsOneFloatCopyWithScalarCallbackAndNoWait) {
