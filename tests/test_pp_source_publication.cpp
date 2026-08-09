@@ -3345,4 +3345,50 @@ TEST(PpUpstreamFeedbackPrePost, FramePublishesOnlyTheSelectedCompletePair) {
     EXPECT_EQ(failed.loss.gap, 1u);
 }
 
+TEST(PpUpstreamFeedbackPrePost, CompactsOnlyTheSelectedCandidatePlanes) {
+    FinalGuestSurfaceWatchOrdinals selector{};
+    selector.count = 1;
+    selector.ordinals[0] = 1024;
+    const auto plan = PlanPpUpstreamFeedbackPrePost({
+        .enabled = true,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .source_width = 1920,
+        .source_height = 1080,
+        .format = FinalGuestSurfaceFormat::Bgra8,
+        .samples = 1,
+        .mip_count = 1,
+        .layer_count = 1,
+        .color = true,
+        .type_2d = true,
+        .uniform_state = true,
+        .selector = selector,
+        .candidate_capacity = 4,
+        .buffer_alignment = 16,
+        .max_regions = 8,
+        .max_bytes = PpTerminalScopeSnapshotBytes,
+    });
+    ASSERT_TRUE(plan.copy);
+    std::vector<std::byte> slot(plan.total_bytes);
+    const auto pre = ResolvePpUpstreamFeedbackPrePostCopy(plan, 2, false, 0);
+    const auto post = ResolvePpUpstreamFeedbackPrePostCopy(plan, 2, true, 0);
+    ASSERT_TRUE(pre.copy);
+    ASSERT_TRUE(post.copy);
+    std::ranges::fill(std::span{slot}.subspan(pre.buffer_offset, pre.byte_size), std::byte{0x11});
+    std::ranges::fill(std::span{slot}.subspan(post.buffer_offset, post.byte_size), std::byte{0x22});
+
+    const auto compact = CompactPpUpstreamFeedbackPrePost(plan, 2, slot);
+    ASSERT_EQ(compact.status, FinalGuestSurfaceStatus::Complete);
+    ASSERT_FALSE(compact.loss.Any());
+    ASSERT_EQ(compact.bytes.size(), plan.plane_bytes * 2u);
+    EXPECT_EQ(compact.bytes[plan.regions[0].buffer_offset], std::byte{0x11});
+    EXPECT_EQ(compact.bytes[plan.plane_bytes + plan.regions[0].buffer_offset], std::byte{0x22});
+
+    const auto short_slot = CompactPpUpstreamFeedbackPrePost(
+        plan, 2, std::span<const std::byte>{slot}.first(post.buffer_offset + post.byte_size - 1));
+    EXPECT_EQ(short_slot.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(short_slot.loss.invalidation, 1u);
+    EXPECT_TRUE(short_slot.bytes.empty());
+}
+
 } // namespace
