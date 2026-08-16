@@ -18,6 +18,9 @@ and pass PS4-only regression gates.
 | Buffer lookup | Independently audited | Selection and containment behavior is covered by focused tests and PS4 gates. |
 | Uncharted 1 cave hair | Accepted | MUBUF `addr64` decoding and source-buffer residency are preserved. |
 | Uncharted 3 pub geometry corruption | Operationally fixed for CUSA02320 | The integration build plus a per-game `Relaxed` GPU-readback override passed three fresh full-scene trials. The global default remains unchanged; a general automatic readback trigger is still future work. |
+| Uncharted 1 production visual and audio checkpoints | Passed on the integration build | The production-shaped seed keeps DMA enabled and scopes `Relaxed` readbacks to CUSA02320. Reviewed title and cave frames are correct, and the preserved stereo PCM audio contract passes. |
+| Uncharted 2 checkpoint and performance route | Passed on the integration build | The 180-second checkpoint completed without the historical device-loss, buffer-lookup, EOP, or offset failures. Three performance trials held approximately 60 FPS with no measured stutter. |
+| ReadConst with DMA disabled | Candidate code repair | Dynamic and immediate ReadConst accesses now follow the global DMA boundary consistently; focused tests, shader tests, application linking, and title checkpoints pass. The complete test build remains blocked by an unrelated GoogleTest/Clang 22 warning. |
 
 Compatibility claims are checkpoint-specific until the complete campaign
 playthrough and regression matrix is green.
@@ -41,6 +44,85 @@ playthrough and regression matrix is green.
 Keep code, corpus metadata, and private evidence in separate repositories and
 worktrees. See [Emulator Test Lab workflow](emulator-test-lab.md) for the
 cross-repository rules.
+
+## Validation configuration is part of test authority
+
+A visually bad run is not evidence of a renderer regression until the candidate
+and accepted control use the same authoritative seed configuration. This
+campaign exposed a particularly misleading case: an intentionally diagnostic
+Uncharted 1 seed had direct memory access disabled. It rendered an all-black
+scene on both the accepted pre-stack build and the current integration build,
+while the historical visible reference and the production-shaped seed had DMA
+enabled.
+
+The correct production validation therefore uses:
+
+- the normal global DMA setting used by the accepted reference;
+- the title-scoped CUSA02320 `Relaxed` readback override;
+- the exact checkpoint, input route, asset set, and scenario revision;
+- a reviewed scene reference from that same configuration.
+
+Do not label a black, corrupt, or unexpectedly stable diagnostic run as a new
+renderer failure until these inputs match. Record configuration differences as
+first-class evidence rather than silently cloning a convenient scenario.
+
+Test Lab provenance has two related operational requirements:
+
+- scenario files must live under a Git repository or worktree so their revision
+  can be recorded; coordinator-local scenarios are not authoritative inputs;
+- temporary bisect worktrees must be clean and commit-specific. Nested or
+  untracked repositories can make bounded provenance hashing ambiguous or
+  excessively large.
+
+These rules prevent a seed mismatch or provenance failure from being mistaken
+for an emulator result.
+
+## ReadConst policy must follow DMA availability
+
+The broad U1 diagnostic route uncovered a real fail-fast defect even though its
+black output was a seed-configuration issue. A prior shader change forced
+dynamic ReadConst offsets onto the DMA path even when direct memory access was
+globally disabled. Shader collection also retained DMA descriptor metadata in
+that disabled state. The generated resource contract and runtime bindings could
+therefore disagree, leading to a Windows fail-fast termination.
+
+The repaired invariant is general:
+
+- when DMA is disabled, both immediate and dynamic ReadConst accesses use the
+  flat-buffer path;
+- when DMA is enabled, dynamic offsets use DMA and immediate offsets retain the
+  established DMA-with-flat-buffer-fallback behavior;
+- shader collection clears `uses_dma` and ReadConst descriptor metadata when
+  DMA is disabled;
+- production behavior with DMA enabled is unchanged.
+
+The focused TDD matrix covers both offset classes, both DMA states, and metadata
+retention. This is not a title, shader, address, or draw special case. The
+DMA-disabled route now completes rather than terminating, but it remains a
+diagnostic configuration and is not a visual acceptance route for U1.
+
+### 2026-08-16 broad validation snapshot
+
+After the ReadConst repair, the integration build passed these sanitized gates:
+
+- **U1 visual:** reviewed title and cave frames at 60, 90, and 120 seconds show
+  the expected characters, geometry, lighting, and hair;
+- **U1 audio:** the preserved stereo PCM policy passes;
+- **U2 checkpoint:** the 180-second route completes without device loss,
+  `FindBuffer`, EOP, or offset-assertion signatures;
+- **U2 performance:** three valid trials average approximately `60.004 FPS`,
+  with `16.543 ms` median, `17.522 ms` p95, `17.594 ms` p99, and zero measured
+  stutter;
+- **U3 visual:** the exact CUSA02320 temporal route passes again with the global
+  readback mode disabled and only the per-game `Relaxed` override active.
+
+Focused ReadConst tests pass `3/3`, the shader/GCN target passes `59/59`, and the
+Release application builds and links. A build of the complete test tree is
+currently blocked in third-party GoogleTest/GMock because Clang 22 promotes a
+`char8_t` to `char32_t` conversion warning to an error. That toolchain issue is
+not a failure in the changed source, but it means the complete regression box
+must remain unchecked until the dependency/toolchain gate is resolved and the
+full suite runs.
 
 ## Visual acceptance is multidimensional
 
@@ -328,6 +410,11 @@ Keep private and outside Git:
 - [ ] Audio and performance results do not regress.
 - [ ] Emulator and corpus revisions are recorded together when test intent
       changes.
+- [ ] Candidate and accepted-control seeds have matching DMA, readback, title,
+      route, asset, and checkpoint configuration.
+- [ ] Scenario provenance comes from a clean, commit-specific Git worktree; no
+      coordinator-local or nested untracked repository is treated as an
+      authoritative input.
 - [ ] Documentation distinguishes accepted, rejected, negative, and unknown
       findings.
 - [ ] Only source, tests, and sanitized Markdown are committed; private evidence
