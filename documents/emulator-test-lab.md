@@ -30,6 +30,9 @@ Public regression tests must use synthetic or legally redistributable inputs.
 Reduce behavior learned from a private commercial-game run to a synthetic test
 whenever possible.
 
+For the stricter visual-correctness rules and a worked compatibility campaign,
+see [Uncharted compatibility investigation guide](uncharted-compatibility-investigation.md).
+
 ## Starting an emulator task
 
 Create one emulator feature worktree and one unique run root. Use the accepted
