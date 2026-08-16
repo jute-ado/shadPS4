@@ -17,7 +17,7 @@ and pass PS4-only regression gates.
 | Video decode packet data | Accepted | Packet storage outlives asynchronous decode and presentation work. |
 | Buffer lookup | Independently audited | Selection and containment behavior is covered by focused tests and PS4 gates. |
 | Uncharted 1 cave hair | Accepted | MUBUF `addr64` decoding and source-buffer residency are preserved. |
-| Uncharted 3 pub flicker | Active | The remaining corruption is downstream of several now-proven resource, sampling, and target-readback boundaries; no final behavior repair is accepted yet. |
+| Uncharted 3 pub geometry corruption | Operationally fixed for CUSA02320 | The integration build plus a per-game `Relaxed` GPU-readback override passed three fresh full-scene trials. The global default remains unchanged; a general automatic readback trigger is still future work. |
 
 Compatibility claims are checkpoint-specific until the complete campaign
 playthrough and regression matrix is green.
@@ -79,7 +79,7 @@ rejects the stable polygon by both mean absolute and cosine difference.
 The lesson is general: a temporal pass is only meaningful after scene identity
 and static correctness are established.
 
-## Current U3 failure signature
+## U3 failure signature
 
 Clean accepted main renders the intended pub scene, but adjacent frames can
 alternate between:
@@ -95,6 +95,74 @@ temporal metric improves.
 Current evidence rules out several sampled-image, sampler, cube-coordinate, and
 content-lineage hypotheses as unique discriminators. These diagnostics remain
 useful negative evidence, but they do not authorize renderer behavior changes.
+
+## Validated CUSA02320 operational fix
+
+The decisive control was GPU readback policy, not another shader, sampler, or
+attachment mutation. With the global `readbacks_mode` left at `Disabled`, the
+reviewed full-scene route reproduced one-frame geometry expansion and object or
+character disappearance. Setting the effective mode to `Relaxed` removed the
+corruption. `Precise` also passed, but was not required.
+
+Use a game-specific override so unrelated titles keep their existing global
+policy:
+
+```json
+{
+  "GPU": {
+    "readbacks_mode": 1
+  }
+}
+```
+
+Store this as `custom_configs/CUSA02320.json` in the shadPS4 user directory, or
+select **Readbacks Mode: Relaxed** in the CUSA02320 game-specific settings UI.
+Do not change the global default solely for this title.
+
+### Acceptance evidence
+
+The production-shaped validation kept the seeded global configuration at mode
+`0` and supplied only the per-game override. The emulator reported that a
+game-specific configuration was active and that the effective mode was `1`.
+Three independent full-scene trials then produced:
+
+- normal process exit in all three trials;
+- all required scene markers and no forbidden markers;
+- 300 captured frames and 300 distinct frames per trial;
+- zero global abrupt returns per trial;
+- zero localized abrupt returns per trial;
+- maximum adjacent differences of approximately `0.00131`, `0.00136`, and
+  `0.00106`, all below the `0.007` contract threshold;
+- manual review of the complete 30-second frame sequence with no expanding
+  table, disappearing character, large dark polygon, or scene replacement.
+
+The same integration build failed with mode `0`, so the readback control is a
+real A/B discriminator rather than a lucky replay. A near-upstream control with
+mode `1` still stopped at the older `FindBuffer` assertion before the scene,
+which proves the per-game setting is not a substitute for the integration
+branch's generic buffer lifetime and lookup repairs.
+
+This is an accepted operational fix for the tested CUSA02320 checkpoint. It is
+not yet a general code repair that automatically discovers which GPU-produced
+pages the guest will read. Future code work should preserve the successful
+semantics while finding a narrow, data-driven trigger; it must not hard-code a
+title, shader, draw, address, or captured event.
+
+### Rollback and diagnostics
+
+To roll back the operational fix, remove the CUSA02320 custom configuration or
+set its Readbacks Mode back to Disabled. Keep that rollback scoped to the game;
+do not delete the global user configuration.
+
+When validating another region or release:
+
+1. confirm the title ID and create a separate per-game override;
+2. verify the startup log reports both game-specific configuration use and the
+   intended effective readback mode;
+3. run at least three clean full-scene trials;
+4. inspect the complete video manually, not only the temporal verdict;
+5. record performance separately, because this fixed-duration visual route is
+   not a frame-time benchmark.
 
 ## Cached shader permutation generation
 
@@ -187,13 +255,20 @@ capability. A validator-clean implementation must either declare and support
 that capability or keep the conditional descriptor load inline. Passing unit
 tests alone did not prove the generated module legal.
 
-## Current next boundary
+## Next code boundary if the defect reproduces with Relaxed readbacks
 
-The strongest remaining boundary is the fragment color/MRT export before
-fixed-function depth/stencil, blend, and attachment writeback, joined to the
-existing target-post plane. Instrument it without adding a second render pass or
-changing renderer behavior. The test must prove that it consumes the existing
-export SSA, uses the existing sequence/writer authority, retains only bounded
+Do not add more fragment-export instrumentation while the validated
+game-specific readback configuration remains clean. If the defect reproduces
+under `Relaxed`, first determine which GPU-owned page was read by the guest and
+why the relaxed protection/flush path missed it. Preserve the successful
+readback semantics with a focused synthetic RED before changing policy.
+
+If that readback path is exact and the visual defect still reproduces, the next
+rendering boundary is the fragment color/MRT export before fixed-function
+depth/stencil, blend, and attachment writeback, joined to the existing
+target-post plane. Instrument it without adding a second render pass or changing
+renderer behavior. The test must prove that it consumes the existing export
+SSA, uses the existing sequence/writer authority, retains only bounded
 classifications, and adds no image operation, copy, barrier, command, slot,
 wait, or release.
 
