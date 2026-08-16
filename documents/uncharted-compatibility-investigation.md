@@ -17,7 +17,7 @@ and pass PS4-only regression gates.
 | Video decode packet data | Accepted | Packet storage outlives asynchronous decode and presentation work. |
 | Buffer lookup | Independently audited | Selection and containment behavior is covered by focused tests and PS4 gates. |
 | Uncharted 1 cave hair | Accepted | MUBUF `addr64` decoding and source-buffer residency are preserved. |
-| Uncharted 3 pub flicker | Active | Cached shader permutation compilation must consume one coherent guest-resource generation. |
+| Uncharted 3 pub flicker | Active | The remaining corruption is downstream of several now-proven resource, sampling, and target-readback boundaries; no final behavior repair is accepted yet. |
 
 Compatibility claims are checkpoint-specific until the complete campaign
 playthrough and regression matrix is green.
@@ -122,7 +122,86 @@ The candidate contract is deliberately narrow:
 
 This contract requires focused RED tests for generation replay, malformed
 snapshot rejection, fetch replay, call ordering, and transient ownership. It is
-not accepted until the corrected full-scene oracle and broader PS4 gates pass.
+implemented on the integration branch and remains useful hardening, but it did
+not eliminate the full-scene defect. It is not, by itself, the U3 fix.
+
+## U3 boundaries measured so far
+
+The investigation now has sequence-joined, bounded observations at several
+layers. These results are important because they prevent future work from
+repeating attractive but non-discriminating hypotheses.
+
+| Boundary | Result | Interpretation |
+| --- | --- | --- |
+| Final sampled-image lookup and view | Uniform across event and control frames | The selected image, direct view, descriptor, and subresource relation do not uniquely explain the event. |
+| Sampler realization and descriptor | Uniform and exact | LOD, compare, reduction, association, cache, and sampler descriptor state did not separate event frames. |
+| Cube lowering | Uniform `NonCube` | The measured source is not a cube resource; a cube-array face remap is not authorized. |
+| Sampled content lineage | Clean refresh, current direct producer, no transfer | Repeating the same lineage receipt would be redundant. |
+| Instrumented sampled values | Stable in localized event rows | The selected sampled value is not the first observed unstable boundary. |
+| Tee-authorized target pre/post temporal class | Event transitions also occur in controls | This localizes some changes to the draw-output side but does not establish causality. |
+| Same-frame target pre/post equality | Changed pixels are enriched in current event members but also common in controls | Useful localization only; not a unique repair condition. |
+
+All observations retain scalar classifications only. Raw shader values, image
+identities, routes, coordinates, captures, and private logs remain outside the
+repository.
+
+### Target pre/post interpretation
+
+The target pre/post reuse path is authorized by the existing sampled-result
+tee, then compares CPU-owned pre-draw and post-draw planes for the exact selected
+window. It does not add a GPU copy, command, barrier, slot, wait, or release.
+
+This boundary must not be described as sample-to-export identity. The post plane
+also includes shader control flow, other inputs, depth/stencil tests, blending,
+and attachment writeback. A temporal-class transition or same-frame byte change
+therefore localizes the unresolved work but cannot select a renderer mutation.
+
+## Rejected U3 experiments
+
+The following changes were each tested on a fresh full-scene route and rejected.
+Keep the explicit reverts in history and do not retry them without a new
+discriminating test.
+
+- **Merged vertex-descriptor clamping:** satisfied its synthetic range test but
+  increased full-scene localized corruption.
+- **One- and two-MiB fault readback windows:** a one-MiB trial produced one lucky
+  clean run, but immediate repetition showed a large one-frame dark geometry
+  obstruction. Two MiB also failed. Window size changes timing rather than the
+  root invariant; 512 KiB remains the bounded baseline.
+- **Broad read/write stream mapping:** corrupted the whole scene and violated
+  the narrow ownership model.
+- **Large readonly stream snapshots:** produced stable large black polygons and
+  greatly reduced distinct frames.
+- **Write-after-write barrier broadening:** produced giant triangles and many
+  global returns.
+- **ADDR64 DMA descriptor fallback:** on a missing BDA page, substituting the
+  already-bound descriptor value instead of zero is unsafe because the binding
+  can represent a different residency generation. The candidate was unit- and
+  SPIR-V-validator-green but worsened the full scene to 16 global and 18
+  localized returns; manual review showed tutorial text stretching into long
+  shards for one frame. The experiment was reverted.
+
+The ADDR64 experiment also exposed a reusable SPIR-V rule: passing a
+`StorageBuffer` pointer as a function argument requires variable-pointer
+capability. A validator-clean implementation must either declare and support
+that capability or keep the conditional descriptor load inline. Passing unit
+tests alone did not prove the generated module legal.
+
+## Current next boundary
+
+The strongest remaining boundary is the fragment color/MRT export before
+fixed-function depth/stencil, blend, and attachment writeback, joined to the
+existing target-post plane. Instrument it without adding a second render pass or
+changing renderer behavior. The test must prove that it consumes the existing
+export SSA, uses the existing sequence/writer authority, retains only bounded
+classifications, and adds no image operation, copy, barrier, command, slot,
+wait, or release.
+
+If export is stable while target-post is unstable, isolate attachment feedback,
+write classification, blend, and writeback contracts one at a time. If export
+itself is unstable, continue backward through shader inputs and control flow.
+Do not bundle multiple renderer changes or revive a historical patch solely
+because it is plausible.
 
 ## Evidence classifications
 
