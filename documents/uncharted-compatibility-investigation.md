@@ -18,6 +18,7 @@ and pass PS4-only regression gates.
 | Buffer lookup | Independently audited | Selection and containment behavior is covered by focused tests and PS4 gates. |
 | Uncharted 1 cave hair | Accepted | MUBUF `addr64` decoding and source-buffer residency are preserved. |
 | Uncharted 3 pub geometry corruption | Operationally fixed for CUSA02320 | The integration build plus a per-game `Relaxed` GPU-readback override passed three fresh full-scene trials. The global default remains unchanged; a general automatic readback trigger is still future work. |
+| Uncharted 3 post-pub frame-lifecycle crash | Validated candidate; interactive soak continues | Guest graphics submissions no longer wait for the preceding physical GPU boundary, and copied DCB/CCB storage is owned by each queued submission. The exact recorded route crossed the former crash point, the full unit suite passed, and the complete PS4 regression passed. |
 | Uncharted 1 production visual and audio checkpoints | Passed on the integration build | The production-shaped seed keeps DMA enabled and scopes `Relaxed` readbacks to CUSA02320. Reviewed title and cave frames are correct, and the preserved stereo PCM audio contract passes. |
 | Uncharted 2 checkpoint and performance route | Passed on the integration build | The 180-second checkpoint completed without the historical device-loss, buffer-lookup, EOP, or offset failures. Three performance trials held approximately 60 FPS with no measured stutter. |
 | ReadConst with DMA disabled | Candidate code repair | Dynamic and immediate ReadConst accesses now follow the global DMA boundary consistently; focused tests, the complete unit suite, application linking, and title checkpoints pass. |
@@ -121,7 +122,8 @@ After the ReadConst repair, the integration build passed these sanitized gates:
 
 Focused ReadConst tests pass `3/3`, the shader/GCN target passes `59/59`, the
 Release application builds and links, and the complete discovered unit suite
-passes `553/553` with one intentional environment-dependent skip.
+passes `554/554` after the submission-ownership regression test was added, with
+one intentional environment-dependent skip.
 
 The full-suite run required two test-infrastructure corrections that leave
 emulator warning policy unchanged. Clang 22 reports a `char8_t` conversion in
@@ -139,6 +141,79 @@ and zero measured stutter. The Uncharted audio entry exits normally, finds its
 required title marker, finds no device-loss marker, and passes the preserved
 stereo PCM policy. These aggregate values are safe to publish; raw traces and
 audio remain private evidence.
+
+## Guest submission progress and queued command-buffer ownership
+
+An interactive Uncharted 3 playthrough confirmed that the pub geometry was
+visually correct, then stopped without user action shortly after the bar scene.
+The terminal guest assertion was the established frame-lifecycle signature:
+`GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick` in guest
+`FrameBegin`, followed by a host access violation. The failure occurred about
+108 seconds into the preserved controller route.
+
+The relevant contract has two inseparable parts:
+
+1. A guest graphics submission must remain enqueueable while the previous
+   physical GPU completion boundary is pending. The boundary still gates
+   GPU-visible memory remaps through `WaitForBoundary`; it must not serialize
+   the guest's submission thread and allow the guest job thread to advance into
+   the next `FrameBegin` without the queued work that produces its EOP tick.
+2. Once consecutive submissions can be queued, every copied DCB/CCB pair must
+   have immutable per-submission storage that lives until its Liverpool
+   coroutine finishes. Shared vectors whose offsets are reset by `SubmitDone`
+   can be overwritten by a later guest submission while an earlier coroutine
+   still owns spans into them.
+
+The TDD sequence was intentionally kept in the evidence trail. First, a gate
+test required the next guest submission to enter while a prior boundary was
+pending. Removing the submission wait made that test green, but the first live
+route then failed immediately with malformed PM4 packet decoding. That failure
+was not discarded: it exposed the latent shared-copy-buffer lifetime bug made
+reachable by the corrected concurrency. A second RED required two consecutive
+copied command-buffer pairs to retain independent immutable storage after the
+source arrays were overwritten. The final implementation stores each copied
+DCB/CCB pair in a reference-counted owner retained by the graphics coroutine;
+the old queue-global vectors, offsets, reserve step, and completion-time offset
+reset are gone.
+
+This is a general scheduling and ownership repair, not a title, frame, command,
+shader, or address special case. It is recorded by code commit `e1913b84`.
+
+### 2026-08-16 frame-lifecycle validation
+
+The sanitized validation evidence is:
+
+- focused submission-gate and copied-buffer ownership tests: `6/6`;
+- neighboring EOP tests: `3/3`;
+- complete discovered unit suite: `554/554`, with the same single intentional
+  environment-dependent skip;
+- exact replay of the recorded user route: `180.5` seconds, normal exit, zero
+  EOP assertion, device-loss, buffer-lookup, offset-assertion, or malformed-PM4
+  markers; this crossed the original failure time by more than 70 seconds;
+- complete platform-scoped PS4 regression: `12/12`, comprising seven smoke,
+  three visual, one audio, and one five-trial performance entry.
+
+The user separately confirmed that the U3 graphics defect was visually fixed
+before reporting the post-bar stop. That confirmation proves the repaired
+graphics configuration at the observed checkpoint; it is not evidence that
+the frame-lifecycle failure was user-initiated. The continuation playthrough is
+the next long soak for this scheduling fix. Preserve any later failure as a new
+route boundary rather than extending the conclusion beyond the tested segment.
+
+### Reusable review rules for asynchronous submission fixes
+
+- Do not model a physical GPU completion callback as a guest submit gate unless
+  the guest API explicitly requires synchronous completion.
+- When removing serialization, re-audit every span, pointer, descriptor, and
+  scratch allocation whose lifetime was accidentally protected by that
+  serialization.
+- A unit-green concurrency change is not sufficient. Replay the exact private
+  route, because newly reachable overlap can expose ownership corruption that
+  the original deadlock or stall hid.
+- Treat an early malformed command-stream failure after a concurrency change as
+  ownership evidence, not as permission to restore over-serialization.
+- Keep guest enqueue progress and GPU-visible memory-remap safety as separate
+  contracts with separate tests.
 
 ## Visual acceptance is multidimensional
 
