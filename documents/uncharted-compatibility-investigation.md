@@ -115,6 +115,9 @@ After the ReadConst repair, the integration build passed these sanitized gates:
   stutter;
 - **U3 visual:** the exact CUSA02320 temporal route passes again with the global
   readback mode disabled and only the per-game `Relaxed` override active.
+- **Complete PS4 regression:** all `12/12` platform-scoped entries pass,
+  including smoke checks at multiple console/output profiles, three visual
+  checkpoints, Uncharted audio, and the five-trial PT performance gate.
 
 Focused ReadConst tests pass `3/3`, the shader/GCN target passes `59/59`, the
 Release application builds and links, and the complete discovered unit suite
@@ -129,6 +132,13 @@ GoogleTest discovery script, making targets race on one empty-name JSON file.
 Using pre-test discovery for CMake 4.4 serializes that dependency step and
 restores deterministic discovery. These are test-harness compatibility fixes,
 not renderer behavior changes.
+
+The final cross-game performance aggregate contains five valid trials, mean
+`30.000 FPS`, `33.452 ms` median frame time, `34.061 ms` p95, `34.119 ms` p99,
+and zero measured stutter. The Uncharted audio entry exits normally, finds its
+required title marker, finds no device-loss marker, and passes the preserved
+stereo PCM policy. These aggregate values are safe to publish; raw traces and
+audio remain private evidence.
 
 ## Visual acceptance is multidimensional
 
