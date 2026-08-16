@@ -20,7 +20,7 @@ and pass PS4-only regression gates.
 | Uncharted 3 pub geometry corruption | Operationally fixed for CUSA02320 | The integration build plus a per-game `Relaxed` GPU-readback override passed three fresh full-scene trials. The global default remains unchanged; a general automatic readback trigger is still future work. |
 | Uncharted 1 production visual and audio checkpoints | Passed on the integration build | The production-shaped seed keeps DMA enabled and scopes `Relaxed` readbacks to CUSA02320. Reviewed title and cave frames are correct, and the preserved stereo PCM audio contract passes. |
 | Uncharted 2 checkpoint and performance route | Passed on the integration build | The 180-second checkpoint completed without the historical device-loss, buffer-lookup, EOP, or offset failures. Three performance trials held approximately 60 FPS with no measured stutter. |
-| ReadConst with DMA disabled | Candidate code repair | Dynamic and immediate ReadConst accesses now follow the global DMA boundary consistently; focused tests, shader tests, application linking, and title checkpoints pass. The complete test build remains blocked by an unrelated GoogleTest/Clang 22 warning. |
+| ReadConst with DMA disabled | Candidate code repair | Dynamic and immediate ReadConst accesses now follow the global DMA boundary consistently; focused tests, the complete unit suite, application linking, and title checkpoints pass. |
 
 Compatibility claims are checkpoint-specific until the complete campaign
 playthrough and regression matrix is green.
@@ -116,13 +116,19 @@ After the ReadConst repair, the integration build passed these sanitized gates:
 - **U3 visual:** the exact CUSA02320 temporal route passes again with the global
   readback mode disabled and only the per-game `Relaxed` override active.
 
-Focused ReadConst tests pass `3/3`, the shader/GCN target passes `59/59`, and the
-Release application builds and links. A build of the complete test tree is
-currently blocked in third-party GoogleTest/GMock because Clang 22 promotes a
-`char8_t` to `char32_t` conversion warning to an error. That toolchain issue is
-not a failure in the changed source, but it means the complete regression box
-must remain unchecked until the dependency/toolchain gate is resolved and the
-full suite runs.
+Focused ReadConst tests pass `3/3`, the shader/GCN target passes `59/59`, the
+Release application builds and links, and the complete discovered unit suite
+passes `553/553` with one intentional environment-dependent skip.
+
+The full-suite run required two test-infrastructure corrections that leave
+emulator warning policy unchanged. Clang 22 reports a `char8_t` conversion in
+GoogleTest 1.17, so the dependency-only suppression must be applied to `gtest`,
+`gtest_main`, `gmock`, and `gmock_main`; emulator targets retain warnings as
+errors. CMake 4.4 also omits the target key from its parallel post-build
+GoogleTest discovery script, making targets race on one empty-name JSON file.
+Using pre-test discovery for CMake 4.4 serializes that dependency step and
+restores deterministic discovery. These are test-harness compatibility fixes,
+not renderer behavior changes.
 
 ## Visual acceptance is multidimensional
 
