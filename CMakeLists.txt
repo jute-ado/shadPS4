@@ -957,7 +957,8 @@ if (ARCHITECTURE STREQUAL "x86_64")
              ${FIBER_LIB})
 endif()
 
-set(SHADER_RECOMPILER src/shader_recompiler/profile.h
+set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
+                      src/shader_recompiler/profile.h
                       src/shader_recompiler/recompiler.cpp
                       src/shader_recompiler/recompiler.h
                       src/shader_recompiler/resource.h
@@ -1014,6 +1015,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/frontend/opcodes.h
                       src/shader_recompiler/frontend/structured_control_flow.cpp
                       src/shader_recompiler/frontend/structured_control_flow.h
+                      src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
                       src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
                       src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
                       src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
