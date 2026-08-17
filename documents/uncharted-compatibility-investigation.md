@@ -292,6 +292,22 @@ Store this as `custom_configs/CUSA02320.json` in the shadPS4 user directory, or
 select **Readbacks Mode: Relaxed** in the CUSA02320 game-specific settings UI.
 Do not change the global default solely for this title.
 
+This uses shadPS4's existing per-game configuration system; it is not a new
+setting and it is not a title-specific renderer patch in `main`. In the UI,
+open **Settings**, select **Profiles**, choose **CUSA02320**, then set
+**Experimental > Readbacks Mode** to **Relaxed** and save. Once the per-game
+profile exists, the same profile can be opened while the game is running with
+the emulator-settings hotkey (F3 by default). The override is intentionally
+stored in user data rather than Git.
+
+The distinction matters when validating builds: a clean checkout does not show
+a U3 source-code fix for this symptom, while a normal launch can still use the
+persisted per-game override. Always confirm the startup log reports both a
+game-specific configuration and effective readbacks mode `1` before judging the
+result. A future automatic GPU-readback trigger would be the general emulator
+repair; until that is independently proven, keep this workaround scoped to the
+tested title.
+
 ### Acceptance evidence
 
 The production-shaped validation kept the seeded global configuration at mode
