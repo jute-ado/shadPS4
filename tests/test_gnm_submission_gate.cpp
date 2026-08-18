@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <ranges>
@@ -217,6 +217,22 @@ TEST(OwnedCommandBuffers, ConsecutiveCopiesRetainIndependentImmutableStorage) {
     EXPECT_TRUE(std::ranges::equal(second->Ccb(), std::array<u32, 1>{8}));
     EXPECT_NE(first->Dcb().data(), second->Dcb().data());
     EXPECT_NE(first->Ccb().data(), second->Ccb().data());
+}
+
+TEST(OwnedCommandBuffers, GraphicsSubmissionAlwaysTakesImmutableOwnership) {
+    std::array<u32, 3> dcb{0x10, 0x20, 0x30};
+    std::array<u32, 2> ccb{0x40, 0x50};
+
+    const auto submission = AmdGpu::PrepareGraphicsSubmission(dcb, ccb);
+    ASSERT_TRUE(submission.owner);
+    EXPECT_NE(submission.dcb.data(), dcb.data());
+    EXPECT_NE(submission.ccb.data(), ccb.data());
+
+    dcb.fill(0);
+    ccb.fill(0);
+
+    EXPECT_TRUE(std::ranges::equal(submission.dcb, std::array<u32, 3>{0x10, 0x20, 0x30}));
+    EXPECT_TRUE(std::ranges::equal(submission.ccb, std::array<u32, 2>{0x40, 0x50}));
 }
 
 } // namespace

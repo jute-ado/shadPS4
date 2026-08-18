@@ -97,11 +97,9 @@ void Liverpool::Process(std::stop_token stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(submit_cv, lk, stoken,
-                                [this] {
-                                    return num_commands || num_submits ||
-                                           submission_completions.HasPendingBoundaries();
-                                });
+            Common::CondvarWait(submit_cv, lk, stoken, [this] {
+                return num_commands || num_submits || submission_completions.HasPendingBoundaries();
+            });
         }
         if (stoken.stop_requested()) {
             break;
@@ -216,9 +214,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_EXIT;
 }
 
-Liverpool::Task Liverpool::ProcessGraphics(
-    std::span<const u32> dcb, std::span<const u32> ccb,
-    SubmissionCompletionQueue::Sequence submission_sequence, CmdBufferOwner owner) {
+Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                                           SubmissionCompletionQueue::Sequence submission_sequence,
+                                           CmdBufferOwner owner) {
     FIBER_ENTER(dcb_task_name);
     (void)owner;
 
@@ -919,9 +917,8 @@ Liverpool::Task Liverpool::ProcessGraphics(
 }
 
 template <bool is_indirect>
-Liverpool::Task Liverpool::ProcessCompute(
-    std::span<const u32> acb, u32 vqid,
-    SubmissionCompletionQueue::Sequence submission_sequence) {
+Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid,
+                                          SubmissionCompletionQueue::Sequence submission_sequence) {
     FIBER_ENTER(acb_task_name[vqid]);
     auto& queue = asc_queues[{vqid}];
     const bool host_markers_enabled = rasterizer && EmulatorSettings.IsVkHostMarkersEnabled();
@@ -1198,15 +1195,11 @@ Liverpool::Task Liverpool::ProcessCompute(
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     auto& queue = mapped_queues[GfxQueueId];
 
-    CmdBufferOwner owner;
-    if (EmulatorSettings.IsCopyGpuBuffers()) {
-        owner = OwnedCommandBuffers::Copy(dcb, ccb);
-        dcb = owner->Dcb();
-        ccb = owner->Ccb();
-    }
+    auto submission = PrepareGraphicsSubmission(dcb, ccb);
 
     const auto sequence = submission_completions.IssueSubmission();
-    auto task = ProcessGraphics(dcb, ccb, sequence, std::move(owner));
+    auto task =
+        ProcessGraphics(submission.dcb, submission.ccb, sequence, std::move(submission.owner));
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.push({task.handle, sequence});
@@ -1236,16 +1229,15 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
 }
 
 void Liverpool::SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
-    submission_completions.EnqueueBoundary(
-        [this, completion = std::move(completion)]() mutable {
-            if (rasterizer) {
-                rasterizer->OnSubmit();
-                rasterizer->Flush();
-            }
-            if (completion) {
-                completion();
-            }
-        });
+    submission_completions.EnqueueBoundary([this, completion = std::move(completion)]() mutable {
+        if (rasterizer) {
+            rasterizer->OnSubmit();
+            rasterizer->Flush();
+        }
+        if (completion) {
+            completion();
+        }
+    });
     std::scoped_lock lk{submit_mutex};
     submit_cv.notify_one();
 }
