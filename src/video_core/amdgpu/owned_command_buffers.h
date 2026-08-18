@@ -13,8 +13,8 @@ namespace AmdGpu {
 
 class OwnedCommandBuffers final {
 public:
-    [[nodiscard]] static std::shared_ptr<const OwnedCommandBuffers> Copy(
-        std::span<const u32> dcb, std::span<const u32> ccb) {
+    [[nodiscard]] static std::shared_ptr<const OwnedCommandBuffers> Copy(std::span<const u32> dcb,
+                                                                         std::span<const u32> ccb) {
         return std::shared_ptr<const OwnedCommandBuffers>{new OwnedCommandBuffers{dcb, ccb}};
     }
 
@@ -33,5 +33,21 @@ private:
     std::vector<u32> dcb;
     std::vector<u32> ccb;
 };
+
+struct OwnedGraphicsSubmission {
+    std::shared_ptr<const OwnedCommandBuffers> owner;
+    std::span<const u32> dcb;
+    std::span<const u32> ccb;
+};
+
+[[nodiscard]] inline OwnedGraphicsSubmission PrepareGraphicsSubmission(std::span<const u32> dcb,
+                                                                       std::span<const u32> ccb) {
+    auto owner = OwnedCommandBuffers::Copy(dcb, ccb);
+    return {
+        .owner = owner,
+        .dcb = owner->Dcb(),
+        .ccb = owner->Ccb(),
+    };
+}
 
 } // namespace AmdGpu

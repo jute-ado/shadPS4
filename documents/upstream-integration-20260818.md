@@ -150,9 +150,11 @@ the existing signal stub; without that integration support their link failed.
 
 ## Validation snapshot
 
-The complete discovered unit suite passes `649/649`, with one expected
-environment-dependent host-override skip. The Release application builds and
-links.
+The fresh promoted-source unit build discovers and passes `560/560`, with one
+expected environment-dependent host-override skip. An earlier `649/649` count
+came from a reused build directory that still registered 89 removed diagnostic
+tests; it was not the clean promoted-source inventory. The Release application
+builds and links.
 
 Final Nvidia platform results:
 

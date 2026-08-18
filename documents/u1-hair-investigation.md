@@ -183,6 +183,51 @@ multiple clean U1 trials, and cross-game controls are still required. Per the
 upstream-first integration boundary, implementation work is deferred until the
 upstream merge and regression campaign are complete.
 
+### 2026-08-18 immutable graphics-submission ownership
+
+After the upstream promotion completed, the command-buffer discriminator was
+implemented as a generic lifetime contract rather than a game override. A
+focused RED now requires every queued graphics submission to own immutable
+copies of its top-level DCB and CCB. `Liverpool::SubmitGfx` creates that owner
+before the guest can mutate or reuse the source memory, and the existing
+graphics coroutine retains it until command decoding finishes. The old
+`copyGPUBuffers` setting and per-game override were removed because permitting
+borrowed queued command spans is not a safe behavior choice; legacy TOML keys
+are ignored.
+
+The focused graphics-submission gate passes `13/13`. A fresh promoted-source
+build discovers and passes `560/560` tests, with one expected host-environment
+skip, and the Release application links. The original private motion seed still
+contains `copy_gpu_buffers=false`, so it verifies the code contract rather than
+the earlier modified seed. Its complete 300-frame replay produced 300/300
+distinct gameplay frames, zero invisible flashes, zero abrupt A-B-A returns,
+and a longest repeated run of one frame. This matches the earlier copied-buffer
+control and differs from the borrowed-buffer replay's two one-frame white
+returns.
+
+Repeated motion attempts also exposed an independent route/bootstrap problem:
+several runs remained in early asset loading, produced no screenshots, and
+timed out without a device-loss or forbidden assertion. Those unavailable runs
+are retained but are not counted as either visual passes or failures. A
+separate 600-frame post-observation gate initially failed before triage because
+the task-local asset map supplied baseline `v3` while the visual contract pins
+baseline `v2`; a diagnostic Test Lab build identified the exact mismatch. The
+corrected map is retained privately. Subsequent zero-frame starts remained the
+same route issue, not captured white returns.
+
+The maintained Nvidia parity suite provides the cross-game gate for the same
+binary: U1 audio passes, U2 smoke passes, and U2 rooftop performance passes all
+three trials at approximately 60 FPS with zero measured stutter. Against the
+accepted upstream-integration build, median frame time changed from 16.5532 ms
+to 16.5667 ms, p95 improved from 17.5425 ms to 17.5227 ms, p99 improved from
+17.6314 ms to 17.6161 ms, and stutter remained zero. The suite's U1 visual entry
+is still the inherited route/seed timeout and is classified inconclusive.
+
+This evidence supports immutable queued graphics command ownership as the U1
+white-return repair without a measurable Nvidia cross-game performance
+regression. It does not claim that the separate U1 route-start reliability
+problem is fixed.
+
 Preserve the distinction between:
 
 - a renderer-visible white material return in completed gameplay frames;
