@@ -206,18 +206,28 @@ target_compile_features(shadps4_gnm_submission_gate_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_gnm_submission_gate_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_gnm_submission_gate_test)
 
-add_executable(shadps4_pipeline_compilation_policy_test
-    test_pipeline_compilation_policy.cpp
+add_executable(shadps4_sysmodule_requirement_test
+    test_sysmodule_requirement.cpp
 )
-target_include_directories(shadps4_pipeline_compilation_policy_test PRIVATE
+target_include_directories(shadps4_sysmodule_requirement_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
-target_compile_definitions(shadps4_pipeline_compilation_policy_test PRIVATE
+target_compile_features(shadps4_sysmodule_requirement_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_sysmodule_requirement_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_sysmodule_requirement_test)
+
+add_executable(shadps4_host_compilation_pause_test
+    test_host_compilation_pause.cpp
+)
+target_include_directories(shadps4_host_compilation_pause_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(shadps4_host_compilation_pause_test PRIVATE
     SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
 )
-target_compile_features(shadps4_pipeline_compilation_policy_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_pipeline_compilation_policy_test PRIVATE GTest::gtest_main)
-list(APPEND TEST_TARGETS shadps4_pipeline_compilation_policy_test)
+target_compile_features(shadps4_host_compilation_pause_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_host_compilation_pause_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_host_compilation_pause_test)
 
 add_executable(shadps4_guest_thread_priority_test
     test_guest_thread_priority.cpp

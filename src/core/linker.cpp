@@ -23,6 +23,7 @@
 #include "core/libraries/libc_internal/libc_internal.h"
 #include "core/libraries/sysmodule/sysmodule.h"
 #include "core/libraries/sysmodule/sysmodule_internal.h"
+#include "core/libraries/sysmodule/sysmodule_requirement.h"
 #include "core/linker.h"
 #include "core/memory.h"
 #include "core/tls.h"
@@ -448,11 +449,16 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
         LOG_WARNING(Core_Linker, "Linker: Stub resolved {} as {} (lib: {}, mod: {})", sr.name,
                     return_info->name, library->name, module->name);
     } else {
-        if (library->name == "libc" && return_info->name == "Need_sceLibc") {
+        switch (Libraries::SysModule::ClassifyPreloadRequirement(library->name,
+                                                                  return_info->name)) {
+        case Libraries::SysModule::PreloadRequirement::Libc:
             Libraries::SysModule::g_need_scelibc = true;
-        }
-        if (library->name == "libSceFios2" && return_info->name == "sceFiosInitialize") {
-            Libraries::SysModule::g_need_scelibc = true;
+            break;
+        case Libraries::SysModule::PreloadRequirement::Fios2:
+            Libraries::SysModule::g_need_fios2 = true;
+            break;
+        case Libraries::SysModule::PreloadRequirement::None:
+            break;
         }
     }
     return false;
