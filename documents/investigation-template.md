@@ -69,4 +69,3 @@ were rejected.
 - [ ] No machine-local paths, maps, private routes, network details, tokens,
       credentials, or personal information.
 - [ ] Private observations are reduced to bounded technical facts.
-

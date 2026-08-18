@@ -66,4 +66,3 @@ operating-system, or adapter-selection change.
    user-facing conclusion to `main`.
 9. Merge `main` back into `dev` regularly; never merge `dev` wholesale into
    `main`.
-
