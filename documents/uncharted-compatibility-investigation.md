@@ -21,6 +21,7 @@ and pass PS4-only regression gates.
 | Uncharted 3 post-pub frame-lifecycle crash | Validated candidate; interactive soak continues | Guest graphics submissions no longer wait for the preceding physical GPU boundary, and copied DCB/CCB storage is owned by each queued submission. The exact recorded route crossed the former crash point, the full unit suite passed, and the complete PS4 regression passed. |
 | Uncharted 1 production visual and audio checkpoints | Passed on the integration build | The production-shaped seed keeps DMA enabled and scopes `Relaxed` readbacks to CUSA02320. Reviewed title and cave frames are correct, and the preserved stereo PCM audio contract passes. |
 | Uncharted 2 checkpoint and performance route | Passed on the integration build | The 180-second checkpoint completed without the historical device-loss, buffer-lookup, EOP, or offset failures. Three performance trials held approximately 60 FPS with no measured stutter. |
+| AMD Vulkan U1/U2 checkpoints | Passed on the tested integrated GPU | Host-only shader and pipeline compilation now pauses guest time, compressed-image creation drops unsupported optional storage usage only after an exact capability retry, and the same portable U1/U2 routes pass on AMD and Nvidia. |
 | ReadConst with DMA disabled | Candidate code repair | Dynamic and immediate ReadConst accesses now follow the global DMA boundary consistently; focused tests, the complete unit suite, application linking, and title checkpoints pass. |
 
 Compatibility claims are checkpoint-specific until the complete campaign
@@ -141,6 +142,88 @@ and zero measured stutter. The Uncharted audio entry exits normally, finds its
 required title marker, finds no device-loss marker, and passes the preserved
 stereo PCM policy. These aggregate values are safe to publish; raw traces and
 audio remain private evidence.
+
+## AMD Vulkan dual-vendor validation
+
+The AMD checkpoint failure was not an AMD shader-translation difference. The
+tested integrated adapter (`1002:13c0`, Vulkan 1.3.302) compiles new Vulkan
+shaders and pipelines much more slowly than the Nvidia control (`10de:2704`,
+Vulkan 1.4.341). Pipeline construction runs synchronously on the host PM4
+parser thread. Before the repair, other guest CPU jobs and the guest clock kept
+advancing during this host-only delay. U1 therefore retired its three-frame
+resource ring before the queued PM4 work that produced the required EOP had
+been parsed. Nvidia was fast enough to hide the same timing defect.
+
+The general repair is a scoped host-compilation pause:
+
+- pause guest threads while a new shader module or graphics/compute pipeline is
+  compiled by the host driver;
+- resume only when the scope created the pause, preserving a pre-existing user
+  or debugger pause;
+- leave pipeline-cache hits unchanged;
+- do not wait for physical GPU completion or change guest submission order.
+
+This models the PS4 timing boundary more accurately: host translation and host
+driver compilation are emulator implementation work, not elapsed time on the
+guest CPU/GPU timeline. A synthetic RAII test covers owned and pre-existing
+pause states. The live PM4 trace independently showed the required EOP packet
+already queued but still unparsed, with no queue semaphore or GPU-wait block;
+that observation ruled out a missing EOP packet and a physical-completion
+dependency.
+
+AMD also exposed a separate Vulkan portability issue. Some block-compressed
+formats support the required sampled/transfer uses but reject the optional
+`Storage` bit. Image creation now probes the preferred usage first and, only
+for a block-compressed image whose preferred usage contains storage, retries
+without that optional bit. The fallback is accepted only when the driver
+reports the reduced usage as supported. Non-compressed images, supported
+preferred usages, and unsupported required usages retain their old behavior.
+
+The investigation deliberately rejected these alternatives after focused or
+live controls:
+
+- signaling guest EOP only at physical GPU completion;
+- immediate, batched, or capped command-buffer completion copies;
+- parser priority and weighted queue scheduling changes;
+- making `sceGnmSubmitDone` synchronously wait;
+- treating a warm shader cache as the repair.
+
+Each either failed the exact AMD route, changed the wrong guest contract, or
+only masked startup cost. Keep them in the evidence history so a future slow
+driver investigation does not repeat them.
+
+### 2026-08-18 acceptance evidence
+
+The sanitized final matrix is:
+
+- image-usage policy tests: `4/4`;
+- submission gate, exact boundary ordering, and command-buffer ownership:
+  `12/12`;
+- host-compilation pause tests: `2/2`;
+- neighboring EOP tests: `3/3`;
+- complete discovered unit suite: `535/535`, with one intentional
+  environment-dependent skip;
+- Test Lab contract/core/CLI suites: `171/171`, `254/254`, and `37/37`;
+- AMD U1: smoke and strict visual gates pass, including a fresh smoke replay
+  of the final cleaned and relinked binary;
+- AMD U2: the checkpoint smoke gate passes;
+- Nvidia U1: the strict visual report and all 13 temporal samples pass with no
+  invisible flash or abrupt return. The wrapper separately reports its bounded
+  stdout truncation, which is an infrastructure classification rather than a
+  visual regression;
+- Nvidia U2: the checkpoint smoke gate passes.
+
+The AMD driver on this machine is older and the integrated adapter is slow, so
+these results establish functional and visual checkpoint parity, not equal
+performance. Performance baselines remain adapter-profile-specific.
+
+For future dual-vendor work, use one logical Test Lab installation and isolated
+user seed per adapter. Require a stable startup marker that names the selected
+GPU, then reuse the same portable scenario, route, and visual policy. Run the
+adapters sequentially, preserve the exact executable hash in each artifact,
+and compare process, marker, static-visual, and temporal outcomes separately.
+Machine maps, games, seeds, captures, videos, raw logs, and profiles remain
+private and must not enter Git.
 
 ## Guest submission progress and queued command-buffer ownership
 

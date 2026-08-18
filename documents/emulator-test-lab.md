@@ -74,6 +74,45 @@ creation, emulator-map loading, or process launch. The corpus also rejects a
 PS4 suite containing any SharpEmu scenario. The command's explicit corpus root
 isolates test intent; it does not search for another task's corpus branch.
 
+## Dual-vendor Vulkan correctness matrix
+
+Treat two adapters in one machine as two logical emulator installations even
+when they launch the same executable. Each installation needs:
+
+- an isolated writable user-data seed that selects exactly one adapter;
+- a stable, non-secret machine-level required-output marker naming that
+  adapter;
+- a separately captured machine profile;
+- a unique logical ID and run root.
+
+The required-output marker is an assertion, not a selection mechanism. Test Lab
+must fail closed when an AMD installation starts on Nvidia, or vice versa,
+before accepting smoke, visual, audio, or performance evidence. Keep machine
+maps and adapter-selection configuration local and untracked.
+
+For functional and visual parity, reuse the same portable scenario intent,
+controller route, and reviewed visual policy across adapters. Run adapters
+sequentially to avoid process/GPU contention. Compare these dimensions
+independently:
+
+1. process exit, timeout, and signal state;
+2. required and forbidden emulator markers;
+3. static scene identity and visible structure;
+4. temporal samples and abrupt/localized returns;
+5. bounded-output or capture infrastructure health.
+
+A bounded stdout capture is not by itself a renderer regression when the full
+private log, required/forbidden markers, and visual/temporal reports are closed
+and healthy. Record the caveat rather than weakening the output bound or the
+visual contract.
+
+Performance is not portable between adapters. Use the matching machine profile
+and adapter-specific reference for performance while keeping correctness
+expectations portable. After any driver, operating-system, GPU-selection, or
+power-profile change, recapture the profile and produce fresh immutable runs.
+Always verify that run provenance records the exact application hash used by
+the matrix.
+
 ## When game progress changes
 
 If the emulator branch still satisfies the accepted expectation, no corpus
