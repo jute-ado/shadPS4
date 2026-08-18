@@ -206,16 +206,40 @@ The sanitized final matrix is:
 - Test Lab contract/core/CLI suites: `171/171`, `254/254`, and `37/37`;
 - AMD U1: smoke and strict visual gates pass, including a fresh smoke replay
   of the final cleaned and relinked binary;
-- AMD U2: the checkpoint smoke gate passes;
+- AMD U1 audio: the preserved 48 kHz stereo PCM policy passes over `1,680,000`
+  analyzed frames, with an audible-frame fraction of approximately `0.936`;
+- AMD U2: the checkpoint smoke gate passes. A separately pinned functional
+  performance window produced three valid trials at approximately `31.997 FPS`,
+  `31.21 ms` median, `31.64 ms` P95, `31.72 ms` P99, and zero measured
+  stutter;
 - Nvidia U1: the strict visual report and all 13 temporal samples pass with no
   invisible flash or abrupt return. The wrapper separately reports its bounded
   stdout truncation, which is an infrastructure classification rather than a
   visual regression;
-- Nvidia U2: the checkpoint smoke gate passes.
+- Nvidia U1 audio: an independent cold run passes the same PCM policy. One
+  preceding cold-start trial ended before a complete PCM window while the host
+  driver was compiling pipelines; it had no crash marker and the exact repeat
+  passed, so retain it as a startup-reliability caveat rather than an audio or
+  rendering regression;
+- Nvidia U2: the checkpoint smoke gate passes, and the unchanged strict
+  performance contract passes three trials at approximately `59.9997 FPS`,
+  `16.54 ms` median, `17.52 ms` P95, `17.59 ms` P99, and zero measured
+  stutter. Its only findings are improvements relative to the accepted P95,
+  P99, and stutter references;
+- the portable corpus now exposes paired four-entry
+  `local.ps4-uncharted-amd-parity` and
+  `local.ps4-uncharted-nvidia-parity` suites covering U1 visual, U1 audio, U2
+  checkpoint smoke, and U2 performance. The full 50-scenario corpus validates
+  at corpus revision `2db4a6a`.
 
-The AMD driver on this machine is older and the integrated adapter is slow, so
-these results establish functional and visual checkpoint parity, not equal
-performance. Performance baselines remain adapter-profile-specific.
+The AMD driver on this machine is older and the integrated adapter is slower,
+so these results establish functional and visual checkpoint parity, not equal
+performance. Nvidia retains its frame-1500 steady-state window and 60 FPS
+floor. The AMD functional baseline starts at presented frame 1, warms 30
+frames, then measures 120 frames with a 30 FPS floor. This is intentional: the
+iGPU could not reach the inherited frame-1500 window within the 65-second
+route, although every process exited cleanly. Performance baselines and their
+measurement windows therefore remain adapter-profile-specific.
 
 For future dual-vendor work, use one logical Test Lab installation and isolated
 user seed per adapter. Require a stable startup marker that names the selected

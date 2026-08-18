@@ -113,6 +113,26 @@ power-profile change, recapture the profile and produce fresh immutable runs.
 Always verify that run provenance records the exact application hash used by
 the matrix.
 
+Do not copy a fast adapter's presented-frame start into a slow-adapter baseline
+without proving that the route can reach it. A header-only timing trace from an
+otherwise clean process means the configured measurement window was
+unreachable; it is an inconclusive test design, not a performance regression.
+Keep the fast adapter's steady-state contract unchanged and define a separate,
+profile-pinned functional window for the slow adapter. First collect a broad
+candidate, then tighten the accepted FPS, percentile, stutter, and variation
+limits to an independent repeat. The Uncharted matrix currently uses a strict
+frame-1500/60-FPS Nvidia reference and a frame-1 plus 30-frame-warmup/30-FPS AMD
+iGPU reference. Both require three valid trials.
+
+The committed PS4 matrix suites are
+`local.ps4-uncharted-amd-parity` and
+`local.ps4-uncharted-nvidia-parity`. Each contains the same four intents—U1
+visual, U1 audio, U2 checkpoint smoke, and U2 performance—while scenario seeds,
+logical emulator IDs, machine profiles, and performance references remain
+adapter-specific. Validate each suite and the complete corpus before merging;
+never commit the machine maps, user-data seeds, captures, PCM, profiles, or raw
+logs used to execute it.
+
 ## When game progress changes
 
 If the emulator branch still satisfies the accepted expectation, no corpus
