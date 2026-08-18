@@ -87,4 +87,17 @@ TEST(WindowsExceptionPolicy, SignalDispatcherDestructionOwnsHandlerRemoval) {
     EXPECT_NE(destructor.find("RemoveHandlers("), std::string::npos);
 }
 
+TEST(WindowsExceptionPolicy, AssertPathRemovesHandlersImmediatelyBeforeBreakpointCrash) {
+    const auto source = ReadSource(SHADPS4_ASSERT_SOURCE_PATH);
+    const auto assert_fail = FunctionBody(source, "void assert_fail_impl()");
+
+    ASSERT_FALSE(assert_fail.empty());
+    const auto remove_handlers = assert_fail.find("RemoveHandlers(");
+    const auto crash = assert_fail.find("Crash()");
+    ASSERT_NE(remove_handlers, std::string::npos);
+    ASSERT_NE(crash, std::string::npos);
+    EXPECT_LT(remove_handlers, crash);
+    EXPECT_EQ(assert_fail.find("Emulator>::Instance()->Shutdown()"), std::string::npos);
+}
+
 } // namespace

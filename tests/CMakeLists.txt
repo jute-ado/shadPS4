@@ -330,6 +330,7 @@ if (WIN32)
         test_windows_exception_policy.cpp
     )
     target_compile_definitions(shadps4_windows_exception_policy_test PRIVATE
+        SHADPS4_ASSERT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/common/assert.cpp"
         SHADPS4_EMULATOR_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/emulator.cpp"
         SHADPS4_SIGNALS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/signals.cpp"
     )
