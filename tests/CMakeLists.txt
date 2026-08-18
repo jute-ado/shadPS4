@@ -175,6 +175,9 @@ set(GCN_TEST_SOURCES
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+add_executable(shadps4_fault_range_test test_fault_range.cpp)
+target_link_libraries(shadps4_fault_range_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_fault_range_test)
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE
