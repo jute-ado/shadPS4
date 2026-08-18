@@ -54,7 +54,7 @@ of every affected host-image/view cache key.
 - [x] Guest-display dimensions are per-game overrideable.
 - [x] Startup logging reports the exact requested dimensions.
 - [x] Full settings tests and a fresh application build pass.
-- [ ] Re-run Nvidia PS4 and PS4 Pro probes at 3840x2160 and record the actual
+- [x] Re-run Nvidia PS4 and PS4 Pro probes at 3840x2160 and record the actual
   registered guest buffers, presented dimensions, stability, and timing.
 - [ ] Add synthetic RED tests for scalable-image eligibility and host extents.
 - [ ] Add RED tests for viewport/scissor, copy/resolve, sampling, and readback
@@ -72,3 +72,23 @@ of every affected host-image/view cache key.
 - No PS4 Pro requirement unless current Nvidia evidence shows that the game
   actually selects a useful Pro render path and remains at least as stable.
 - No AMD 4K gate for this work; the requested validation target is Nvidia.
+
+## Nvidia mode comparison (2026-08-18)
+
+Both probes used the same U2 sewer checkpoint, controller route, game/seed
+assets, 3840x2160 guest-display request, 3840x2160 presented-frame checkpoint,
+and RTX 4080. Both exited with code 0 in about 111.2 seconds with no device
+loss or known renderer assertion.
+
+| Profile | Guest VideoOut buffers | Visual result | Duration |
+| --- | --- | --- | --- |
+| PS4 | 1920x1080, three buffers | changed strongly from the retained checkpoint | 111.141 s |
+| PS4 Pro | 1920x1080, three buffers | passed the retained 4K presentation checkpoint | 111.187 s |
+
+The PS4 Pro capture had mean absolute difference 0.00297 and cosine difference
+0.00237 from the retained reference. The base-PS4 capture represented a
+different visual state and had mean absolute difference 0.16316. This makes
+PS4 Pro the better current profile for stable 4K presentation in this
+collection, with no meaningful performance difference in the measured route.
+It does **not** prove native 4K: both profiles still registered 1920x1080 guest
+buffers.
