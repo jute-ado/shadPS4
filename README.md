@@ -3,6 +3,35 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+# Unofficial personal fork
+
+> [!CAUTION]
+> This is **not an official shadPS4 repository**. It is a personal fork currently focused primarily on investigating compatibility with *Uncharted: The Nathan Drake Collection*.
+
+Much of the fork-specific work has been produced with substantial AI assistance. Not all of that code has received thorough manual review, and parts of it will undoubtedly be imperfect. Although I am a software developer, I do not have extensive emulator-development experience. Even with AI assistance, understanding, testing, and verifying emulator changes takes significant time.
+
+I would like to upstream useful improvements where practical, but I cannot promise that every change will become a pull request. If you find generally useful code here, please feel free to adapt it or propose it to the original project, subject to this repository's license.
+
+For normal use, support, and authoritative releases, please use the [official shadPS4 repository](https://github.com/shadps4-emu/shadPS4) and support its contributors. Builds from this fork are experimental and come with **no compatibility, stability, or performance guarantees**. Please do not ask the upstream project for support with fork-specific builds or settings.
+
+## Uncharted investigation status
+
+The following is a snapshot of local testing as of **2026-08-18**, not a general compatibility claim:
+
+| Game | Current local result | Known issues |
+| --- | --- | --- |
+| **Uncharted 1: Drake's Fortune** | Reaches gameplay and has progressed at least into the cave. | Hair, spider webs, and some related surfaces can flicker or flash white. |
+| **Uncharted 2: Among Thieves** | Reaches gameplay. | The field of view can become far too strong, sometimes making aiming difficult. |
+| **Uncharted 3: Drake's Deception** | Reaches gameplay. The large vertex explosions previously seen in the bar scene appear to be resolved in the tested configuration. | Some graphics require `readbacks_mode=1` (`relaxed`) in the tested configuration, and the game may crash after the bar scene. |
+
+Testing has primarily used an **NVIDIA GeForce RTX 4080** with an **AMD Ryzen 7 9800X3D**. The Ryzen 7 9800X3D integrated GPU has received limited investigative testing, but AMD GPU compatibility is not guaranteed.
+
+Public-safe screenshots may be added later. Private Test Lab captures, game data, saves, routes, and machine-specific configuration are intentionally not included in this repository.
+
+---
+
+# Original shadPS4 README
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
