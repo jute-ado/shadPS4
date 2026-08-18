@@ -1,5 +1,10 @@
 # Uncharted 1 cave hair investigation
 
+- **Status:** Confirmed at the recorded checkpoints
+- **Last verified:** 2026-08-18
+- **Verified revision:** `8ce873a7`
+- **Scope:** MUBUF `addr64`, source-buffer residency, and texture containment
+
 Status: the original orange hair-card lattice and the follow-on intermittent
 white hair/web flash are fixed on a reviewable TDD branch. Focused Uncharted,
 GPU, cross-game performance, and the complete PS4 regression gates are green.

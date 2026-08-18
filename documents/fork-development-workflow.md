@@ -121,13 +121,20 @@ carry its focused tests, and pass the gates above before it can be merged.
 
 ## Current restructuring checkpoint
 
-The pre-cleanup public `main` is preserved by the
-`archive/public-main-before-cleanup-20260818` tag and forms the starting point
-of `dev`. The clean-main candidate starts from upstream commit `11a5e47a` and
-initially adds only the public fork disclosure. Existing fork commits must be
-reviewed and promoted individually; no prior investigation result is accepted
-solely because it existed on the old `main`.
+The working public branch is preserved by the
+`archive/public-main-before-cleanup-20260818` tag. The attempted reconstruction
+from upstream was rejected as a promotion strategy because it discarded
+working compatibility behavior and would require replaying a large, coupled
+history without preserving its validation context.
 
-The upstream integration review branch remains a useful source of conflict and
-test evidence, but it is not a promotion candidate while its recorded AMD U1
-regression remains unresolved.
+The retained `main` and `dev` branches intentionally share the working
+implementation. Their difference is documentation and development surface:
+`main` carries the public fork disclosure, working code, and tests, while
+`dev` additionally carries this knowledge base, investigation history, and
+generic Test Lab guidance. Future functional changes are developed from
+`dev`, validated, then promoted as focused code-and-test changes rather than by
+merging `dev` wholesale.
+
+The old `clean-main` branch is an archive/comparison only. It must not replace
+the working public branch without independently recovering and validating full
+functional parity.
