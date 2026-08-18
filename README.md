@@ -3,14 +3,17 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-# Unofficial personal fork
+# Unofficial Jute research fork
 
 > [!CAUTION]
-> This is **not an official shadPS4 repository**. It is a personal fork currently focused primarily on investigating compatibility with *Uncharted: The Nathan Drake Collection*.
+> This is **not an official shadPS4 repository**. It is a personal fork currently focused primarily on investigating compatibility with *Uncharted: The Nathan Drake Collection*. shadPS4 and its contributors created the foundation this work builds on; their ambitious work is deeply appreciated. This fork is not an official upstream release!
 
-Much of the fork-specific work has been produced with substantial AI assistance. Not all of that code has received thorough manual review, and parts of it will undoubtedly be imperfect. Although I am a software developer, I do not have extensive emulator-development experience. Even with AI assistance, understanding, testing, and verifying emulator changes takes significant time.
-
-I would like to upstream useful improvements where practical, but I cannot promise that every change will become a pull request. If you find generally useful code here, please feel free to adapt it or propose it to the original project, subject to this repository's license.
+This fork has been mostly AI generated. Not all code has received thorough manual review, and parts of it will undoubtedly be imperfect. 
+Even though I am a dev, I do not have extensive emulator development experience.
+I would like to upstream useful improvements where practical. 
+But it takes a lot of time to go through the code, understand the changes, and desloppify it.
+This has not been done for this fork!
+But if you find generally useful code here, absolutely feel free to adapt it or propose it to the original project.
 
 For normal use, support, and authoritative releases, please use the [official shadPS4 repository](https://github.com/shadps4-emu/shadPS4) and support its contributors. Builds from this fork are experimental and come with **no compatibility, stability, or performance guarantees**. Please do not ask the upstream project for support with fork-specific builds or settings.
 
@@ -24,9 +27,10 @@ The following is a snapshot of local testing as of **2026-08-18**, not a general
 | **Uncharted 2: Among Thieves** | Reaches gameplay. | The field of view can become far too strong, sometimes making aiming difficult. |
 | **Uncharted 3: Drake's Deception** | Reaches gameplay. The large vertex explosions previously seen in the bar scene appear to be resolved in the tested configuration. | Some graphics require `readbacks_mode=1` (`relaxed`) in the tested configuration, and the game may crash after the bar scene. |
 
-Testing has primarily used an **NVIDIA GeForce RTX 4080** with an **AMD Ryzen 7 9800X3D**. The Ryzen 7 9800X3D integrated GPU has received limited investigative testing, but AMD GPU compatibility is not guaranteed.
+Primarily used an RTX 4080 and 9800X3D for testing. The 9800X3D iGPU has received limited investigative testing, but AMD GPU compatibility is not guaranteed.
+And in general, no compatibility is guaranteed at all.
 
-Public-safe screenshots may be added later. Private Test Lab captures, game data, saves, routes, and machine-specific configuration are intentionally not included in this repository.
+Public-safe screenshots may be added later. 
 
 ---
 
