@@ -85,7 +85,7 @@ selection before rasterizer wiring. The focused matrix passes 4/4 and prevents
 state-selection changes from being hidden inside large Vulkan integration
 tests.
 
-### Host pipeline compilation pause remains an unresolved tradeoff
+### Host pipeline compilation pause and EOP flip ordering
 
 The inherited fork commit `90d54e7d` suspends guest threads around shader,
 graphics-pipeline, and compute-pipeline compilation. A motion-bearing U1 route
@@ -100,12 +100,28 @@ therefore preserved on top of upstream's controller model. Focused tests cover
 normal lifetime, a pre-existing user/debugger pause, nested compilation, and
 all three production compilation sites.
 
-Restoring the guard did not make the merged AMD U1 route reliable: a final
-matched run still reached the same assertion. Conversely, removing it enabled
-a completed Nvidia motion-bearing capture but exposed two one-frame white
-material returns. The pause is neither an accepted U1 fix nor sufficient proof
-of the AMD crash cause. Resolving this cross-vendor timing/lifecycle boundary is
-explicitly deferred; a vendor-specific bypass is not authorized.
+Restoring the guard did not make the merged AMD U1 route reliable: matched runs
+still reached the same assertion. Reversing upstream's signal-emulation rewrite
+on an isolated control branch also reproduced the assertion at 115 seconds, so
+that upstream commit was ruled out.
+
+The actual race was at the EOP-associated presentation boundary. The existing
+fork tracker published the graphics EOP interrupt before queueing its flip, but
+the presentation thread could consume that new flip during the same vblank
+iteration. U1's woken job thread could therefore observe the flip/free event
+before it had processed the EOP event and set `m_gfxEopTick`.
+
+The generic correction stamps each submitted flip with the current vblank
+counter. CPU flips remain immediately eligible; an EOP-associated flip becomes
+eligible only after the counter advances. Focused coverage pins both cases. The
+exact AMD U1 route subsequently completed after 333 seconds with a passing
+visual result and no EOP assertion, and the full AMD suite repeated that pass.
+This is a presentation-order correction, not a vendor or title override.
+
+Removing the compilation guard previously enabled a completed Nvidia
+motion-bearing capture but exposed two one-frame white material returns. The
+guard remains preserved; those visual returns are a separate U1 correctness
+task after upstream promotion.
 
 The next controlled boundary was queued GPU memory ownership. The preserved U1
 seed disables command-buffer copying; an otherwise identical short replay with
@@ -134,49 +150,43 @@ the existing signal stub; without that integration support their link failed.
 
 ## Validation snapshot
 
-The complete discovered unit suite passes `648/648`, with one expected
+The complete discovered unit suite passes `649/649`, with one expected
 environment-dependent host-override skip. The Release application builds and
 links.
 
-The earlier final Nvidia platform suite passed all four entries. The exact
-post-refresh rerun remained functionally healthy but the suite wrapper reported
-failure because bounded stdout was truncated for U1 visual and U1 audio was
-classified inconclusive at its normal bounded timeout:
+Final Nvidia platform results:
 
-- U1 visual: process exit 0, temporal oracle pass, no forbidden marker;
-- U1 audio: bounded timeout, expected progress milestone, no crash signature;
+- U1 visual: bounded timeout with no crash or forbidden marker, but the retained
+  Nvidia seed/route did not reach the cave checkpoint; accepted `main` has the
+  same route gap, so this remains an inherited inconclusive rather than a passed
+  visual gate;
+- U1 audio: pass;
 - U2 smoke: pass;
 - U2 performance: pass.
 
-AMD platform suite and controls:
+Final AMD platform results:
 
-- U1 visual integration runs: repeated guest EOP assertion followed by host
-  access violation near 113 seconds;
-- current accepted-main exact control: no assertion/crash and a clean bounded
-  timeout, but it did not reach the visual checkpoint;
-- restoring the fork compilation guard did not remove the integration crash;
-- U1 audio: pass;
+- U1 visual: pass in both the focused 333-second replay and the full suite;
+- U1 audio: known incomplete-window inconclusive, without a crash signature;
 - U2 smoke: pass;
-- U2 performance: approximately 32 FPS with zero measured stutter.
+- U2 performance: pass on a complete retry quorum, approximately 32 FPS with
+  zero measured stutter. The first suite invocation had two valid trials and
+  one trace-less timeout, which was retained as infrastructure evidence.
 
-The earlier single passing integration retry is retained as timing evidence but
-does not override the repeated failures. AMD is required for ordinary
-integration regression, so the review branch is not accepted into fork `main`.
-The requested 4K campaign remains Nvidia-only and has not started.
+The upstream integration is accepted for promotion. The requested 4K campaign
+remains Nvidia-only and has not started.
 
-## Remaining gates before merge acceptance
+## Follow-up work after upstream promotion
 
-- isolate the AMD U1 EOP/assertion reliability regression without weakening the
-  retained host-compilation lifetime contract;
 - isolate and fix the two reproduced one-frame U1 white material returns before
   4K work;
-- keep cold compilation stutter, guest-pause liveness, AMD frame lifecycle, and
+- repair or replace the inherited Nvidia U1 seed/route so it reaches the cave
+  deterministically;
+- keep cold compilation stutter, guest-pause liveness, frame lifecycle, and
   renderer flicker as separate classifications;
 - update the corpus only after a route proves it reached the intended scene;
-- rerun the complete unit suite and both vendor-scoped Test Lab suites after the
-  final U1 change;
-- merge the review branch to fork `main` only after both vendor-scoped gates are
-  functionally green.
+- rerun the complete unit suite and relevant platform-scoped Test Lab suites
+  after each U1, resolution, or performance change.
 
 After the U1 gate, add generic per-game internal-resolution configuration and
 UI rather than title-specific patches. Evaluate PS4 versus PS4 Pro behavior on
