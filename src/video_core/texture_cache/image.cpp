@@ -8,6 +8,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
+#include "video_core/texture_cache/image_usage_policy.h"
 
 #include <vk_mem_alloc.h>
 
@@ -142,8 +143,8 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
         flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
     }
 
-    usage_flags = ImageUsageFlags(instance, info);
-    format_features = FormatFeatureFlags(usage_flags);
+    const auto preferred_usage = ImageUsageFlags(instance, info);
+    format_features = FormatFeatureFlags(preferred_usage);
     if (info.props.is_depth) {
         aspect_mask = vk::ImageAspectFlagBits::eDepth;
         if (info.props.has_stencil) {
@@ -153,23 +154,41 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 
     constexpr auto tiling = vk::ImageTiling::eOptimal;
     const auto supported_format = instance->GetSupportedFormat(info.pixel_format, format_features);
-    const vk::PhysicalDeviceImageFormatInfo2 format_info{
+    vk::PhysicalDeviceImageFormatInfo2 format_info{
         .format = supported_format,
         .type = ConvertImageType(info.type),
         .tiling = tiling,
-        .usage = usage_flags,
+        .usage = preferred_usage,
         .flags = flags,
     };
-    const auto image_format_properties =
-        instance->GetPhysicalDevice().getImageFormatProperties2(format_info);
-    if (image_format_properties.result == vk::Result::eErrorFormatNotSupported) {
+    vk::ImageFormatProperties2 supported_properties{};
+    const auto selected_usage = SelectSupportedImageUsage(
+        info.props.is_block, preferred_usage, [&](const vk::ImageUsageFlags candidate_usage) {
+            format_info.usage = candidate_usage;
+            const auto properties =
+                instance->GetPhysicalDevice().getImageFormatProperties2(format_info);
+            if (properties.result != vk::Result::eSuccess) {
+                return false;
+            }
+            supported_properties = properties.value;
+            return true;
+        });
+    if (!selected_usage) {
         LOG_ERROR(Render_Vulkan, "image format {} type {} is not supported (flags {}, usage {})",
                   vk::to_string(supported_format), vk::to_string(format_info.type),
-                  vk::to_string(format_info.flags), vk::to_string(format_info.usage));
+                  vk::to_string(format_info.flags), vk::to_string(preferred_usage));
+        usage_flags = preferred_usage;
+        supported_samples = vk::SampleCountFlagBits::e1;
+    } else {
+        usage_flags = selected_usage->usage;
+        supported_samples = supported_properties.imageFormatProperties.sampleCounts;
+        if (selected_usage->dropped_optional_storage) {
+            LOG_WARNING(Render_Vulkan,
+                        "Image format {} does not support optional storage usage; using sampled "
+                        "compressed image compatibility path",
+                        vk::to_string(supported_format));
+        }
     }
-    supported_samples = image_format_properties.result == vk::Result::eSuccess
-                            ? image_format_properties.value.imageFormatProperties.sampleCounts
-                            : vk::SampleCountFlagBits::e1;
 
     const vk::ImageCreateInfo image_ci = {
         .flags = flags,

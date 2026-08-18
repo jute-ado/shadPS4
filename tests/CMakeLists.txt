@@ -128,6 +128,19 @@ target_link_libraries(shadps4_texture_types_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_texture_types_test)
 
+add_executable(shadps4_image_usage_policy_test
+    test_image_usage_policy.cpp
+)
+target_include_directories(shadps4_image_usage_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_image_usage_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_image_usage_policy_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_image_usage_policy_test)
+
 add_executable(shadps4_fault_range_test
     test_fault_range.cpp
 )
