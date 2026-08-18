@@ -1,8 +1,10 @@
 # Uncharted 1 cave hair investigation
 
-Status: the original orange hair-card lattice and the follow-on intermittent
-white hair/web flash are fixed on a reviewable TDD branch. Focused Uncharted,
-GPU, cross-game performance, and the complete PS4 regression gates are green.
+Status: the original orange hair-card lattice is fixed. The follow-on
+intermittent white hair/web return passed the historical gates below, but a
+newer motion-bearing route reproduced it twice and supersedes the old
+"fixed" conclusion. No new U1 renderer fix is accepted. The current upstream
+integration branch is also blocked separately by an AMD frame-EOP assertion.
 
 ## Target
 
@@ -100,6 +102,90 @@ no crash or forbidden marker and passed all temporal invariants, but its 105-sec
 checkpoint caught a different phase of the animated options highlight. The
 accepted visual reference was not changed and the result is not counted as a
 clean pass.
+
+## 2026-08-18 upstream-integration revalidation
+
+The upstream-integration campaign invalidated an initially reassuring U1
+recheck. The legacy elapsed-time replay stopped sending confirmation input near
+30 seconds. On the current build U1 reaches its offline and title dialogs later,
+so the nominal cave runs stayed in menus. Their clean temporal results are not
+evidence about cave rendering and must not be counted as white-flash trials.
+
+A replacement private route sends bounded confirmation pulses throughout the
+slow menu phase. It reaches the saved jungle checkpoint at native 1920x1080 and
+produces 300/300 distinct gameplay frames. That stationary 30-second window has
+zero invisible flashes, zero abrupt A-B-A returns, and a maximum adjacent-frame
+difference of `0.06269234705130189`; its visual oracle passes. The containing
+run is classified separately because bounded stdout truncation makes the smoke
+result fail closed.
+
+The first route that also replayed the preserved human camera/gameplay input
+entered a long cold shader/pipeline-compilation pause at the start of capture.
+The sole captured frame is the explicit `Emulation Paused` overlay, the process
+continued compiling without a device-loss/assertion signature, and Test Lab
+terminated it at the scenario deadline. A second bounded run reproduced the
+same condition for its full 905-second lifetime: the emulator stayed responsive
+and accumulated CPU time, but no second gameplay frame was produced and no
+device-loss or renderer assertion appeared.
+
+That result exposed a testability and liveness tradeoff in fork commit
+`90d54e7d`: shader and pipeline creation wraps driver work in
+`ScopedHostCompilationGuestPause`, suspending guest threads while the uncached
+host work completes. The same design had previously been reverted by
+`69563239`, so the integration temporarily removed the three pause scopes.
+That experiment was rejected after matched AMD runs repeatedly reached the
+guest `m_gfxEopTick` assertion and terminated with host access violation
+`0xC0000005`. The accepted-main control retained the guard and survived to its
+configured timeout without the assertion. The integration therefore preserves
+the scoped pause and adds focused lifetime, pre-existing-pause, nested-pause,
+and production-wiring tests. Restoring it did not, by itself, make the merged
+AMD U1 route reliable, so neither policy is an accepted U1 fix.
+
+The rejected no-pause experiment let the identical moving route complete for
+900.951 seconds with the emulator and runner both exiting cleanly. It produced
+300 screenshots,
+298 distinct frames, and actual motion-bearing jungle gameplay throughout the
+capture window. That run reproduced the reported defect twice. In each case,
+Drake and Sully's hair and several nearby spider-web-like surfaces became bright
+white for exactly one frame and returned to their normal material on the next
+frame. The strict temporal evaluator reported two abrupt A-B-A returns and a
+maximum adjacent-frame difference of `0.5599515`.
+
+The first white frame followed creation of vertex shader `0x767c63ee` and
+graphics pipeline `0x9ab644acaf87479f`. The second white frame had no intervening
+shader or pipeline compilation. Host compilation can therefore coincide with
+the defect but is not its necessary cause. The no-pause experiment improved
+this route's liveness but is not retained because it weakens AMD frame-lifecycle
+reliability; it also did not fix the white material return.
+
+This motion-bearing replay supersedes the earlier five-clean-trial conclusion.
+Those trials remain useful historical evidence for the ADDR64 residency repair,
+but they did not exercise this route strongly enough to establish that the
+intermittent white return was gone. The current leading boundary is queued GPU
+memory ownership: the private seed has `copy_gpu_buffers=false`. A controlled
+replay kept the route and renderer unchanged while enabling queued guest
+command-buffer copying. Its 300/300 frames were distinct and the temporal oracle
+reported zero abrupt returns, zero invisible flashes, and no findings. The run
+exited normally; only bounded stdout truncation prevented its outer smoke result
+from being fully green.
+
+That single clean comparison is a strong discriminator, not an accepted fix.
+The optional setting copies only the top-level graphics DCB/CCB, and changing it
+globally could affect performance and other titles. A generic ownership RED,
+multiple clean U1 trials, and cross-game controls are still required. Per the
+upstream-first integration boundary, implementation work is deferred until the
+upstream merge and regression campaign are complete.
+
+Preserve the distinction between:
+
+- a renderer-visible white material return in completed gameplay frames;
+- a menu/route timing miss;
+- a host-compilation pause frame; and
+- bounded runner-output truncation.
+
+Private scenarios, input routes, screenshots, saves, and raw logs remain in the
+local Test Lab evidence store. The reusable lesson is that a strict temporal
+policy is only authoritative after actual scene membership is reviewed.
 
 White-flash candidate commits are `845f6391` (RED) and `7b182423` (GREEN).
 Texture-containment commits are `e7fff725` (RED) and `eaa8c93b` (GREEN).
