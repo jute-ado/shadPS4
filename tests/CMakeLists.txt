@@ -348,3 +348,19 @@ gtest_discover_tests(shadps4_http_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     DISCOVERY_TIMEOUT 60
 )
+
+add_executable(shadps4_texture_types_test
+    test_texture_types.cpp
+)
+target_include_directories(shadps4_texture_types_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_texture_types_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_texture_types_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+gtest_discover_tests(shadps4_texture_types_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
