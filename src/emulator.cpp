@@ -17,6 +17,7 @@
 #include "common/string_util.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
+#include "core/guest_display_resolution.h"
 #include "core/ipc/ipc.h"
 #ifdef ENABLE_DISCORD_RPC
 #include "common/discord_rpc_handler.h"
@@ -493,6 +494,9 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU directMemoryAccess: {}", EmulatorSettings.IsDirectMemoryAccessEnabled());
     LOG_INFO(Config, "GPU shouldDumpShaders: {}", EmulatorSettings.IsDumpShaders());
     LOG_INFO(Config, "GPU vblankFrequency: {}", EmulatorSettings.GetVblankFrequency());
+    LOG_INFO(Config, "{}",
+             Core::FormatGuestDisplayResolution({EmulatorSettings.GetInternalScreenWidth(),
+                                                 EmulatorSettings.GetInternalScreenHeight()}));
     LOG_INFO(Config, "Vulkan gpuId: {}", EmulatorSettings.GetGpuId());
     LOG_INFO(Config, "Vulkan vkValidation: {}", EmulatorSettings.IsVkValidationEnabled());
     LOG_INFO(Config, "Vulkan vkValidationCore: {}", EmulatorSettings.IsVkValidationCoreEnabled());

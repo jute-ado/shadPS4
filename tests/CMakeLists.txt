@@ -407,6 +407,7 @@ set(SETTINGS_TEST_SOURCES
 
     # Tests
     test_emulator_settings.cpp
+    test_guest_display_resolution.cpp
     # Windows static guest red-zone protection
     test_windows_guest_red_zone_protection_settings.cpp
 )
