@@ -2299,8 +2299,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 int PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    auto complete_boundary = submission_gate.BeginBoundary();
-    liverpool->SubmitDone(std::move(complete_boundary));
+    auto boundary = submission_gate.BeginGuardedBoundary();
+    liverpool->SubmitDone(std::move(boundary.complete));
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
@@ -2865,10 +2865,6 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {
         sdk_version = 0;
-    }
-
-    if (EmulatorSettings.IsCopyGpuBuffers()) {
-        liverpool->ReserveCopyBufferSpace();
     }
 
     LIB_FUNCTION("b0xyllnVY-I", "libSceGnmDriver", 1, "libSceGnmDriver", sceGnmAddEqEvent);

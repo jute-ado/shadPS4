@@ -19,7 +19,9 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/owned_command_buffers.h"
 #include "video_core/amdgpu/regs.h"
+#include "video_core/amdgpu/submission_completion_queue.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -71,14 +73,7 @@ public:
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
-    void SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
-        std::scoped_lock lk{submit_mutex};
-        mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
-        mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
-        submit_done_completion = std::move(completion);
-        submit_done = true;
-        submit_cv.notify_one();
-    }
+    void SubmitDone(Common::UniqueFunction<void>&& completion) noexcept;
 
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
@@ -120,14 +115,6 @@ public:
             ++num_commands;
             submit_cv.notify_one();
         }
-    }
-
-    void ReserveCopyBufferSpace() {
-        GpuQueue& gfx_queue = mapped_queues[GfxQueueId];
-        std::scoped_lock lk(gfx_queue.m_access);
-        constexpr size_t GfxReservedSize = 2_MB >> 2;
-        gfx_queue.ccb_buffer.reserve(GfxReservedSize);
-        gfx_queue.dcb_buffer.reserve(GfxReservedSize);
     }
 
     inline ComputeProgram& GetCsRegs() {
@@ -178,23 +165,26 @@ private:
         Handle handle;
     };
 
-    using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
-    CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb);
+    using CmdBufferOwner = std::shared_ptr<const OwnedCommandBuffers>;
+    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
+                         SubmissionCompletionQueue::Sequence submission_sequence,
+                         CmdBufferOwner owner = {});
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
-    Task ProcessCompute(std::span<const u32> acb, u32 vqid);
+    Task ProcessCompute(std::span<const u32> acb, u32 vqid,
+                        SubmissionCompletionQueue::Sequence submission_sequence);
 
     void ProcessCommands();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
+        struct Submission {
+            Task::Handle handle{};
+            SubmissionCompletionQueue::Sequence sequence{};
+        };
+
         std::mutex m_access{};
-        std::atomic<u32> dcb_buffer_offset;
-        std::atomic<u32> ccb_buffer_offset;
-        std::vector<u32> dcb_buffer;
-        std::vector<u32> ccb_buffer;
-        std::queue<Task::Handle> submits{};
+        std::queue<Submission> submits{};
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
@@ -204,7 +194,6 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
-
     struct ConstantEngine {
         void Reset() {
             ce_count = 0;
@@ -228,11 +217,10 @@ private:
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
     std::atomic<u32> num_commands{};
-    std::atomic<bool> submit_done{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
-    Common::UniqueFunction<void> submit_done_completion{};
+    SubmissionCompletionQueue submission_completions;
     std::thread::id gpu_id;
     s32 curr_qid{-1};
 };
