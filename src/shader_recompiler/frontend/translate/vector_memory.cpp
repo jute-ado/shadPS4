@@ -209,6 +209,45 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     const IR::VectorReg vaddr{inst.src[0].code};
     const IR::ScalarReg sharp{inst.src[2].code * 4};
 
+    if (mubuf.addr64 && !is_inst_typed && !is_buffer_typed) {
+        IR::BufferInstInfo buffer_info{};
+        buffer_info.pc.Assign(pc);
+        const IR::Value handle =
+            ir.CompositeConstruct(ir.GetScalarReg(sharp), ir.GetScalarReg(sharp + 1),
+                                  ir.GetScalarReg(sharp + 2), ir.GetScalarReg(sharp + 3));
+        const IR::U64 byte_address = BufferAddress64(inst);
+        const IR::VectorReg dst_reg{inst.src[1].code};
+        if (scalar_width == 8 || scalar_width == 16) {
+            ASSERT(num_dwords == 1);
+            const IR::Value address_words = ir.UnpackUint2x32(byte_address);
+            const IR::U32 address_lo{ir.CompositeExtract(address_words, 0)};
+            const IR::U32 byte_index =
+                ir.BitwiseAnd(address_lo, ir.Imm32(scalar_width == 8 ? 3U : 2U));
+            const IR::U64 aligned_address = ir.BitwiseAnd(byte_address, ir.Imm64(~u64{3}));
+            const IR::U32 word = ir.ReadConstBufferAddr64(
+                handle, ir.UnpackUint2x32(aligned_address), ir.Imm32(0), buffer_info);
+            const IR::U32 bit_offset = ir.IMul(byte_index, ir.Imm32(8));
+            const IR::U32 value =
+                ir.BitFieldExtract(word, bit_offset, ir.Imm32(scalar_width), is_signed);
+            ir.SetVectorReg(dst_reg, value);
+            return;
+        }
+
+        ASSERT(scalar_width == 32);
+        const IR::U64 aligned_address = ir.BitwiseAnd(byte_address, ir.Imm64(~u64{3}));
+        const IR::Value base = ir.UnpackUint2x32(aligned_address);
+        if (num_dwords == 1) {
+            ir.SetVectorReg(dst_reg,
+                            ir.ReadConstBufferAddr64(handle, base, ir.Imm32(0), buffer_info));
+            return;
+        }
+        for (u32 i = 0; i < num_dwords; i++) {
+            ir.SetVectorReg(dst_reg + i,
+                            ir.ReadConstBufferAddr64(handle, base, ir.Imm32(i), buffer_info));
+        }
+        return;
+    }
+
     const IR::U32 index = mubuf.idxen ? ir.GetVectorReg(vaddr) : ir.Imm32(0);
     const IR::VectorReg voffset_vgpr = mubuf.idxen ? vaddr + 1 : vaddr;
     const IR::U32 voffset = mubuf.offen ? ir.GetVectorReg(voffset_vgpr) : ir.Imm32(0);
@@ -269,6 +308,27 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
             ir.SetVectorReg(dst_reg + i, IR::U32{ir.CompositeExtract(value, i)});
         }
     }
+}
+
+IR::U64 Translator::BufferAddress64(const GcnInst& inst) {
+    const auto& mubuf = inst.control.mubuf;
+    ASSERT(mubuf.addr64);
+    ASSERT_MSG(!mubuf.idxen && !mubuf.offen,
+               "MUBUF ADDR64 cannot be combined with IDXEN or OFFEN");
+
+    const IR::VectorReg vaddr{inst.src[0].code};
+    const IR::ScalarReg sharp{inst.src[2].code * 4};
+    const IR::U64 vector_address = ir.PackUint2x32(ir.CompositeConstruct(
+        ir.GetVectorReg<IR::U32>(vaddr), ir.GetVectorReg<IR::U32>(vaddr + 1)));
+    const IR::U32 resource_base_hi =
+        ir.BitwiseAnd(ir.GetScalarReg(sharp + 1), ir.Imm32(0xff));
+    const IR::U64 resource_base = ir.PackUint2x32(
+        ir.CompositeConstruct(ir.GetScalarReg(sharp), resource_base_hi));
+    const IR::U64 scalar_offset = ir.UConvert(64, IR::U32{GetSrc(inst.src[3])});
+
+    IR::U64 address = ir.IAdd(vector_address, resource_base);
+    address = ir.IAdd(address, scalar_offset);
+    return ir.IAdd(address, ir.Imm64(u64{mubuf.offset}));
 }
 
 void Translator::BUFFER_STORE(u32 num_dwords, bool is_inst_typed, bool is_buffer_typed,

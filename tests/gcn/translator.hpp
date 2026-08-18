@@ -8,5 +8,12 @@
 
 #include "common/types.h"
 
+struct TranslationResult {
+    std::vector<u32> spirv;
+    std::size_t guest_buffer_count;
+};
+
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst);
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts);
+TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst);
+TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts);

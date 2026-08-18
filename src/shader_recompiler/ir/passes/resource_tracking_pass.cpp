@@ -81,6 +81,7 @@ bool IsBufferInstruction(const IR::Inst& inst) {
     case IR::Opcode::LoadBufferF32x4:
     case IR::Opcode::LoadBufferFormatF32:
     case IR::Opcode::ReadConstBuffer:
+    case IR::Opcode::ReadConstBufferAddr64:
         return true;
     default:
         return IsBufferStore(inst);
@@ -875,7 +876,8 @@ void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
     const auto buffer = buffer_res.GetSharp(info);
 
     // Address of constant buffer reads can be calculated at IR emission time.
-    if (inst.GetOpcode() == IR::Opcode::ReadConstBuffer) {
+    if (inst.GetOpcode() == IR::Opcode::ReadConstBuffer ||
+        inst.GetOpcode() == IR::Opcode::ReadConstBufferAddr64) {
         return;
     }
 

@@ -257,12 +257,6 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
                     continue;
                 }
 
-                all_readconsts.push_back(&inst);
-                if (pass_info.DeduplicateInstruction(&inst) != &inst) {
-                    // This is a duplicate of a readconst we've already visited
-                    continue;
-                }
-
                 IR::Inst* ptr_composite = inst.Arg(0).InstRecursive();
 
                 const auto pred = [](IR::Inst* inst) -> std::optional<IR::Inst*> {
@@ -274,7 +268,18 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
                 };
                 auto base0 = IR::BreadthFirstSearch(ptr_composite->Arg(0), pred);
                 auto base1 = IR::BreadthFirstSearch(ptr_composite->Arg(1), pred);
-                ASSERT_MSG(base0 && base1, "ReadConst not from constant memory");
+                if (!base0 || !base1) {
+                    // Direct guest-memory reads, such as MUBUF ADDR64, may use a VGPR-derived
+                    // address. They are not part of an extended user-data/SRT tree and must
+                    // remain dynamic for the backend's direct-memory path.
+                    continue;
+                }
+
+                all_readconsts.push_back(&inst);
+                if (pass_info.DeduplicateInstruction(&inst) != &inst) {
+                    // This is a duplicate of a readconst we've already visited
+                    continue;
+                }
 
                 IR::Inst* ptr_lo = base0.value();
                 ptr_lo = pass_info.DeduplicateInstruction(ptr_lo);

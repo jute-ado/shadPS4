@@ -81,6 +81,13 @@ Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     return result;
 }
 
+Id EmitReadConstBufferAddr64(EmitContext& ctx, [[maybe_unused]] u32 handle, Id addr, Id offset) {
+    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+        return ctx.EmitFlatbufferLoad(ctx.ConstU32(0U));
+    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
+}
+
 Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
     if (IR::IsParam(attr)) {
         const u32 param_index{u32(attr) - u32(IR::Attribute::Param0)};

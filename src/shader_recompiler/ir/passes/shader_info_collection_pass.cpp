@@ -127,7 +127,9 @@ void Visit(Info& info, const IR::Inst& inst) {
         info.uses_lane_id = true;
         break;
     case IR::Opcode::ReadConst:
-        if (!info.uses_dma) {
+    case IR::Opcode::ReadConstBufferAddr64:
+        if (!info.uses_dma && (inst.GetOpcode() == IR::Opcode::ReadConst ||
+                               !EmulatorSettings.IsDirectMemoryAccessEnabled())) {
             info.buffers.push_back({
                 .used_types = IR::Type::U32,
                 // We can't guarantee that flatbuf will not grow past UBO
@@ -136,7 +138,7 @@ void Visit(Info& info, const IR::Inst& inst) {
                 .buffer_type = BufferType::Flatbuf,
             });
         }
-        if (inst.Flags<u32>() != 0) {
+        if (inst.GetOpcode() == IR::Opcode::ReadConst && inst.Flags<u32>() != 0) {
             info.readconst_types |= Info::ReadConstType::Immediate;
         } else {
             info.readconst_types |= Info::ReadConstType::Dynamic;

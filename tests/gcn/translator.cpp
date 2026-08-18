@@ -28,6 +28,14 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
 }
 
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
+    return TranslateToSpirvWithInfo(raw_gcn_insts).spirv;
+}
+
+TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst) {
+    return TranslateToSpirvWithInfo(std::span<const u64>{&raw_gcn_inst, 1});
+}
+
+TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -48,7 +56,7 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
     Shader::Info info{};
     info.stage = Stage::Compute;
     info.l_stage = LogicalStage::Compute;
-    info.flattened_ud_buf.resize(4);
+    info.flattened_ud_buf.resize(8);
     AmdGpu::Buffer buf = AmdGpu::Buffer::Null();
     std::memcpy(info.flattened_ud_buf.data(), &buf, sizeof(buf));
 
@@ -71,7 +79,7 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);
-    runtime_info.num_user_data = 4;
+    runtime_info.num_user_data = 8;
     runtime_info.cs_info.workgroup_size = {1, 1, 1};
 
     Gcn::Translator translator(program.info, runtime_info, profile);
@@ -94,6 +102,7 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 
     Shader::Optimization::SsaRewritePass(program.post_order_blocks);
     Shader::Optimization::IdentityRemovalPass(program.blocks);
+    Shader::Optimization::FlattenExtendedUserdataPass(program);
     Shader::Optimization::ResourceTrackingPassStub(program, profile);
     Shader::Optimization::ConstantPropagationPass(program.blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);
@@ -103,5 +112,9 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 
     const auto spirv = Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 
-    return spirv;
+    std::size_t guest_buffer_count = 0;
+    for (const auto& buffer : program.info.buffers) {
+        guest_buffer_count += buffer.buffer_type == Shader::BufferType::Guest;
+    }
+    return {.spirv = spirv, .guest_buffer_count = guest_buffer_count};
 }

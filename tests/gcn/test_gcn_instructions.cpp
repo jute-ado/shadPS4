@@ -26,6 +26,29 @@ struct F32x2 {
     float b;
 };
 
+TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
+    // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+    // With ADDR64 clear, the same encoding is descriptor-relative and must
+    // not lower to the same memory access as the 64-bit VGPR address form.
+    constexpr u64 descriptor_relative_load = 0x80010000e030000cULL;
+
+    const auto addr64_spirv = TranslateToSpirv(addr64_load);
+    const auto descriptor_relative_spirv = TranslateToSpirv(descriptor_relative_load);
+
+    EXPECT_NE(addr64_spirv, descriptor_relative_spirv);
+}
+
+TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
+    // The test epilogue writes through s[0:3]. Use a distinct source descriptor so this
+    // assertion proves that ADDR64 itself keeps s[4:7] live for pre-draw residency.
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto result = TranslateToSpirvWithInfo(addr64_load);
+
+    EXPECT_EQ(result.guest_buffer_count, 2U);
+}
+
 // Example
 // TEST_F(GcnTest, test_name) {
 //     // Runner sets the vulkan context

@@ -81,6 +81,7 @@ bool IsBufferInstruction(const IR::Inst& inst) {
     case IR::Opcode::LoadBufferF32x4:
     case IR::Opcode::LoadBufferFormatF32:
     case IR::Opcode::ReadConstBuffer:
+    case IR::Opcode::ReadConstBufferAddr64:
         return true;
     default:
         return IsBufferStore(inst);
@@ -203,7 +204,15 @@ private:
 
 void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& descriptors,
                       const Profile& profile) {
-    u32 buffer_binding = descriptors.Add(BufferResource{.sharp_idx = 0,
+    u32 sharp_idx = 0;
+    if (inst.GetOpcode() == IR::Opcode::ReadConstBufferAddr64) {
+        const IR::Inst* handle = inst.Arg(0).InstRecursive();
+        ASSERT(handle->GetOpcode() == IR::Opcode::CompositeConstructU32x4);
+        const IR::Inst* source = handle->Arg(0).InstRecursive();
+        ASSERT(source->GetOpcode() == IR::Opcode::GetUserData);
+        sharp_idx = static_cast<u32>(source->Arg(0).ScalarReg());
+    }
+    u32 buffer_binding = descriptors.Add(BufferResource{.sharp_idx = sharp_idx,
                                                         .used_types = IR::Type::U32,
                                                         .buffer_type = BufferType::Guest,
                                                         .is_written = true,
@@ -299,7 +308,8 @@ void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
     const auto buffer = AmdGpu::Buffer::Null();
 
     // Address of constant buffer reads can be calculated at IR emission time.
-    if (inst.GetOpcode() == IR::Opcode::ReadConstBuffer) {
+    if (inst.GetOpcode() == IR::Opcode::ReadConstBuffer ||
+        inst.GetOpcode() == IR::Opcode::ReadConstBufferAddr64) {
         return;
     }
 
