@@ -369,6 +369,27 @@ TEST_F(GcnTest, and_or_b32_8) {
     EXPECT_EQ(*result, 0x11111111);
 }
 
+TEST_F(GcnTest, mad_f32_rounds_multiply_before_add) {
+    auto runner = gcn_test::Runner::instance().value();
+
+    // This triple distinguishes GCN V_MAD_F32 from a fused multiply-add. The rounded
+    // float32 product exactly cancels src2, while an FMA retains a non-zero residual.
+    constexpr float a = 1.00000011920928955078125f;
+    constexpr float b = 1.00000011920928955078125f;
+    constexpr float c = -1.0000002384185791015625f;
+    ASSERT_NE(std::fma(a, b, c), 0.0f);
+
+    const auto inst =
+        VOP3A(OpcodeVOP3::V_MAD_F32, VOperand8::V0, SOperand9::V0, SOperand9::V1,
+              SOperand9::V2)
+            .Get();
+    const auto spirv = TranslateToSpirv(inst);
+    const auto result = runner->run<float>(spirv, std::array{a, b, c});
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 0.0f);
+}
+
 TEST_F(GcnTest, mad_mix_f32_1) {
     auto runner = gcn_test::Runner::instance().value();
 

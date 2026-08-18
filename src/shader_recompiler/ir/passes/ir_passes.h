@@ -23,6 +23,7 @@ void ResourceTrackingPass(IR::Program& program, const Profile& profile);
 void BufferAccessRangePass(IR::Program& program);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
 void LowerBufferFormatToRaw(IR::Program& program);
+void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info);
 void LowerFp64ToFp32(IR::Program& program);
 void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtime_info);
 void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info);

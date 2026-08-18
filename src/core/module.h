@@ -9,7 +9,6 @@
 #include "core/emulator_settings.h"
 #include "core/loader/elf.h"
 #include "core/loader/symbols_resolver.h"
-#include "core/module_mapping.h"
 
 namespace Core {
 
@@ -143,7 +142,7 @@ class MemoryManager;
 class Module {
 public:
     explicit Module(Core::MemoryManager* memory, const std::filesystem::path& file,
-                    ModuleMappingRole mapping_role, u32& max_tls_index);
+                    std::unique_ptr<Core::FileSys::IFile> handle, u32& max_tls_index, s32 id);
     ~Module();
 
     VAddr GetBaseAddress() const noexcept {
@@ -213,7 +212,7 @@ public:
     }
 
     s32 Start(u64 args, const void* argp, void* param);
-    void LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_index);
+    void LoadModuleToMemory(u32& max_tls_index);
     void LoadDynamicInfo();
     void LoadSymbols();
 
@@ -228,6 +227,7 @@ public:
     std::filesystem::path file;
     std::string name;
     Loader::Elf elf;
+    s32 id{};
     u64 aligned_base_size{};
     VAddr base_virtual_addr{};
     VAddr proc_param_virtual_addr{};

@@ -3,21 +3,32 @@
 
 #pragma once
 
+#include <utility>
+
 #include "common/types.h"
 
 namespace Core {
 
 enum class ModuleMappingRole {
     MainExecutable,
-    Library,
+    GameLibrary,
+    SystemLibrary,
 };
 
-constexpr VAddr LibraryModuleLoadBase = 0x800000000;
+constexpr VAddr GameLibraryModuleLoadBase = 0x80000000;
+constexpr VAddr SystemLibraryModuleLoadBase = 0x800000000;
 
 constexpr VAddr PreferredModuleLoadAddress(ModuleMappingRole role,
                                            VAddr system_managed_base) noexcept {
-    return role == ModuleMappingRole::MainExecutable ? system_managed_base
-                                                     : LibraryModuleLoadBase;
+    switch (role) {
+    case ModuleMappingRole::MainExecutable:
+        return system_managed_base;
+    case ModuleMappingRole::GameLibrary:
+        return GameLibraryModuleLoadBase;
+    case ModuleMappingRole::SystemLibrary:
+        return SystemLibraryModuleLoadBase;
+    }
+    std::unreachable();
 }
 
 } // namespace Core

@@ -16,4 +16,10 @@ constexpr bool ShouldShutdownForUnclaimedException(u32 code) {
     return code != BreakpointExceptionCode && code != MsvcCppExceptionCode;
 }
 
+constexpr bool ShouldReportUnhandledException(u32 code, bool static_red_zone_enabled,
+                                              bool static_protection_exception) {
+    return ShouldShutdownForUnclaimedException(code) &&
+           (!static_red_zone_enabled || static_protection_exception);
+}
+
 } // namespace Core::WindowsException

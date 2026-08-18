@@ -12,7 +12,12 @@ TEST(ModuleMapping, MainExecutableStartsAtFirstUsableSystemManagedAddress) {
               system_managed_base);
 }
 
-TEST(ModuleMapping, LibrariesRetainContiguousModuleRegionPreference) {
-    EXPECT_EQ(Core::PreferredModuleLoadAddress(Core::ModuleMappingRole::Library, 0xc020000),
-              Core::LibraryModuleLoadBase);
+TEST(ModuleMapping, GameLibrariesLoadBelowFourGiB) {
+    EXPECT_EQ(Core::PreferredModuleLoadAddress(Core::ModuleMappingRole::GameLibrary, 0xc020000),
+              Core::GameLibraryModuleLoadBase);
+}
+
+TEST(ModuleMapping, SystemLibrariesRetainTheHighModuleRegion) {
+    EXPECT_EQ(Core::PreferredModuleLoadAddress(Core::ModuleMappingRole::SystemLibrary, 0xc020000),
+              Core::SystemLibraryModuleLoadBase);
 }

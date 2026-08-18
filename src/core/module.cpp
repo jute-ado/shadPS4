@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/alignment.h"
@@ -14,6 +14,7 @@
 #include "core/loader/dwarf.h"
 #include "core/memory.h"
 #include "core/module.h"
+#include "core/module_mapping.h"
 #include "core/tls.h"
 
 namespace Core {
@@ -82,11 +83,11 @@ static std::string StringToNid(std::string_view symbol) {
 }
 
 Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_,
-               ModuleMappingRole mapping_role, u32& max_tls_index)
-    : memory{memory_}, file{file_}, name{file.filename().string()} {
-    elf.Open(file);
+               std::unique_ptr<Core::FileSys::IFile> handle, u32& max_tls_index, s32 id_)
+    : id{id_}, memory{memory_}, file{file_}, name{file.filename().string()} {
+    elf.Open(std::move(handle));
     if (elf.IsElfFile()) {
-        LoadModuleToMemory(mapping_role, max_tls_index);
+        LoadModuleToMemory(max_tls_index);
         LoadDynamicInfo();
         LoadSymbols();
     }
@@ -100,7 +101,7 @@ s32 Module::Start(u64 args, const void* argp, void* param) {
     return reinterpret_cast<EntryFunc>(addr)(args, argp, param);
 }
 
-void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_index) {
+void Module::LoadModuleToMemory(u32& max_tls_index) {
     static constexpr size_t BlockAlign = 0x1000;
     static constexpr u64 TrampolineSize = 8_MB;
 
@@ -111,12 +112,17 @@ void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_ind
     aligned_base_size = Common::AlignUp(base_size, BlockAlign);
 
     // Reserve memory area for module
-    void** out_addr = reinterpret_cast<void**>(&base_virtual_addr);
-    const VAddr preferred_address =
+    const bool is_executable =
+        elf_header.e_type == ET_SCE_EXEC || elf_header.e_type == ET_SCE_DYNEXEC;
+    const auto mapping_role = is_executable   ? ModuleMappingRole::MainExecutable
+                              : IsSystemLib() ? ModuleMappingRole::SystemLibrary
+                                              : ModuleMappingRole::GameLibrary;
+    const VAddr load_base =
         PreferredModuleLoadAddress(mapping_role, memory->SystemManagedVirtualBase());
-    s32 result = memory->MapMemory(out_addr, preferred_address, aligned_base_size + TrampolineSize,
-                                   MemoryProt::NoAccess, MemoryMapFlags::NoFlags,
-                                   VMAType::Reserved, name);
+    void** out_addr = reinterpret_cast<void**>(&base_virtual_addr);
+    s32 result =
+        memory->MapMemory(out_addr, load_base, aligned_base_size + TrampolineSize,
+                          MemoryProt::NoAccess, MemoryMapFlags::NoFlags, VMAType::Reserved, name);
     ASSERT_MSG(result == ORBIS_OK, "Failed to reserve memory for module {}", name);
     LOG_INFO(Core_Linker, "Loading module {} to {}", name, fmt::ptr(*out_addr));
 
@@ -171,6 +177,13 @@ void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_ind
         }
     };
 
+#if defined(ARCH_X86_64) && defined(_WIN32)
+    // Windows static guest red-zone protection
+    const bool use_static_windows_guest_red_zone_protection =
+        WindowsGuestRedZoneProtection::IsStaticPatchingEnabled();
+    std::vector<std::pair<VAddr, u64>> executable_segments;
+    std::vector<uintptr_t> function_starts;
+#endif
     for (u16 i = 0; i < elf_header.e_phnum; i++) {
         const auto header_type = elf.ElfPheaderTypeStr(elf_pheader[i].p_type);
         switch (elf_pheader[i].p_type) {
@@ -195,6 +208,12 @@ void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_ind
 #ifdef ARCH_X86_64
             if (elf_pheader[i].p_flags & PF_EXEC) {
                 PrePatchInstructions(segment_addr, segment_file_size);
+#ifdef _WIN32
+                // Windows static guest red-zone protection
+                if (use_static_windows_guest_red_zone_protection) {
+                    executable_segments.emplace_back(segment_addr, segment_file_size);
+                }
+#endif
             }
 #endif
             break;
@@ -237,6 +256,13 @@ void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_ind
             const VAddr eh_hdr_end = eh_hdr_start + eh_frame_hdr_size;
             Dwarf::EHHeaderInfo hdr_info;
             if (Dwarf::DecodeEHHdr(eh_hdr_start, eh_hdr_end, hdr_info)) {
+#if defined(ARCH_X86_64) && defined(_WIN32)
+                // Windows static guest red-zone protection
+                if (use_static_windows_guest_red_zone_protection &&
+                    !Dwarf::DecodeEHHdrTable(hdr_info, eh_hdr_end, function_starts)) {
+                    LOG_ERROR(Core_Linker, "Failed to decode EH frame search table for {}", name);
+                }
+#endif
                 eh_frame_addr = hdr_info.eh_frame_ptr - base_virtual_addr;
                 if (eh_frame_hdr_addr > eh_frame_addr) {
                     eh_frame_size = (eh_frame_hdr_addr - eh_frame_addr);
@@ -250,6 +276,60 @@ void Module::LoadModuleToMemory(ModuleMappingRole mapping_role, u32& max_tls_ind
             LOG_ERROR(Core_Linker, "Unimplemented type {}", header_type);
         }
     }
+
+#if defined(ARCH_X86_64) && defined(_WIN32)
+    // Windows static guest red-zone protection
+    if (use_static_windows_guest_red_zone_protection) {
+        u64 analyzed_function_count{};
+        u64 stack_dependent_instruction_count{};
+        u64 control_flow_instruction_count{};
+        u64 unrelocatable_instruction_count{};
+        u64 unsupported_cpu_patch_instruction_count{};
+        for (const auto& [segment_addr, segment_size] : executable_segments) {
+            // Windows static guest red-zone protection
+            const auto result =
+                PatchRedZoneMemoryInstructions(segment_addr, segment_size, function_starts);
+            analyzed_function_count += result.function_count;
+            stack_dependent_instruction_count += result.stack_dependent_memory_instruction_count;
+            control_flow_instruction_count += result.control_flow_memory_instruction_count;
+            unrelocatable_instruction_count += result.unrelocatable_memory_instruction_count;
+            unsupported_cpu_patch_instruction_count +=
+                result.unsupported_cpu_patch_instruction_count;
+            LOG_DEBUG(
+                Core_Linker,
+                "Windows guest red-zone static patching for {}: {} functions, {} instructions, "
+                "{} red-zone functions, {}/{} memory instructions patched "
+                "({} short, {} stack-dependent, {} control-flow, {} unrelocatable), "
+                "{}/{} short CPU patches applied ({} unsupported), {} indirect red-zone "
+                "functions",
+                name, result.function_count, result.instruction_count,
+                result.red_zone_function_count, result.patched_memory_instruction_count,
+                result.memory_instruction_count, result.short_memory_instruction_count,
+                result.stack_dependent_memory_instruction_count,
+                result.control_flow_memory_instruction_count,
+                result.unrelocatable_memory_instruction_count,
+                result.patched_cpu_patch_instruction_count, result.cpu_patch_instruction_count,
+                result.unsupported_cpu_patch_instruction_count,
+                result.indirect_red_zone_function_count);
+        }
+        if (!executable_segments.empty() && analyzed_function_count == 0) {
+            LOG_WARNING(Core_Linker,
+                        "Windows guest red-zone static patching could not find function "
+                        "boundaries for {}; protection was not applied",
+                        name);
+        } else if (stack_dependent_instruction_count != 0 || control_flow_instruction_count != 0 ||
+                   unrelocatable_instruction_count != 0 ||
+                   unsupported_cpu_patch_instruction_count != 0) {
+            LOG_WARNING(
+                Core_Linker,
+                "Windows guest red-zone static patching for {} is partial: {} stack-dependent, "
+                "{} control-flow, and {} unrelocatable memory instructions were not protected; "
+                "{} CPU patch instructions were unsupported",
+                name, stack_dependent_instruction_count, control_flow_instruction_count,
+                unrelocatable_instruction_count, unsupported_cpu_patch_instruction_count);
+        }
+    }
+#endif
 
     const VAddr entry_addr = base_virtual_addr + elf.GetElfEntry();
     LOG_INFO(Core_Linker, "program entry addr ..........: {:#018x}", entry_addr);
@@ -491,6 +571,7 @@ void Module::LoadSymbols() {
 OrbisKernelModuleInfoEx Module::GetModuleInfoEx() const {
     return OrbisKernelModuleInfoEx{
         .name = info.name,
+        .id = id,
         .tls_index = tls.modid,
         .tls_init_addr = tls.image_virtual_addr,
         .tls_init_size = tls.init_image_size,
