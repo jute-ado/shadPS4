@@ -192,7 +192,8 @@ struct AddressSpace::Impl {
         user_size = supported_user_max - USER_MIN - 1;
 
         // Increase BackingSize to account for config options.
-        BackingSize += EmulatorSettings.GetExtraDmemInMBytes() * 1_MB;
+        BackingSize += EmulatorSettings.GetExtraDmemInMBytes() * 1_MB +
+                       EmulatorSettings.GetExtraFmemInMBytes() * 1_MB;
 
         // Allocate backing file that represents the total physical memory.
         backing_handle = CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_ALL_ACCESS,
@@ -654,7 +655,8 @@ enum PosixPageProtection {
 
 struct AddressSpace::Impl {
     Impl() {
-        BackingSize += EmulatorSettings.GetExtraDmemInMBytes() * 1_MB;
+        BackingSize += EmulatorSettings.GetExtraDmemInMBytes() * 1_MB +
+                       EmulatorSettings.GetExtraFmemInMBytes() * 1_MB;
         // Allocate virtual address placeholder for our address space.
         system_managed_size = SystemManagedSize;
         system_reserved_size = SystemReservedSize;

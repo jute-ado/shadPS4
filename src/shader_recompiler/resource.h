@@ -25,6 +25,7 @@ enum class BufferType : u32 {
     FaultBuffer,
     GdsBuffer,
     SharedMemory,
+    ClipPlanes,
 };
 
 struct Info;

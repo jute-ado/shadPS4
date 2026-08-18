@@ -206,15 +206,18 @@ target_compile_features(shadps4_gnm_submission_gate_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_gnm_submission_gate_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_gnm_submission_gate_test)
 
-add_executable(shadps4_host_compilation_pause_test
-    test_host_compilation_pause.cpp
+add_executable(shadps4_pipeline_compilation_policy_test
+    test_pipeline_compilation_policy.cpp
 )
-target_include_directories(shadps4_host_compilation_pause_test PRIVATE
+target_include_directories(shadps4_pipeline_compilation_policy_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
-target_compile_features(shadps4_host_compilation_pause_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_host_compilation_pause_test PRIVATE GTest::gtest_main)
-list(APPEND TEST_TARGETS shadps4_host_compilation_pause_test)
+target_compile_definitions(shadps4_pipeline_compilation_policy_test PRIVATE
+    SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+)
+target_compile_features(shadps4_pipeline_compilation_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pipeline_compilation_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pipeline_compilation_policy_test)
 
 add_executable(shadps4_guest_thread_priority_test
     test_guest_thread_priority.cpp
@@ -316,6 +319,10 @@ if (WIN32)
     add_executable(shadps4_windows_exception_policy_test
         test_windows_exception_policy.cpp
     )
+    target_compile_definitions(shadps4_windows_exception_policy_test PRIVATE
+        SHADPS4_EMULATOR_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/emulator.cpp"
+        SHADPS4_SIGNALS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/signals.cpp"
+    )
     target_link_libraries(shadps4_windows_exception_policy_test PRIVATE GTest::gtest_main)
     list(APPEND TEST_TARGETS shadps4_windows_exception_policy_test)
 endif()
@@ -333,6 +340,19 @@ target_link_libraries(shadps4_depth_association_test PRIVATE
     spdlog::spdlog
 )
 list(APPEND TEST_TARGETS shadps4_depth_association_test)
+
+add_executable(shadps4_depth_stencil_policy_test
+    test_depth_stencil_policy.cpp
+)
+target_include_directories(shadps4_depth_stencil_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_depth_stencil_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_depth_stencil_policy_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_depth_stencil_policy_test)
 
 add_executable(shadps4_module_mapping_test
     test_module_mapping.cpp
@@ -375,6 +395,8 @@ set(SETTINGS_TEST_SOURCES
 
     # Tests
     test_emulator_settings.cpp
+    # Windows static guest red-zone protection
+    test_windows_guest_red_zone_protection_settings.cpp
 )
 
 set(NGS2_TEST_SOURCES
@@ -404,7 +426,6 @@ set(GCN_TEST_SOURCES
     # Under test
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/emulator_state.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/signals.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv_atomic.cpp
@@ -490,6 +511,7 @@ set(GCN_TEST_SOURCES
     stubs/scm_rev_stub.cpp
     stubs/sdl_stub.cpp
     stubs/core_stub.cpp
+    stubs/signals_stub.cpp
 
     gcn/gcn_test_runner.hpp
     gcn/gcn_test_runner.cpp

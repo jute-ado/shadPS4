@@ -14,7 +14,6 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
-#include "video_core/renderer_vulkan/host_compilation_pause.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -132,6 +131,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
     }
     case Stage::Vertex: {
         BuildCommon(regs.vs_program);
+        info.vs_info.user_clip_plane_mask = regs.clipper_control.user_clip_plane_enable;
         info.vs_info.step_rate_0 = regs.vgt_instance_step_rate_0;
         info.vs_info.step_rate_1 = regs.vgt_instance_step_rate_1;
         info.vs_info.num_outputs = MapOutputs(info.vs_info.outputs, regs.vs_output_control);
@@ -223,9 +223,16 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
             info.fs_info.color_buffers[i] = graphics_key.color_buffers[i];
         }
+        // Lowered user clip planes ride the same emulation path as guest-exported distances, so
+        // the fragment side arms whenever the hardware vertex stage lowers them, keeping its input
+        // locations in sync with the shifted vertex outputs.
+        const bool lowers_user_clip_planes =
+            regs.clipper_control.user_clip_plane_enable &&
+            !regs.stage_enable.IsStageEnabled(static_cast<u32>(Stage::Geometry));
         info.fs_info.clip_distance_emulation =
-            regs.vs_output_control.clip_distance_enable &&
-            !regs.stage_enable.IsStageEnabled(static_cast<u32>(Stage::Local)) &&
+            ((regs.vs_output_control.clip_distance_enable &&
+              !regs.stage_enable.IsStageEnabled(static_cast<u32>(Stage::Local))) ||
+             lowers_user_clip_planes) &&
             profile.needs_clip_distance_emulation;
         break;
     }
@@ -325,8 +332,6 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
-        ScopedHostCompilationGuestPause pause{DebugState};
-
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
@@ -356,8 +361,6 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
-        ScopedHostCompilationGuestPause pause{DebugState};
-
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
@@ -501,13 +504,8 @@ bool PipelineCache::RefreshGraphicsStages() {
 
     infos.fill(nullptr);
     modules.fill(nullptr);
-    const auto result = bind_stage(Stage::Fragment, LogicalStage::Fragment);
-    if (!result && regs.vs_output_control.clip_distance_enable &&
-        profile.needs_clip_distance_emulation) {
-        // TODO: need to implement a discard only fallback shader
-        LOG_WARNING(Render_Vulkan,
-                    "Clip distance emulation is ineffective due to absense of fragment shader");
-    }
+
+    bind_stage(Stage::Fragment, LogicalStage::Fragment);
 
     const auto* fs_info = infos[static_cast<u32>(LogicalStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -606,7 +604,6 @@ bool PipelineCache::RefreshComputeKey() {
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
                                               Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{DebugState};
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
