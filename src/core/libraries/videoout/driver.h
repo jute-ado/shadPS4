@@ -99,6 +99,7 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        u64 submitted_vblank;
 
         operator bool() const noexcept {
             return frame != nullptr;

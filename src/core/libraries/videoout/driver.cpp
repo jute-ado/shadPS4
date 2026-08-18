@@ -8,6 +8,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+#include "core/libraries/videoout/eop_flip_presentation.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -326,6 +327,12 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
 
+    u64 submitted_vblank;
+    {
+        std::scoped_lock lock{port->vo_mutex};
+        submitted_vblank = port->vblank_status.count;
+    }
+
     std::scoped_lock lock{mutex};
     requests.push({
         .frame = frame,
@@ -333,6 +340,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         .flip_arg = flip_arg,
         .index = index,
         .eop = is_eop,
+        .submitted_vblank = submitted_vblank,
     });
 }
 
@@ -345,9 +353,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
     Common::AccurateTimer timer{vblank_period};
 
-    const auto receive_request = [this] -> Request {
+    const auto receive_request = [this](u64 current_vblank) -> Request {
         std::scoped_lock lk{mutex};
-        if (!requests.empty()) {
+        if (!requests.empty() &&
+            IsFlipPresentationEligible(requests.front().eop, requests.front().submitted_vblank,
+                                       current_vblank)) {
             const auto request = requests.front();
             requests.pop();
             return request;
@@ -367,7 +377,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
         if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
-            const auto request = receive_request();
+            const auto request = receive_request(vblank_status.count);
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
                     if (!main_port.is_open) {
