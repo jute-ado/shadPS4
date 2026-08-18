@@ -1,5 +1,9 @@
 # Emulator Test Lab workflow
 
+- **Status:** Confirmed development workflow
+- **Last verified:** 2026-08-18
+- **Verified revision:** `8ce873a7`
+
 shadPS4 game regressions are exercised by an external, local-only test
 framework. The external framework owns orchestration, portable scenario
 contracts, controller routes, evidence classification, and immutable run
@@ -22,7 +26,7 @@ timing, diagnostic, configuration, save-data, state, or audio-capture behavior.
   changes orchestration or a versioned contract.
 
 Because the emulator repositories are public, their committed documentation
-must use placeholders—never your `F:\...` paths, private Forgejo address,
+must use placeholders—never your `<drive>:\...` paths, private Forgejo address,
 credentials, game identities unnecessarily, or vault layout. Exact
 machine-specific commands belong in a private local runbook.
 

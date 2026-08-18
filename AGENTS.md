@@ -38,8 +38,10 @@ the first pair, rebase the second, and produce fresh evidence. Never resolve a
 baseline or scenario digest conflict mechanically.
 
 Because the emulator repositories are public, their committed documentation
-must use placeholders—never your `F:\...` paths, private Forgejo address,
+must use placeholders—never your `<drive>:\...` paths, private Forgejo address,
 credentials, game identities unnecessarily, or vault layout. Exact
 machine-specific commands belong in a private local runbook.
 
-See `documents/emulator-test-lab.md` for the complete local workflow.
+Start with `documents/engineering-knowledge-base.md` for the sanitized
+engineering index and `documents/emulator-test-lab.md` for the complete local
+workflow.

@@ -1,5 +1,10 @@
 # Uncharted compatibility investigation guide
 
+- **Status:** Historical campaign record with confirmed checkpoint findings
+- **Last verified:** 2026-08-18
+- **Verified revision:** `8ce873a7`
+- **Scope:** Recorded checkpoints and synthetic invariants, not general game compatibility
+
 This document records the reusable engineering method and accepted findings from
 the Uncharted compatibility campaign. It is intentionally free of games, saves,
 captures, machine paths, private manifests, and raw logs. Those artifacts remain

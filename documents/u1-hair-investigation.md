@@ -1,10 +1,17 @@
 # Uncharted 1 cave hair investigation
 
+- **Status:** Confirmed at the recorded checkpoints
+- **Last verified:** 2026-08-18
+- **Verified revision:** `e227a31f`
+- **Scope:** MUBUF `addr64`, source-buffer residency, and texture containment
+
 Status: the original orange hair-card lattice is fixed. The follow-on
 intermittent white hair/web return passed the historical gates below, but a
 newer motion-bearing route reproduced it twice and supersedes the old
-"fixed" conclusion. No new U1 renderer fix is accepted. The current upstream
-integration branch is also blocked separately by an AMD frame-EOP assertion.
+"fixed" conclusion. No new U1 renderer fix is accepted. The upstream
+integration's separate AMD frame-EOP race is fixed by deferring EOP-associated
+presentation until the next vblank iteration; that ordering fix does not claim
+to repair the white material return.
 
 ## Target
 
