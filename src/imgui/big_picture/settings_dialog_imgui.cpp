@@ -10,6 +10,7 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "core/guest_display_resolution.h"
 #include "core/devtools/layer.h"
 #include "imgui/imgui_std.h"
 #include "settings_dialog_imgui.h"
@@ -54,6 +55,10 @@ void SettingsWindow::LoadSettings(std::string profile) {
     presentModeSetting = GetComboIndex(EmulatorSettings.GetPresentMode(), presentModeOptions);
     windowHeightSetting = EmulatorSettings.GetWindowHeight();
     windowWidthSetting = EmulatorSettings.GetWindowWidth();
+    internalScreenWidthSetting = EmulatorSettings.GetInternalScreenWidth();
+    internalScreenHeightSetting = EmulatorSettings.GetInternalScreenHeight();
+    guestDisplayResolutionSetting = static_cast<int>(Core::FindGuestDisplayResolutionPreset(
+        internalScreenWidthSetting, internalScreenHeightSetting));
     hdrAllowedSetting = EmulatorSettings.IsHdrAllowed();
     fsrEnabledSetting = EmulatorSettings.IsFsrEnabled();
     rcasEnabledSetting = EmulatorSettings.IsRcasEnabled();
@@ -118,6 +123,12 @@ void SettingsWindow::SaveSettings(std::string profile) {
     EmulatorSettings.SetPresentMode(presentModeOptions.at(presentModeSetting), isSpecific);
     EmulatorSettings.SetWindowHeight(windowHeightSetting, isSpecific);
     EmulatorSettings.SetWindowWidth(windowWidthSetting, isSpecific);
+    const auto guestDisplayResolution = Core::ResolveGuestDisplayResolutionPreset(
+        static_cast<std::size_t>(guestDisplayResolutionSetting),
+        {static_cast<std::uint32_t>(internalScreenWidthSetting),
+         static_cast<std::uint32_t>(internalScreenHeightSetting)});
+    EmulatorSettings.SetInternalScreenWidth(guestDisplayResolution.width, isSpecific);
+    EmulatorSettings.SetInternalScreenHeight(guestDisplayResolution.height, isSpecific);
     EmulatorSettings.SetHdrAllowed(hdrAllowedSetting, isSpecific);
     EmulatorSettings.SetFsrEnabled(fsrEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasEnabled(rcasEnabledSetting, isSpecific);
@@ -692,6 +703,13 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCombo("Present Mode", presentModeSetting, presentModeOptions);
             AddSettingSliderInt("Window Width", windowWidthSetting, 0, 8000);
             AddSettingSliderInt("Window Height", windowHeightSetting, 0, 7000);
+            AddSettingCombo("Guest Display Resolution", guestDisplayResolutionSetting,
+                            guestDisplayResolutionOptions);
+            if (guestDisplayResolutionSetting ==
+                static_cast<int>(Core::CustomGuestDisplayResolutionPreset)) {
+                AddSettingSliderInt("Guest Display Width", internalScreenWidthSetting, 320, 7680);
+                AddSettingSliderInt("Guest Display Height", internalScreenHeightSetting, 180, 4320);
+            }
             AddSettingCheckbox("Enable HDR", hdrAllowedSetting);
             AddSettingCheckbox("Enable FSR", fsrEnabledSetting);
 

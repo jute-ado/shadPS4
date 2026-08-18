@@ -114,6 +114,9 @@ private:
                                                             "Fullscreen (Borderless)"};
     const std::vector<std::string> audioBackendOptions = {"SDL", "OpenAL"};
     const std::vector<std::string> presentModeOptions = {"Mailbox", "Fifo", "Immediate"};
+    const std::vector<std::string> guestDisplayResolutionOptions = {
+        "1280 x 720 (720p)", "1920 x 1080 (1080p)", "2560 x 1440 (1440p)",
+        "3840 x 2160 (4K)", "Custom"};
     const std::vector<std::string> hideCursorOptions = {"Never", "Idle", "Always"};
     const std::vector<std::string> trophySideOptions = {"left", "right", "top", "bottom"};
     const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
@@ -135,6 +138,9 @@ private:
     int presentModeSetting;
     int windowWidthSetting;
     int windowHeightSetting;
+    int guestDisplayResolutionSetting;
+    int internalScreenWidthSetting;
+    int internalScreenHeightSetting;
     bool hdrAllowedSetting;
     bool fsrEnabledSetting;
     bool rcasEnabledSetting;
