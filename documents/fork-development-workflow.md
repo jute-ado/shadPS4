@@ -92,6 +92,33 @@ fixtures, and documentation needed to run Test Lab. It must not contain:
 Public reports should retain only bounded, sanitized evidence needed to explain
 the invariant and reproduce the test with separately held private inputs.
 
+## Promotion inventory checkpoint
+
+At the 2026-08-18 checkpoint, patch-ID screening found 103 fork-unique,
+non-merge commits relative to upstream `11a5e47a`. None was patch-equivalent to
+upstream. This does **not** mean all 103 changes are still needed: upstream may
+have solved the same behavior with a different implementation.
+
+The initial review queues are:
+
+- **Keep on `dev`:** Test Lab capability negotiation, controller route
+  recording/replay, automated capture integration, extensive investigation
+  documentation, and diagnostic-only reporting.
+- **Review for promotion:** generic fix-and-test pairs covering address-space
+  mapping, DMA/BDA residency, sparse memory, buffer publication, Vulkan
+  pipeline binding, presentation ownership, MUBUF `addr64`, texture subresource
+  containment, video-decoder ownership, and Windows path/runtime behavior.
+- **Require game-gate evidence:** Uncharted-derived changes whose tests express
+  a generic invariant but whose only live validation is currently game-specific.
+- **Hold:** the combined upstream-integration branch until its recorded AMD U1
+  assertion regression is resolved and the complete current gates pass.
+- **Do not promote:** historical result logs and investigation-only documents;
+  retain their sanitized forms on `dev` instead.
+
+Each review-for-promotion item needs an explicit upstream semantic comparison,
+not merely a cherry-pick attempt. The candidate must be rebuilt from `main`,
+carry its focused tests, and pass the gates above before it can be merged.
+
 ## Current restructuring checkpoint
 
 The pre-cleanup public `main` is preserved by the
