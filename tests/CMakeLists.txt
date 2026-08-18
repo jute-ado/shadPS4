@@ -9,6 +9,15 @@ include(FetchContent)
 )
 FetchContent_MakeAvailable(googletest)
 
+# GoogleTest 1.17 enables warnings-as-errors for its own targets. Clang 22
+# diagnoses a char8_t conversion in gtest-printers.h, so suppress that
+# dependency-only warning without weakening shadPS4's test targets.
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    foreach(googletest_target IN ITEMS gtest gtest_main gmock gmock_main)
+        target_compile_options(${googletest_target} PRIVATE /clang:-Wno-character-conversion)
+    endforeach()
+endif()
+
 set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
@@ -32,6 +41,7 @@ set(SETTINGS_TEST_SOURCES
     stubs/core_stub.cpp
     stubs/scm_rev_stub.cpp
     stubs/sdl_stub.cpp
+    stubs/signals_stub.cpp
 
     # Tests
     test_emulator_settings.cpp
@@ -58,6 +68,7 @@ set(NGS2_TEST_SOURCES
     stubs/core_stub.cpp
     stubs/scm_rev_stub.cpp
     stubs/sdl_stub.cpp
+    stubs/signals_stub.cpp
 
     # Tests
     test_ngs2.cpp
@@ -147,6 +158,7 @@ set(GCN_TEST_SOURCES
     stubs/scm_rev_stub.cpp
     stubs/sdl_stub.cpp
     stubs/core_stub.cpp
+    stubs/signals_stub.cpp
 
     gcn/gcn_test_runner.hpp
     gcn/gcn_test_runner.cpp
@@ -269,6 +281,7 @@ set(HTTP_TEST_SOURCES
     stubs/loader_stub.cpp
     stubs/core_stub.cpp
     stubs/kernel_stub.cpp
+    stubs/signals_stub.cpp
 
     # Tests
     network/test_http_uri.cpp
