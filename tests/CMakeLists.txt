@@ -534,6 +534,7 @@ set(GCN_TEST_SOURCES
 
     # Tests
     gcn/test_buffer_access_range_pass.cpp
+    gcn/test_barycentric_spirv.cpp
     gcn/test_gcn_instructions.cpp
 )
 
