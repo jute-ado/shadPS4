@@ -729,7 +729,7 @@ void EmitContext::DefineOutputs() {
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
     const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2]),
+                                         U32[4], U32[4], U32[4], U32[2], F32[1]),
                               "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -743,6 +743,7 @@ void EmitContext::DefinePushDataBlock() {
     MemberName(struct_type, PushData::BufOffsetIndex + 0, "buf_offsets0");
     MemberName(struct_type, PushData::BufOffsetIndex + 1, "buf_offsets1");
     MemberName(struct_type, PushData::BufOffsetIndex + 2, "buf_offsets2");
+    MemberName(struct_type, PushData::HostInvScaleIndex, "host_inv_scale");
     MemberDecorate(struct_type, PushData::XOffsetIndex, spv::Decoration::Offset, 0U);
     MemberDecorate(struct_type, PushData::YOffsetIndex, spv::Decoration::Offset, 4U);
     MemberDecorate(struct_type, PushData::XScaleIndex, spv::Decoration::Offset, 8U);
@@ -754,6 +755,7 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 80U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 96U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 112U);
+    MemberDecorate(struct_type, PushData::HostInvScaleIndex, spv::Decoration::Offset, 120U);
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);

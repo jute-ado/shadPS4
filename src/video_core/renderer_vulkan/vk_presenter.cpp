@@ -718,7 +718,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
-    const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+    const auto host_extent = image.GetHostExtent();
+    const vk::Extent2D image_size = {host_extent.width, host_extent.height};
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     const auto capture_game_only = VideoCore::ConsumeGameOnlyScreenshotRequests();

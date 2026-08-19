@@ -431,6 +431,9 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
 
     EmulatorSettings.Load(id);
+    if (internalResolutionScaleOverride) {
+        EmulatorSettings.SetInternalResolutionScale(*internalResolutionScaleOverride);
+    }
     // Windows static guest red-zone protection
     WindowsGuestRedZoneProtection::SetActiveMode(
         EmulatorSettings.GetWindowsGuestRedZoneProtectionMode());
@@ -497,6 +500,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "{}",
              Core::FormatGuestDisplayResolution({EmulatorSettings.GetInternalScreenWidth(),
                                                  EmulatorSettings.GetInternalScreenHeight()}));
+    LOG_INFO(Config, "GPU internalRenderScale: {}%", EmulatorSettings.GetInternalResolutionScale());
     LOG_INFO(Config, "Vulkan gpuId: {}", EmulatorSettings.GetGpuId());
     LOG_INFO(Config, "Vulkan vkValidation: {}", EmulatorSettings.IsVkValidationEnabled());
     LOG_INFO(Config, "Vulkan vkValidationCore: {}", EmulatorSettings.IsVkValidationCoreEnabled());

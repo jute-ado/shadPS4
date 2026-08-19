@@ -125,9 +125,17 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
         return ctx.OpLoad(ctx.F32[1],
                           ctx.OpAccessChain(ctx.input_f32, ctx.gl_in, ctx.ConstU32(index),
                                             ctx.ConstU32(0U), ctx.ConstU32(comp)));
-    case IR::Attribute::FragCoord:
-        return ctx.OpLoad(ctx.F32[1],
-                          ctx.OpAccessChain(ctx.input_f32, ctx.frag_coord, ctx.ConstU32(comp)));
+    case IR::Attribute::FragCoord: {
+        const Id coordinate = ctx.OpLoad(
+            ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.frag_coord, ctx.ConstU32(comp)));
+        if (comp < 2) {
+            const Id host_inv_scale = ctx.OpLoad(
+                ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.push_data_block,
+                                              ctx.ConstU32(PushData::HostInvScaleIndex)));
+            return ctx.OpFMul(ctx.F32[1], coordinate, host_inv_scale);
+        }
+        return coordinate;
+    }
     case IR::Attribute::TessellationEvaluationPointU:
         return ctx.OpLoad(ctx.F32[1],
                           ctx.OpAccessChain(ctx.input_f32, ctx.tess_coord, ctx.u32_zero_value));

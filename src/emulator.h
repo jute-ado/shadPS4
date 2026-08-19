@@ -47,6 +47,7 @@ public:
 
     const char* executableName;
     bool waitForDebuggerBeforeRun{false};
+    std::optional<u32> internalResolutionScaleOverride;
 
 private:
     void LoadSystemModules(const std::string& game_serial);

@@ -10,8 +10,8 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
-#include "core/guest_display_resolution.h"
 #include "core/devtools/layer.h"
+#include "core/guest_display_resolution.h"
 #include "imgui/imgui_std.h"
 #include "settings_dialog_imgui.h"
 
@@ -59,6 +59,7 @@ void SettingsWindow::LoadSettings(std::string profile) {
     internalScreenHeightSetting = EmulatorSettings.GetInternalScreenHeight();
     guestDisplayResolutionSetting = static_cast<int>(Core::FindGuestDisplayResolutionPreset(
         internalScreenWidthSetting, internalScreenHeightSetting));
+    internalResolutionScaleSetting = EmulatorSettings.GetInternalResolutionScale() == 200 ? 1 : 0;
     hdrAllowedSetting = EmulatorSettings.IsHdrAllowed();
     fsrEnabledSetting = EmulatorSettings.IsFsrEnabled();
     rcasEnabledSetting = EmulatorSettings.IsRcasEnabled();
@@ -129,6 +130,8 @@ void SettingsWindow::SaveSettings(std::string profile) {
          static_cast<std::uint32_t>(internalScreenHeightSetting)});
     EmulatorSettings.SetInternalScreenWidth(guestDisplayResolution.width, isSpecific);
     EmulatorSettings.SetInternalScreenHeight(guestDisplayResolution.height, isSpecific);
+    EmulatorSettings.SetInternalResolutionScale(internalResolutionScaleSetting == 1 ? 200u : 100u,
+                                                isSpecific);
     EmulatorSettings.SetHdrAllowed(hdrAllowedSetting, isSpecific);
     EmulatorSettings.SetFsrEnabled(fsrEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasEnabled(rcasEnabledSetting, isSpecific);
@@ -710,6 +713,8 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
                 AddSettingSliderInt("Guest Display Width", internalScreenWidthSetting, 320, 7680);
                 AddSettingSliderInt("Guest Display Height", internalScreenHeightSetting, 180, 4320);
             }
+            AddSettingCombo("Internal Render Resolution", internalResolutionScaleSetting,
+                            internalResolutionScaleOptions);
             AddSettingCheckbox("Enable HDR", hdrAllowedSetting);
             AddSettingCheckbox("Enable FSR", fsrEnabledSetting);
 

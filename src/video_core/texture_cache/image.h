@@ -7,6 +7,7 @@
 #include "common/incremental_id.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/texture_cache/host_image_scaling.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
 
@@ -102,6 +103,17 @@ struct Image {
         return backing->image.image;
     }
 
+    vk::Extent3D GetHostExtent() const {
+        return backing->image.image_ci.extent;
+    }
+
+    u32 GetHostScale() const {
+        return host_scale_plan.IsScaled() ? host_scale_plan.numerator : 1u;
+    }
+
+    bool CanHostScale(u32 scale_percent, u32 display_width, u32 display_height) const;
+    bool SetHostScale(u32 scale_percent, u32 display_width = 0, u32 display_height = 0);
+
     bool IsTracked() {
         return track_addr != 0 && track_addr_end != 0;
     }
@@ -179,6 +191,8 @@ public:
     u64 lru_id{};
     u64 tick_accessed_last{};
     u64 hash{};
+    HostImageScalePlan host_scale_plan{};
+    bool host_scale_logged{};
 
     struct {
         u32 texture : 1;
