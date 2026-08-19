@@ -48,9 +48,11 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    if (argc == 2 && std::string_view{argv[1]} == "--test-lab-probe") {
-        std::cout << Core::TestLabProbeJson() << '\n';
-        return 0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view{argv[i]} == "--test-lab-probe") {
+            std::cout << Core::TestLabProbeJson() << '\n';
+            return 0;
+        }
     }
 
     CLI::App app{"shadPS4 Emulator CLI"};
@@ -60,6 +62,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> gameArgs;
     std::optional<std::filesystem::path> overrideRoot;
     std::optional<int> waitPid;
+    std::optional<u32> internalResolutionScale;
     bool waitForDebugger = false;
 
     std::optional<std::string> fullscreenStr;
@@ -94,6 +97,9 @@ int main(int argc, char* argv[]) {
 
     app.add_flag("--wait-for-debugger", waitForDebugger);
     app.add_option("--wait-for-pid", waitPid);
+    app.add_option("--internal-resolution-scale", internalResolutionScale,
+                   "Internal render scale percent (100|200)")
+        ->check(CLI::IsMember({100u, 200u}));
 
     app.add_flag("--show-fps", showFps);
     app.add_flag("--config-clean", configClean);
@@ -256,6 +262,7 @@ int main(int argc, char* argv[]) {
     auto* emulator = Common::Singleton<Core::Emulator>::Instance();
     emulator->executableName = argv[0];
     emulator->waitForDebuggerBeforeRun = waitForDebugger;
+    emulator->internalResolutionScaleOverride = internalResolutionScale;
     emulator->Run(ebootPath, gameArgs, overrideRoot, mounts, env_vars);
 
     return 0;

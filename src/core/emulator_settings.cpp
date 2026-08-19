@@ -612,6 +612,7 @@ bool EmulatorSettingsImpl::TransferSettings() {
         setFromToml(s.window_height, gpu, "screenHeight");
         setFromToml(s.internal_screen_width, gpu, "internalScreenWidth");
         setFromToml(s.internal_screen_height, gpu, "internalScreenHeight");
+        setFromToml(s.internal_resolution_scale, gpu, "internalResolutionScale");
         setFromToml(s.null_gpu, gpu, "nullGpu");
         setFromToml(s.readbacks_mode, gpu, "readbacksMode");
         setFromToml(s.readback_linear_images_enabled, gpu, "readbackLinearImages");

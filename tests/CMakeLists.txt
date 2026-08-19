@@ -143,6 +143,16 @@ target_link_libraries(shadps4_image_usage_policy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_image_usage_policy_test)
 
+add_executable(shadps4_host_image_scaling_test
+    test_host_image_scaling.cpp
+)
+target_include_directories(shadps4_host_image_scaling_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_host_image_scaling_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_host_image_scaling_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_host_image_scaling_test)
+
 add_executable(shadps4_fault_range_test
     test_fault_range.cpp
 )

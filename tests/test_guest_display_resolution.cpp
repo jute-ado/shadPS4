@@ -31,11 +31,12 @@ TEST(GuestDisplayResolution, InternalDimensionsArePerGameOverrideable) {
     GPUSettings settings;
     const auto fields = settings.GetOverrideableFields();
     const auto has = [&](const char* key) {
-        return std::ranges::any_of(fields, [key](const OverrideItem& item) {
-            return std::string_view{item.key} == key;
-        });
+        return std::ranges::any_of(
+            fields, [key](const OverrideItem& item) { return std::string_view{item.key} == key; });
     };
 
     EXPECT_TRUE(has("internal_screen_width"));
     EXPECT_TRUE(has("internal_screen_height"));
+    EXPECT_TRUE(has("internal_resolution_scale"));
+    EXPECT_EQ(settings.internal_resolution_scale.get(), 100u);
 }

@@ -266,6 +266,8 @@ public:
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
         image.is_written |= desc.is_written;
+        image.uses_integer_coordinates |= desc.uses_integer_coordinates;
+        image.queries_dimensions |= desc.queries_dimensions;
         return index;
     }
 
@@ -557,6 +559,8 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
         .is_atomic = is_atomic,
         .is_array = bool(inst_info.is_array),
         .is_written = is_written,
+        .uses_integer_coordinates = is_storage,
+        .queries_dimensions = inst.GetOpcode() == IR::Opcode::ImageQueryDimensions,
         .is_r128 = bool(inst_info.is_r128),
     };
 
