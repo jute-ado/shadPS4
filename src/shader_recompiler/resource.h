@@ -44,6 +44,11 @@ struct BufferResource {
         return buffer_type != BufferType::Guest;
     }
 
+    u64 GetBindingSize(const AmdGpu::Buffer buffer) const noexcept {
+        const u64 declared_size = buffer.GetSize();
+        return access_range.Fit(declared_size, BufferAddressLayout::From(buffer));
+    }
+
     bool IsStorage([[maybe_unused]] const AmdGpu::Buffer buffer) const noexcept {
         // When using uniform buffers, a size is required at compilation time, so we need to
         // either compile a lot of shader specializations to handle each size or just force it to
@@ -54,12 +59,6 @@ struct BufferResource {
         // acceptable.
         return true; // buffer.GetSize() > profile.max_ubo_size || is_written;
     }
-
-    u64 GetBindingSize(const AmdGpu::Buffer buffer) const noexcept {
-        const u64 declared_size = buffer.GetSize();
-        return access_range.Fit(declared_size, BufferAddressLayout::From(buffer));
-    }
-
     constexpr AmdGpu::Buffer GetSharp(const auto& info) const noexcept {
         AmdGpu::Buffer buffer{};
         if (inline_cbuf) {
