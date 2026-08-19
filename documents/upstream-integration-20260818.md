@@ -197,12 +197,14 @@ before enabling or recommending 4K profiles.
 
 ## 2026-08-19 incremental upstream review
 
-Upstream advanced from `11a5e47a` through `dd968182`. The integration keeps all
-five commits in its ancestry, but deliberately reverts the storage-buffer
+Upstream advanced from `11a5e47a` through `fceea0e0`. The integration keeps all
+six commits in its ancestry, but deliberately reverts the storage-buffer
 cleanup from `dd968182` after a matched U3 runtime regression. The remaining
 changes are retained:
 
 - Abseil is consumed from the upstream submodule;
+- Nix consumes that submodule too, rather than maintaining a second Abseil
+  source input;
 - the upstream signal-test stub is not used where the fork's focused binaries
   require the functional signal-dispatch stub;
 - non-AMD fragment barycentrics use the KHR barycentric path; and
