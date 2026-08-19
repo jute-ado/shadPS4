@@ -194,3 +194,70 @@ After the U1 gate, add generic per-game internal-resolution configuration and
 UI rather than title-specific patches. Evaluate PS4 versus PS4 Pro behavior on
 Nvidia for U1/U2/U3, then document visual accuracy, stability, and performance
 before enabling or recommending 4K profiles.
+
+## 2026-08-19 incremental upstream review
+
+Upstream advanced from `11a5e47a` through `dd968182`. The integration keeps all
+five commits in its ancestry, but deliberately reverts the storage-buffer
+cleanup from `dd968182` after a matched U3 runtime regression. The remaining
+changes are retained:
+
+- Abseil is consumed from the upstream submodule;
+- the upstream signal-test stub is not used where the fork's focused binaries
+  require the functional signal-dispatch stub;
+- non-AMD fragment barycentrics use the KHR barycentric path; and
+- GDS offsets are computed dynamically.
+
+The merge initially duplicated the signal stub in several focused targets
+because the fork already supplied it. Those duplicate source entries were
+removed. A new `BarycentricSpirv` test exercises direct, smooth, centroid,
+sample, sample-ID, interpolation-function, and sample-rate-shading behavior on
+the non-AMD path. The clean merged test inventory passes `570/570`, with 569
+executed tests and the expected environment-dependent host-override skip.
+
+### Storage-buffer cleanup hold
+
+`dd968182` looked mechanically compatible because the fork's existing
+`IsStorage` policy already classifies guest buffers as storage buffers.
+Nevertheless, the exact U3 relaxed bottle route exposed a runtime regression:
+
+- the first cold run terminated at the guest `m_gfxEopTick` assertion during
+  shader compilation;
+- a repeat completed but emitted only 19 temporal frames before timeout; and
+- reverting only `dd968182` restored a normal exit and all 300 requested
+  temporal frames.
+
+The revert preserves the fork's bounded `GetBindingSize` contract as well as
+the pre-cleanup buffer specialization and Vulkan feature/layout path. The
+upstream commit remains in history so the fork is not ancestry-behind, but its
+behavior is held until a smaller independently tested subset can be admitted.
+The staging-buffer alignment sub-change may be reconsidered separately; it is
+not bundled into the shader storage-class change.
+
+The restored 300-frame U3 run still fails the bottle temporal oracle (216
+distinct frames plus repeated-frame and adjacent-difference violations). A
+dev-equivalent shader control can also hit the pre-existing guest EOP assertion,
+while older U3 graphics-integration controls passed 300/300. This is recorded as
+the known U3 correctness/liveness campaign, not evidence that the remaining
+2026-08-19 upstream commits regress U3.
+
+### Nvidia game gates
+
+- U1 cave/hair visual: pass, 300/300 distinct frames, no invisible flash, no
+  abrupt return, and no visual violation. The longer delayed-human route also
+  reproduced its known route flakiness and produced no capture, so it is not
+  used as positive evidence.
+- U2 sewer visual: pass on the exact retained corpus scenario and baseline.
+- U3 relaxed bottle: required scene markers reached. With `dd968182` active it
+  regressed as described above; with the revert it exits normally and captures
+  300 frames, while the existing temporal defect remains visible to the oracle.
+
+### Resolution status
+
+The separate resolution campaign now exposes per-game guest VideoOut requests
+and UI/config persistence, but does not yet provide native internal 4K
+rendering. Base and Pro-mode probes both observed 1920x1080 guest buffers. Pro
+mode is the preferred stable 4K-presentation profile on Nvidia, but a genuine
+internal-resolution implementation must scale the complete guest render-target,
+viewport/scissor, texture-view, resolve/copy, screenshot, and presentation
+pipeline coherently. Partial render-area scaling is explicitly rejected.
