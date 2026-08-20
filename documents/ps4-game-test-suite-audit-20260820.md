@@ -226,6 +226,54 @@ measured timing on the slow supported profile, or introduce a future bounded
 marker/checkpoint wait between fragments. Nvidia and AMD may still need pacing
 variants while sharing the same logical action sequence.
 
+### Composable E2E building blocks
+
+Composition should include post-load gameplay actions and reusable checks, not
+only the collection menu. Model each part with an explicit precondition,
+bounded action, postcondition, and failure label. A typical chapter scenario
+can then be flattened from:
+
+```text
+private chapter save
+  + select-u1 / select-u2 / select-u3
+  + bounded-confirm-pulse
+  + wait-for-visible-gameplay
+  + gameplay-liveness-camera-and-movement
+  + chapter-specific identity/transition check
+```
+
+Useful shared parts include:
+
+- a title-specific collection selector;
+- a generic bounded Cross-button pulse that alternates press and release;
+- a load wait with a timeout and visible-gameplay postcondition;
+- a conservative liveness probe: neutral frame, camera sweep, short forward
+  movement, neutral frame;
+- standard crash/device-loss/assertion guards;
+- standard visible/distinct/non-loading temporal checks.
+
+Cross-button timing need not be frame-perfect in a deterministic menu. A
+reviewed pulse every few hundred milliseconds is more robust than one exact
+press. It must still be bounded and end neutral: Cross is not idempotent, and
+unlimited spam can choose a difficulty, dismiss an unexpected destructive
+dialog, skip a cutscene, or become an in-game action after loading. Prefer a
+future `repeat until checkpoint or timeout` action so the pulse stops as soon
+as the expected loading/gameplay state is observed.
+
+The gameplay-liveness fragment can be reused only when its precondition says
+the save starts with a controllable character in a safe area. Cutscenes,
+vehicles, ledges, combat, scripted traversal, and context-sensitive prompts
+need a different probe or a chapter-specific tail. A camera sweep is generally
+more portable than forward movement; the visual oracle should prove that the
+expected view changes and returns to a stable visible scene rather than demand
+identical pixels across chapters.
+
+Keep authoring DRY without weakening provenance: scenarios may reference shared
+parts, but corpus tooling should resolve them into one validated immutable
+execution plan whose component IDs/digests and final digest are recorded. This
+also allows a failure to be reported as `select_title`, `load_checkpoint`,
+`gameplay_liveness`, or `chapter_transition` instead of one generic timeout.
+
 Three committed Uncharted scenarios are not selected by any PS4 suite:
 `seeded-intro-history`, `seeded-intro-validation`, and `u1-chapter2-load`.
 They should either gain a clearly named diagnostic suite or be marked as
