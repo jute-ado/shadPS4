@@ -187,6 +187,45 @@ curate and register additional save candidates, not invent save-state support.
 Complete CPU/GPU emulator snapshots remain unsupported and are intentionally a
 separate, more fragile future capability.
 
+## Reusable controller-route fragments
+
+The controller contract is not DRY today. Each scenario references one complete
+schema-1 route: a normalized full-controller-state timeline with absolute
+elapsed-millisecond offsets and one exact SHA-256. Test Lab can record, import,
+validate, and replay that route, but it cannot currently reference or compose
+route fragments. Copying a common menu prefix into many route JSON files would
+work operationally while creating maintenance drift.
+
+Add route composition as a small, separately tested framework/corpus feature:
+
+- define immutable fragments such as `collection-select-u1`,
+  `collection-select-u2`, `collection-select-u3`, `continue-confirm`, and a
+  short chapter-specific movement tail;
+- require every fragment to use the same controller profile and clock and to
+  begin/end in a neutral full state;
+- store fragment-relative offsets, rebase them during composition, and reject
+  overlap, overflow, non-monotonic time, or incompatible boundary state;
+- pin every fragment by logical ID and SHA-256, then materialize and pin the
+  final composed route digest used by the scenario;
+- record component and final digests in provenance so changing a shared prefix
+  cannot silently change historical tests;
+- make corpus validation report every dependent scenario when a fragment
+  changes and require its composed route to be regenerated/reviewed.
+
+Standardize chapter-save candidates so they all arrive at the same predictable
+Continue UI state. Then most chapter scenarios can reuse one title-specific
+menu/Continue prefix and vary only their post-load movement/checkpoint tail.
+U2/U3 direct-entry scenarios may deliberately bypass the collection menu, but
+the main progression matrix should preserve at least one composite route that
+tests the collection selection path.
+
+Do not optimize for the fastest human menu traversal. Current routes are driven
+by elapsed time, and cold pipeline compilation plus vendor performance changes
+when a menu becomes ready. Record the shortest route with conservative,
+measured timing on the slow supported profile, or introduce a future bounded
+marker/checkpoint wait between fragments. Nvidia and AMD may still need pacing
+variants while sharing the same logical action sequence.
+
 Three committed Uncharted scenarios are not selected by any PS4 suite:
 `seeded-intro-history`, `seeded-intro-validation`, and `u1-chapter2-load`.
 They should either gain a clearly named diagnostic suite or be marked as
