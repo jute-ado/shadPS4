@@ -320,3 +320,39 @@ Do not delete historical private evidence. Clean the *active selection layer*:
 The immediate conclusion is to reorganize before adding many more scenarios.
 The framework is capable, but the active gates underrepresent the exact bugs
 the fork is trying to protect and overrepresent boot/intro variants.
+
+## Implemented follow-up (2026-08-20)
+
+The first composable-route and checkpoint-matrix slice is now implemented in
+the paired Test Lab framework/corpus repositories:
+
+- route-part and route-composition contracts are strict, versioned, and reject
+  unknown fields;
+- `emu-test route compose` verifies every referenced part by canonical SHA-256
+  and emits the existing schema-1 route artifact, so replay behavior did not
+  gain a second execution path;
+- parts use relative offsets, begin at offset zero, and end neutral; a part may
+  begin with a transition so an accepted boundary press does not shift;
+- corpus validation discovers recipes, recomposes them, and rejects a recipe
+  that does not semantically reproduce its indexed generated route;
+- reusable Uncharted fragments now cover bounded Cross spam, confirmation,
+  waits/terminal neutral state, short forward movement, and a camera sweep;
+- both accepted U2 checkpoint/performance routes were refactored into recipes
+  while preserving their event timelines;
+- `local.ps4-uncharted-checkpoints` now selects the existing Nvidia U1 cave,
+  U1 chapter-2 load, and U2 checkpoint smoke scenarios.
+
+Portable save storage is now independently verifiable and cross-machine: each
+reviewed bundle retains its original manifest and immutable asset tree, a
+generated index exposes only logical IDs/digests/counts, import is atomic, and
+machine-ready asset-map entries can be generated after verification. The
+storage location and access topology remain deliberately outside public
+documentation. Sixteen locally available bundles passed full tree-digest,
+file-count, and byte-count verification; one stale candidate was rejected and
+was not imported.
+
+This is infrastructure progress, not a claim of full per-chapter coverage.
+The matrix can only use checkpoints that have actually been captured and
+reviewed. U3 still needs a committed public scenario/route referencing one of
+the verified logical save identities before it can join the active checkpoint
+suite.
