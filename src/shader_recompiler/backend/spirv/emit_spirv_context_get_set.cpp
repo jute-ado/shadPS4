@@ -81,11 +81,34 @@ Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     return result;
 }
 
-Id EmitReadConstBufferAddr64(EmitContext& ctx, [[maybe_unused]] u32 handle, Id addr, Id offset) {
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
-        return ctx.EmitFlatbufferLoad(ctx.ConstU32(0U));
+Id EmitReadConstBufferAddr64(EmitContext& ctx, u32 handle, Id addr, Id offset) {
+    const auto& buffer = ctx.buffers[handle];
+
+    const Id addr_lo{ctx.OpUConvert(ctx.U64, ctx.OpCompositeExtract(ctx.U32[1], addr, 0))};
+    const Id addr_hi{ctx.OpUConvert(ctx.U64, ctx.OpCompositeExtract(ctx.U32[1], addr, 1))};
+    const Id relative_bytes_base{ctx.OpBitwiseOr(
+        ctx.U64, addr_lo, ctx.OpShiftLeftLogical(ctx.U64, addr_hi, ctx.ConstU32(32U)))};
+    const Id offset_bytes{ctx.OpShiftLeftLogical(ctx.U32[1], offset, ctx.ConstU32(2U))};
+    const Id relative_bytes{
+        ctx.OpIAdd(ctx.U64, relative_bytes_base, ctx.OpUConvert(ctx.U64, offset_bytes))};
+
+    // ADDR64 supplies a 64-bit vector byte offset, while the bound resource descriptor supplies
+    // the base and range. Values outside the 32-bit descriptor window are forced out of range
+    // rather than being truncated into an unrelated in-range address.
+    const Id relative_hi{
+        ctx.OpShiftRightLogical(ctx.U64, relative_bytes, ctx.ConstU32(32U))};
+    const Id address_in_window{ctx.OpIEqual(ctx.U1[1], relative_hi, ctx.u64_zero_value)};
+    const Id relative_dwords{
+        ctx.OpShiftRightLogical(ctx.U64, relative_bytes, ctx.ConstU32(2U))};
+    Id index{ctx.OpUConvert(ctx.U32[1], relative_dwords)};
+    if (const Id binding_offset = buffer.Offset(PointerSize::B32);
+        Sirit::ValidId(binding_offset)) {
+        index = ctx.OpIAdd(ctx.U32[1], index, binding_offset);
     }
-    return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
+    index = ctx.OpSelect(ctx.U32[1], address_in_window, index, ctx.ConstU32(0xffffffffU));
+    const auto [id, pointer_type] = buffer.Alias(PointerType::U32);
+    const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, index)};
+    return ctx.OpLoad(ctx.U32[1], ptr);
 }
 
 Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {

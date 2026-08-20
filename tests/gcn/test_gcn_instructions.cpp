@@ -47,6 +47,34 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
+    EXPECT_FALSE(result.uses_dma);
+}
+
+TEST_F(GcnTest, mubuf_addr64_is_descriptor_relative_independent_of_dma_mode) {
+    // MUBUF ADDR64 still uses the source resource descriptor for its base and range checking.
+    // Direct-memory-access mode must not replace that descriptor access with a first-use BDA
+    // lookup whose missing page returns a transient zero.
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto dma_enabled = TranslateToSpirvWithInfo(addr64_load, true);
+    const auto dma_disabled = TranslateToSpirvWithInfo(addr64_load, false);
+
+    EXPECT_EQ(dma_enabled.guest_buffer_count, 2U);
+    EXPECT_EQ(dma_disabled.guest_buffer_count, 2U);
+    EXPECT_FALSE(dma_enabled.uses_dma);
+    EXPECT_FALSE(dma_disabled.uses_dma);
+    EXPECT_EQ(dma_enabled.spirv, dma_disabled.spirv);
+}
+
+TEST_F(GcnTest, mubuf_addr64_shader_does_not_specialize_on_resource_base) {
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto first = TranslateToSpirvWithInfo(addr64_load, true, 0x10000U);
+    const auto rebound = TranslateToSpirvWithInfo(addr64_load, true, 0x24000U);
+
+    EXPECT_EQ(first.guest_buffer_count, 2U);
+    EXPECT_EQ(rebound.guest_buffer_count, 2U);
+    EXPECT_EQ(first.spirv, rebound.spirv);
 }
 
 // Example
