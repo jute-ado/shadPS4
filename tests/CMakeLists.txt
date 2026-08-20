@@ -214,6 +214,9 @@ target_include_directories(shadps4_gnm_submission_gate_test PRIVATE
 )
 target_compile_features(shadps4_gnm_submission_gate_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_gnm_submission_gate_test PRIVATE GTest::gtest_main)
+target_compile_definitions(shadps4_gnm_submission_gate_test PRIVATE
+    LIVERPOOL_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/amdgpu/liverpool.cpp"
+)
 list(APPEND TEST_TARGETS shadps4_gnm_submission_gate_test)
 
 add_executable(shadps4_sysmodule_requirement_test

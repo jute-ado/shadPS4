@@ -148,7 +148,7 @@ void Liverpool::Process(std::stop_token stoken) {
     }
 }
 
-Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb, CmdBufferOwner owner) {
     FIBER_ENTER(ccb_task_name);
 
     while (!ccb.empty()) {
@@ -193,8 +193,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::IndirectBufferConst: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task =
-                ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
+            const auto indirect_commands = owner->ResolveIndirect(
+                indirect_buffer->Address<const u32>(), indirect_buffer->ib_size);
+            auto task = ProcessCeUpdate(indirect_commands, owner);
             RESUME_CE(task);
 
             while (!task.handle.done()) {
@@ -228,7 +229,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     if (!ccb.empty()) {
         // In case of CCB provided kick off CE asap to have the constant heap ready to use
-        ce_task = ProcessCeUpdate(ccb);
+        ce_task = ProcessCeUpdate(ccb, owner);
         RESUME_GFX(ce_task);
     }
     const bool host_markers_enabled = rasterizer && EmulatorSettings.IsVkHostMarkersEnabled();
@@ -843,9 +844,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-                auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {},
-                    submission_sequence);
+                const auto indirect_commands = owner->ResolveIndirect(
+                    indirect_buffer->Address<const u32>(), indirect_buffer->ib_size);
+                auto task = ProcessGraphics(indirect_commands, {}, submission_sequence, owner);
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
