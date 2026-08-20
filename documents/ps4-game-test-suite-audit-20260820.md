@@ -146,11 +146,46 @@ Recommended suite tiers:
 - existing visual/audio/performance suites remain specialized and are not
   substitutes for progression coverage.
 
-Once the chapter suite exists and reliably traverses the collection menu, the
-standalone Uncharted `boot` and un-routed `seeded-smoke` entries can be removed
-from the main pre-merge gate or kept only in a fast diagnostic suite. Retain one
-cheap startup smoke if its short runtime materially improves failure triage;
-do not mistake it for additional gameplay coverage.
+One composite checkpoint scenario can cover startup, title selection, save
+loading, and gameplay. Its smoke policy reports process/required-marker failure,
+individual visual checkpoints report which post-load boundary was unavailable
+or changed, and the final gameplay assertion is evaluated only after all prior
+boundaries succeed. Separate boot coverage is therefore not inherently
+necessary. Once the chapter suite reliably traverses the collection menu, the
+standalone Uncharted `boot` and un-routed `seeded-smoke` entries should leave the
+main pre-merge gate. Keep a tiny startup-only scenario solely when its materially
+shorter runtime improves local failure triage; do not count it as independent
+compatibility coverage.
+
+## Existing save-seed inventory and storage
+
+The canonical Uncharted scenarios currently reference eight distinct logical
+user-data seeds with eight distinct tree digests:
+
+- one `after-new-game` seed reused by twelve intro/smoke/visual scenarios;
+- separate Nvidia and AMD U1 cave seeds;
+- separate Nvidia and AMD U1 intro-audio seeds;
+- one U1 second-gameplay/chapter-2 load seed, currently not selected by a suite;
+- separate Nvidia and AMD U2 checkpoint seeds, each reused by its smoke and
+  performance scenario.
+
+This is not yet a per-level save matrix. It is a small collection of historical
+investigation checkpoints, and several vendor-specific seeds likely represent
+the same gameplay intent with different run-local configuration state.
+
+The save bytes are deliberately absent from Git. A scenario commits only a
+logical asset ID and exact `sha256-tree-v1` digest. An untracked machine asset
+map resolves that ID to a read-only private bundle on the executing machine.
+For every run, Test Lab verifies the source tree, copies it into a unique
+run-local shadPS4 `user` profile, verifies the copy, and lets the emulator mutate
+only that copy. Performance trials receive independent copies. Another machine
+can execute the scenario only after installing a byte-identical private bundle;
+otherwise asset validation fails before launch.
+
+This existing mechanism is sufficient for chapter checkpoint tests. We need to
+curate and register additional save candidates, not invent save-state support.
+Complete CPU/GPU emulator snapshots remain unsupported and are intentionally a
+separate, more fragile future capability.
 
 Three committed Uncharted scenarios are not selected by any PS4 suite:
 `seeded-intro-history`, `seeded-intro-validation`, and `u1-chapter2-load`.
