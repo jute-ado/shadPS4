@@ -74,6 +74,17 @@ TEST(HostCompilationPause, PreservesAnExistingGuestPause) {
     EXPECT_EQ(controller.resume_calls, 0u);
 }
 
+TEST(HostCompilationPause, AsyncShaderCompilationDoesNotPauseGuestThreads) {
+    FakeGuestPauseController controller;
+    {
+        ScopedHostCompilationGuestPause pause{controller, false};
+        EXPECT_FALSE(controller.paused);
+        EXPECT_EQ(controller.pause_calls, 0u);
+    }
+    EXPECT_FALSE(controller.paused);
+    EXPECT_EQ(controller.resume_calls, 0u);
+}
+
 TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) {
     const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
 
@@ -86,6 +97,15 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
                                 "ScopedHostCompilationGuestPause"));
     EXPECT_TRUE(ContainsBetween(source, "vk::ShaderModule PipelineCache::CompileModule",
                                 "RegisterShaderBinary", "ScopedHostCompilationGuestPause"));
+
+    const auto compile_module = source.find("vk::ShaderModule PipelineCache::CompileModule");
+    const auto register_shader = source.find("RegisterShaderBinary", compile_module);
+    ASSERT_NE(compile_module, std::string::npos);
+    ASSERT_NE(register_shader, std::string::npos);
+    const auto module_compile = source.substr(compile_module, register_shader - compile_module);
+    EXPECT_NE(module_compile.find("IsAsyncGraphicsPipelineCompilation"), std::string::npos);
+    EXPECT_NE(module_compile.find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
+              std::string::npos);
 
     const auto async_compile = source.find("PipelineCache::CompileGraphicsPipelineAsync");
     const auto async_publish = source.find("PipelineCache::PublishAsyncGraphicsPipeline");

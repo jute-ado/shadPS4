@@ -11,7 +11,11 @@ namespace Vulkan {
 template <typename Controller>
 class ScopedHostCompilationGuestPause final {
 public:
-    explicit ScopedHostCompilationGuestPause(Controller& controller_) : controller{controller_} {
+    explicit ScopedHostCompilationGuestPause(Controller& controller_, bool enabled = true)
+        : controller{controller_} {
+        if (!enabled) {
+            return;
+        }
         owns_pause = !controller.IsGuestThreadsPaused();
         if (owns_pause) {
             controller.PauseGuestThreads();
