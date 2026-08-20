@@ -8,6 +8,7 @@
 #include <boost/container/static_vector.hpp>
 #include "common/assert.h"
 #include "common/types.h"
+#include "shader_recompiler/addr64_pointer_residency.h"
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/frontend/copy_shader.h"
 #include "shader_recompiler/frontend/tessellation.h"
@@ -74,6 +75,9 @@ struct InfoPersistent {
     bool has_fetch_shader{};
     bool has_bitwise_xor{};
     bool uses_dma{};
+    std::array<Addr64PointerRoot, MaxAddr64PointerRoots> addr64_pointer_roots{};
+    u32 num_addr64_pointer_roots{};
+    bool addr64_pointer_roots_overflow{};
 
     InfoPersistent() = default;
     InfoPersistent(Stage stage_, LogicalStage l_stage_, u64 pgm_hash_)

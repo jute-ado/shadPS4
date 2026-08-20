@@ -11,6 +11,8 @@
 struct TranslationResult {
     std::vector<u32> spirv;
     std::size_t guest_buffer_count;
+    u32 addr64_pointer_root_count;
+    bool addr64_pointer_roots_overflow;
     bool uses_dma;
 };
 

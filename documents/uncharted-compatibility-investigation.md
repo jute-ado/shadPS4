@@ -21,7 +21,7 @@ and pass PS4-only regression gates.
 | Video decode picture metadata | Accepted | Picture metadata remains owned until the consumer has finished with it. |
 | Video decode packet data | Accepted | Packet storage outlives asynchronous decode and presentation work. |
 | Buffer lookup | Independently audited | Selection and containment behavior is covered by focused tests and PS4 gates. |
-| Uncharted 1 cave hair | Accepted | MUBUF `addr64` decoding and source-buffer residency are preserved. |
+| Uncharted 1 cave hair | Native-scale candidate validated; broader promotion pending | MUBUF `addr64` decoding and the runtime 64-bit address are preserved, while bounded dynamic pointer tables are made resident before their first consuming draw. |
 | Uncharted 3 pub geometry corruption | Operationally fixed for CUSA02320 | The integration build plus a per-game `Relaxed` GPU-readback override passed three fresh full-scene trials. The global default remains unchanged; a general automatic readback trigger is still future work. |
 | Uncharted 3 post-pub frame-lifecycle crash | Validated candidate; interactive soak continues | Guest graphics submissions no longer wait for the preceding physical GPU boundary, and copied DCB/CCB storage is owned by each queued submission. The exact recorded route crossed the former crash point, the full unit suite passed, and the complete PS4 regression passed. |
 | Uncharted 1 production visual and audio checkpoints | Passed on the integration build | The production-shaped seed keeps DMA enabled and scopes `Relaxed` readbacks to CUSA02320. Reviewed title and cave frames are correct, and the preserved stereo PCM audio contract passes. |

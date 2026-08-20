@@ -157,6 +157,8 @@ TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_inst
     return {
         .spirv = spirv,
         .guest_buffer_count = guest_buffer_count,
+        .addr64_pointer_root_count = program.info.num_addr64_pointer_roots,
+        .addr64_pointer_roots_overflow = program.info.addr64_pointer_roots_overflow,
         .uses_dma = program.info.uses_dma,
     };
 }

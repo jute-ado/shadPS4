@@ -23,7 +23,7 @@ The following is a snapshot of local testing as of **2026-08-18**, not a general
 
 | Game | Current local result | Known issues |
 | --- | --- | --- |
-| **Uncharted 1: Drake's Fortune** | Reaches gameplay and has progressed at least into the cave. The earlier orange/zebra hair lighting and intermittent white hair/spider-web flashes are fixed in the tested cave route. | Longer-game validation remains incomplete. |
+| **Uncharted 1: Drake's Fortune** | Reaches gameplay and has progressed at least into the cave. A native-scale candidate fixes the earlier orange/zebra hair lighting and white hair/spider-web material failures in the automated cave oracle. | Repeat/broader promotion is still in progress; the experimental 200% internal-scale cave path remains incorrect. Longer-game validation is incomplete. |
 | **Uncharted 2: Among Thieves** | Reaches gameplay. | The field of view can become far too strong, sometimes making aiming difficult. |
 | **Uncharted 3: Drake's Deception** | Reaches gameplay. The large vertex explosions and the tested host-compilation/frame-lifecycle crash are resolved. | The tested bar scene still requires `readbacks_mode=1` (`relaxed`); this accurate path is currently synchronization limited and longer progression remains incomplete. |
 

@@ -3,9 +3,12 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <vector>
 
+#include "shader_recompiler/addr64_pointer_residency.h"
 #include "video_core/buffer_cache/buffer_residency.h"
+#include "video_core/buffer_cache/fault_range.h"
 
 namespace {
 
@@ -29,6 +32,19 @@ public:
     [[nodiscard]] size_t SizeBytes() const {
         return 0x200000;
     }
+};
+
+class RecordedBufferCache {
+public:
+    void FindBuffer(VAddr address, u32 size) {
+        calls.push_back({ResidencyCall::Publish, address, size});
+    }
+
+    void SynchronizeBuffersInRange(VAddr address, u32 size) {
+        calls.push_back({ResidencyCall::Synchronize, address, size});
+    }
+
+    std::vector<RecordedResidencyCall> calls;
 };
 
 } // namespace
@@ -59,4 +75,76 @@ TEST(BufferResidency, DoesNotTouchUnpublishedBufferAfterResidencyUpload) {
 
     VideoCore::TouchBufferAfterUploadIfRegistered(true, [&] { ++touch_count; });
     EXPECT_EQ(touch_count, 1);
+}
+
+TEST(BufferResidency, SelectsOnlyAdjacentFlattenedPointerWordsFromAddr64Dependencies) {
+    constexpr std::array flattened_dependencies{116U, 29U, 28U, 29U, 74U};
+
+    const auto roots = Shader::SelectAddr64PointerRoots(3, flattened_dependencies);
+
+    ASSERT_FALSE(roots.overflow);
+    ASSERT_EQ(roots.count, 1U);
+    EXPECT_EQ(roots.values[0].buffer_resource_index, 3U);
+    EXPECT_EQ(roots.values[0].pointer_lo_flat_index, 28U);
+}
+
+TEST(BufferResidency, Addr64PointerRootSelectionIsBoundedDeduplicatedAndFailClosed) {
+    constexpr std::array isolated_dependencies{1U, 3U, 5U, 7U};
+    const auto isolated = Shader::SelectAddr64PointerRoots(0, isolated_dependencies);
+    EXPECT_FALSE(isolated.overflow);
+    EXPECT_EQ(isolated.count, 0U);
+
+    constexpr std::array duplicated_pair{20U, 21U, 20U, 21U};
+    const auto duplicate = Shader::SelectAddr64PointerRoots(2, duplicated_pair);
+    ASSERT_FALSE(duplicate.overflow);
+    ASSERT_EQ(duplicate.count, 1U);
+    EXPECT_EQ(duplicate.values[0].pointer_lo_flat_index, 20U);
+
+    constexpr std::array too_many_pairs{0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U,
+                                        10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U};
+    const auto overflow = Shader::SelectAddr64PointerRoots(1, too_many_pairs);
+    EXPECT_TRUE(overflow.overflow);
+    EXPECT_EQ(overflow.count, 0U);
+}
+
+TEST(BufferResidency, Addr64PointerTraversalSetBoundsQueueGrowthAndDeduplicatesNodes) {
+    Shader::Addr64PointerTraversalSet traversal;
+    for (u32 node = 1; node <= Shader::MaxAddr64PointerTraversalNodes; ++node) {
+        EXPECT_EQ(traversal.TryInsert(node), Shader::Addr64PointerTraversalInsert::Inserted);
+    }
+    EXPECT_EQ(traversal.TryInsert(1), Shader::Addr64PointerTraversalInsert::Duplicate);
+    EXPECT_EQ(traversal.TryInsert(Shader::MaxAddr64PointerTraversalNodes + 1U),
+              Shader::Addr64PointerTraversalInsert::Overflow);
+    EXPECT_TRUE(traversal.overflow());
+    EXPECT_EQ(traversal.size(), Shader::MaxAddr64PointerTraversalNodes);
+}
+
+TEST(BufferResidency, Addr64PointerResidencyPlansOneExactBoundedGuestTable) {
+    constexpr u64 address_space_size = 1ULL << 40U;
+
+    const auto exact = Shader::PlanAddr64PointerResidency(0x06622E30U, 0x10U,
+                                                          address_space_size);
+    EXPECT_TRUE(exact.valid);
+    EXPECT_EQ(exact.address, 0x1006622E30ULL);
+    EXPECT_EQ(exact.size, Shader::Addr64PointerTableBytes);
+
+    EXPECT_FALSE(Shader::PlanAddr64PointerResidency(0U, 0U, address_space_size).valid);
+    EXPECT_FALSE(Shader::PlanAddr64PointerResidency(
+                     0xFFFFFF80U, 0xFFU, address_space_size)
+                     .valid);
+}
+
+TEST(BufferResidency, Addr64PointerResidencyUsesExistingFindThenSynchronizePathExactlyOnce) {
+    RecordedBufferCache cache;
+    constexpr VAddr address = 0x1006622E30ULL;
+
+    VideoCore::MakeDmaFaultRangeResident(cache, address, Shader::Addr64PointerTableBytes);
+
+    ASSERT_EQ(cache.calls.size(), 2U);
+    EXPECT_EQ(cache.calls[0].operation, ResidencyCall::Publish);
+    EXPECT_EQ(cache.calls[0].address, address);
+    EXPECT_EQ(cache.calls[0].size, Shader::Addr64PointerTableBytes);
+    EXPECT_EQ(cache.calls[1].operation, ResidencyCall::Synchronize);
+    EXPECT_EQ(cache.calls[1].address, address);
+    EXPECT_EQ(cache.calls[1].size, Shader::Addr64PointerTableBytes);
 }

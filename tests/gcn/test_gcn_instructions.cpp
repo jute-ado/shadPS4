@@ -47,6 +47,8 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
+    EXPECT_EQ(result.addr64_pointer_root_count, 0U);
+    EXPECT_FALSE(result.addr64_pointer_roots_overflow);
     EXPECT_TRUE(result.uses_dma);
 }
 

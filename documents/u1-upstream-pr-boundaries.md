@@ -35,12 +35,20 @@ requests, and the commits should not be submitted as one large series.
    - Keep presented images alive and readable until the consumer is finished.
    - Representative commits: `69f9a6ac` and `4699c660`.
 
-7. **ADDR64 decoding and descriptor-relative reads**
-   - Decode MUBUF ADDR64 correctly, bind the read to the selected storage
-     descriptor, and use a robust descriptor-relative 64-bit offset.
-   - The progression is `59bbd421` -> `7b182423` -> `5bebf5ab`.
-   - The final step fixes the intermittent white hair/web frame without
-     reverting the earlier orange-hair lighting correction.
+7. **ADDR64 decoding, runtime addressing, and pointer-table residency**
+   - Decode MUBUF ADDR64 correctly and preserve the guest's runtime-rebindable
+     64-bit address rather than reading shader bytes or specializing a host
+     descriptor base.
+   - Track bounded dynamic `ReadConst` roots and make each validated 256-byte
+     guest pointer table resident through the existing buffer cache before the
+     first consuming draw.
+   - The historical progression is `59bbd421` -> `7b182423` -> `5bebf5ab`;
+     the later pointer-table residency correction supersedes the claim that the
+     descriptor-relative step alone was sufficient.
+   - Keep decoding/address generation, compiler root discovery, and runtime
+     residency as separately reviewable commits with focused tests. Together
+     they fix the original orange hair and the native-scale white hair/web
+     failure without a title or shader special case.
 
 8. **Queued and nested command-buffer lifetime**
    - Retain top-level and nested indirect command buffers until their queued

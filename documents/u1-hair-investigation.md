@@ -1,8 +1,8 @@
 # Uncharted 1 cave hair investigation
 
-- **Status:** Descriptor-relative fragment ADDR64 repair accepted and promoted
+- **Status:** Native-scale ADDR64 pointer-table residency repair validated; broader promotion pending
 - **Last verified:** 2026-08-20
-- **Verified revision:** `5bebf5ab` and later promoted `dev`/`main`
+- **Verified revision:** candidate branch `fix/u1-cave-material-residency-20260820`
 - **Scope:** MUBUF `addr64`, source-buffer residency, and texture containment
 
 Status: the original orange hair-card lattice and the later intermittent white
@@ -380,6 +380,68 @@ mode, and camera path at 100% and 200%; publish the effective scale selected for
 each target transaction; and compare the persistent material failure against
 the native composition. Do not reduce this report to sharpness or fullscreen
 window size.
+
+## 2026-08-20 native-scale pointer-table residency correction
+
+Later native-scale review invalidated the statement that descriptor-relative
+lowering had completely solved the cave material path. The guest instruction
+uses an unbounded 64-bit address, and restoring that ISA behavior was necessary,
+but the address itself comes from a small guest pointer table reached through
+dynamic `ReadConst` operations. The table was not necessarily registered in the
+buffer-device-address page table before the first fragment draw. A missed first
+read therefore still returned zero, which can produce the stable-white material
+or a one-frame white return depending on when the table becomes resident.
+
+The current candidate fixes the ownership boundary without changing generated
+SPIR-V. Resource tracking walks the exact dynamic ADDR64 address expression and
+records bounded flattened-userdata roots. Before normal buffer binding, the
+rasterizer reads each root pointer already produced by the SRT walker, validates
+the resulting 256-byte guest range against the 40-bit GPU address space and the
+live GPU mapping, and sends it through the existing `FindBuffer` plus
+`SynchronizeBuffersInRange` path. The direct-memory shader then sees the same
+runtime-rebindable address and the normal buffer cache publishes current data
+before the draw.
+
+The compiler analysis is deliberately bounded and fail-closed: at most eight
+roots, 32 `ReadConst` dependencies, and 256 traversed IR nodes are retained;
+duplicates are removed and overflow discards the observation. Runtime rejects
+zero, wrapping, out-of-address-space, out-of-flat-buffer, and unmapped ranges.
+There is no title ID, shader hash, asset, draw ordinal, readback override, extra
+GPU draw, or shader-data snapshot in the fix.
+
+A rejected prototype copied the 256-byte table into appended userdata and added
+a SPIR-V fallback. Although logically bounded, that changed the affected shader
+enough to make NVIDIA async pipeline compilation stall for minutes. It was
+removed. A second rejected refinement required the two pointer words to share
+one exact IR producer node; the real guest expression uses semantically related
+but non-identical nodes, and this overconstraint reproduced the known stable-
+white signature. The production candidate relies on adjacent flattened pointer
+words plus the strict runtime address/mapping checks instead.
+
+Focused evidence currently includes seven buffer-residency tests and four GCN
+ADDR64 tests, all passing. The complete generated test suite passes 586/586
+(with the one documented environment-only skip), and the Release application
+links successfully. The authoritative
+native 1920x1080 async replay completed 190/190 distinct cave frames with zero
+abrupt returns and zero invisible flashes. It matched the correct-material
+signature and rejected both the orange-lattice and white-material signatures.
+The deliberately overconstrained build completed the same scene and matched the
+white-material signature, providing a live negative control. Subsequent fresh
+starts used the same `async_graphics_pipeline_compilation=true` configuration.
+Because the private seed deliberately disables the pipeline cache, several of
+those cold starts remained in shader compilation or asset loading through the
+95--114 second window. A late 175--194 second variant and a longer resilient
+route likewise returned no screenshots before their deadlines. They are
+retained as capture-unavailable evidence, not renderer failures; neither
+produced a contradictory cave frame. The final binary differs from the clean
+live candidate only by the required shader-metadata serialization-version bump
+and has the same tested renderer behavior.
+
+This section supersedes the earlier claim that descriptor-relative lowering by
+itself was the final native-scale repair. Promotion still requires a second
+reached-scene pass plus the broader regression gates. The separate 200% scaling
+failure above remains open and must not be conflated with this native-scale
+result.
 
 ## Working rules
 
