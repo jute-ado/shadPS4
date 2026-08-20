@@ -47,13 +47,13 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
-    EXPECT_FALSE(result.uses_dma);
+    EXPECT_TRUE(result.uses_dma);
 }
 
-TEST_F(GcnTest, mubuf_addr64_is_descriptor_relative_independent_of_dma_mode) {
-    // MUBUF ADDR64 still uses the source resource descriptor for its base and range checking.
-    // Direct-memory-access mode must not replace that descriptor access with a first-use BDA
-    // lookup whose missing page returns a transient zero.
+TEST_F(GcnTest, mubuf_addr64_uses_unbounded_global_address_when_dma_is_enabled) {
+    // Southern Islands ADDR64 adds the 64-bit VGPR address to the resource base but explicitly
+    // ignores the resource size and performs no range checking. A bounded storage-buffer access
+    // is therefore not equivalent: it turns a valid address beyond NUM_RECORDS into zero.
     constexpr u64 addr64_load = 0x80010000e030800cULL;
 
     const auto dma_enabled = TranslateToSpirvWithInfo(addr64_load, true);
@@ -61,12 +61,12 @@ TEST_F(GcnTest, mubuf_addr64_is_descriptor_relative_independent_of_dma_mode) {
 
     EXPECT_EQ(dma_enabled.guest_buffer_count, 2U);
     EXPECT_EQ(dma_disabled.guest_buffer_count, 2U);
-    EXPECT_FALSE(dma_enabled.uses_dma);
+    EXPECT_TRUE(dma_enabled.uses_dma);
     EXPECT_FALSE(dma_disabled.uses_dma);
-    EXPECT_EQ(dma_enabled.spirv, dma_disabled.spirv);
+    EXPECT_NE(dma_enabled.spirv, dma_disabled.spirv);
 }
 
-TEST_F(GcnTest, mubuf_addr64_shader_does_not_specialize_on_resource_base) {
+TEST_F(GcnTest, mubuf_addr64_global_address_remains_runtime_rebindable) {
     constexpr u64 addr64_load = 0x80010000e030800cULL;
 
     const auto first = TranslateToSpirvWithInfo(addr64_load, true, 0x10000U);
@@ -74,6 +74,8 @@ TEST_F(GcnTest, mubuf_addr64_shader_does_not_specialize_on_resource_base) {
 
     EXPECT_EQ(first.guest_buffer_count, 2U);
     EXPECT_EQ(rebound.guest_buffer_count, 2U);
+    // The descriptor base is read from live user data. Rebinding it must change the effective
+    // absolute address without forcing a shader permutation.
     EXPECT_EQ(first.spirv, rebound.spirv);
 }
 

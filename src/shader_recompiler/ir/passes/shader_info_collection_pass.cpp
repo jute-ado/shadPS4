@@ -127,6 +127,8 @@ void Visit(Info& info, const IR::Inst& inst) {
         info.uses_lane_id = true;
         break;
     case IR::Opcode::ReadConstBufferAddr64:
+        info.uses_dma = true;
+        info.readconst_types |= Info::ReadConstType::Dynamic;
         break;
     case IR::Opcode::ReadConst:
         if (!info.uses_dma) {

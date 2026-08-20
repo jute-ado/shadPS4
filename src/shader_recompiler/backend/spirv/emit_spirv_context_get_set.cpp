@@ -82,6 +82,10 @@ Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
 }
 
 Id EmitReadConstBufferAddr64(EmitContext& ctx, u32 handle, Id addr, Id offset) {
+    if (EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+        return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
+    }
+
     const auto& buffer = ctx.buffers[handle];
 
     const Id addr_lo{ctx.OpUConvert(ctx.U64, ctx.OpCompositeExtract(ctx.U32[1], addr, 0))};
@@ -92,9 +96,8 @@ Id EmitReadConstBufferAddr64(EmitContext& ctx, u32 handle, Id addr, Id offset) {
     const Id relative_bytes{
         ctx.OpIAdd(ctx.U64, relative_bytes_base, ctx.OpUConvert(ctx.U64, offset_bytes))};
 
-    // ADDR64 supplies a 64-bit vector byte offset, while the bound resource descriptor supplies
-    // the base and range. Values outside the 32-bit descriptor window are forced out of range
-    // rather than being truncated into an unrelated in-range address.
+    // Without direct guest-memory access there is no faithful unbounded ADDR64 fallback. Keep the
+    // bounded source-resource path for compatibility, but do not use it on DMA-capable devices.
     const Id relative_hi{
         ctx.OpShiftRightLogical(ctx.U64, relative_bytes, ctx.ConstU32(32U))};
     const Id address_in_window{ctx.OpIEqual(ctx.U1[1], relative_hi, ctx.u64_zero_value)};
