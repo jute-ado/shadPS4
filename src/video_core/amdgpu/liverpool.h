@@ -169,7 +169,7 @@ private:
     Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
                          SubmissionCompletionQueue::Sequence submission_sequence,
                          CmdBufferOwner owner = {});
-    Task ProcessCeUpdate(std::span<const u32> ccb);
+    Task ProcessCeUpdate(std::span<const u32> ccb, CmdBufferOwner owner);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid,
                         SubmissionCompletionQueue::Sequence submission_sequence);
