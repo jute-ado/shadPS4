@@ -4,6 +4,7 @@
 #include "translator.hpp"
 
 #include <iostream>
+#include <optional>
 
 #include "common/io_file.h"
 #include "core/emulator_settings.h"
@@ -19,6 +20,11 @@
 #include "shader_recompiler/recompiler.h"
 
 using namespace Shader;
+
+namespace {
+TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_insts,
+                                               std::optional<u64> source_buffer_base);
+}
 
 namespace Shader::Optimization {
 void ResourceTrackingPassStub(IR::Program& program, const Profile& profile);
@@ -39,12 +45,29 @@ TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst) {
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access) {
     const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();
     EmulatorSettings.SetDirectMemoryAccessEnabled(direct_memory_access);
-    const auto result = TranslateToSpirvWithInfo(raw_gcn_inst);
+    const auto result =
+        TranslateToSpirvWithInfoImpl(std::span<const u64>{&raw_gcn_inst, 1}, std::nullopt);
     EmulatorSettings.SetDirectMemoryAccessEnabled(previous);
     return result;
 }
 
 TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
+    return TranslateToSpirvWithInfoImpl(raw_gcn_insts, std::nullopt);
+}
+
+TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access,
+                                           u64 source_buffer_base) {
+    const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    EmulatorSettings.SetDirectMemoryAccessEnabled(direct_memory_access);
+    const auto result = TranslateToSpirvWithInfoImpl(std::span<const u64>{&raw_gcn_inst, 1},
+                                                     source_buffer_base);
+    EmulatorSettings.SetDirectMemoryAccessEnabled(previous);
+    return result;
+}
+
+namespace {
+TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_insts,
+                                               std::optional<u64> source_buffer_base) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -68,6 +91,12 @@ TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
     info.flattened_ud_buf.resize(8);
     AmdGpu::Buffer buf = AmdGpu::Buffer::Null();
     std::memcpy(info.flattened_ud_buf.data(), &buf, sizeof(buf));
+    if (source_buffer_base) {
+        AmdGpu::Buffer source{};
+        source.base_address = *source_buffer_base;
+        source.num_records = 4096;
+        std::memcpy(info.flattened_ud_buf.data() + 4, &source, sizeof(source));
+    }
 
     IR::Program program{info};
     Pools pools{};
@@ -125,5 +154,10 @@ TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
     for (const auto& buffer : program.info.buffers) {
         guest_buffer_count += buffer.buffer_type == Shader::BufferType::Guest;
     }
-    return {.spirv = spirv, .guest_buffer_count = guest_buffer_count};
+    return {
+        .spirv = spirv,
+        .guest_buffer_count = guest_buffer_count,
+        .uses_dma = program.info.uses_dma,
+    };
 }
+} // Anonymous namespace
