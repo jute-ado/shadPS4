@@ -1,17 +1,16 @@
 # Uncharted 1 cave hair investigation
 
-- **Status:** Fragment ADDR64 publication repair under repeated motion validation
+- **Status:** Descriptor-relative fragment ADDR64 repair accepted and promoted
 - **Last verified:** 2026-08-20
-- **Verified revision:** diagnostic branch based on `b498a5fa`
+- **Verified revision:** `5bebf5ab` and later promoted `dev`/`main`
 - **Scope:** MUBUF `addr64`, source-buffer residency, and texture containment
 
-Status: the original orange hair-card lattice is fixed. The follow-on
-intermittent white hair/web return passed the historical gates below, but a
-newer motion-bearing route reproduced it twice and supersedes the old
-"fixed" conclusion. No new U1 renderer fix is accepted. The upstream
-integration's separate AMD frame-EOP race is fixed by deferring EOP-associated
-presentation until the next vblank iteration; that ordering fix does not claim
-to repair the white material return.
+Status: the original orange hair-card lattice and the later intermittent white
+hair/web return are both fixed. They were separate defects in the same ADDR64
+path: the first correction decoded the guest resource-relative address; the
+final correction stopped lowering that bounded descriptor access through the
+fault-on-first-use BDA path. The final fix deliberately builds on rather than
+reverts the original lighting correction.
 
 ## Target
 
@@ -330,13 +329,14 @@ This evidence promotes descriptor-relative ADDR64 lowering from a diagnostic
 candidate to the U1 white-frame repair. It fixes the fault-on-first-dynamic-read
 mechanism without reverting the earlier orange-hair correction, without adding
 a preflight draw, and without retaining the temporary fault instrumentation.
-Promotion still requires the normal branch-level regression suite; any future
-white return must be compared against the preserved failing frames and not
-classified from runner completion alone.
+The repair passed the normal branch-level regression suite and was promoted to
+both `dev` and clean `main`. Any future white return must still be compared
+against the preserved failing frames and not classified from runner completion
+alone.
 
 White-flash candidate commits are `845f6391` (RED) and `7b182423` (GREEN).
 
-### 2026-08-19 moving-scene revalidation
+### 2026-08-19 superseded moving-scene revalidation
 
 A new visible moving-scene check invalidated the conclusion that immutable top-level DCB/CCB
 ownership was sufficient. The white hair and spider-web flicker remained visible at native 1080p
@@ -349,8 +349,9 @@ top-level DCB/CCB storage, but `INDIRECT_BUFFER` and `INDIRECT_BUFFER_CONST` rec
 guest pointers and could yield while those nested command streams remained borrowed. A focused RED
 mutates both a nested graphics IB and constant-engine IB after submission; it now requires the
 submission owner to preserve both recursively and requires both Liverpool recursion sites to resolve
-through that owner. The focused submission suite passes 15/15 after the repair. Live U1 validation is
-still required before calling this the white-return fix.
+through that owner. The focused submission suite passes 15/15 after the repair. This lifetime repair
+remains useful, but later live evidence showed it was not the white-return fix; the descriptor-relative
+ADDR64 correction above is the accepted repair.
 Texture-containment commits are `e7fff725` (RED) and `eaa8c93b` (GREEN).
 
 ## Working rules
