@@ -443,6 +443,28 @@ reached-scene pass plus the broader regression gates. The separate 200% scaling
 failure above remains open and must not be conflated with this native-scale
 result.
 
+### 2026-08-21 user validation and async-pause follow-up
+
+The native-scale correction is now manually user-validated in the U1 cave on
+the clean public `main` line. The reviewed build contained the unbounded ADDR64
+lowering and dynamic pointer-table residency repairs, used the RTX 4080 at
+1920x1080, and had `async_graphics_pipeline_compilation=true`. The user confirmed
+that the previously wrong hair and spider-web material appearance was fixed.
+This confirmation applies only to native scale; the separate 200% regression
+remains open.
+
+The first two attempts to present that build exposed an independent async-start
+hang. `CompileModule` entered `ScopedHostCompilationGuestPause` even while async
+graphics-pipeline compilation was enabled. Once shader compilation needed a
+guest-owned dependency, the guest remained suspended and the window stayed on
+`Emulation Paused` with negligible CPU and no log progress. A focused TDD repair
+keeps the pause guard for synchronous compilation but disables it for shader
+module compilation in async mode. The regression suite covers both modes and
+the exact pipeline-cache call site. The rebuilt async run advanced through the
+collection menus into the cave without the emulator pause overlay and was the
+run the user accepted. Public-main commit: `b84e731b`; dev equivalent:
+`c1899362`.
+
 ## Working rules
 
 Prefer deterministic RenderDoc Python/CLI reports over GUI inspection. Keep
