@@ -263,3 +263,38 @@ mode is the preferred stable 4K-presentation profile on Nvidia, but a genuine
 internal-resolution implementation must scale the complete guest render-target,
 viewport/scissor, texture-view, resolve/copy, screenshot, and presentation
 pipeline coherently. Partial render-area scaling is explicitly rejected.
+
+## 2026-08-20 incremental upstream review
+
+Upstream advanced by one commit, `fff44315` ("core: Add libScePngDec to LLE
+list"). The change removes eager `libScePngDec` registration from
+`InitHLELibs` and registers it through the internal sysmodule table beside
+`libScePngEnc`. This matches the title-requested sysmodule lifetime, does not
+overlap the fork's controller, renderer, U1 ADDR64, or 4K work, and merged
+without conflict.
+
+The integration is based on dev commit `5bebf5ab`, which keeps the valid MUBUF
+ADDR64 lighting correction and fixes the later intermittent white hair/web
+regression by resolving dynamic ADDR64 reads through the bound storage
+descriptor. It also keeps asynchronous graphics-pipeline compilation enabled
+as a per-game option without guest-thread pause stalls. The U1 fix was
+independently built and validated before this upstream merge.
+
+Validation at merge commit `92201875`:
+
+- fresh Release application build and link: pass;
+- discovered synthetic tests: 646/646 pass, with one expected
+  environment-dependent host-override skip;
+- `local.ps4-uncharted-focus`: 3/3 operations pass (PS4 smoke, PS4 Pro 1080
+  smoke, seeded audio);
+- `local.ps4-regression`: 12/12 operations pass, including standard/Pro smoke,
+  three visual cases, Uncharted seeded audio, and the multi-trial performance
+  entry;
+- capability probe: pass with PS4/PS4 Pro, controller replay/recording,
+  presented-frame timing/screenshot, audio, RenderDoc, and Vulkan-validation
+  capabilities.
+
+The first high-parallelism unit build hit a transient CMake GoogleTest JSON
+discovery failure after one executable linked. Direct list/run of that binary
+passed, a lower-parallelism build completed, and the full discovered suite then
+passed. No source workaround or weakened test was introduced.
