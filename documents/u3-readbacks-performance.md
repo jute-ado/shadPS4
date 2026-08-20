@@ -44,7 +44,31 @@ with a 16.57 ms median, but two of three trials failed to reach the same frame
 window even after extending the route to 180 seconds, and the mode is already
 known to be visually incorrect.
 
-## Rejected optimization
+## Synchronous-fault profile
+
+A temporary timing-only build measured the existing Relaxed write-fault path on
+the same private route. The instrumentation was removed after the run and did
+not retain guest addresses or content. In about 131 seconds it observed 18,479
+write faults; 18,470 requests were only eight bytes. Cumulative worker wait was
+102.72 seconds across the guest worker threads: 62.83 seconds waiting to enter
+the GPU command queue and 39.70 seconds inside the download/finish phase. The
+median queue wait was about 1.00 ms and the median download phase about 0.19 ms,
+with one 310.7 ms download outlier.
+
+Those cumulative values overlap across worker threads and are not frame time,
+but they prove that Relaxed is servicing many tiny, synchronized CPU writes and
+that latency, rather than transfer bandwidth alone, is the limiting boundary.
+
+A second temporary aggregate-only profile measured locality without retaining
+or formatting guest addresses. The first 4,095 of 4,096 faults were in one
+512 KiB window. At 8,192 faults, the leading window accounted for 7,496; later
+loading/gameplay broadened the set, and at 16,384 faults there were 335 windows,
+with the top four accounting for 10,699 and the top sixteen for 12,290. A hot
+set exists, but it changes over the route. Any prefetch therefore needs bounded
+recency plus exact write-generation ownership; a permanent address list or one
+fixed hot window would be a title-specific and phase-specific mistake.
+
+## Rejected optimizations
 
 The synchronous write-fault path currently widens scattered GPU-dirty islands
 to a 512 KiB download window. A TDD candidate increased only accurate write
@@ -57,11 +81,23 @@ about 37.72 FPS, slightly below the 512 KiB control, one trial timed out, and on
 trace had materially worse p95 latency. Copying more neighboring bytes does not
 remove enough synchronization events to offset the added transfer/range work.
 
+A second TDD candidate coalesced concurrent write faults within the same 512 KiB
+window. One leader performed the existing Relaxed download while followers
+waited on that exact generation; the leader published every enrolled CPU write
+range only after completion. Focused concurrency tests and the Release build
+passed, and the U3 pub route remained reachable. Live performance did not
+improve: the two valid trials were 38.67 and 37.97 FPS, with 32.53 and 32.77 ms
+median frame times; one trial timed out. The candidate and its tests were
+removed in full. Queue contention is visible in cumulative worker waits, but
+coalescing those callers does not remove the GPU completion boundary that sets
+frame time.
+
 ## Next safe optimization boundary
 
-The remaining cost is synchronization frequency. A future improvement should
-retain exact `Relaxed` semantics while moving known CPU-hot GPU ranges into an
-already-submitted asynchronous download before the guest faults. It needs:
+The remaining cost is synchronization frequency and, specifically, waiting for
+GPU completion. A future improvement should retain exact `Relaxed` semantics
+while moving known CPU-hot GPU ranges into an already-submitted asynchronous
+download before the guest faults. It needs:
 
 1. a generic, bounded hot-range policy rather than a title/address heuristic;
 2. exact GPU-write generation and completion ownership;
@@ -71,7 +107,7 @@ already-submitted asynchronous download before the guest faults. It needs:
    controls;
 5. the same U3 visual A/B gate plus Nvidia cross-game performance controls.
 
-Do not weaken page coherence, promote the rejected 2 MiB heuristic, or claim
-that `Disabled` is faster based on its single surviving trace. Keep the
-CUSA02320 per-game `Relaxed` override until a generic automatic coherence path
-passes those gates.
+Do not weaken page coherence, promote the rejected 2 MiB heuristic, reintroduce
+the rejected same-window caller coalescer, or claim that `Disabled` is faster
+based on its single surviving trace. Keep the CUSA02320 per-game `Relaxed`
+override until a generic automatic coherence path passes those gates.
