@@ -21,12 +21,12 @@ timing, diagnostic, configuration, save-data, state, or audio-capture behavior.
 - Portable game scenarios, controller routes, and expectation or baseline
   metadata belong in the external corpus repository.
 - Games, saves, screenshots, videos, GPU traces, memory images, and machine
-  maps remain outside Git in a private local store.
+  maps remain outside public Git in an externally managed private asset store.
 - Framework source changes require a framework branch only when the task
   changes orchestration or a versioned contract.
 
 Because the emulator repositories are public, their committed documentation
-must use placeholders—never your `<drive>:\...` paths, private Forgejo address,
+must use placeholders—never your `<drive>:\...` paths, private service address,
 credentials, game identities unnecessarily, or vault layout. Exact
 machine-specific commands belong in a private local runbook.
 
