@@ -215,7 +215,7 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
         const IR::Value handle =
             ir.CompositeConstruct(ir.GetScalarReg(sharp), ir.GetScalarReg(sharp + 1),
                                   ir.GetScalarReg(sharp + 2), ir.GetScalarReg(sharp + 3));
-        const IR::U64 byte_address = BufferOffset64(inst);
+        const IR::U64 byte_address = BufferAddress64(inst);
         const IR::VectorReg dst_reg{inst.src[1].code};
         if (scalar_width == 8 || scalar_width == 16) {
             ASSERT(num_dwords == 1);
@@ -311,22 +311,27 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     }
 }
 
-IR::U64 Translator::BufferOffset64(const GcnInst& inst) {
+IR::U64 Translator::BufferAddress64(const GcnInst& inst) {
     const auto& mubuf = inst.control.mubuf;
     ASSERT(mubuf.addr64);
     ASSERT_MSG(!mubuf.idxen && !mubuf.offen,
                "MUBUF ADDR64 cannot be combined with IDXEN or OFFEN");
 
     const IR::VectorReg vaddr{inst.src[0].code};
+    const IR::ScalarReg sharp{inst.src[2].code * 4};
     const IR::U64 vector_address = ir.PackUint2x32(ir.CompositeConstruct(
         ir.GetVectorReg<IR::U32>(vaddr), ir.GetVectorReg<IR::U32>(vaddr + 1)));
+    const IR::U32 resource_base_hi =
+        ir.BitwiseAnd(ir.GetScalarReg(sharp + 1), ir.Imm32(0xff));
+    const IR::U64 resource_base = ir.PackUint2x32(
+        ir.CompositeConstruct(ir.GetScalarReg(sharp), resource_base_hi));
     const IR::U64 scalar_offset = ir.UConvert(64, IR::U32{GetSrc(inst.src[3])});
 
-    // The resource descriptor remains the authority for the base and bounds. Keep the ADDR64
-    // operands descriptor-relative so a compiled shader remains valid when that descriptor is
-    // rebound to a different guest address.
-    IR::U64 offset = ir.IAdd(vector_address, scalar_offset);
-    return ir.IAdd(offset, ir.Imm64(u64{mubuf.offset}));
+    // Southern Islands ADDR64 forms an absolute guest address. NUM_RECORDS and STRIDE do not
+    // bound or scale this access, so descriptor-relative storage-buffer lowering is not valid.
+    IR::U64 address = ir.IAdd(vector_address, resource_base);
+    address = ir.IAdd(address, scalar_offset);
+    return ir.IAdd(address, ir.Imm64(u64{mubuf.offset}));
 }
 
 void Translator::BUFFER_STORE(u32 num_dwords, bool is_inst_typed, bool is_buffer_typed,

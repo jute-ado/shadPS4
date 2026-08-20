@@ -335,7 +335,7 @@ public:
                       u32 scalar_width = 32);
     template <typename T = IR::U32>
     void BUFFER_ATOMIC(AtomicOp op, const GcnInst& inst);
-    [[nodiscard]] IR::U64 BufferOffset64(const GcnInst& inst);
+    [[nodiscard]] IR::U64 BufferAddress64(const GcnInst& inst);
 
     // Image Memory
     // MIMG
