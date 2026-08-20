@@ -142,11 +142,19 @@ host work completes. The same design had previously been reverted by
 `69563239`, so the integration temporarily removed the three pause scopes.
 That experiment was rejected after matched AMD runs repeatedly reached the
 guest `m_gfxEopTick` assertion and terminated with host access violation
-`0xC0000005`. The accepted-main control retained the guard and survived to its
-configured timeout without the assertion. The integration therefore preserves
-the scoped pause and adds focused lifetime, pre-existing-pause, nested-pause,
-and production-wiring tests. Restoring it did not, by itself, make the merged
-AMD U1 route reliable, so neither policy is an accepted U1 fix.
+`0xC0000005`. The accepted-main control retained the guard and survived to its configured timeout
+without the assertion. A later Nvidia validation then remained in the visible `Emulation Paused`
+state for more than ten minutes. Its log stopped between shader-module creation and compute-pipeline
+creation while the process remained responsive with little additional CPU time. This demonstrates
+that suspending arbitrary guest threads from the GPU compilation path can deadlock on a lock or
+dependency held by a suspended thread. The scoped pause is therefore no longer accepted as a
+liveness mechanism.
+
+The replacement synchronous fallback compiles without OS-suspending guest threads. An experimental
+asynchronous graphics-pipeline stage is documented in `async-graphics-compilation.md`; it is not an
+accepted U1 or AMD fix until matched live controls pass. Compute and shader-module compilation remain
+synchronous in this first stage because silently dropping compute dispatches or borrowing mutable
+shader state would be incorrect.
 
 The rejected no-pause experiment let the identical moving route complete for
 900.951 seconds with the emulator and runner both exiting cleanly. It produced
@@ -327,6 +335,22 @@ white return must be compared against the preserved failing frames and not
 classified from runner completion alone.
 
 White-flash candidate commits are `845f6391` (RED) and `7b182423` (GREEN).
+
+### 2026-08-19 moving-scene revalidation
+
+A new visible moving-scene check invalidated the conclusion that immutable top-level DCB/CCB
+ownership was sufficient. The white hair and spider-web flicker remained visible at native 1080p
+with both correctness-preserving asynchronous graphics-pipeline compilation and the matched
+synchronous control. Async pipeline misses are therefore not a necessary cause, and internal
+resolution scaling is not involved in this reproduction.
+
+The ownership audit found a narrower lifetime hole below `SubmitGfx`: the submission retained copied
+top-level DCB/CCB storage, but `INDIRECT_BUFFER` and `INDIRECT_BUFFER_CONST` recursively decoded raw
+guest pointers and could yield while those nested command streams remained borrowed. A focused RED
+mutates both a nested graphics IB and constant-engine IB after submission; it now requires the
+submission owner to preserve both recursively and requires both Liverpool recursion sites to resolve
+through that owner. The focused submission suite passes 15/15 after the repair. Live U1 validation is
+still required before calling this the white-return fix.
 Texture-containment commits are `e7fff725` (RED) and `eaa8c93b` (GREEN).
 
 ## Working rules

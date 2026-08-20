@@ -177,6 +177,7 @@ private:
     bool connectedNetworkSetting;
     bool pipelineCacheEnabledSetting;
     bool pipelineCacheArchiveSetting;
+    bool asyncGraphicsPipelineCompilationSetting;
     int extraDmemSetting;
     int vblankFrequencySetting;
 };
