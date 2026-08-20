@@ -58,6 +58,100 @@ has important omissions:
 - audio is U1 intro-only, not longer gameplay;
 - performance is U2-only and uses adapter-specific references.
 
+## What the current Uncharted tests actually assert
+
+The scenario timeout is not the assertion. A 185-second process can still pass
+with a very shallow oracle.
+
+### Boot and seeded smoke
+
+- `boot` runs for up to 60 seconds and requires only that CUSA02320 is
+  identified, with no device loss. It does not select U1/U2/U3 or prove a menu
+  frame.
+- `seeded-smoke` and its PS4 Pro variant install the after-new-game user seed
+  but have no controller route or gameplay milestone. They mainly prove that
+  the seeded profile can launch without an immediate crash.
+
+These are useful when diagnosing whether startup itself broke, but they add
+little pre-merge confidence when a stronger scenario uses the same
+configuration and demonstrably reaches gameplay.
+
+### U1 intro and cave
+
+- The intro-to-gameplay family replays one route from the seeded profile and
+  checks a route-stage ordinal near the intro/gameplay transition. Base PS4 and
+  PS4 Pro variants repeat smoke, visual, and audio operations around the same
+  route.
+- The audio oracle checks for mostly audible, non-clipped 48 kHz stereo PCM in
+  a fixed window. It does not validate dialogue/music identity.
+- The committed Nvidia U1 cave visual runs at 1280x720 for up to 165 seconds;
+  the AMD variant permits 330 seconds. It samples three elapsed-time frames and
+  a 13-frame temporal window. The static comparison thresholds allow the full
+  possible image difference, so the meaningful assertions are visibility,
+  temporal diversity, repeated-frame bounds, and a coarse abrupt-return count.
+  It does not recognize correct hair/web materials and therefore cannot catch
+  the persistent 200% regression reported on 2026-08-20.
+
+### U2 checkpoint and performance
+
+- The Nvidia/AMD checkpoint smokes use a U2-direct launch, a private checkpoint
+  seed, and a 180-second Continue/confirm route. Their required markers prove
+  CUSA02320 started and U2 data—not U1 data—was selected. The minimum stage is
+  still only `title_identified`; there is no committed chapter identity,
+  post-load gameplay screenshot, movement proof, or level-transition oracle.
+- The rooftop performance scenarios reuse that seed and a 60-second route.
+  Nvidia requires three valid trials around 60 FPS after presented frame 1500;
+  the AMD iGPU has a separate functional 30-FPS-class window. These are useful
+  performance gates but not visual-correctness or progression tests.
+
+### U3
+
+There is no committed U3 scenario in the canonical corpus. The bar/bottle,
+post-bar crash, and readback investigations currently exist only as private
+task-local evidence. Consequently, the normal corpus suites can be green while
+U3 gameplay is completely broken.
+
+## Chapter/checkpoint progression suite
+
+The highest-value expansion is a save/checkpoint matrix for U1, U2, and U3.
+Each row should represent one chapter or historically fragile level load and
+use a private user-data seed plus portable hashed metadata:
+
+1. start from a deterministic save at the beginning of the chapter, or just
+   before a historically crashing transition;
+2. replay only the inputs needed to Continue/confirm and move through 20-60
+   seconds of gameplay;
+3. require the correct title and chapter-specific load evidence;
+4. require a visible, non-loading gameplay frame and a short distinct-frame
+   temporal window after loading;
+5. require a bounded gameplay action or camera/movement result, rather than
+   accepting a static menu;
+6. forbid device loss, access violations, known renderer assertions, and
+   premature process exit;
+7. keep raw saves and captures private while committing only logical IDs,
+   hashes, routes, and sanitized expectations.
+
+For crashes that historically occurred *between* levels, a save already inside
+the destination level is not sufficient. Add a smaller transition subset with
+the save shortly before the boundary, then cross the boundary under controller
+replay. This exercises old-level teardown, streaming, new-level initialization,
+and first gameplay together.
+
+Recommended suite tiers:
+
+- `local.ps4-uncharted-chapter-smoke`: one short load-and-move scenario per
+  available chapter/checkpoint, run nightly or before promotion;
+- `local.ps4-uncharted-transition-regression`: only historically crashing
+  boundaries, suitable for a stronger pre-merge gate;
+- existing visual/audio/performance suites remain specialized and are not
+  substitutes for progression coverage.
+
+Once the chapter suite exists and reliably traverses the collection menu, the
+standalone Uncharted `boot` and un-routed `seeded-smoke` entries can be removed
+from the main pre-merge gate or kept only in a fast diagnostic suite. Retain one
+cheap startup smoke if its short runtime materially improves failure triage;
+do not mistake it for additional gameplay coverage.
+
 Three committed Uncharted scenarios are not selected by any PS4 suite:
 `seeded-intro-history`, `seeded-intro-validation`, and `u1-chapter2-load`.
 They should either gain a clearly named diagnostic suite or be marked as
