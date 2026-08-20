@@ -2,8 +2,9 @@
 
 Status: guest-display dimensions remain independently configurable. A separate
 experimental host-render scale now has a strict 100%/200% policy. Its corrected
-200% path has passed the focused renderer contracts, the full unit suite, and
-one reviewed 100-frame Nvidia U1 cave replay. U2 and U3 validation remains open,
+200% path has passed the focused renderer contracts, the full unit suite, a
+reviewed 100-frame Nvidia U1 cave replay, and a U2 4K correctness/performance
+pair. U3 reaches the same pre-existing EOP lifecycle crash at native and 200%,
 so this is not yet a collection-wide compatibility claim.
 
 ## Proven boundary
@@ -71,8 +72,10 @@ of every affected host-image/view cache key.
   host extent and remain one coherent post-refresh scale transaction.
 - [x] Complete one reviewed U1 200% temporal route with coherent scaled
   attachments; the swapchain size alone is not counted as evidence.
-- [ ] Validate U1, U2, and U3 Nvidia routes against their native-resolution
-  controls, including temporal visual checks and performance metrics.
+- [x] Validate U1 and U2 Nvidia routes against their native-resolution controls,
+  including temporal visual checks and performance metrics.
+- [ ] Re-run U3 200% correctness after the scale-independent EOP lifecycle crash
+  is fixed; native and 200% currently fail at the same boundary.
 - [ ] Merge only after clean unit, application, and PS4 Test Lab gates.
 
 ## Rejected shortcuts
@@ -143,6 +146,26 @@ Checkpoint mean-absolute differences ranged from 0.0173 to 0.0191 and cosine
 differences from 0.095 to 0.106 against the retained native control.
 
 This establishes the tested U1 cave boundary only. It does not prove every U1
-scene or any U2/U3 route, and it does not replace a manual playthrough. The
-next acceptance step is equivalent Nvidia validation for U2 and U3, followed
-by a user-visible U1 run for manual confirmation.
+scene and does not replace a manual playthrough. The U2 and U3 boundaries are
+recorded separately below.
+
+### Current Nvidia U2 and U3 evidence (2026-08-20)
+
+The rebuilt post-upstream branch passed the U2 sewer 200% visual checkpoint on
+an RTX 4080. The run used the base PS4 profile, logged the 200% renderer mode,
+and promoted the primary 1920x1080 targets to 3840x2160. Its retained checkpoint
+had mean-absolute difference 0.00740 and cosine difference 0.01537, with no
+device loss or renderer assertion.
+
+The matching three-trial U2 performance pair was effectively refresh-limited:
+
+| Host-render scale | Mean FPS | Median frame time | p95 | p99 | Stutters |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100% | 59.999 | 16.554 ms | 17.531 ms | 17.600 ms | 0% |
+| 200% | 60.003 | 16.575 ms | 17.522 ms | 17.798 ms | 0% |
+
+The U3 bottle route is not valid 4K acceptance evidence yet. Both the native
+control and 200% run entered the bar scene, then hit the same guest
+`FrameBegin` EOP assertion and host access violation after about 55 seconds.
+The nearly identical native/200% failure boundary rules out a scale-specific
+regression on this route, but it does not establish later-scene correctness.
