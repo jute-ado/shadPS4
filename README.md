@@ -23,9 +23,9 @@ The following is a snapshot of local testing as of **2026-08-18**, not a general
 
 | Game | Current local result | Known issues |
 | --- | --- | --- |
-| **Uncharted 1: Drake's Fortune** | Reaches gameplay and has progressed at least into the cave. | Hair, spider webs, and some related surfaces can flicker or flash white. |
+| **Uncharted 1: Drake's Fortune** | Reaches gameplay and has progressed at least into the cave. The earlier orange/zebra hair lighting and intermittent white hair/spider-web flashes are fixed in the tested cave route. | Longer-game validation remains incomplete. |
 | **Uncharted 2: Among Thieves** | Reaches gameplay. | The field of view can become far too strong, sometimes making aiming difficult. |
-| **Uncharted 3: Drake's Deception** | Reaches gameplay. The large vertex explosions previously seen in the bar scene appear to be resolved in the tested configuration. | Some graphics require `readbacks_mode=1` (`relaxed`) in the tested configuration, and the game may crash after the bar scene. |
+| **Uncharted 3: Drake's Deception** | Reaches gameplay. The large vertex explosions and the tested host-compilation/frame-lifecycle crash are resolved. | The tested bar scene still requires `readbacks_mode=1` (`relaxed`); this accurate path is currently synchronization limited and longer progression remains incomplete. |
 
 Primarily used an RTX 4080 and 9800X3D for testing. The 9800X3D iGPU has received limited investigative testing, but AMD GPU compatibility is not guaranteed.
 And in general, no compatibility is guaranteed at all.
