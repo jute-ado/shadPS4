@@ -8,6 +8,7 @@
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
+#include "video_core/renderer_vulkan/async_compilation_queue.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -63,6 +64,27 @@ struct Program {
     }
 };
 
+struct AsyncGraphicsPipelineJob {
+    GraphicsPipelineKey key{};
+    std::array<Shader::Info, MaxShaderStages> info_copies{};
+    std::array<std::array<u32, Shader::NUM_USER_DATA_REGS>, MaxShaderStages> user_data_copies{};
+    std::array<u32, MaxShaderStages> user_data_sizes{};
+    std::array<const Shader::Info*, MaxShaderStages> retained_infos{};
+    std::array<const Shader::Info*, MaxShaderStages> compile_infos{};
+    std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos{};
+    std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
+    std::array<vk::ShaderModule, MaxShaderStages> modules{};
+
+    void RebindCompileInfo() noexcept;
+};
+
+struct AsyncGraphicsPipelineResult {
+    std::unique_ptr<GraphicsPipeline> pipeline;
+    GraphicsPipeline::SerializationSupport serialization;
+    std::array<vk::ShaderModule, MaxShaderStages> modules{};
+    std::array<const Shader::Info*, MaxShaderStages> retained_infos{};
+};
+
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
@@ -96,9 +118,18 @@ public:
     }
 
 private:
+    using AsyncGraphicsPipelineQueue =
+        AsyncCompilationQueue<GraphicsPipelineKey, AsyncGraphicsPipelineResult,
+                              AsyncGraphicsPipelineJob>;
+
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
+    AsyncGraphicsPipelineResult CompileGraphicsPipelineAsync(AsyncGraphicsPipelineJob job);
+    AsyncGraphicsPipelineJob MakeAsyncGraphicsPipelineJob() const;
+    void PublishAsyncGraphicsPipeline(AsyncGraphicsPipelineQueue::Completion completion);
+    void PublishAsyncGraphicsPipelines();
+    const GraphicsPipeline* WaitForAsyncGraphicsPipeline(const GraphicsPipelineKey& key);
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage, size_t perm_idx,
                     std::string_view ext);
@@ -132,6 +163,8 @@ private:
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+
+    std::unique_ptr<AsyncGraphicsPipelineQueue> async_graphics_compiler;
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,
