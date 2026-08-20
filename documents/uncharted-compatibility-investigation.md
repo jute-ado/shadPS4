@@ -449,6 +449,13 @@ pages the guest will read. Future code work should preserve the successful
 semantics while finding a narrow, data-driven trigger; it must not hard-code a
 title, shader, draw, address, or captured event.
 
+The 2026-08-20 matched performance follow-up is recorded in
+`documents/u3-readbacks-performance.md`. It confirms that the accurate path is
+synchronization-limited at roughly 38 FPS in the measured pub window. A bounded
+2 MiB readback-window experiment was slower and was removed completely; the
+next safe boundary is asynchronous prefetch of generation-matched CPU-hot GPU
+ranges, not broader synchronous copies or weaker coherence.
+
 ### Rollback and diagnostics
 
 To roll back the operational fix, remove the CUSA02320 custom configuration or
