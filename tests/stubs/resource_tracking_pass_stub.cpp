@@ -163,6 +163,8 @@ public:
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
         image.is_written |= desc.is_written;
+        image.uses_integer_coordinates |= desc.uses_integer_coordinates;
+        image.queries_dimensions |= desc.queries_dimensions;
         return index;
     }
 

@@ -119,6 +119,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
+    boost::container::static_vector<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1>
+        target_images;
     for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         const auto& col_buf = regs.color_buffers[cb];
@@ -132,6 +134,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        image.usage.render_target = 1u;
+        target_images.push_back(image_id);
     }
 
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
@@ -144,8 +148,28 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        image.usage.depth_target = 1u;
+        target_images.push_back(image_id);
     } else {
         db_desc.first = {};
+    }
+
+    std::ranges::sort(target_images, {}, &VideoCore::ImageId::index);
+    const auto unique = std::ranges::unique(target_images);
+    target_images.erase(unique.begin(), unique.end());
+    const u32 scale_percent = EmulatorSettings.GetInternalResolutionScale();
+    const u32 display_width = EmulatorSettings.GetInternalScreenWidth();
+    const u32 display_height = EmulatorSettings.GetInternalScreenHeight();
+    std::array<bool, AmdGpu::NUM_COLOR_BUFFERS + 1> eligible{};
+    for (u32 index = 0; index < target_images.size(); ++index) {
+        eligible[index] = texture_cache.GetImage(target_images[index])
+                              .CanHostScale(scale_percent, display_width, display_height);
+    }
+    prepared_host_scale = VideoCore::ResolveHostAttachmentScale(
+        scale_percent, std::span<const bool>{eligible.data(), target_images.size()});
+    for (const auto image_id : target_images) {
+        ASSERT(texture_cache.GetImage(image_id).SetHostScale(prepared_host_scale * 100,
+                                                             display_width, display_height));
     }
 }
 
@@ -709,6 +733,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This array holds the size of each consecutive array with the number of bindings consumed.
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
+    boost::container::small_vector<std::pair<bool, bool>, 8> image_native_extent_requirements;
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
@@ -719,6 +744,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         if (tsharp.Address() == 0 || tsharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid) {
             image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
             image_descriptor_array_sizes.push_back(1);
+            image_native_extent_requirements.emplace_back(false, false);
             continue;
         }
 
@@ -728,6 +754,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings.emplace_back(
                 std::piecewise_construct, std::tuple{}, std::tuple{tsharp, image_desc});
+            image_native_extent_requirements.emplace_back(image_desc.uses_integer_coordinates,
+                                                          image_desc.queries_dimensions);
 
             if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
                 ASSERT(num_bindings == 1);
@@ -760,7 +788,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 
     // Second pass to re-bind images that were updated after binding
-    for (auto& [image_id, desc] : image_bindings) {
+    ASSERT(image_native_extent_requirements.size() == image_bindings.size());
+    for (u32 binding_index = 0; binding_index < image_bindings.size(); ++binding_index) {
+        auto& [image_id, desc] = image_bindings[binding_index];
         bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
@@ -774,6 +804,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             bound_images.emplace_back(image_id);
 
             auto& image = texture_cache.GetImage(image_id);
+            const auto [uses_integer_coordinates, queries_dimensions] =
+                image_native_extent_requirements[binding_index];
+            if (VideoCore::ShouldForceNativeHostImageAccess(is_storage, uses_integer_coordinates,
+                                                            queries_dimensions)) {
+                ASSERT(image.SetHostScale(100));
+            }
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
             // The image is either bound as storage in a separate descriptor or bound as render
@@ -861,6 +897,23 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     state.height = instance.GetMaxFramebufferHeight();
     state.num_layers = std::numeric_limits<u16>::max();
     state.num_color_attachments = std::bit_width(key.mrt_mask);
+    current_host_scale = prepared_host_scale;
+    for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+        if (cb_descs[cb].first &&
+            texture_cache.GetImage(cb_descs[cb].first).GetHostScale() != prepared_host_scale) {
+            current_host_scale = 1;
+        }
+    }
+    if (db_desc.first &&
+        texture_cache.GetImage(db_desc.first).GetHostScale() != prepared_host_scale) {
+        current_host_scale = 1;
+    }
+    const auto observe_scale = [this](const VideoCore::Image& image) {
+        const u32 scale = image.GetHostScale();
+        current_host_scale = current_host_scale == 0       ? scale
+                             : current_host_scale == scale ? scale
+                                                           : 1;
+    };
     for (auto cb = 0u; cb < state.num_color_attachments; ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         if (!image_id) {
@@ -874,7 +927,11 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         }
         texture_cache.UpdateImage(image_id);
         image->SetBackingSamples(key.color_samples[cb]);
-        const auto& image_view = texture_cache.FindRenderTarget(image_id, desc);
+        static_cast<void>(texture_cache.FindRenderTarget(image_id, desc));
+        ASSERT(image->SetHostScale(current_host_scale * 100,
+                                   EmulatorSettings.GetInternalScreenWidth(),
+                                   EmulatorSettings.GetInternalScreenHeight()));
+        const auto& image_view = image->FindView(desc.view_info, false);
         const auto slice = image_view.info.range.base.layer;
         const auto mip = image_view.info.range.base.level;
 
@@ -897,8 +954,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                            desc.view_info.range);
         }
 
-        state.width = std::min<u32>(state.width, std::max(image->info.size.width >> mip, 1u));
-        state.height = std::min<u32>(state.height, std::max(image->info.size.height >> mip, 1u));
+        const auto host_extent = image->GetHostExtent();
+        state.width = std::min<u32>(state.width, std::max(host_extent.width >> mip, 1u));
+        state.height = std::min<u32>(state.height, std::max(host_extent.height >> mip, 1u));
+        observe_scale(*image);
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
         const auto clear_value =
@@ -918,8 +977,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     if (auto image_id = db_desc.first; image_id) {
         auto& desc = db_desc.second;
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
-        const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
+        static_cast<void>(texture_cache.FindDepthTarget(image_id, desc));
         auto& image = texture_cache.GetImage(image_id);
+        ASSERT(image.SetHostScale(current_host_scale * 100,
+                                  EmulatorSettings.GetInternalScreenWidth(),
+                                  EmulatorSettings.GetInternalScreenHeight()));
+        const auto& image_view = image.FindView(desc.view_info, false);
 
         const auto slice = image_view.info.range.base.layer;
         const bool is_depth_clear = VideoCore::DepthStencilPolicy::ShouldClearDepth(
@@ -946,8 +1009,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                           vk::AccessFlagBits2::eDepthStencilAttachmentRead,
                       desc.view_info.range);
 
-        state.width = std::min<u32>(state.width, image.info.size.width);
-        state.height = std::min<u32>(state.height, image.info.size.height);
+        const auto host_extent = image.GetHostExtent();
+        state.width = std::min<u32>(state.width, host_extent.width);
+        state.height = std::min<u32>(state.height, host_extent.height);
+        observe_scale(image);
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
         auto& attachment = state.depth_stencil_attachment;
@@ -974,6 +1039,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     if (state.num_layers == std::numeric_limits<u16>::max()) {
         state.num_layers = 1;
     }
+    if (current_host_scale == 0) {
+        current_host_scale = 1;
+    }
+    push_data.host_inv_scale = 1.0f / static_cast<float>(current_host_scale);
 
     return state;
 }
@@ -1045,7 +1114,7 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
                 .layerCount = sub_range.extent.layers,
             },
         .dstOffset = {0, 0, 0},
-        .extent = {write_image.info.size.width, write_image.info.size.height, 1},
+        .extent = write_image.GetHostExtent(),
     };
     scheduler.CommandBuffer().copyImage(read_image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                                         write_image.GetImage(),
@@ -1223,6 +1292,13 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
+
+            if (current_host_scale != 1) {
+                viewport.x *= static_cast<float>(current_host_scale);
+                viewport.y *= static_cast<float>(current_host_scale);
+                viewport.width *= static_cast<float>(current_host_scale);
+                viewport.height *= static_cast<float>(current_host_scale);
+            }
         }
 
         viewports.push_back(viewport);
@@ -1239,8 +1315,10 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_y);
         }
         scissors.push_back({
-            .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
-            .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
+            .offset = {vp_scsr.top_left_x * static_cast<s32>(current_host_scale),
+                       vp_scsr.top_left_y * static_cast<s32>(current_host_scale)},
+            .extent = {vp_scsr.GetWidth() * current_host_scale,
+                       vp_scsr.GetHeight() * current_host_scale},
         });
     }
 
@@ -1321,9 +1399,8 @@ void Rasterizer::UpdateDepthStencilState() const {
         // GCN REPLACE_OP writes DB_STENCILREFMASK.STENCILOPVAL, so a face whose stencil ops
         // include ReplaceOp takes its Vulkan reference from op_val.
         const auto& sc = regs.stencil_control;
-        const bool front_op =
-            VideoCore::DepthStencilPolicy::UsesStencilOpValue(
-                sc.stencil_fail_front, sc.stencil_zpass_front, sc.stencil_zfail_front);
+        const bool front_op = VideoCore::DepthStencilPolicy::UsesStencilOpValue(
+            sc.stencil_fail_front, sc.stencil_zpass_front, sc.stencil_zfail_front);
         const bool back_op =
             regs.depth_control.backface_enable
                 ? VideoCore::DepthStencilPolicy::UsesStencilOpValue(
@@ -1340,10 +1417,10 @@ void Rasterizer::UpdateDepthStencilState() const {
                                        "op_val; the stencil test will use op_val");
         }
         dynamic_state.SetStencilReferences(
-            VideoCore::DepthStencilPolicy::SelectStencilReference(
-                front_op, front.stencil_op_val, front.stencil_test_val),
-            VideoCore::DepthStencilPolicy::SelectStencilReference(
-                back_op, back.stencil_op_val, back.stencil_test_val));
+            VideoCore::DepthStencilPolicy::SelectStencilReference(front_op, front.stencil_op_val,
+                                                                  front.stencil_test_val),
+            VideoCore::DepthStencilPolicy::SelectStencilReference(back_op, back.stencil_op_val,
+                                                                  back.stencil_test_val));
         dynamic_state.SetStencilWriteMasks(!stencil_clear ? front.stencil_write_mask : 0U,
                                            !stencil_clear ? back.stencil_write_mask : 0U);
         dynamic_state.SetStencilCompareMasks(front.stencil_mask, back.stencil_mask);

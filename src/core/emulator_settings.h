@@ -419,6 +419,7 @@ struct GPUSettings {
     Setting<u32> window_height{720};
     Setting<u32> internal_screen_width{1280};
     Setting<u32> internal_screen_height{720};
+    Setting<u32> internal_resolution_scale{100};
     Setting<bool> null_gpu{false};
     Setting<u32> readbacks_mode{GpuReadbacksMode::Disabled};
     Setting<bool> readback_linear_images_enabled{false};
@@ -446,6 +447,8 @@ struct GPUSettings {
                                        &GPUSettings::internal_screen_height),
             make_override<GPUSettings>("internal_screen_width",
                                        &GPUSettings::internal_screen_width),
+            make_override<GPUSettings>("internal_resolution_scale",
+                                       &GPUSettings::internal_resolution_scale),
             make_override<GPUSettings>("hdr_allowed", &GPUSettings::hdr_allowed),
             make_override<GPUSettings>("fsr_enabled", &GPUSettings::fsr_enabled),
             make_override<GPUSettings>("rcas_enabled", &GPUSettings::rcas_enabled),
@@ -462,11 +465,11 @@ struct GPUSettings {
     }
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, internal_screen_width,
-                                   internal_screen_height, null_gpu, readbacks_mode,
-                                   readback_linear_images_enabled, direct_memory_access_enabled,
-                                   dump_shaders, patch_shaders, vblank_frequency, full_screen,
-                                   full_screen_mode, present_mode, hdr_allowed, fsr_enabled,
-                                   rcas_enabled, rcas_attenuation)
+                                   internal_screen_height, internal_resolution_scale, null_gpu,
+                                   readbacks_mode, readback_linear_images_enabled,
+                                   direct_memory_access_enabled, dump_shaders, patch_shaders,
+                                   vblank_frequency, full_screen, full_screen_mode, present_mode,
+                                   hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation)
 // -------------------------------
 // Vulkan settings
 // -------------------------------
@@ -739,6 +742,7 @@ public:
     SETTING_FORWARD(m_gpu, WindowWidth, window_width)
     SETTING_FORWARD(m_gpu, InternalScreenHeight, internal_screen_height)
     SETTING_FORWARD(m_gpu, InternalScreenWidth, internal_screen_width)
+    SETTING_FORWARD(m_gpu, InternalResolutionScale, internal_resolution_scale)
     SETTING_FORWARD_BOOL(m_gpu, HdrAllowed, hdr_allowed)
     SETTING_FORWARD_BOOL(m_gpu, FsrEnabled, fsr_enabled)
     SETTING_FORWARD_BOOL(m_gpu, RcasEnabled, rcas_enabled)

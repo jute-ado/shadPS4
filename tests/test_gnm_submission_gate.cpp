@@ -4,8 +4,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <future>
 #include <ranges>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -233,6 +235,51 @@ TEST(OwnedCommandBuffers, GraphicsSubmissionAlwaysTakesImmutableOwnership) {
 
     EXPECT_TRUE(std::ranges::equal(submission.dcb, std::array<u32, 3>{0x10, 0x20, 0x30}));
     EXPECT_TRUE(std::ranges::equal(submission.ccb, std::array<u32, 2>{0x40, 0x50}));
+}
+
+std::array<u32, 4> MakeIndirectPacket(u32 opcode, std::span<const u32> commands) {
+    const auto address = reinterpret_cast<uintptr_t>(commands.data());
+    return {
+        (3u << 30) | (2u << 16) | (opcode << 8),
+        static_cast<u32>(address),
+        static_cast<u32>(address >> 32) & 0xffffu,
+        static_cast<u32>(commands.size()),
+    };
+}
+
+TEST(OwnedCommandBuffers, SubmissionRecursivelyOwnsGraphicsAndConstantIndirectBuffers) {
+    std::array<u32, 3> leaf{0x11111111, 0x22222222, 0x33333333};
+    auto nested = MakeIndirectPacket(0x3f, leaf);
+    auto dcb = MakeIndirectPacket(0x3f, nested);
+    auto ccb = MakeIndirectPacket(0x33, leaf);
+    const auto expected_nested = nested;
+
+    const auto submission = AmdGpu::PrepareGraphicsSubmission(dcb, ccb);
+    ASSERT_TRUE(submission.owner);
+    const auto nested_address = reinterpret_cast<const u32*>(
+        static_cast<uintptr_t>(dcb[1]) | (static_cast<uintptr_t>(dcb[2] & 0xffffu) << 32));
+    const auto leaf_address = reinterpret_cast<const u32*>(
+        static_cast<uintptr_t>(nested[1]) | (static_cast<uintptr_t>(nested[2] & 0xffffu) << 32));
+
+    nested.fill(0);
+    leaf.fill(0);
+
+    EXPECT_TRUE(
+        std::ranges::equal(submission.owner->ResolveIndirect(nested_address, 4), expected_nested));
+    EXPECT_TRUE(std::ranges::equal(submission.owner->ResolveIndirect(leaf_address, 3),
+                                   std::array<u32, 3>{0x11111111, 0x22222222, 0x33333333}));
+}
+
+TEST(OwnedCommandBuffers, LiverpoolResolvesBothIndirectPacketKindsThroughSubmissionOwner) {
+    std::ifstream input{LIVERPOOL_SOURCE_PATH, std::ios::binary};
+    ASSERT_TRUE(input);
+    const std::string source{std::istreambuf_iterator<char>{input}, {}};
+
+    const auto first_resolve = source.find("ResolveIndirect");
+    ASSERT_NE(first_resolve, std::string::npos);
+    EXPECT_NE(source.find("ResolveIndirect", first_resolve + 1), std::string::npos);
+    EXPECT_NE(source.find("ProcessGraphics(indirect_commands"), std::string::npos);
+    EXPECT_NE(source.find("ProcessCeUpdate(indirect_commands"), std::string::npos);
 }
 
 } // namespace

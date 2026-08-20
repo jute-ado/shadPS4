@@ -147,6 +147,8 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+    u32 prepared_host_scale{1};
+    u32 current_host_scale{1};
 };
 
 } // namespace Vulkan

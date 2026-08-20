@@ -221,6 +221,150 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 
 Image::~Image() = default;
 
+bool Image::CanHostScale(const u32 scale_percent, const u32 display_width,
+                         const u32 display_height) const {
+    const bool supports_blit = instance->IsFormatSupported(
+        backing->image.image_ci.format,
+        vk::FormatFeatureFlagBits2::eBlitSrc | vk::FormatFeatureFlagBits2::eBlitDst);
+    const auto plan = PlanHostImageScale({
+        .width = info.size.width,
+        .height = info.size.height,
+        .display_width = display_width,
+        .display_height = display_height,
+        .scale_percent = scale_percent,
+        .levels = info.resources.levels,
+        .layers = info.resources.layers,
+        .samples = info.num_samples,
+        .is_2d = ConvertImageType(info.type) == vk::ImageType::e2D,
+        .is_block_compressed = bool(info.props.is_block),
+        .supports_blit = supports_blit,
+        .is_render_target = bool(usage.render_target),
+        .is_depth_target = bool(usage.depth_target),
+    });
+    return plan.disposition == HostImageScaleDisposition::Identity || plan.IsScaled();
+}
+
+bool Image::SetHostScale(const u32 scale_percent, const u32 display_width,
+                         const u32 display_height) {
+    const bool supports_blit = instance->IsFormatSupported(
+        backing->image.image_ci.format,
+        vk::FormatFeatureFlagBits2::eBlitSrc | vk::FormatFeatureFlagBits2::eBlitDst);
+    const auto plan = PlanHostImageScale({
+        .width = info.size.width,
+        .height = info.size.height,
+        .display_width = display_width,
+        .display_height = display_height,
+        .scale_percent = scale_percent,
+        .levels = info.resources.levels,
+        .layers = info.resources.layers,
+        .samples = info.num_samples,
+        .is_2d = ConvertImageType(info.type) == vk::ImageType::e2D,
+        .is_block_compressed = bool(info.props.is_block),
+        .supports_blit = supports_blit,
+        .is_render_target = bool(usage.render_target),
+        .is_depth_target = bool(usage.depth_target),
+    });
+    if (plan.disposition != HostImageScaleDisposition::Identity && !plan.IsScaled()) {
+        return false;
+    }
+    const u32 requested_scale = plan.IsScaled() ? plan.numerator : 1u;
+    if (GetHostScale() == requested_scale) {
+        return true;
+    }
+
+    scheduler->EndRendering();
+    auto new_image_ci = backing->image.image_ci;
+    new_image_ci.extent.width = plan.host_width;
+    new_image_ci.extent.height = plan.host_height;
+
+    auto* old_backing = backing;
+    const auto matching_backing = std::ranges::find_if(backing_images, [&](const auto& candidate) {
+        return std::addressof(candidate) != old_backing &&
+               candidate.num_samples == old_backing->num_samples &&
+               candidate.image.image_ci.extent == new_image_ci.extent;
+    });
+    BackingImage* new_backing{};
+    if (matching_backing != backing_images.end()) {
+        new_backing = std::addressof(*matching_backing);
+    } else {
+        new_backing = &backing_images.emplace_back();
+        new_backing->num_samples = old_backing->num_samples;
+        new_backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
+        new_backing->image.Create(new_image_ci);
+    }
+
+    const auto old_extent = old_backing->image.image_ci.extent;
+    const auto new_extent = new_backing->image.image_ci.extent;
+    auto barriers =
+        GetBarriers(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                    vk::PipelineStageFlagBits2::eCopy, std::nullopt);
+    backing = new_backing;
+    const auto destination_barriers =
+        GetBarriers(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
+                    vk::PipelineStageFlagBits2::eCopy, std::nullopt);
+    backing = old_backing;
+    barriers.insert(barriers.end(), destination_barriers.begin(), destination_barriers.end());
+    const auto cmdbuf = scheduler->CommandBuffer();
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = static_cast<u32>(barriers.size()),
+        .pImageMemoryBarriers = barriers.data(),
+    });
+
+    boost::container::small_vector<vk::ImageBlit, 2> blits;
+    const auto add_blit = [&](const vk::ImageAspectFlagBits aspect) {
+        if (aspect_mask & aspect) {
+            blits.push_back(vk::ImageBlit{
+                .srcSubresource{
+                    .aspectMask = aspect,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = info.resources.layers,
+                },
+                .srcOffsets =
+                    std::array{
+                        vk::Offset3D{0, 0, 0},
+                        vk::Offset3D{static_cast<s32>(old_extent.width),
+                                     static_cast<s32>(old_extent.height), 1},
+                    },
+                .dstSubresource{
+                    .aspectMask = aspect,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = info.resources.layers,
+                },
+                .dstOffsets =
+                    std::array{
+                        vk::Offset3D{0, 0, 0},
+                        vk::Offset3D{static_cast<s32>(new_extent.width),
+                                     static_cast<s32>(new_extent.height), 1},
+                    },
+            });
+        }
+    };
+    add_blit(vk::ImageAspectFlagBits::eColor);
+    add_blit(vk::ImageAspectFlagBits::eDepth);
+    add_blit(vk::ImageAspectFlagBits::eStencil);
+    cmdbuf.blitImage(old_backing->image.image, vk::ImageLayout::eTransferSrcOptimal,
+                     new_backing->image.image, vk::ImageLayout::eTransferDstOptimal, blits,
+                     vk::Filter::eNearest);
+
+    backing = new_backing;
+    host_scale_plan = plan;
+    Transit(vk::ImageLayout::eGeneral,
+            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
+    if (plan.IsScaled() && !host_scale_logged) {
+        LOG_INFO(Render_Vulkan, "Internal resolution promoted {}x{} to {}x{} ({})", info.size.width,
+                 info.size.height, new_extent.width, new_extent.height,
+                 vk::to_string(new_image_ci.format));
+        host_scale_logged = true;
+    }
+    Vulkan::SetObjectName(instance->GetDevice(), GetImage(),
+                          "Image host-scaled {}x{} from {}x{} {:#x}:{:#x}", new_extent.width,
+                          new_extent.height, info.size.width, info.size.height, info.guest_address,
+                          info.guest_size);
+    return true;
+}
+
 ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_samples) {
     if (ensure_guest_samples && backing->num_samples > 1 != info.num_samples > 1) {
         SetBackingSamples(info.num_samples);
@@ -373,6 +517,7 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
 
 void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffer buffer,
                    u64 offset) {
+    ASSERT(SetHostScale(100));
     SetBackingSamples(info.num_samples, false);
     scheduler->EndRendering();
 
@@ -419,6 +564,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
 
 void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::Buffer buffer,
                      u64 offset, u64 download_size) {
+    ASSERT(SetHostScale(100));
     SetBackingSamples(info.num_samples);
     scheduler->EndRendering();
 
@@ -508,6 +654,10 @@ static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const I
 }
 
 void Image::CopyImage(Image& src_image) {
+    if (GetHostScale() != src_image.GetHostScale()) {
+        ASSERT(SetHostScale(100));
+        ASSERT(src_image.SetHostScale(100));
+    }
     const auto& src_info = src_image.info;
 
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
@@ -520,8 +670,9 @@ void Image::CopyImage(Image& src_image) {
                   vk::to_string(src_info.pixel_format), vk::to_string(info.pixel_format));
     }
 
-    const u32 base_width = src_info.size.width;
-    const u32 base_height = src_info.size.height;
+    const auto src_host_extent = src_image.GetHostExtent();
+    const u32 base_width = src_host_extent.width;
+    const u32 base_height = src_host_extent.height;
     const u32 base_depth =
         info.type == AmdGpu::ImageType::Color3D ? info.size.depth : src_info.size.depth;
 
@@ -609,6 +760,8 @@ void Image::CopyImage(Image& src_image) {
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
 }
 void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
+    ASSERT(SetHostScale(100));
+    ASSERT(src_image.SetHostScale(100));
     const auto& src_info = src_image.info;
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
     const u32 num_layers = std::min(src_info.resources.layers, info.resources.layers);
@@ -689,6 +842,8 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
 }
 
 void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
+    ASSERT(SetHostScale(100));
+    ASSERT(src_image.SetHostScale(100));
     const auto& src_info = src_image.info;
 
     const auto dst_dim = info.props.is_block ? 2 : 0;
@@ -735,6 +890,10 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
 
 void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
                     const VideoCore::SubresourceRange& mrt1_range) {
+    if (GetHostScale() != src_image.GetHostScale()) {
+        ASSERT(SetHostScale(100));
+        ASSERT(src_image.SetHostScale(100));
+    }
     SetBackingSamples(1, false);
     scheduler->EndRendering();
 
@@ -759,7 +918,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                 .layerCount = dst_layers,
             },
             .dstOffset = {0, 0, 0},
-            .extent = {info.size.width, info.size.height, 1},
+            .extent = GetHostExtent(),
         };
         scheduler->CommandBuffer().copyImage(src_image.GetImage(),
                                              vk::ImageLayout::eTransferSrcOptimal, GetImage(),
@@ -780,7 +939,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                 .layerCount = dst_layers,
             },
             .dstOffset = {0, 0, 0},
-            .extent = {info.size.width, info.size.height, 1},
+            .extent = GetHostExtent(),
         };
         scheduler->CommandBuffer().resolveImage(src_image.GetImage(),
                                                 vk::ImageLayout::eTransferSrcOptimal, GetImage(),
@@ -812,7 +971,11 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     }
     ASSERT_MSG(!info.props.is_depth, "Swapping samples is only valid for color images");
     BackingImage* new_backing;
-    auto it = std::ranges::find(backing_images, num_samples, &BackingImage::num_samples);
+    const auto current_extent = backing->image.image_ci.extent;
+    auto it = std::ranges::find_if(backing_images, [&](const BackingImage& candidate) {
+        return candidate.num_samples == num_samples &&
+               candidate.image.image_ci.extent == current_extent;
+    });
     if (it == backing_images.end()) {
         auto new_image_ci = backing->image.image_ci;
         new_image_ci.samples = LiverpoolToVK::NumSamples(num_samples, supported_samples);
@@ -871,8 +1034,8 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
 
         // Copy between ms and non ms backing images
         blit_helper->CopyBetweenMsImages(
-            info.size.width, info.size.height, new_backing->num_samples, info.pixel_format,
-            backing->num_samples > 1, backing->image, new_backing->image);
+            current_extent.width, current_extent.height, new_backing->num_samples,
+            info.pixel_format, backing->num_samples > 1, backing->image, new_backing->image);
 
         // Update current layout in tracker to new backings layout
         new_backing->state.layout = dst_layout;

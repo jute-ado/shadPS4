@@ -115,11 +115,13 @@ private:
     const std::vector<std::string> audioBackendOptions = {"SDL", "OpenAL"};
     const std::vector<std::string> presentModeOptions = {"Mailbox", "Fifo", "Immediate"};
     const std::vector<std::string> guestDisplayResolutionOptions = {
-        "1280 x 720 (720p)", "1920 x 1080 (1080p)", "2560 x 1440 (1440p)",
-        "3840 x 2160 (4K)", "Custom"};
+        "1280 x 720 (720p)", "1920 x 1080 (1080p)", "2560 x 1440 (1440p)", "3840 x 2160 (4K)",
+        "Custom"};
     const std::vector<std::string> hideCursorOptions = {"Never", "Idle", "Always"};
     const std::vector<std::string> trophySideOptions = {"left", "right", "top", "bottom"};
     const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
+    const std::vector<std::string> internalResolutionScaleOptions = {"Native (1x)",
+                                                                     "4K (2x, Experimental)"};
     // Windows static guest red-zone protection
     const std::vector<std::string> windowsGuestRedZoneProtectionModeOptions = {"Disabled",
                                                                                "Static Patching"};
@@ -141,6 +143,7 @@ private:
     int guestDisplayResolutionSetting;
     int internalScreenWidthSetting;
     int internalScreenHeightSetting;
+    int internalResolutionScaleSetting;
     bool hdrAllowedSetting;
     bool fsrEnabledSetting;
     bool rcasEnabledSetting;
@@ -174,6 +177,7 @@ private:
     bool connectedNetworkSetting;
     bool pipelineCacheEnabledSetting;
     bool pipelineCacheArchiveSetting;
+    bool asyncGraphicsPipelineCompilationSetting;
     int extraDmemSetting;
     int vblankFrequencySetting;
 };
