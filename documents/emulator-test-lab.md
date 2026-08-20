@@ -36,6 +36,8 @@ whenever possible.
 
 For the stricter visual-correctness rules and a worked compatibility campaign,
 see [Uncharted compatibility investigation guide](uncharted-compatibility-investigation.md).
+For the current committed PS4 suite inventory, overlap analysis, and proposed
+cleanup tiers, see [PS4 game test-suite audit](ps4-game-test-suite-audit-20260820.md).
 
 ## Starting an emulator task
 

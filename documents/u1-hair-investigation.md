@@ -354,6 +354,33 @@ remains useful, but later live evidence showed it was not the white-return fix; 
 ADDR64 correction above is the accepted repair.
 Texture-containment commits are `e7fff725` (RED) and `eaa8c93b` (GREEN).
 
+### 2026-08-20 unresolved 200% host-scaling regression
+
+A live manual review invalidated the earlier acceptance claim for the U1 cave at
+200% internal render scale. Hair and spider webs were not intermittently wrong
+for one or two frames; they were persistently and uniformly rendered with the
+wrong material appearance throughout the observed scene. This is a distinct,
+stronger failure than the preserved native-scale white-return sequence.
+
+The reviewed Test Lab launch did pass `--internal-resolution-scale 200`, and the
+emulator's own startup log confirmed `GPU internalRenderScale: 200%` on the RTX
+4080. The guest display and captured output remained 1920x1080. The current
+implementation scales eligible host attachments transactionally and permits
+ineligible images or mixed attachment sets to fall back to native scale; it
+does not render a native 3840x2160 guest framebuffer or present a 3840x2160
+image. The run also ended as invalid Test Lab evidence rather than an accepted
+visual result. Without per-draw effective-scale evidence, it must not be
+described as proof that every attachment was rendered at 3840x2160.
+
+Status: **open and deliberately not being fixed in this pass**. The earlier
+native-scale descriptor-relative ADDR64 result remains separate evidence, but
+the 200% cave acceptance in the resolution-scaling notes is superseded. A
+future investigation should replay the exact same seed, route, async-pipeline
+mode, and camera path at 100% and 200%; publish the effective scale selected for
+each target transaction; and compare the persistent material failure against
+the native composition. Do not reduce this report to sharpness or fullscreen
+window size.
+
 ## Working rules
 
 Prefer deterministic RenderDoc Python/CLI reports over GUI inspection. Keep

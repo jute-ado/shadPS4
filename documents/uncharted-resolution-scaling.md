@@ -135,7 +135,7 @@ unavailable, not visual passes or failures. Resolution acceptance therefore
 requires reviewed gameplay membership plus temporal evidence; raw timeout or
 checkpoint counters are insufficient.
 
-### Accepted U1 evidence
+### Superseded U1 evidence
 
 After the post-refresh attachment transaction repair, a fresh RTX 4080 cave
 replay completed normally and produced 100 distinct temporal frames. The
@@ -145,9 +145,14 @@ earlier stale silhouette, overbright wet geometry, or mixed color/depth extent.
 Checkpoint mean-absolute differences ranged from 0.0173 to 0.0191 and cosine
 differences from 0.095 to 0.106 against the retained native control.
 
-This establishes the tested U1 cave boundary only. It does not prove every U1
-scene and does not replace a manual playthrough. The U2 and U3 boundaries are
-recorded separately below.
+This automated result is superseded by the 2026-08-20 live review. In that
+review, the same cave's hair and spider webs were persistently rendered with the
+wrong material appearance at 200%. The emulator log confirmed the requested
+200% setting, but the guest/output resolution was 1920x1080 and the current
+selective host-scaling path does not report the effective scale of every draw.
+The run's Test Lab result was invalid, not an accepted visual pass. U1 200%
+therefore remains an open regression and must not be advertised as accepted
+4K rendering. See [U1 hair investigation](u1-hair-investigation.md).
 
 ### Current Nvidia U2 and U3 evidence (2026-08-20)
 
