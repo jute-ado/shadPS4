@@ -101,6 +101,7 @@ private:
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
+    void PrepareAddr64PointerResidency(const Shader::Info& stage);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
 

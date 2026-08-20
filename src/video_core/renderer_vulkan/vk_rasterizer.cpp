@@ -5,8 +5,11 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "shader_recompiler/addr64_pointer_residency.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/fault_range.h"
+#include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/depth_stencil_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -451,6 +454,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
         stage->PushUd(binding, push_data);
+        PrepareAddr64PointerResidency(*stage);
         BindBuffers(*stage, binding, push_data);
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
@@ -463,6 +467,34 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     return true;
+}
+
+void Rasterizer::PrepareAddr64PointerResidency(const Shader::Info& stage) {
+    if (stage.addr64_pointer_roots_overflow) {
+        return;
+    }
+
+    for (u32 ordinal = 0; ordinal < stage.num_addr64_pointer_roots; ++ordinal) {
+        const auto& root = stage.addr64_pointer_roots[ordinal];
+        if (root.buffer_resource_index >= stage.buffers.size() ||
+            root.pointer_lo_flat_index + 1U >= stage.flattened_ud_buf.size()) {
+            continue;
+        }
+
+        const u32 pointer_lo = stage.flattened_ud_buf[root.pointer_lo_flat_index];
+        const u32 pointer_hi = stage.flattened_ud_buf[root.pointer_lo_flat_index + 1U];
+        const auto plan = Shader::PlanAddr64PointerResidency(
+            pointer_lo, pointer_hi, 1ULL << VideoCore::MemoryTracker::MAX_CPU_PAGE_BITS);
+        if (!plan.valid || !VideoCore::IsProcessableDmaFaultRange(
+                               plan.address, plan.address + plan.size,
+                               1ULL << VideoCore::MemoryTracker::MAX_CPU_PAGE_BITS,
+                               [this](VAddr address, u64 size) {
+                                   return page_manager.IsGpuMapped(address, size);
+                               })) {
+            continue;
+        }
+        VideoCore::MakeDmaFaultRangeResident(buffer_cache, plan.address, plan.size);
+    }
 }
 
 bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {

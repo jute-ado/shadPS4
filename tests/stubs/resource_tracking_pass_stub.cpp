@@ -7,6 +7,7 @@
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
+#include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -219,6 +220,8 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
                                                         .buffer_type = BufferType::Guest,
                                                         .is_written = true,
                                                         .is_formatted = false});
+
+    RecordAddr64PointerRoots(inst, buffer_binding, info);
 
     // Replace handle with binding index in buffer resource list.
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
