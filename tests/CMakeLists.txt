@@ -124,6 +124,9 @@ target_include_directories(shadps4_texture_types_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_texture_types_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_texture_types_test PRIVATE
+    SHADPS4_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+)
 target_link_libraries(shadps4_texture_types_test PRIVATE
     GTest::gtest_main
     spdlog::spdlog
