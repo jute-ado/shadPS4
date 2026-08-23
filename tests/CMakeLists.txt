@@ -369,6 +369,7 @@ endif()
 if (WIN32 AND ARCHITECTURE STREQUAL "x86_64")
     add_executable(shadps4_windows_exception_stack_test
         ${CMAKE_SOURCE_DIR}/src/core/libraries/kernel/threads/stack_asm.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/windows_exception_stack.cpp
         test_windows_exception_stack.cpp
     )
     target_link_libraries(shadps4_windows_exception_stack_test PRIVATE GTest::gtest_main)
