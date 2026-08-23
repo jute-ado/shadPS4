@@ -104,7 +104,7 @@ TEST(WindowsExceptionPolicy, NativeGuestThreadsOwnPreparedExceptionStackLifetime
     ASSERT_FALSE(initialize.empty());
     ASSERT_FALSE(exit.empty());
     EXPECT_NE(initialize.find("PrepareWindowsExceptionStack("), std::string::npos);
-    const auto cleanup = exit.find("CleanupWindowsExceptionStack(");
+    const auto cleanup = exit.find("ReleaseWindowsExceptionStackForThreadExit(");
     const auto terminate = exit.find("ExitThread(");
     ASSERT_NE(cleanup, std::string::npos);
     ASSERT_NE(terminate, std::string::npos);
