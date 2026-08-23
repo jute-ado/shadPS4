@@ -74,6 +74,7 @@ target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
 target_compile_definitions(shadps4_ipc_capabilities_test PRIVATE
     SHADPS4_IPC_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/ipc/ipc.cpp"
     SHADPS4_PRESENTER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_presenter.cpp"
+    SHADPS4_PRESENTED_FRAME_QUEUE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/ipc/presented_frame_input_queue.h"
 )
 target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
