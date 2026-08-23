@@ -4,7 +4,9 @@
 #pragma once
 
 #include "common/singleton.h"
+#include "core/ipc/presented_frame_input_queue.h"
 
+#include <mutex>
 #include <semaphore>
 #include <string>
 #include <thread>
@@ -38,6 +40,13 @@ public:
 
     void SendRestart(const std::vector<std::string>& args);
 
+    void DispatchPresentedFrameInputs(u64 presented_frame);
+
 private:
+    bool SchedulePresentedFrameInput(const Core::Ipc::PresentedFrameInputEvent& event);
+
     [[noreturn]] void InputLoop();
+
+    std::mutex presented_frame_input_mutex;
+    Core::Ipc::PresentedFrameInputQueue presented_frame_input_queue;
 };

@@ -9,6 +9,7 @@
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
+#include "core/ipc/ipc.h"
 #include "core/libraries/system/systemservice.h"
 #include "imgui/friends_layer.h"
 #include "imgui/invitation_prompt_layer.h"
@@ -1095,6 +1096,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     complete_frame(true);
     if (!is_reusing_frame) {
         const auto presented_frame = DebugState.IncFlipFrameNum();
+        if (auto& ipc = IPC::Instance()) {
+            ipc.DispatchPresentedFrameInputs(presented_frame);
+        }
         RecordPresentedFrameTiming(presented_frame);
     }
 }

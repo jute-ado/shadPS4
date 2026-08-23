@@ -56,6 +56,7 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - ENABLE_SCREENSHOT: enables SCREENSHOT and SCREENSHOT_WITH_OVERLAYS commands
  *   - ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
  *   - ENABLE_GAMEPAD
+ *   - ENABLE_PRESENTED_FRAME_GAMEPAD
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -74,6 +75,14 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - GAMEPAD_BUTTON
  *     - button: player-one button name
  *     - pressed: 1 to press, 0 to release
+ *   - GAMEPAD_BUTTON_AT_PRESENTED_FRAME
+ *     - presented frame: positive frame number
+ *     - button: player-one button name
+ *     - pressed: 1 to press, 0 to release
+ *   - GAMEPAD_AXIS_AT_PRESENTED_FRAME
+ *     - presented frame: positive frame number
+ *     - axis: player-one axis name
+ *     - value: byte from 0 through 255
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -118,6 +127,34 @@ void IPC::SendRestart(const std::vector<std::string>& args) {
         std::cerr << ";" << arg << "\n";
     }
     std::cerr.flush();
+}
+
+namespace {
+
+void PushPresentedFrameInput(const Core::Ipc::PresentedFrameInputEvent& input) {
+    SDL_Event event;
+    SDL_memset(&event, 0, sizeof(event));
+    event.type = input.kind == Core::Ipc::PresentedFrameInputKind::Button
+                     ? SDL_EVENT_INJECT_GAMEPAD_BUTTON
+                     : SDL_EVENT_INJECT_GAMEPAD_AXIS;
+    event.user.code = static_cast<Sint32>(input.control);
+    event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(input.value));
+    SDL_PushEvent(&event);
+}
+
+} // namespace
+
+bool IPC::SchedulePresentedFrameInput(const Core::Ipc::PresentedFrameInputEvent& event) {
+    std::scoped_lock lock{presented_frame_input_mutex};
+    return presented_frame_input_queue.Schedule(event);
+}
+
+void IPC::DispatchPresentedFrameInputs(const u64 presented_frame) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lock{presented_frame_input_mutex};
+    presented_frame_input_queue.Dispatch(presented_frame, PushPresentedFrameInput);
 }
 
 void IPC::InputLoop() {
@@ -193,6 +230,20 @@ void IPC::InputLoop() {
             event.user.code = static_cast<Sint32>(*button);
             event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(pressed));
             SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_BUTTON_AT_PRESENTED_FRAME") {
+            const u64 presented_frame = next_u64();
+            const std::string name = next_str();
+            const auto button = Input::ParseControllerButton(name);
+            const u64 pressed = next_u64();
+            if (!button || pressed > 1 || !SchedulePresentedFrameInput({
+                                                   .presented_frame = presented_frame,
+                                                   .kind = Core::Ipc::PresentedFrameInputKind::Button,
+                                                   .control = static_cast<u32>(*button),
+                                                   .value = static_cast<u8>(pressed),
+                                               })) {
+                std::cerr << ";INVALID PRESENTED FRAME GAMEPAD BUTTON: " << name << '\n';
+                std::cerr.flush();
+            }
         } else if (cmd == "GAMEPAD_AXIS") {
             const std::string name = next_str();
             const auto axis = Input::ParseControllerAxis(name);
@@ -208,6 +259,21 @@ void IPC::InputLoop() {
             event.user.code = static_cast<Sint32>(*axis);
             event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(value));
             SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_AXIS_AT_PRESENTED_FRAME") {
+            const u64 presented_frame = next_u64();
+            const std::string name = next_str();
+            const auto axis = Input::ParseControllerAxis(name);
+            const u64 value = next_u64();
+            if (!axis || value > 255 || !SchedulePresentedFrameInput({
+                                             .presented_frame = presented_frame,
+                                             .kind = Core::Ipc::PresentedFrameInputKind::Axis,
+                                             .control = static_cast<u32>(*axis),
+                                             .value = static_cast<u8>(value),
+                                         })) {
+                std::cerr << ";INVALID PRESENTED FRAME GAMEPAD AXIS: " << name << ' ' << value
+                          << '\n';
+                std::cerr.flush();
+            }
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());
             bool is_game_specific = next_u64() != 0;
