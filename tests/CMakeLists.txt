@@ -560,6 +560,7 @@ set(GCN_TEST_SOURCES
     gcn/test_buffer_access_range_pass.cpp
     gcn/test_barycentric_spirv.cpp
     gcn/test_gcn_instructions.cpp
+    gcn/test_ssa_rewrite.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
