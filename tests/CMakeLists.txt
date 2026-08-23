@@ -359,9 +359,20 @@ if (WIN32)
         SHADPS4_ASSERT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/common/assert.cpp"
         SHADPS4_EMULATOR_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/emulator.cpp"
         SHADPS4_SIGNALS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/signals.cpp"
+        SHADPS4_THREAD_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/thread.cpp"
     )
     target_link_libraries(shadps4_windows_exception_policy_test PRIVATE GTest::gtest_main)
     list(APPEND TEST_TARGETS shadps4_windows_exception_policy_test)
+
+endif()
+
+if (WIN32 AND ARCHITECTURE STREQUAL "x86_64")
+    add_executable(shadps4_windows_exception_stack_test
+        ${CMAKE_SOURCE_DIR}/src/core/libraries/kernel/threads/stack_asm.cpp
+        test_windows_exception_stack.cpp
+    )
+    target_link_libraries(shadps4_windows_exception_stack_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_exception_stack_test)
 endif()
 
 add_executable(shadps4_depth_association_test

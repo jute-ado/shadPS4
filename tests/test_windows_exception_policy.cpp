@@ -87,6 +87,30 @@ TEST(WindowsExceptionPolicy, SignalDispatcherDestructionOwnsHandlerRemoval) {
     EXPECT_NE(destructor.find("RemoveHandlers("), std::string::npos);
 }
 
+TEST(WindowsExceptionPolicy, VectoredHandlerRunsBodyOnPreparedExceptionStack) {
+    const auto source = ReadSource(SHADPS4_SIGNALS_SOURCE_PATH);
+    const auto handler = FunctionBody(source, "static LONG WINAPI SignalHandler(");
+
+    ASSERT_FALSE(handler.empty());
+    EXPECT_NE(handler.find("RunOnWindowsExceptionStack("), std::string::npos);
+    EXPECT_NE(handler.find("SignalHandlerBody"), std::string::npos);
+}
+
+TEST(WindowsExceptionPolicy, NativeGuestThreadsOwnPreparedExceptionStackLifetime) {
+    const auto source = ReadSource(SHADPS4_THREAD_SOURCE_PATH);
+    const auto initialize = FunctionBody(source, "void NativeThread::Initialize()");
+    const auto exit = FunctionBody(source, "void NativeThread::Exit()");
+
+    ASSERT_FALSE(initialize.empty());
+    ASSERT_FALSE(exit.empty());
+    EXPECT_NE(initialize.find("PrepareWindowsExceptionStack("), std::string::npos);
+    const auto cleanup = exit.find("CleanupWindowsExceptionStack(");
+    const auto terminate = exit.find("ExitThread(");
+    ASSERT_NE(cleanup, std::string::npos);
+    ASSERT_NE(terminate, std::string::npos);
+    EXPECT_LT(cleanup, terminate);
+}
+
 TEST(WindowsExceptionPolicy, AssertPathRemovesHandlersImmediatelyBeforeBreakpointCrash) {
     const auto source = ReadSource(SHADPS4_ASSERT_SOURCE_PATH);
     const auto assert_fail = FunctionBody(source, "void assert_fail_impl()");
