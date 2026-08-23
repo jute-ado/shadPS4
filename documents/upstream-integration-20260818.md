@@ -298,3 +298,46 @@ The first high-parallelism unit build hit a transient CMake GoogleTest JSON
 discovery failure after one executable linked. Direct list/run of that binary
 passed, a lower-parallelism build completed, and the full discovered suite then
 passed. No source workaround or weakened test was introduced.
+
+## 2026-08-23 incremental upstream review
+
+Upstream advanced by eleven commits through `7fb1a530c`. Integration commit
+`62d17dda8` has both the previous fork head and that upstream tip as parents, so
+the review branch is ancestry-current without rewriting either history.
+
+The changes cover NP authorization/trophy behavior, HTTP/2 cleanup, Nix
+development dependencies, screenshot encoding, unsupported shader metadata,
+and a three-commit SSA/virtual-register series. The shader series overlaps the
+same unstructured-control-flow area as experimental Shadow of the Colossus
+work, so it is being evaluated as the clean upstream control before any local
+SSA experiment is forward-ported.
+
+Upstream also reverted its Neo MIMG decoder extension. Two fork-added tests
+referred only to enums removed by that revert and would no longer compile; they
+were guards for the upstream experiment rather than fork functionality. The
+integration therefore follows the upstream revert and removes exactly those
+two tests while retaining the independent MUBUF ADDR64 coverage used by U1.
+
+The SSA commit added `test_predicate_reconstruction.cpp`, but the file is not
+listed in upstream's test target and cannot compile against the tree: it
+includes two control-flow pass headers that are not present in the commit or at
+the upstream tip. The integration does not pretend that this orphan source is
+coverage. Instead, a buildable focused regression test exercises an actual
+contract of the merged SSA rewrite: undefined values are shared from the first
+block across disconnected blocks. This protects the new first-block ownership
+model without inventing the absent predicate passes.
+
+Validation completed before preserving the merge:
+
+- focused SSA rewrite test: 1/1 pass;
+- discovered synthetic suite: 619/619 pass, with one expected
+  environment-dependent host-override skip;
+- clean Release application build and link: pass;
+- formatting and staged-diff checks: pass.
+
+The screenshot encoder changed from libpng to `stb_image_write`. Unit tests do
+not exercise the Vulkan readback-to-file path, so exact Test Lab screenshot
+capture and decode remain mandatory game-gate evidence. The merge is isolated
+and must not move to `dev` or `main` until the async U1/U2/U3 and broader PS4
+gates complete. A clean async Shadow exact-frame control is also queued because
+the new SSA series may affect its long-running compute shaders.
