@@ -197,6 +197,56 @@ struct VehObservation {
 
 thread_local VehObservation* active_veh_observation{};
 
+class ScopedVirtualPage {
+public:
+    explicit ScopedVirtualPage(const std::size_t size)
+        : address{static_cast<std::byte*>(
+              VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS))} {}
+
+    ~ScopedVirtualPage() {
+        if (address != nullptr) {
+            VirtualFree(address, 0, MEM_RELEASE);
+        }
+    }
+
+    [[nodiscard]] std::byte* Get() const {
+        return address;
+    }
+
+private:
+    std::byte* address{};
+};
+
+class ScopedVehRegistration {
+public:
+    explicit ScopedVehRegistration(PVECTORED_EXCEPTION_HANDLER handler)
+        : handle{AddVectoredExceptionHandler(1, handler)} {}
+
+    ~ScopedVehRegistration() {
+        if (handle != nullptr) {
+            RemoveVectoredExceptionHandler(handle);
+        }
+    }
+
+    [[nodiscard]] bool IsValid() const {
+        return handle != nullptr;
+    }
+
+private:
+    void* handle{};
+};
+
+class ScopedActiveVehObservation {
+public:
+    explicit ScopedActiveVehObservation(VehObservation& observation) {
+        active_veh_observation = &observation;
+    }
+
+    ~ScopedActiveVehObservation() {
+        active_veh_observation = nullptr;
+    }
+};
+
 std::intptr_t RepairFaultOnExceptionStack(void* opaque) noexcept {
     auto& observation = *static_cast<VehObservation*>(opaque);
     std::byte stack_marker{};
@@ -259,12 +309,60 @@ void NTAPI FlsCleanupCallback(void* opaque) noexcept {
 std::intptr_t InstallFlsCleanupCallback(void* opaque) noexcept {
     auto& observation = *static_cast<FlsCleanupObservation*>(opaque);
     observation.slot = FlsAlloc(FlsCleanupCallback);
-    if (observation.slot == FLS_OUT_OF_INDEXES ||
-        FlsSetValue(observation.slot, &observation) == FALSE) {
+    if (observation.slot == FLS_OUT_OF_INDEXES) {
+        return 0;
+    }
+    if (FlsSetValue(observation.slot, &observation) == FALSE) {
+        FlsFree(observation.slot);
+        observation.slot = FLS_OUT_OF_INDEXES;
         return 0;
     }
     return 1;
 }
+
+class ScopedFlsSlot {
+public:
+    explicit ScopedFlsSlot(const DWORD slot) : slot{slot} {}
+    ~ScopedFlsSlot() {
+        if (slot != FLS_OUT_OF_INDEXES) {
+            FlsFree(slot);
+        }
+    }
+
+private:
+    DWORD slot{FLS_OUT_OF_INDEXES};
+};
+
+class ScopedFiberThreadRestorer {
+public:
+    explicit ScopedFiberThreadRestorer(const bool adopt_current_conversion = false)
+        : owns_conversion{adopt_current_conversion} {}
+
+    ~ScopedFiberThreadRestorer() {
+        if (owns_conversion && IsThreadAFiber() != FALSE) {
+            ConvertFiberToThread();
+        }
+    }
+
+    [[nodiscard]] bool ConvertCurrentThread() {
+        if (IsThreadAFiber() != FALSE) {
+            return false;
+        }
+        owns_conversion = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH) != nullptr;
+        return owns_conversion;
+    }
+
+    [[nodiscard]] bool ConvertBackNow() {
+        if (!owns_conversion || IsThreadAFiber() == FALSE || ConvertFiberToThread() == FALSE) {
+            return false;
+        }
+        owns_conversion = false;
+        return true;
+    }
+
+private:
+    bool owns_conversion{};
+};
 
 struct GuestExitReleaseObservation {
     RawTebStackBounds bounds_before{};
@@ -397,24 +495,20 @@ TEST_F(WindowsExceptionStackTest, RealVehResumesFaultingGuestStackThroughPrepare
     ASSERT_TRUE(guest_stack.IsValid());
     SYSTEM_INFO system_info{};
     GetSystemInfo(&system_info);
-    auto* const protected_page = static_cast<std::byte*>(
-        VirtualAlloc(nullptr, system_info.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS));
-    ASSERT_NE(protected_page, nullptr);
-    auto* const veh = AddVectoredExceptionHandler(1, TestVehHandler);
-    ASSERT_NE(veh, nullptr);
+    ScopedVirtualPage protected_page{system_info.dwPageSize};
+    ASSERT_NE(protected_page.Get(), nullptr);
+    ScopedVehRegistration veh{TestVehHandler};
+    ASSERT_TRUE(veh.IsValid());
 
     VehObservation observation{
         .guest_stack = &guest_stack,
-        .protected_page = protected_page,
+        .protected_page = protected_page.Get(),
         .page_size = system_info.dwPageSize,
     };
-    active_veh_observation = &observation;
+    ScopedActiveVehObservation active_observation{observation};
     _runOnAnotherStack(&observation, reinterpret_cast<void*>(FaultFromGuestStack),
                        guest_stack.Top());
-    active_veh_observation = nullptr;
 
-    EXPECT_TRUE(RemoveVectoredExceptionHandler(veh));
-    EXPECT_TRUE(VirtualFree(protected_page, 0, MEM_RELEASE));
     EXPECT_TRUE(observation.guest_marker_on_guest_stack);
     EXPECT_TRUE(observation.handler_on_exception_stack);
     EXPECT_TRUE(observation.handler_registered_with_windows);
@@ -442,19 +536,21 @@ TEST_F(WindowsExceptionStackTest, CleanupRestoresThreadAndAllowsReprepare) {
 
 TEST_F(WindowsExceptionStackTest, CleanupDoesNotUndoBorrowedFiberConversion) {
     ASSERT_FALSE(IsThreadAFiber());
-    ASSERT_NE(ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH), nullptr);
+    ScopedFiberThreadRestorer external_conversion;
+    ASSERT_TRUE(external_conversion.ConvertCurrentThread());
 
     ASSERT_TRUE(Core::PrepareWindowsExceptionStack());
     Core::CleanupWindowsExceptionStack();
     EXPECT_TRUE(IsThreadAFiber());
-    EXPECT_TRUE(ConvertFiberToThread());
+    EXPECT_TRUE(external_conversion.ConvertBackNow());
 }
 
 TEST_F(WindowsExceptionStackTest, PrepareRecoversAfterBorrowedFiberOwnerConvertsBackToThread) {
     ASSERT_FALSE(IsThreadAFiber());
-    ASSERT_NE(ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH), nullptr);
+    ScopedFiberThreadRestorer external_conversion;
+    ASSERT_TRUE(external_conversion.ConvertCurrentThread());
     ASSERT_TRUE(Core::PrepareWindowsExceptionStack());
-    ASSERT_TRUE(ConvertFiberToThread());
+    ASSERT_TRUE(external_conversion.ConvertBackNow());
 
     ASSERT_TRUE(Core::PrepareWindowsExceptionStack());
     CallbackObservation observation{};
@@ -468,6 +564,7 @@ TEST_F(WindowsExceptionStackTest, CleanupInvalidatesFiberBeforeFlsCallbacksCanRe
     ASSERT_TRUE(Core::PrepareWindowsExceptionStack());
     FlsCleanupObservation observation{};
     ASSERT_EQ(Core::RunOnWindowsExceptionStack(InstallFlsCleanupCallback, &observation), 1);
+    ScopedFlsSlot fls_slot{observation.slot};
     ASSERT_NE(observation.slot, FLS_OUT_OF_INDEXES);
 
     Core::CleanupWindowsExceptionStack();
@@ -475,11 +572,12 @@ TEST_F(WindowsExceptionStackTest, CleanupInvalidatesFiberBeforeFlsCallbacksCanRe
     EXPECT_TRUE(observation.callback_invoked);
     EXPECT_EQ(observation.callback_result, 73);
     EXPECT_FALSE(observation.callback_used_deleting_stack);
-    EXPECT_TRUE(FlsFree(observation.slot));
 }
 
 TEST_F(WindowsExceptionStackTest, ExitReleaseIsSafeFromManualGuestStack) {
+    ASSERT_FALSE(IsThreadAFiber());
     ASSERT_TRUE(Core::PrepareWindowsExceptionStack());
+    ScopedFiberThreadRestorer conversion_restorer{true};
     GuardedGuestStack guest_stack{64 * 1024};
     ASSERT_TRUE(guest_stack.IsValid());
     GuestExitReleaseObservation observation{};
@@ -493,7 +591,7 @@ TEST_F(WindowsExceptionStackTest, ExitReleaseIsSafeFromManualGuestStack) {
     EXPECT_EQ(observation.bounds_after.limit, 0u);
     EXPECT_TRUE(observation.still_a_fiber);
     ASSERT_TRUE(IsThreadAFiber());
-    EXPECT_TRUE(ConvertFiberToThread());
+    EXPECT_TRUE(conversion_restorer.ConvertBackNow());
 }
 
 TEST_F(WindowsExceptionStackTest, HostThreadsUseIndependentPreparedStacks) {
