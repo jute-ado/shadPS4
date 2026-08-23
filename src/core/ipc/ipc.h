@@ -41,12 +41,15 @@ public:
     void SendRestart(const std::vector<std::string>& args);
 
     void DispatchPresentedFrameInputs(u64 presented_frame);
+    void DispatchPresentedFrameScreenshots(u64 presented_frame);
 
 private:
     bool SchedulePresentedFrameInput(const Core::Ipc::PresentedFrameInputEvent& event);
+    bool SchedulePresentedFrameScreenshot(u64 presented_frame);
 
     [[noreturn]] void InputLoop();
 
-    std::mutex presented_frame_input_mutex;
+    std::mutex presented_frame_automation_mutex;
     Core::Ipc::PresentedFrameInputQueue presented_frame_input_queue;
+    Core::Ipc::PresentedFrameInputQueue presented_frame_screenshot_queue;
 };

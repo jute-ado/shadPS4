@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <utility>
 
 #include "common/types.h"
@@ -14,9 +15,18 @@ namespace Core::Ipc {
 constexpr u32 MaxPresentedFrameInputEvents = 4096;
 constexpr u64 MaxPresentedFrameInputFrame = 50'000'000;
 
+[[nodiscard]] constexpr std::optional<u64> NextPresentedFrameForAutomation(
+    const u64 current_presented_frame, const bool is_reusing_frame) noexcept {
+    if (is_reusing_frame || current_presented_frame >= MaxPresentedFrameInputFrame) {
+        return std::nullopt;
+    }
+    return current_presented_frame + 1;
+}
+
 enum class PresentedFrameInputKind : u8 {
     Button,
     Axis,
+    ScreenshotWithOverlays,
 };
 
 struct PresentedFrameInputEvent {
@@ -59,6 +69,23 @@ public:
             head = 0;
             size = 0;
         }
+    }
+
+    template <typename Callback>
+    u32 DispatchExact(const u64 presented_frame, Callback&& callback) {
+        u32 missed{};
+        while (head < size && events[head].presented_frame < presented_frame) {
+            ++head;
+            ++missed;
+        }
+        while (head < size && events[head].presented_frame == presented_frame) {
+            std::forward<Callback>(callback)(events[head++]);
+        }
+        if (head == size) {
+            head = 0;
+            size = 0;
+        }
+        return missed;
     }
 
     [[nodiscard]] u32 PendingCount() const noexcept {

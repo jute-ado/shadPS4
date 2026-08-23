@@ -57,6 +57,7 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
  *   - ENABLE_GAMEPAD
  *   - ENABLE_PRESENTED_FRAME_GAMEPAD
+ *   - ENABLE_PRESENTED_FRAME_SCREENSHOT
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -71,6 +72,8 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
  *   - SCREENSHOT: capture the next game-only frame
  *   - SCREENSHOT_WITH_OVERLAYS: capture the next presented frame, including overlays
+ *   - SCREENSHOT_WITH_OVERLAYS_AT_PRESENTED_FRAME
+ *     - presented frame: positive frame number, up to 50000000
  *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc when loaded
  *   - GAMEPAD_BUTTON
  *     - button: player-one button name
@@ -142,19 +145,41 @@ void PushPresentedFrameInput(const Core::Ipc::PresentedFrameInputEvent& input) {
     SDL_PushEvent(&event);
 }
 
+void RequestPresentedFrameScreenshot(const Core::Ipc::PresentedFrameInputEvent&) {
+    VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays,
+                                 VideoCore::ScreenshotRequestOrigin::Automation);
+}
+
 } // namespace
 
 bool IPC::SchedulePresentedFrameInput(const Core::Ipc::PresentedFrameInputEvent& event) {
-    std::scoped_lock lock{presented_frame_input_mutex};
+    std::scoped_lock lock{presented_frame_automation_mutex};
     return presented_frame_input_queue.Schedule(event);
+}
+
+bool IPC::SchedulePresentedFrameScreenshot(const u64 presented_frame) {
+    std::scoped_lock lock{presented_frame_automation_mutex};
+    return presented_frame_screenshot_queue.Schedule({
+        .presented_frame = presented_frame,
+        .kind = Core::Ipc::PresentedFrameInputKind::ScreenshotWithOverlays,
+    });
 }
 
 void IPC::DispatchPresentedFrameInputs(const u64 presented_frame) {
     if (!enabled) {
         return;
     }
-    std::scoped_lock lock{presented_frame_input_mutex};
+    std::scoped_lock lock{presented_frame_automation_mutex};
     presented_frame_input_queue.Dispatch(presented_frame, PushPresentedFrameInput);
+}
+
+void IPC::DispatchPresentedFrameScreenshots(const u64 presented_frame) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lock{presented_frame_automation_mutex};
+    presented_frame_screenshot_queue.DispatchExact(presented_frame,
+                                                    RequestPresentedFrameScreenshot);
 }
 
 void IPC::InputLoop() {
@@ -213,6 +238,12 @@ void IPC::InputLoop() {
         } else if (cmd == "SCREENSHOT_WITH_OVERLAYS") {
             VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays,
                                          VideoCore::ScreenshotRequestOrigin::Automation);
+        } else if (cmd == "SCREENSHOT_WITH_OVERLAYS_AT_PRESENTED_FRAME") {
+            const u64 presented_frame = next_u64();
+            if (!SchedulePresentedFrameScreenshot(presented_frame)) {
+                std::cerr << ";INVALID PRESENTED FRAME SCREENSHOT: " << presented_frame << '\n';
+                std::cerr.flush();
+            }
         } else if (cmd == "RENDERDOC_CAPTURE") {
             VideoCore::TriggerCapture();
         } else if (cmd == "GAMEPAD_BUTTON") {

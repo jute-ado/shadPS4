@@ -865,6 +865,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
 
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
+    if (const auto automation_frame = Core::Ipc::NextPresentedFrameForAutomation(
+            DebugState.GetFrameNum(), is_reusing_frame)) {
+        if (auto& ipc = IPC::Instance()) {
+            ipc.DispatchPresentedFrameScreenshots(*automation_frame);
+        }
+    }
     const auto capture_with_overlays = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     std::vector<ScreenshotReadback> pending_screenshots;
     if (capture_with_overlays.Total() > 0) {
