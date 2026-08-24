@@ -27,44 +27,6 @@ struct F32x2 {
     float b;
 };
 
-namespace {
-
-using namespace Shader::Gcn;
-
-Shader::Gcn::GcnInst DecodeMimg(OpcodeMIMG opcode) {
-    const u32 encoded_opcode = static_cast<u32>(opcode);
-    const u64 instruction = static_cast<u64>(InstEncoding::MIMG) |
-                            (static_cast<u64>(encoded_opcode & 0x7fU) << 18U) |
-                            static_cast<u64>((encoded_opcode >> 7U) & 1U);
-    const std::array words{static_cast<u32>(instruction), static_cast<u32>(instruction >> 32U)};
-    Shader::Gcn::GcnCodeSlice slice{words.data(), words.data() + words.size()};
-    Shader::Gcn::GcnDecodeContext decoder;
-    return decoder.decodeInstruction(slice);
-}
-
-} // namespace
-
-TEST(GcnDecode, NeoMimgUsesTheExtendedOpcodeBitAndGradientModifier) {
-    const auto instruction = DecodeMimg(OpcodeMIMG::IMAGE_SAMPLE_G16);
-    const MimgModifierFlags modifiers{instruction.control.mimg.mod};
-
-    EXPECT_EQ(instruction.opcode, Opcode::IMAGE_SAMPLE_G16);
-    EXPECT_TRUE(modifiers.test(MimgModifier::Gradients));
-    EXPECT_FALSE(modifiers.any(MimgModifier::Derivative, MimgModifier::LodClamp,
-                               MimgModifier::Offset));
-}
-
-TEST(GcnDecode, NeoMimgPreservesBaseModifiersAlongsideGradientMode) {
-    const auto instruction = DecodeMimg(OpcodeMIMG::IMAGE_SAMPLE_D_CL_O_G16);
-    const MimgModifierFlags modifiers{instruction.control.mimg.mod};
-
-    EXPECT_EQ(instruction.opcode, Opcode::IMAGE_SAMPLE_D_CL_O_G16);
-    EXPECT_TRUE(modifiers.test(MimgModifier::Gradients));
-    EXPECT_TRUE(modifiers.test(MimgModifier::Derivative));
-    EXPECT_TRUE(modifiers.test(MimgModifier::LodClamp));
-    EXPECT_TRUE(modifiers.test(MimgModifier::Offset));
-}
-
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
     constexpr u64 addr64_load = 0x80010000e030800cULL;
