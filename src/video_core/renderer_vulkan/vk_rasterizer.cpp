@@ -8,6 +8,7 @@
 #include "shader_recompiler/addr64_pointer_residency.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/fault_range.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/depth_stencil_policy.h"
@@ -236,10 +237,21 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
-    if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
-    }
+    VideoCore::PrepareDrawBuffersThenBindCommandState(
+        [&] { return buffer_cache.PrepareVertexBuffers(*pipeline, buffer_barriers); },
+        [&]() -> std::optional<VideoCore::BufferCache::PreparedIndexBuffer> {
+            if (is_indexed) {
+                return buffer_cache.PrepareIndexBuffer(index_offset, buffer_barriers);
+            }
+            return std::nullopt;
+        },
+        [] {},
+        [&](const auto& prepared_vertex) { buffer_cache.BindVertexBuffers(prepared_vertex); },
+        [&](const auto& prepared_index) {
+            if (prepared_index) {
+                buffer_cache.BindIndexBuffer(*prepared_index);
+            }
+        });
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
@@ -285,30 +297,43 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
-    if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
-    }
-
-    const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
-
+    VideoCore::Buffer* buffer{};
+    u32 base{};
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};
-    if (count_address != 0) {
-        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
-    }
-
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect)) {
-        buffer_barriers.emplace_back(*barrier);
-    }
-    if (count_buffer) {
-        if (auto barrier = count_buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                                    vk::PipelineStageFlagBits2::eDrawIndirect)) {
-            buffer_barriers.emplace_back(*barrier);
-        }
-    }
+    VideoCore::PrepareDrawBuffersThenBindCommandState(
+        [&] { return buffer_cache.PrepareVertexBuffers(*pipeline, buffer_barriers); },
+        [&]() -> std::optional<VideoCore::BufferCache::PreparedIndexBuffer> {
+            if (is_indexed) {
+                return buffer_cache.PrepareIndexBuffer(0, buffer_barriers);
+            }
+            return std::nullopt;
+        },
+        [&] {
+            std::tie(buffer, base) =
+                buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+            if (count_address != 0) {
+                std::tie(count_buffer, count_base) =
+                    buffer_cache.ObtainBuffer(count_address, 4, false);
+            }
+            if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
+                                                  vk::PipelineStageFlagBits2::eDrawIndirect)) {
+                buffer_barriers.emplace_back(*barrier);
+            }
+            if (count_buffer) {
+                if (auto barrier =
+                        count_buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
+                                                 vk::PipelineStageFlagBits2::eDrawIndirect)) {
+                    buffer_barriers.emplace_back(*barrier);
+                }
+            }
+        },
+        [&](const auto& prepared_vertex) { buffer_cache.BindVertexBuffers(prepared_vertex); },
+        [&](const auto& prepared_index) {
+            if (prepared_index) {
+                buffer_cache.BindIndexBuffer(*prepared_index);
+            }
+        });
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);

@@ -77,6 +77,59 @@ TEST(BufferResidency, DoesNotTouchUnpublishedBufferAfterResidencyUpload) {
     EXPECT_EQ(touch_count, 1);
 }
 
+TEST(BufferResidency, RecordsDrawStateAfterEveryPotentiallyFlushingBufferAcquisition) {
+    enum class Operation {
+        PrepareIndirect,
+        PrepareIndex,
+        PrepareVertex,
+        BindVertex,
+        BindIndex,
+    };
+    constexpr std::array expected_operations{
+        Operation::PrepareVertex, Operation::PrepareIndex, Operation::PrepareIndirect,
+        Operation::BindVertex,    Operation::BindIndex,
+    };
+
+    for (u32 flushing_acquisition = 0; flushing_acquisition < 3; ++flushing_acquisition) {
+        u32 command_buffer_generation = 0;
+        u32 vertex_state_generation = std::numeric_limits<u32>::max();
+        u32 index_state_generation = std::numeric_limits<u32>::max();
+        std::vector<Operation> operations;
+
+        const auto prepare = [&](Operation operation, u32 acquisition) {
+            operations.push_back(operation);
+            if (acquisition == flushing_acquisition) {
+                ++command_buffer_generation;
+            }
+        };
+
+        VideoCore::PrepareDrawBuffersThenBindCommandState(
+            [&] {
+                prepare(Operation::PrepareVertex, 0);
+                return Operation::PrepareVertex;
+            },
+            [&] {
+                prepare(Operation::PrepareIndex, 1);
+                return Operation::PrepareIndex;
+            },
+            [&] { prepare(Operation::PrepareIndirect, 2); },
+            [&](Operation prepared_state) {
+                EXPECT_EQ(prepared_state, Operation::PrepareVertex);
+                operations.push_back(Operation::BindVertex);
+                vertex_state_generation = command_buffer_generation;
+            },
+            [&](Operation prepared_state) {
+                EXPECT_EQ(prepared_state, Operation::PrepareIndex);
+                operations.push_back(Operation::BindIndex);
+                index_state_generation = command_buffer_generation;
+            });
+
+        EXPECT_EQ(operations, std::vector(expected_operations.begin(), expected_operations.end()));
+        EXPECT_EQ(vertex_state_generation, command_buffer_generation);
+        EXPECT_EQ(index_state_generation, command_buffer_generation);
+    }
+}
+
 TEST(BufferResidency, SelectsOnlyAdjacentFlattenedPointerWordsFromAddr64Dependencies) {
     constexpr std::array flattened_dependencies{116U, 29U, 28U, 29U, 74U};
 

@@ -21,4 +21,20 @@ void TouchBufferAfterUploadIfRegistered(bool is_registered, Touch&& touch) {
     }
 }
 
+template <typename PrepareVertexBuffers, typename PrepareIndexBuffer,
+          typename PrepareIndirectBuffers, typename BindVertexBuffers, typename BindIndexBuffer>
+void PrepareDrawBuffersThenBindCommandState(PrepareVertexBuffers&& prepare_vertex_buffers,
+                                            PrepareIndexBuffer&& prepare_index_buffer,
+                                            PrepareIndirectBuffers&& prepare_indirect_buffers,
+                                            BindVertexBuffers&& bind_vertex_buffers,
+                                            BindIndexBuffer&& bind_index_buffer) {
+    // Any preparation step can wait for a stream-buffer region and replace the current command
+    // buffer. Publish command-buffer-local draw state only after every such step has completed.
+    auto prepared_vertex_state = prepare_vertex_buffers();
+    auto prepared_index_state = prepare_index_buffer();
+    prepare_indirect_buffers();
+    bind_vertex_buffers(prepared_vertex_state);
+    bind_index_buffer(prepared_index_state);
+}
+
 } // namespace VideoCore

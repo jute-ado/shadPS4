@@ -13,6 +13,7 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
+#include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -66,6 +67,21 @@ public:
         bool has_stream_leap = false;
     };
 
+    struct PreparedVertexBuffers {
+        Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
+        Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
+        Vulkan::VertexInputs<vk::Buffer> host_buffers;
+        Vulkan::VertexInputs<vk::DeviceSize> host_offsets;
+        Vulkan::VertexInputs<vk::DeviceSize> host_sizes;
+        Vulkan::VertexInputs<vk::DeviceSize> host_strides;
+    };
+
+    struct PreparedIndexBuffer {
+        vk::Buffer buffer;
+        vk::DeviceSize offset;
+        vk::IndexType type;
+    };
+
 public:
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
                          AmdGpu::Liverpool* liverpool, TextureCache& texture_cache,
@@ -111,13 +127,21 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
-    /// Binds host vertex buffers for the current draw.
-    void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
-                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+    /// Acquires host vertex buffers without recording command-buffer-local state.
+    [[nodiscard]] PreparedVertexBuffers PrepareVertexBuffers(
+        const Vulkan::GraphicsPipeline& pipeline,
+        boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
-    /// Bind host index buffer for the current draw.
-    void BindIndexBuffer(u32 index_offset,
-                         boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+    /// Records prepared vertex buffer state on the current command buffer.
+    void BindVertexBuffers(const PreparedVertexBuffers& prepared);
+
+    /// Acquires the host index buffer without recording command-buffer-local state.
+    [[nodiscard]] PreparedIndexBuffer PrepareIndexBuffer(
+        u32 index_offset,
+        boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+
+    /// Records prepared index buffer state on the current command buffer.
+    void BindIndexBuffer(const PreparedIndexBuffer& prepared);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
