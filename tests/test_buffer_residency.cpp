@@ -3,7 +3,10 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "shader_recompiler/addr64_pointer_residency.h"
@@ -48,6 +51,65 @@ public:
 };
 
 } // namespace
+
+TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThread) {
+    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    const auto function_begin = source.find("void Rasterizer::UnmapMemory(");
+    const auto function_end = source.find("void Rasterizer::UpdateDynamicState(", function_begin);
+    ASSERT_NE(function_begin, std::string::npos);
+    ASSERT_NE(function_end, std::string::npos);
+    const auto body = source.substr(function_begin, function_end - function_begin);
+
+    const auto buffer_unmap = body.find("buffer_cache.InvalidateMemory(addr, size)");
+    const auto queued = body.find("liverpool->SendCommand<false>([this, addr, size]");
+    const auto texture_unmap = body.find("texture_cache.UnmapMemory(addr, size)", queued);
+    const auto queued_end = body.find("});", queued);
+    const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size)");
+    ASSERT_NE(queued, std::string::npos);
+    ASSERT_NE(buffer_unmap, std::string::npos);
+    ASSERT_NE(texture_unmap, std::string::npos);
+    ASSERT_NE(queued_end, std::string::npos);
+    ASSERT_NE(page_unmap, std::string::npos);
+    EXPECT_LT(buffer_unmap, queued);
+    EXPECT_LT(queued, texture_unmap);
+    EXPECT_LT(texture_unmap, queued_end);
+    EXPECT_LT(queued_end, page_unmap);
+    EXPECT_EQ(body.find("SendCommand<true>"), std::string::npos);
+}
+
+TEST(DescriptorBindingStorage, ReservesBackingBeforeWritesCaptureElementPointers) {
+    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    const auto function_begin = source.find("bool Rasterizer::BindResources(");
+    const auto function_end = source.find("void Rasterizer::PrepareAddr64PointerResidency(",
+                                          function_begin);
+    ASSERT_NE(function_begin, std::string::npos);
+    ASSERT_NE(function_end, std::string::npos);
+    const auto body = source.substr(function_begin, function_end - function_begin);
+
+    const auto buffer_clear = body.find("buffer_infos.clear()");
+    const auto image_clear = body.find("image_infos.clear()");
+    const auto buffer_reserve = body.find("buffer_infos.reserve(required_buffer_infos)");
+    const auto image_reserve = body.find("image_infos.reserve(required_image_infos)");
+    const auto bind_loop = body.find("// Bind resource buffers and textures.");
+
+    ASSERT_NE(buffer_clear, std::string::npos);
+    ASSERT_NE(image_clear, std::string::npos);
+    ASSERT_NE(buffer_reserve, std::string::npos);
+    ASSERT_NE(image_reserve, std::string::npos);
+    ASSERT_NE(bind_loop, std::string::npos);
+    EXPECT_LT(buffer_clear, buffer_reserve);
+    EXPECT_LT(image_clear, image_reserve);
+    EXPECT_LT(buffer_reserve, bind_loop);
+    EXPECT_LT(image_reserve, bind_loop);
+}
 
 TEST(BufferResidency, PublishesExpandedDmaMappingOnlyAfterFullSpanIsResident) {
     ExpandedDmaBuffer buffer;

@@ -467,6 +467,23 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_infos.clear();
     image_infos.clear();
 
+    size_t required_buffer_infos{};
+    size_t required_image_infos{};
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        required_buffer_infos += stage->buffers.size();
+        required_image_infos += stage->samplers.size();
+        for (const auto& image : stage->images) {
+            required_image_infos += image.NumBindings(*stage);
+        }
+    }
+    // Descriptor writes retain pointers into these arrays until BindResources returns. Reserve
+    // the complete pipeline requirement before any stage publishes those pointers.
+    buffer_infos.reserve(required_buffer_infos);
+    image_infos.reserve(required_image_infos);
+
     bool uses_dma = false;
 
     // Bind resource buffers and textures.
@@ -1261,8 +1278,15 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    // Buffer invalidation may read the guest backing, so it must finish before the VMM removes it.
     buffer_cache.InvalidateMemory(addr, size);
-    texture_cache.UnmapMemory(addr, size);
+
+    // Images may still be referenced by commands being recorded on the GPU thread. Queue their
+    // eviction in the same command stream so it cannot race resource lookup or recording. This
+    // must remain non-blocking: guest VMM threads are allowed to unmap while GPU work runs.
+    liverpool->SendCommand<false>([this, addr, size] {
+        texture_cache.UnmapMemory(addr, size);
+    });
     page_manager.OnGpuUnmap(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};

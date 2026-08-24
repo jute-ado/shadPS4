@@ -222,14 +222,22 @@ struct Image {
     }
 
     [[nodiscard]] u32 NumLayers() const noexcept {
-        // Depth is the number of layers for Array images.
-        u32 slices = depth + 1;
-        if (GetType() == ImageType::Color3D) {
-            // Depth is the actual texture depth for 3D images.
-            slices = 1;
-        } else if (IsCube()) {
+        // The depth field is only a layer count for array and cube descriptors. Its bits are
+        // unused for ordinary 1D/2D/MSAA images and games need not clear them.
+        u32 slices = 1;
+        if (IsCube()) {
             // Depth is the number of full cubes for Cube images.
-            slices *= 6;
+            slices = (depth + 1) * 6;
+        } else {
+            switch (GetType()) {
+            case ImageType::Color1DArray:
+            case ImageType::Color2DArray:
+            case ImageType::Color2DMsaaArray:
+                slices = depth + 1;
+                break;
+            default:
+                return 1;
+            }
         }
         if (pow2pad) {
             slices = std::bit_ceil(slices);
