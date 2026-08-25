@@ -236,6 +236,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
     const auto state = BeginRendering(pipeline);
+    RefreshImageDescriptorLayouts();
 
     VideoCore::PrepareDrawBuffersThenBindCommandState(
         [&] { return buffer_cache.PrepareVertexBuffers(*pipeline, buffer_barriers); },
@@ -296,6 +297,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
     const auto state = BeginRendering(pipeline);
+    RefreshImageDescriptorLayouts();
 
     VideoCore::Buffer* buffer{};
     u32 base{};
@@ -466,6 +468,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    descriptor_image_layout_bindings.clear();
 
     size_t required_buffer_infos{};
     size_t required_image_infos{};
@@ -939,6 +942,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
+            descriptor_image_layout_bindings.emplace_back(
+                static_cast<u32>(image_infos.size() - 1), image_id.index);
         }
     }
 
@@ -979,6 +984,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
     }
+}
+
+void Rasterizer::RefreshImageDescriptorLayouts() {
+    RefreshDescriptorImageLayouts(
+        image_infos, descriptor_image_layout_bindings, [this](const u32 image_index) {
+            return texture_cache.GetImage(VideoCore::ImageId{image_index}).backing->state.layout;
+        });
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
