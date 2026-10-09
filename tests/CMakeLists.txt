@@ -473,12 +473,20 @@ set(GCN_TEST_SOURCES
 
     # Tests
     gcn/test_buffer_access_range_pass.cpp
+    gcn/test_compile_resource_snapshot.cpp
     gcn/test_gcn_instructions.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+target_compile_definitions(shadps4_gcn_test PRIVATE
+    U3_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    U3_GRAPHICS_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp"
+    U3_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    U3_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+    U3_IMAGE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image.cpp"
+)
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE
