@@ -313,6 +313,10 @@ void Translator::DS_SWIZZLE_B32(const GcnInst& inst) {
         const u8 and_mask = (offset0 & 0x1f) | (~u8{0} << 5);
         const u8 or_mask = (offset0 >> 5) | ((offset1 & 0x3) << 3);
         const u8 xor_mask = offset1 >> 2;
+        if (and_mask == 0xff && or_mask == 0) {
+            SetDst(inst.dst[0], ir.ShuffleXor(src, ir.Imm32(xor_mask)));
+            return;
+        }
         const IR::U32 index = ir.BitwiseXor(
             ir.BitwiseOr(ir.BitwiseAnd(lane_id, ir.Imm32(and_mask)), ir.Imm32(or_mask)),
             ir.Imm32(xor_mask));

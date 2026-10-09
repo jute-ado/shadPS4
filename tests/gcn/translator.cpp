@@ -23,7 +23,8 @@ using namespace Shader;
 
 namespace {
 TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_insts,
-                                               std::optional<u64> source_buffer_base);
+                                               std::optional<u64> source_buffer_base,
+                                               bool subgroup_uniform_control_flow = false);
 }
 
 namespace Shader::Optimization {
@@ -55,6 +56,12 @@ TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
     return TranslateToSpirvWithInfoImpl(raw_gcn_insts, std::nullopt);
 }
 
+TranslationResult TranslateToSpirvWithSubgroupUniformControlFlow(u64 raw_gcn_inst,
+                                                                 bool supported) {
+    return TranslateToSpirvWithInfoImpl(std::span<const u64>{&raw_gcn_inst, 1}, std::nullopt,
+                                        supported);
+}
+
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access,
                                            u64 source_buffer_base) {
     const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();
@@ -67,7 +74,8 @@ TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_
 
 namespace {
 TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_insts,
-                                               std::optional<u64> source_buffer_base) {
+                                               std::optional<u64> source_buffer_base,
+                                               bool subgroup_uniform_control_flow) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -114,6 +122,7 @@ TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_inst
     Profile profile{};
     profile.supported_spirv = 0x00010600;
     profile.subgroup_size = 32;
+    profile.supports_subgroup_uniform_control_flow = subgroup_uniform_control_flow;
 
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);

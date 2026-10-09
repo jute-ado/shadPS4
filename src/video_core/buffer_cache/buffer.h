@@ -150,6 +150,9 @@ public:
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
 
+    /// Makes device writes to a mapped range visible to the host.
+    [[nodiscard]] bool InvalidateMappedRange(u64 offset, u64 size) const;
+
 public:
     VAddr cpu_addr = 0;
     bool is_picked{};

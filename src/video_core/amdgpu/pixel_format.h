@@ -97,6 +97,20 @@ enum class CompSwizzle : u8 {
     Alpha = 7,
 };
 
+constexpr bool IsValidCompSwizzle(CompSwizzle swizzle) {
+    switch (swizzle) {
+    case CompSwizzle::Zero:
+    case CompSwizzle::One:
+    case CompSwizzle::Red:
+    case CompSwizzle::Green:
+    case CompSwizzle::Blue:
+    case CompSwizzle::Alpha:
+        return true;
+    default:
+        return false;
+    }
+}
+
 enum class NumberConversion : u32 {
     None = 0,
     UintToUscaled = 1,
@@ -106,6 +120,7 @@ enum class NumberConversion : u32 {
     Sint16ToSnormNz = 5,
     Uint32ToUnorm = 6,
     SrgbToNorm = 7,
+    Sint32ToSnormNz = 8,
 };
 
 union CompMapping {
@@ -355,6 +370,11 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16:
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
+        case DataFormat::Format32:
+        case DataFormat::Format32_32:
+        case DataFormat::Format32_32_32:
+        case DataFormat::Format32_32_32_32:
+            return NumberConversion::Sint32ToSnormNz;
         default:
             UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
         }

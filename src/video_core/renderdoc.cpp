@@ -122,24 +122,23 @@ void LoadRenderDoc(const bool allow_offline_loading) {
 }
 
 void TriggerCapture() {
-    (void)capture_state.Trigger();
-}
-
-bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
-        return false;
+    if (!rdoc_api || !capture_state.TryBeginCapture()) {
+        return;
     }
 
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    rdoc_api->StartFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
-    return true;
+    // The presenter's final blit is submitted after the guest render work. Starting here and
+    // ending after the next complete non-reused present interval captures both submissions.
+    rdoc_api->StartFrameCapture(nullptr, nullptr);
+    LOG_WARNING(Common, "RenderDoc capture started at trigger time");
 }
 
-void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
+bool ConsumeCaptureForPresentedFrame(const bool is_reusing_frame) {
+    return rdoc_api && capture_state.ConsumeCaptureForPresentedFrame(is_reusing_frame);
+}
+
+void EndPresentedFrameCapture() {
     ASSERT(rdoc_api);
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
+    const u32 result = rdoc_api->EndFrameCapture(nullptr, nullptr);
     LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
 }
 

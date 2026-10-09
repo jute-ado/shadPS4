@@ -9,7 +9,54 @@
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
 #include "shader_recompiler/frontend/decode.h"
+#include "spirv/unified1/spirv.hpp"
 #include "translator.hpp"
+
+namespace {
+
+size_t CountSpirvOpcode(const std::vector<u32>& spirv, spv::Op opcode) {
+    size_t count = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        EXPECT_GT(word_count, 0u);
+        if (static_cast<spv::Op>(instruction & 0xffff) == opcode) {
+            ++count;
+        }
+        offset += word_count;
+    }
+    return count;
+}
+
+bool HasSpirvCapability(const std::vector<u32>& spirv, spv::Capability capability) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        EXPECT_GT(word_count, 0u);
+        if (static_cast<spv::Op>(instruction & 0xffff) == spv::Op::OpCapability &&
+            word_count >= 2 && spirv[offset + 1] == static_cast<u32>(capability)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+bool HasSpirvExecutionMode(const std::vector<u32>& spirv, spv::ExecutionMode execution_mode) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        EXPECT_GT(word_count, 0u);
+        if (static_cast<spv::Op>(instruction & 0xffff) == spv::Op::OpExecutionMode &&
+            word_count >= 3 && spirv[offset + 2] == static_cast<u32>(execution_mode)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+} // Anonymous namespace
 
 class GcnTest : public ::testing::Test {
 protected:
@@ -26,6 +73,69 @@ struct F32x2 {
     float a;
     float b;
 };
+
+TEST_F(GcnTest, ds_swizzle_xor_uses_lane_varying_shuffle) {
+    // ds_swizzle_b32 v0, v0 offset:0x041f
+    // OFFSET0=0x1f and OFFSET1=0x04 encode index = lane_id XOR 1.
+    constexpr u64 ds_swizzle_xor = 0x00000000d8d4041fULL;
+
+    const auto spirv = TranslateToSpirv(ds_swizzle_xor);
+
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpGroupNonUniformShuffleXor), 1U);
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast), 0U);
+    EXPECT_TRUE(
+        HasSpirvCapability(spirv, spv::Capability::CapabilityGroupNonUniformShuffle));
+}
+
+TEST_F(GcnTest, compute_group_operations_request_subgroup_uniform_control_flow_when_supported) {
+    // ds_swizzle_b32 v0, v0 offset:0x041f
+    constexpr u64 ds_swizzle_xor = 0x00000000d8d4041fULL;
+    // SPV_KHR_subgroup_uniform_control_flow assigns execution-mode value 4421. The vendored
+    // SPIR-V enum predates the symbolic name even though the Vulkan headers expose the feature.
+    constexpr auto subgroup_uniform_control_flow = static_cast<spv::ExecutionMode>(4421);
+
+    const auto supported =
+        TranslateToSpirvWithSubgroupUniformControlFlow(ds_swizzle_xor, true).spirv;
+    const auto unsupported =
+        TranslateToSpirvWithSubgroupUniformControlFlow(ds_swizzle_xor, false).spirv;
+
+    EXPECT_TRUE(HasSpirvExecutionMode(supported, subgroup_uniform_control_flow));
+    EXPECT_FALSE(HasSpirvExecutionMode(unsupported, subgroup_uniform_control_flow));
+}
+
+TEST_F(GcnTest, direct_memory_fault_bits_are_recorded_atomically) {
+    // Every invocation may report a different absent page into the shared fault bitmap.
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+
+    const auto result = TranslateToSpirvWithInfo(addr64_load, true);
+
+    EXPECT_EQ(CountSpirvOpcode(result.spirv, spv::Op::OpAtomicOr), 1U);
+}
+
+TEST_F(GcnTest, direct_memory_bda_lookup_checks_guest_page_range_before_access) {
+    constexpr u64 addr64_load = 0x80010000e030800cULL;
+    const auto spirv = TranslateToSpirvWithInfo(addr64_load, true).spirv;
+
+    size_t bounds_check = spirv.size();
+    size_t first_access_chain = spirv.size();
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        ASSERT_GT(word_count, 0U);
+        const auto opcode = static_cast<spv::Op>(instruction & 0xffff);
+        if (opcode == spv::Op::OpULessThan && bounds_check == spirv.size()) {
+            bounds_check = offset;
+        }
+        if (opcode == spv::Op::OpAccessChain && first_access_chain == spirv.size()) {
+            first_access_chain = offset;
+        }
+        offset += word_count;
+    }
+
+    ASSERT_NE(bounds_check, spirv.size());
+    ASSERT_NE(first_access_chain, spirv.size());
+    EXPECT_LT(bounds_check, first_access_chain);
+}
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64

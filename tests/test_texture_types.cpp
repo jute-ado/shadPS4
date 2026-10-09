@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/resource.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/texture_cache/types.h"
 
 namespace {
@@ -42,6 +43,17 @@ TEST(ImageDescriptorLayers, ArrayAndCubeTypesRetainEncodedLayerCounts) {
     cube.type = static_cast<u64>(AmdGpu::ImageType::Cube);
     cube.depth = 1;
     EXPECT_EQ(cube.NumLayers(), 12U);
+}
+
+TEST(ImageDescriptorSwizzle, RejectsReservedSelectorsBeforeVulkanConversion) {
+    AmdGpu::Image image = AmdGpu::Image::Null(false);
+    EXPECT_TRUE(image.HasValidDstSelect());
+
+    image.dst_sel_z = 2;
+    EXPECT_FALSE(image.HasValidDstSelect());
+
+    image.dst_sel_z = 3;
+    EXPECT_FALSE(image.HasValidDstSelect());
 }
 
 TEST(SubresourceExtent, ContainsEqualExtent) {
@@ -92,7 +104,18 @@ TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
         ++call_count;
         ++call;
     }
-    EXPECT_EQ(call_count, 2U);
+    EXPECT_EQ(call_count, 3U);
 }
 
 } // namespace
+
+TEST(DescriptorBindingCursor, ArraysConsumeOneBindingAndAllDescriptorCapacity) {
+    VideoCore::DescriptorBindingCursor cursor;
+    EXPECT_EQ(cursor.Add(), 0U);
+    EXPECT_EQ(cursor.Add(6), 1U);
+    EXPECT_EQ(cursor.Add(), 2U);
+    EXPECT_EQ(cursor.BindingCount(), 3U);
+    EXPECT_EQ(cursor.DescriptorCount(), 8U);
+    EXPECT_TRUE(cursor.CanUsePushDescriptors(8));
+    EXPECT_FALSE(cursor.CanUsePushDescriptors(7));
+}

@@ -137,6 +137,11 @@ void IREmitter::SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value) {
     Inst(Opcode::SetThreadBitScalarReg, reg, value);
 }
 
+void IREmitter::SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value) {
+    ASSERT(static_cast<u32>(reg) + 1 < IR::NumScalarRegs);
+    Inst(Opcode::SetThreadBitScalarRegPair, reg, value);
+}
+
 template <>
 U32 IREmitter::GetScalarReg(IR::ScalarReg reg) {
     ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
@@ -686,6 +691,15 @@ U32 IREmitter::WriteLane(const U32& value, const U32& write_value, const U32& la
 
 Value IREmitter::Ballot(const U1& bit) {
     return Inst(Opcode::Ballot, bit);
+}
+
+U32 IREmitter::ShuffleXor(const U32& value, const U32& mask) {
+    return Inst<U32>(Opcode::ShuffleXor, value, mask);
+}
+
+U32 IREmitter::MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                         const U32& scalar, u32 word) {
+    return Inst<U32>(Opcode::MaterializeScalarMaskWord, is_thread_bit, bit, scalar, Imm32(word));
 }
 
 U32 IREmitter::BallotFindLsb(const Value& mask) {

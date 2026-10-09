@@ -566,6 +566,10 @@ void EmitSetThreadBitScalarReg(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
+void EmitSetThreadBitScalarRegPair(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
 void EmitGetScalarRegister(EmitContext&) {
     UNREACHABLE_MSG("Unreachable instruction");
 }

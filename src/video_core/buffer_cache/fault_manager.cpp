@@ -7,6 +7,7 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -25,6 +26,7 @@ FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& 
       page_manager{page_manager_},
       caching_pagesize{1ULL << caching_pagebits}, caching_num_pages{caching_num_pages_},
       fault_buffer_size{caching_num_pages_ / 8},
+      diagnostic_checkpoints{instance.SupportsDiagnosticCheckpoints()},
       fault_buffer{instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, fault_buffer_size},
       download_buffer{instance, scheduler, MemoryUsage::Download,
                       0,        AllFlags,  MaxPendingFaults * PageFaultAreaSize} {
@@ -150,7 +152,19 @@ void FaultManager::ProcessFaultBuffer() {
     // 1 bit per page, 32 pages per workgroup
     const u32 num_threads = caching_num_pages / 32;
     const u32 num_workgroups = Common::DivCeil(num_threads, 64u);
+    if (diagnostic_checkpoints) {
+        cmdbuf.setCheckpointNV(Vulkan::RecordCommandCheckpoint(
+            Vulkan::CommandCheckpointType::FaultProcess, 0, {},
+            {fault_buffer_size, caching_num_pages, num_workgroups, current_area, offset,
+             PageFaultAreaSize}));
+    }
     cmdbuf.dispatch(num_workgroups, 1, 1);
+    if (diagnostic_checkpoints) {
+        cmdbuf.setCheckpointNV(Vulkan::RecordCommandCheckpoint(
+            Vulkan::CommandCheckpointType::FaultProcessComplete, 0, {},
+            {fault_buffer_size, caching_num_pages, num_workgroups, current_area, offset,
+             PageFaultAreaSize}));
+    }
 
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
