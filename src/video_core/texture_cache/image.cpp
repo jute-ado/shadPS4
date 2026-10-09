@@ -4,6 +4,7 @@
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/texture_rejection_diagnostics.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
@@ -114,6 +115,32 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VkImage unsafe_image{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_info, &unsafe_image,
                                      &allocation, nullptr);
+    if (result != VK_SUCCESS && TextureRejectionDiagnosticsEnabled()) {
+        // The failed allocation has no valid image handle to query for memory requirements.
+        LOG_ERROR(Render_Vulkan,
+                  "Image allocation diagnostic result={} extent={}x{}x{} mips={} layers={} "
+                  "format={} type={} tiling={} samples={} usage={:#x} flags={:#x}; "
+                  "host_allocation_bytes=unavailable",
+                  vk::to_string(vk::Result{result}), image_ci.extent.width,
+                  image_ci.extent.height, image_ci.extent.depth, image_ci.mipLevels,
+                  image_ci.arrayLayers, vk::to_string(image_ci.format),
+                  vk::to_string(image_ci.imageType), vk::to_string(image_ci.tiling),
+                  static_cast<u32>(image_ci.samples), static_cast<VkImageUsageFlags>(image_ci.usage),
+                  static_cast<VkImageCreateFlags>(image_ci.flags));
+        if (const auto* context = ScopedTextureDiagnosticContext::Current()) {
+            const auto& words = context->words;
+            LOG_ERROR(Render_Vulkan,
+                      "Image allocation T# context stage={} logical_stage={} shader={:#x} "
+                      "sharp={} entry={} count={} stride_dw={} r128={} reasons={:#x} "
+                      "base_byte_logical_gpu_mapped={} raw=[{:08x} {:08x} {:08x} {:08x} "
+                      "{:08x} {:08x} {:08x} {:08x}]",
+                      context->stage, context->logical_stage, context->shader_hash,
+                      context->sharp_index, context->array_index, context->descriptor_count,
+                      context->descriptor_stride_dw, context->is_r128, context->reasons,
+                      context->base_byte_logical_gpu_mapped, words[0], words[1], words[2], words[3],
+                      words[4], words[5], words[6], words[7]);
+        }
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};

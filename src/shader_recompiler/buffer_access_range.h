@@ -65,6 +65,25 @@ public:
         return upper_bound;
     }
 
+    [[nodiscard]] constexpr bool HasAddressLayout() const noexcept {
+        return has_address_layout;
+    }
+
+    [[nodiscard]] constexpr BufferAddressLayout AddressLayout() const noexcept {
+        return address_layout;
+    }
+
+    [[nodiscard]] static constexpr BufferAccessRange FromSerialized(
+        u64 upper_bound_, BufferAddressLayout address_layout_, bool is_bounded_,
+        bool has_address_layout_) noexcept {
+        BufferAccessRange range;
+        range.upper_bound = upper_bound_;
+        range.address_layout = address_layout_;
+        range.is_bounded = is_bounded_;
+        range.has_address_layout = has_address_layout_;
+        return range;
+    }
+
     [[nodiscard]] constexpr u64 Fit(u64 declared_size) const noexcept {
         if (!is_bounded || upper_bound == 0) {
             return declared_size;
