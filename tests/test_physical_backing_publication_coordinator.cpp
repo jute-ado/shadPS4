@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "core/physical_backing_provenance.h"
+#include "video_core/buffer_cache/physical_backing_map_dispatch.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
 
 namespace {
@@ -13,6 +14,8 @@ namespace {
 using Core::PhysicalBackingSpan;
 using VideoCore::PhysicalBackingDeviceAddress;
 using VideoCore::PhysicalBackingPublicationCoordinator;
+using VideoCore::PhysicalBackingMapDispatch;
+using VideoCore::PlanPhysicalBackingMapDispatch;
 
 constexpr u64 PageSize = 16_KB;
 constexpr u64 ImportedBase = 0x2'0000'0000ULL;
@@ -22,6 +25,14 @@ constexpr VAddr GuestB = 0x2000'0000ULL;
 constexpr VAddr GuestC = 0x3000'0000ULL;
 constexpr u64 PhysicalPage = 3 * PageSize;
 constexpr u64 OtherPhysicalPage = 5 * PageSize;
+
+TEST(PhysicalBackingPublicationCoordinator, MapDispatchPreservesOrderWithoutPerMapRoundTrip) {
+    EXPECT_EQ(PlanPhysicalBackingMapDispatch(false, false), PhysicalBackingMapDispatch::Inline);
+    EXPECT_EQ(PlanPhysicalBackingMapDispatch(true, false),
+              PhysicalBackingMapDispatch::GpuQueueOrdered);
+    EXPECT_EQ(PlanPhysicalBackingMapDispatch(true, true),
+              PhysicalBackingMapDispatch::GpuQueueOrderedAndWait);
+}
 
 TEST(PhysicalBackingPublicationCoordinator, MapsPhysicalAliasesToExactImportedAddresses) {
     PhysicalBackingPublicationCoordinator coordinator{PhysicalBackingDeviceAddress{ImportedBase},

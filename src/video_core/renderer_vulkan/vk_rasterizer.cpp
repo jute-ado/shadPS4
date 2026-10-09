@@ -7,6 +7,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/physical_backing_publication_coordinator.h"
+#include "video_core/buffer_cache/physical_backing_map_dispatch.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_external_address_space_backing.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -209,7 +210,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const auto [pipeline, vertex_inputs] = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
     }
@@ -220,7 +221,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, vertex_inputs, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
     }
@@ -257,7 +258,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const auto [pipeline, vertex_inputs] = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
     }
@@ -268,7 +269,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, vertex_inputs, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(0, buffer_barriers);
     }
@@ -1107,10 +1108,17 @@ void Rasterizer::MapMemory(VAddr addr, u64 size,
         }
         page_manager.OnGpuMap(addr, size);
     };
-    if (physical_backing_coordinator) {
-        liverpool->SendCommand<true>(map);
-    } else {
+    switch (VideoCore::PlanPhysicalBackingMapDispatch(
+        physical_backing_coordinator != nullptr, false)) {
+    case VideoCore::PhysicalBackingMapDispatch::Inline:
         map();
+        break;
+    case VideoCore::PhysicalBackingMapDispatch::GpuQueueOrdered:
+        liverpool->SendCommand<false>(std::move(map));
+        break;
+    case VideoCore::PhysicalBackingMapDispatch::GpuQueueOrderedAndWait:
+        liverpool->SendCommand<true>(map);
+        break;
     }
 }
 

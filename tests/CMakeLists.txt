@@ -267,6 +267,20 @@ target_compile_features(shadps4_event_write_eop_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_event_write_eop_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_event_write_eop_test)
 
+add_executable(shadps4_pending_operation_queue_test
+    test_pending_operation_queue.cpp
+)
+target_include_directories(shadps4_pending_operation_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pending_operation_queue_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_pending_operation_queue_test PRIVATE
+    U3_SCHEDULER_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_scheduler.h"
+    U3_SCHEDULER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_scheduler.cpp"
+)
+target_link_libraries(shadps4_pending_operation_queue_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pending_operation_queue_test)
+
 add_executable(shadps4_videodec_packet_handle_test
     test_videodec_packet_handle.cpp
 )
@@ -313,6 +327,16 @@ target_compile_features(shadps4_physical_backing_publication_state_test PRIVATE 
 target_link_libraries(shadps4_physical_backing_publication_state_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_physical_backing_publication_state_test)
 
+add_executable(shadps4_cpu_writable_backing_oracle_test
+    test_cpu_writable_backing_oracle.cpp
+)
+target_include_directories(shadps4_cpu_writable_backing_oracle_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_cpu_writable_backing_oracle_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_cpu_writable_backing_oracle_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_cpu_writable_backing_oracle_test)
+
 add_executable(shadps4_physical_backing_publication_coordinator_test
     test_physical_backing_publication_coordinator.cpp
 )
@@ -322,6 +346,26 @@ target_include_directories(shadps4_physical_backing_publication_coordinator_test
 target_compile_features(shadps4_physical_backing_publication_coordinator_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_physical_backing_publication_coordinator_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_physical_backing_publication_coordinator_test)
+
+add_executable(shadps4_stream_buffer_watch_test
+    test_stream_buffer_watch.cpp
+)
+target_include_directories(shadps4_stream_buffer_watch_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_stream_buffer_watch_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_stream_buffer_watch_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_stream_buffer_watch_test)
+
+add_executable(shadps4_read_const_access_policy_test
+    test_read_const_access_policy.cpp
+)
+target_include_directories(shadps4_read_const_access_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_read_const_access_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_read_const_access_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_read_const_access_policy_test)
 
 add_executable(shadps4_buffer_access_range_test
     test_buffer_access_range.cpp
@@ -572,12 +616,19 @@ set(GCN_TEST_SOURCES
 
     # Tests
     gcn/test_buffer_access_range_pass.cpp
+    gcn/test_compile_resource_snapshot.cpp
     gcn/test_gcn_instructions.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+target_compile_definitions(shadps4_gcn_test PRIVATE
+    U3_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    U3_GRAPHICS_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp"
+    U3_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    U3_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+)
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE

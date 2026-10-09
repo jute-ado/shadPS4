@@ -239,7 +239,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-        runtime_infos, fetch_shader, modules, sdata, true);
+        runtime_infos, fetch_shader, Shader::Gcn::VertexInputSnapshot{}, modules, sdata, true);
 
     infos.fill(nullptr);
     modules.fill(nullptr);

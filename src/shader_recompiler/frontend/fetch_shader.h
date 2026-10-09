@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <vector>
+#include <boost/container/static_vector.hpp>
 #include "common/types.h"
 #include "shader_recompiler/info.h"
 
@@ -66,6 +67,28 @@ struct FetchShaderData {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& buffer);
+};
+
+inline constexpr size_t MaxVertexInputSnapshotBuffers = 32;
+
+struct VertexInputSnapshot {
+    boost::container::static_vector<AmdGpu::Buffer, MaxVertexInputSnapshotBuffers> buffers;
+
+    template <typename Reader>
+    static VertexInputSnapshot Capture(const FetchShaderData& fetch_shader, Reader&& reader) {
+        VertexInputSnapshot snapshot;
+        for (const auto& attribute : fetch_shader.attributes) {
+            snapshot.buffers.emplace_back(reader(attribute));
+        }
+        return snapshot;
+    }
+
+    static VertexInputSnapshot Capture(const FetchShaderData& fetch_shader,
+                                       const Shader::Info& info) {
+        return Capture(fetch_shader, [&info](const VertexAttribute& attribute) {
+            return attribute.GetSharp(info);
+        });
+    }
 };
 
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
