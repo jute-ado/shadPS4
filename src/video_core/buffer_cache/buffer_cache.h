@@ -117,6 +117,9 @@ public:
     void BindIndexBuffer(u32 index_offset,
                          boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
+    /// Converts and binds a host index buffer for a direct QuadList draw.
+    [[nodiscard]] u32 BindQuadListIndexBuffer(bool is_indexed, u32 index_offset);
+
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
 
