@@ -109,6 +109,12 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
                               const FormatInfo& format_info) {
+    // An invalid descriptor format represents a null formatted store. Do not try to construct a
+    // value from its zero components before reaching the no-op switch case below.
+    if (format_info.data_format == AmdGpu::DataFormat::FormatInvalid) {
+        return;
+    }
+
     // Extract actual number of components and apply additional modifications.
     const auto swizzled = ApplySwizzle(ir, value, format_info.swizzle.Inverse());
     boost::container::static_vector<IR::Value, 4> components;
@@ -196,8 +202,14 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     const auto buffer{desc.GetSharp(info)};
 
     const auto is_inst_typed = flags.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
-    const auto data_format =
-        is_inst_typed ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value()) : buffer.GetDataFmt();
+    const auto resource_data_format = buffer.GetDataFmt();
+    // The instruction format can refine a bound descriptor, but it cannot turn an unbound
+    // descriptor into storage. Invalid resource loads stay zero and stores remain no-ops.
+    const auto data_format = resource_data_format == AmdGpu::DataFormat::FormatInvalid
+                                 ? AmdGpu::DataFormat::FormatInvalid
+                             : is_inst_typed
+                                 ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value())
+                                 : resource_data_format;
     const auto format_info = FormatInfo{
         .data_format = data_format,
         .num_format = is_inst_typed
