@@ -568,6 +568,7 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ir_passes.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
@@ -614,6 +615,7 @@ set(GCN_TEST_SOURCES
     gcn/test_barycentric_spirv.cpp
     gcn/test_gcn_instructions.cpp
     gcn/test_ssa_rewrite.cpp
+    gcn/test_shared_memory_barriers.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
