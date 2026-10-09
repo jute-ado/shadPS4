@@ -8,6 +8,7 @@
 
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
+#include "video_core/amdgpu/eop_completion_batch.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 
 namespace {
@@ -68,6 +69,59 @@ TEST(EventWriteEop, RetainsEveryFlipAssociatedWithTheSameEop) {
     EXPECT_TRUE(flips.empty());
     complete_eop();
     EXPECT_EQ(flips, (std::vector<int>{1, 2}));
+}
+
+TEST(EventWriteEop, BatchesSideEffectsUntilSubmittedGpuWorkCompletes) {
+    std::vector<std::string> operations;
+    Common::UniqueFunction<void> gpu_completion;
+    AmdGpu::EopCompletionBatch batch;
+
+    batch.Add([&] { operations.emplace_back("eop-1"); });
+    batch.Add([&] { operations.emplace_back("eop-2"); });
+    EXPECT_TRUE(operations.empty());
+
+    EXPECT_TRUE(batch.Submit(
+        [&](Common::UniqueFunction<void>&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::move(completion);
+        },
+        [&] { operations.emplace_back("submit"); }));
+    EXPECT_TRUE(batch.Empty());
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit"}));
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"defer", "submit", "eop-1", "eop-2"}));
+
+    EXPECT_FALSE(batch.Submit([](auto&&) {}, [] {}));
+}
+
+TEST(EventWriteEop, InterruptingBoundarySubmitsPendingCompletionPromptly) {
+    std::vector<std::string> operations;
+    Common::UniqueFunction<void> gpu_completion;
+    AmdGpu::EopCompletionBatch batch;
+
+    batch.Add([&] { operations.emplace_back("eop"); });
+    EXPECT_FALSE(batch.SubmitIf(
+        false, [&](auto&&) { operations.emplace_back("unexpected-defer"); },
+        [&] { operations.emplace_back("unexpected-submit"); }));
+    EXPECT_TRUE(operations.empty());
+    EXPECT_FALSE(batch.Empty());
+
+    EXPECT_TRUE(batch.SubmitIf(
+        true,
+        [&](Common::UniqueFunction<void>&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::move(completion);
+        },
+        [&] { operations.emplace_back("submit"); }));
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit"}));
+    EXPECT_TRUE(batch.Empty());
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "eop"}));
 }
 
 } // namespace
