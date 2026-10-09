@@ -3,6 +3,8 @@
 
 #include <ranges>
 
+#include <spirv-tools/optimizer.hpp>
+
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -609,6 +611,14 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    if (info.stage == Stage::Compute) {
+        spvtools::Optimizer optimizer{SPV_ENV_VULKAN_1_3};
+        optimizer.RegisterPerformancePasses();
+        std::vector<u32> optimized_spv;
+        if (optimizer.Run(spv.data(), spv.size(), &optimized_spv)) {
+            spv = std::move(optimized_spv);
+        }
+    }
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
     vk::ShaderModule module;
