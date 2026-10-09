@@ -5,6 +5,7 @@
 #include "common/debug.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
+#include "video_core/renderer_vulkan/gpu_completion_submission.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -101,6 +102,20 @@ void Scheduler::Flush() {
     Flush(info);
 }
 
+void Scheduler::FlushWithGpuCompletion(Common::UniqueFunction<void, u64>&& on_submitted,
+                                      Common::UniqueFunction<void>&& wake_owner) {
+    SubmitInfo info{};
+    GpuCompletionSubmission sequencer{submit_mutex};
+    static_cast<void>(sequencer.Submit(
+        std::move(wake_owner), [this, &info] { return SubmitExecutionWithSubmitLockHeld(info); },
+        [this, &on_submitted](Common::UniqueFunction<void>&& callback, u64 completion_tick) {
+            on_submitted(u64{completion_tick});
+            QueuePriorityOperationAtTick(std::move(callback), completion_tick);
+        }));
+    priority_pending_ops_cv.notify_one();
+    PopPendingOperations();
+}
+
 void Scheduler::Finish() {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
@@ -150,7 +165,16 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
+    {
+        std::scoped_lock lk{submit_mutex};
+        SubmitExecutionWithSubmitLockHeld(info);
+    }
+    // Owner-side callbacks may themselves submit work; never invoke them under
+    // the shared queue submission mutex.
+    PopPendingOperations();
+}
+
+u64 Scheduler::SubmitExecutionWithSubmitLockHeld(SubmitInfo& info) {
     const u64 signal_value = master_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
@@ -192,13 +216,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    Check<"submit GPU command buffer">(submit_result);
 
     master_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
 
-    // Apply pending operations
-    PopPendingOperations();
+    return signal_value;
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
