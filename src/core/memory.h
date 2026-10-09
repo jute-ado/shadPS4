@@ -3,14 +3,19 @@
 
 #pragma once
 
+#include <algorithm>
+#include <functional>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include "common/enum.h"
 #include "common/shared_first_mutex.h"
 #include "common/singleton.h"
 #include "common/types.h"
+#include "common/unique_function.h"
 #include "core/address_space.h"
 #include "core/libraries/kernel/memory.h"
 
@@ -46,6 +51,44 @@ constexpr bool RequiresSubmissionBoundaryBeforeMapping(MemoryProt prot) {
     return True(prot & MemoryProt::GpuReadWrite);
 }
 
+constexpr bool RequiresSubmissionBoundaryBeforeUnmapping(MemoryProt prot) {
+    return RequiresSubmissionBoundaryBeforeMapping(prot);
+}
+
+template <typename QueryProtection>
+bool RequiresSubmissionBoundaryBeforeUnmapping(VAddr address, u64 size,
+                                               QueryProtection&& query_protection) {
+    if (size == 0 || address > std::numeric_limits<VAddr>::max() - size) {
+        return false;
+    }
+
+    const VAddr range_end = address + size;
+    while (address < range_end) {
+        MemoryProt prot{};
+        VAddr area_end{};
+        if (!std::forward<QueryProtection>(query_protection)(address, prot, area_end) ||
+            area_end <= address) {
+            return false;
+        }
+        if (RequiresSubmissionBoundaryBeforeUnmapping(prot)) {
+            return true;
+        }
+        address = std::min(area_end, range_end);
+    }
+    return false;
+}
+
+template <typename AcquireBoundary, typename AddressChange>
+decltype(auto) ChangeGpuVisibleAddressSpaceAfterSubmissionBoundary(
+    bool requires_submission_boundary, AcquireBoundary&& acquire_boundary,
+    AddressChange&& address_change) {
+    Common::UniqueFunction<void> submission_admission;
+    if (requires_submission_boundary) {
+        submission_admission = std::forward<AcquireBoundary>(acquire_boundary)();
+    }
+    return std::forward<AddressChange>(address_change)();
+}
+
 enum class MemoryMapFlags : u32 {
     NoFlags = 0,
     Shared = 1,
@@ -60,6 +103,9 @@ enum class MemoryMapFlags : u32 {
     NoCore = 0x20000,
     NoCoalesce = 0x400000,
 };
+
+using SubmissionBoundaryToken = Common::UniqueFunction<void>;
+using AcquireSubmissionBoundary = Common::UniqueFunction<SubmissionBoundaryToken>;
 DECLARE_ENUM_FLAG_OPERATORS(MemoryMapFlags)
 
 enum class PhysicalMemoryType : u32 {
@@ -163,6 +209,58 @@ struct VirtualMemoryArea {
         return true;
     }
 };
+
+/// Visits a sparse guest range without assuming that its first byte belongs to a host VMA.
+/// Gaps and VMAs without readable backing are reported as unreadable so callers can zero-fill
+/// them, while readable VMAs may be copied directly from the guest address space.
+template <typename VmaMap, typename Visitor>
+[[nodiscard]] bool ForEachSparseMemorySegment(const VmaMap& areas, VAddr address, u64 size,
+                                              Visitor&& visitor) {
+    if (size == 0) {
+        return true;
+    }
+    if (size > std::numeric_limits<VAddr>::max() - address) {
+        return false;
+    }
+
+    const VAddr range_end = address + size;
+    VAddr cursor = address;
+    auto area = areas.upper_bound(cursor);
+    if (area != areas.begin()) {
+        auto previous = std::prev(area);
+        const VAddr previous_end = previous->second.base + previous->second.size;
+        if (previous->second.base <= cursor && cursor < previous_end) {
+            area = previous;
+        }
+    }
+
+    while (cursor < range_end) {
+        while (area != areas.end() && area->second.base + area->second.size <= cursor) {
+            ++area;
+        }
+        if (area == areas.end()) {
+            std::invoke(visitor, cursor, range_end - cursor, false);
+            break;
+        }
+
+        const auto& current = area->second;
+        if (cursor < current.base) {
+            const VAddr gap_end = std::min(range_end, current.base);
+            std::invoke(visitor, cursor, gap_end - cursor, false);
+            cursor = gap_end;
+            continue;
+        }
+
+        const VAddr area_end = current.base + current.size;
+        const VAddr segment_end = std::min(range_end, area_end);
+        std::invoke(visitor, cursor, segment_end - cursor, current.HasReadableBacking());
+        cursor = segment_end;
+        if (cursor == area_end) {
+            ++area;
+        }
+    }
+    return true;
+}
 
 class MemoryManager {
     using PhysMap = std::map<PAddr, PhysicalMemoryArea>;
@@ -273,7 +371,8 @@ public:
 
     s32 PoolDecommit(VAddr virtual_addr, u64 size);
 
-    s32 UnmapMemory(VAddr virtual_addr, u64 size);
+    s32 UnmapMemory(VAddr virtual_addr, u64 size,
+                    AcquireSubmissionBoundary&& acquire_submission_boundary = {});
 
     s32 QueryProtection(VAddr addr, void** start, void** end, u32* prot);
 

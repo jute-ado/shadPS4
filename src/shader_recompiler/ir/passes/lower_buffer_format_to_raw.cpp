@@ -18,6 +18,42 @@ struct FormatInfo {
     u32 num_components;
 };
 
+static constexpr bool IsSupportedBufferFormat(const AmdGpu::DataFormat data_format,
+                                              const AmdGpu::NumberFormat num_format) {
+    switch (data_format) {
+    case AmdGpu::DataFormat::FormatInvalid:
+        return true;
+    case AmdGpu::DataFormat::Format8:
+    case AmdGpu::DataFormat::Format8_8:
+    case AmdGpu::DataFormat::Format8_8_8_8:
+    case AmdGpu::DataFormat::Format2_10_10_10:
+        return num_format == AmdGpu::NumberFormat::Unorm ||
+               num_format == AmdGpu::NumberFormat::Snorm ||
+               num_format == AmdGpu::NumberFormat::Uint ||
+               num_format == AmdGpu::NumberFormat::Sint;
+    case AmdGpu::DataFormat::Format16:
+    case AmdGpu::DataFormat::Format16_16:
+    case AmdGpu::DataFormat::Format16_16_16_16:
+        return num_format == AmdGpu::NumberFormat::Unorm ||
+               num_format == AmdGpu::NumberFormat::Snorm ||
+               num_format == AmdGpu::NumberFormat::Uint ||
+               num_format == AmdGpu::NumberFormat::Sint ||
+               num_format == AmdGpu::NumberFormat::Float;
+    case AmdGpu::DataFormat::Format10_11_11:
+        return num_format == AmdGpu::NumberFormat::Float ||
+               num_format == AmdGpu::NumberFormat::Sint;
+    case AmdGpu::DataFormat::Format32:
+    case AmdGpu::DataFormat::Format32_32:
+    case AmdGpu::DataFormat::Format32_32_32:
+    case AmdGpu::DataFormat::Format32_32_32_32:
+        return num_format == AmdGpu::NumberFormat::Uint ||
+               num_format == AmdGpu::NumberFormat::Sint ||
+               num_format == AmdGpu::NumberFormat::Float;
+    default:
+        return false;
+    }
+}
+
 static bool IsBufferFormatLoad(const IR::Inst& inst) {
     return inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32;
 }
@@ -109,12 +145,19 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
                               const FormatInfo& format_info) {
+    // An invalid descriptor format represents a null formatted store. Do not try to construct a
+    // value from its zero components before reaching the no-op switch case below.
+    if (format_info.data_format == AmdGpu::DataFormat::FormatInvalid) {
+        return;
+    }
+
     // Extract actual number of components and apply additional modifications.
     const auto swizzled = ApplySwizzle(ir, value, format_info.swizzle.Inverse());
     boost::container::static_vector<IR::Value, 4> components;
     for (u32 i = 0; i < format_info.num_components; i++) {
         const auto component = IR::F32{ir.CompositeExtract(swizzled, i)};
-        components.push_back(ApplyWriteNumberConversion(ir, component, format_info.num_conversion));
+        components.push_back(
+            ApplyWriteNumberConversion(ir, component, format_info.num_conversion));
     }
     const auto real_value =
         components.size() == 1 ? components[0] : ir.CompositeConstruct(components);
@@ -196,9 +239,32 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     const auto buffer{desc.GetSharp(info)};
 
     const auto is_inst_typed = flags.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
-    const auto data_format =
-        is_inst_typed ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value()) : buffer.GetDataFmt();
-    const auto format_info = FormatInfo{
+    const auto resource_data_format = buffer.GetDataFmt();
+    // The instruction format can refine a bound descriptor, but it cannot turn an unbound
+    // descriptor into storage. Invalid resource loads stay zero and stores remain no-ops.
+    const auto data_format = resource_data_format == AmdGpu::DataFormat::FormatInvalid
+                                 ? AmdGpu::DataFormat::FormatInvalid
+                             : is_inst_typed
+                                 ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value())
+                                 : resource_data_format;
+    const auto raw_data_format =
+        is_inst_typed ? flags.inst_data_fmt.Value() : AmdGpu::DataFormat(buffer.data_format);
+    const auto raw_num_format =
+        is_inst_typed ? flags.inst_num_fmt.Value() : AmdGpu::NumberFormat(buffer.num_format);
+    const bool unsupported_snorm_nz =
+        resource_data_format != AmdGpu::DataFormat::FormatInvalid &&
+        raw_num_format == AmdGpu::NumberFormat::SnormNz &&
+        raw_data_format != AmdGpu::DataFormat::Format8 &&
+        raw_data_format != AmdGpu::DataFormat::Format8_8 &&
+        raw_data_format != AmdGpu::DataFormat::Format8_8_8_8 &&
+        raw_data_format != AmdGpu::DataFormat::Format16 &&
+        raw_data_format != AmdGpu::DataFormat::Format16_16 &&
+        raw_data_format != AmdGpu::DataFormat::Format16_16_16_16 &&
+        raw_data_format != AmdGpu::DataFormat::Format32 &&
+        raw_data_format != AmdGpu::DataFormat::Format32_32 &&
+        raw_data_format != AmdGpu::DataFormat::Format32_32_32 &&
+        raw_data_format != AmdGpu::DataFormat::Format32_32_32_32;
+    auto format_info = FormatInfo{
         .data_format = data_format,
         .num_format = is_inst_typed
                           ? AmdGpu::RemapNumberFormat(flags.inst_num_fmt.Value(), data_format)
@@ -206,11 +272,37 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
         .swizzle = is_inst_typed
                        ? AmdGpu::RemapSwizzle(flags.inst_data_fmt.Value(), AmdGpu::IdentityMapping)
                        : buffer.DstSelect(),
-        .num_conversion = is_inst_typed ? AmdGpu::MapNumberConversion(flags.inst_num_fmt.Value(),
-                                                                      flags.inst_data_fmt.Value())
-                                        : buffer.GetNumberConversion(),
+        .num_conversion = resource_data_format == AmdGpu::DataFormat::FormatInvalid ||
+                                  unsupported_snorm_nz
+                              ? AmdGpu::NumberConversion::None
+                          : is_inst_typed
+                              ? AmdGpu::MapNumberConversion(raw_num_format, raw_data_format)
+                              : buffer.GetNumberConversion(),
         .num_components = AmdGpu::NumComponents(data_format),
     };
+
+    // This is a lowering-capability check, not a test of guest descriptor coherence or legality.
+    // An unsupported format prevents publication and skips the current draw/dispatch; a later
+    // retry is not guaranteed to support it. Do not cache a zero-data substitute as a valid shader.
+    // Normalize the remaining IR only to let the translation pipeline unwind without asserting.
+    if (unsupported_snorm_nz ||
+        !IsSupportedBufferFormat(format_info.data_format, format_info.num_format)) {
+        if (!info.translation_failed) {
+            const auto words = std::bit_cast<std::array<u32, 4>>(buffer);
+            LOG_WARNING(Render_Recompiler,
+                        "Unsupported formatted buffer lowering: shader {:#x}, binding {}, "
+                        "sharp {}, operation {}, instruction format {}, raw formats {}/{}, "
+                        "descriptor [{:08x} {:08x} {:08x} {:08x}]",
+                        info.pgm_hash, inst.Arg(0).U32(), desc.sharp_idx,
+                        IsBufferFormatStore(inst) ? "store" : "load", is_inst_typed,
+                        static_cast<u32>(raw_data_format), static_cast<u32>(raw_num_format),
+                        words[0], words[1], words[2], words[3]);
+        }
+        info.translation_failed = true;
+        format_info.data_format = AmdGpu::DataFormat::FormatInvalid;
+        format_info.num_conversion = AmdGpu::NumberConversion::None;
+        format_info.num_components = 0;
+    }
 
     if (IsBufferFormatLoad(inst)) {
         const auto interpreted =
