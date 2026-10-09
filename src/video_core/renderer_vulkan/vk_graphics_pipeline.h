@@ -109,11 +109,12 @@ public:
                          u32 step_rate_1) const;
 
 private:
-    void BuildDescSetLayout(bool preloading);
+    [[nodiscard]] bool BuildDescSetLayout(bool preloading);
 
 private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
+    std::vector<vk::ShaderModule> owned_auxiliary_modules{};
 };
 
 struct ClipDistanceShaderKey {
