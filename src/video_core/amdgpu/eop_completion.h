@@ -33,6 +33,17 @@ void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&
 }
 
 template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,
+          typename SignalInterrupt, typename NotifyFlip>
+void SubmitEopWithDeferredFlip(Packet packet, DeferCompletion&& defer_completion,
+                               SubmitGpuWork&& submit_gpu_work, WriteMemory&& write_memory,
+                               SignalInterrupt&& signal_interrupt, NotifyFlip&& notify_flip) {
+    std::forward<DeferCompletion>(defer_completion)(std::forward<NotifyFlip>(notify_flip));
+    std::forward<SubmitGpuWork>(submit_gpu_work)();
+    packet.SignalFence(std::forward<WriteMemory>(write_memory),
+                       std::forward<SignalInterrupt>(signal_interrupt));
+}
+
+template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,
           typename SignalInterrupt, typename GdsToMemory>
 void SubmitReleaseMem(Packet packet, DeferCompletion&& defer_completion,
                       SubmitGpuWork&& submit_gpu_work, WriteMemory&& write_memory,

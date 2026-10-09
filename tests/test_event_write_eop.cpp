@@ -69,6 +69,47 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
+TEST(EventWriteEop, PublishesFenceAndInterruptAfterSubmissionWhileDeferringFlip) {
+    u32 fence = 0;
+    bool interrupt_signalled = false;
+    bool flip_signalled = false;
+    std::vector<std::string> operations;
+    std::function<void()> gpu_completion;
+
+    AmdGpu::SubmitEopWithDeferredFlip(
+        TestEopPacket{.data = 0x12345678},
+        [&](auto&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::forward<decltype(completion)>(completion);
+        },
+        [&] { operations.emplace_back("submit"); },
+        [&](u32 data) {
+            operations.emplace_back("fence");
+            fence = data;
+        },
+        [&] {
+            operations.emplace_back("interrupt");
+            interrupt_signalled = true;
+        },
+        [&] {
+            operations.emplace_back("flip");
+            flip_signalled = true;
+        });
+
+    EXPECT_EQ(fence, 0x12345678u);
+    EXPECT_TRUE(interrupt_signalled);
+    EXPECT_FALSE(flip_signalled);
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+
+    EXPECT_TRUE(flip_signalled);
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"defer", "submit", "fence", "interrupt", "flip"}));
+}
+
 TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {
     std::vector<std::string> operations;
     Common::UniqueFunction<void> gpu_completion;
