@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -96,6 +97,10 @@ struct EqueueEvent {
     }
 
     void Trigger(void* data) {
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore &&
+            event.fflags != std::numeric_limits<u32>::max()) {
+            ++event.fflags;
+        }
         is_triggered = true;
         event.data = reinterpret_cast<uintptr_t>(data);
     }
