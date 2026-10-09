@@ -9,6 +9,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/image_descriptor.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -196,7 +197,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const bool convert_quad_list =
+        regs.primitive_type == AmdGpu::PrimitiveType::QuadList &&
+        regs.stage_enable.raw == AmdGpu::ShaderStageEnable::Vs &&
+        (regs.enable_primitive_restart & 1) == 0;
+    const auto primitive_type =
+        convert_quad_list ? AmdGpu::PrimitiveType::TriangleList : regs.primitive_type;
+    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(primitive_type);
     if (!pipeline) {
         return;
     }
@@ -208,7 +215,15 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
-    if (is_indexed) {
+    u32 index_count = regs.num_indices;
+    if (convert_quad_list) {
+        index_count = buffer_cache.BindQuadListIndexBuffer(is_indexed, index_offset);
+        if (index_count == 0) {
+            ResetBindings();
+            return;
+        }
+        is_indexed = true;
+    } else if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
     }
 
@@ -222,9 +237,29 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        u64 shader_hash{};
+        for (const auto* stage : pipeline->GetStages()) {
+            if (stage) {
+                shader_hash = stage->pgm_hash;
+            }
+        }
+        const auto type = is_indexed ? CommandCheckpointType::DrawIndexed
+                                     : CommandCheckpointType::Draw;
+        const auto& key = pipeline->GetGraphicsKey();
+        const u64 packed_key =
+            static_cast<u64>(key.prim_type) | (static_cast<u64>(key.patch_control_points) << 8) |
+            (static_cast<u64>(key.num_color_attachments) << 16) |
+            (static_cast<u64>(key.mrt_mask) << 24) | (static_cast<u64>(key.num_samples) << 56);
+        const auto marker = RecordCommandCheckpoint(
+            type, std::hash<GraphicsPipelineKey>{}(key), shader_hash,
+            {regs.num_indices, regs.num_instances.NumInstances(), index_offset,
+             regs.index_base_address.Address<VAddr>(), packed_key, regs.index_buffer_type.raw});
+        cmdbuf.setCheckpointNV(marker);
+    }
 
     if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
+        cmdbuf.drawIndexed(index_count, regs.num_instances.NumInstances(), 0,
                            s32(vertex_offset), instance_offset);
     } else {
         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
@@ -244,7 +279,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const GraphicsPipeline* pipeline =
+        pipeline_cache.GetGraphicsPipeline(liverpool->regs.primitive_type);
     if (!pipeline) {
         return;
     }
@@ -289,6 +325,25 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        u64 shader_hash{};
+        for (const auto* stage : pipeline->GetStages()) {
+            if (stage) {
+                shader_hash = stage->pgm_hash;
+            }
+        }
+        const auto type = is_indexed ? CommandCheckpointType::DrawIndexedIndirect
+                                     : CommandCheckpointType::DrawIndirect;
+        const auto& key = pipeline->GetGraphicsKey();
+        const u64 packed_key =
+            static_cast<u64>(key.prim_type) | (static_cast<u64>(key.patch_control_points) << 8) |
+            (static_cast<u64>(key.num_color_attachments) << 16) |
+            (static_cast<u64>(key.mrt_mask) << 24) | (static_cast<u64>(key.num_samples) << 56);
+        const auto marker = RecordCommandCheckpoint(
+            type, std::hash<GraphicsPipelineKey>{}(key), shader_hash,
+            {arg_address + offset, max_count, stride, count_address, packed_key, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
 
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
@@ -338,6 +393,12 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::Dispatch, cs.pgm_hash, cs.pgm_hash,
+            {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
     ResetBindings();
@@ -370,6 +431,13 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchIndirect, cs.pgm_hash, cs.pgm_hash,
+            {address + offset, size, 0, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
 
     ResetBindings();
@@ -1101,7 +1169,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
     UpdateViewportScissorState();
     UpdateDepthStencilState();
-    UpdatePrimitiveState(is_indexed);
+    UpdatePrimitiveState(pipeline, is_indexed);
     UpdateRasterizationState();
     UpdateColorBlendingState(pipeline);
 
@@ -1298,8 +1366,10 @@ void Rasterizer::UpdateDepthStencilState() const {
     }
 }
 
-void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
+void Rasterizer::UpdatePrimitiveState(const GraphicsPipeline* pipeline,
+                                      const bool is_indexed) const {
     const auto& regs = liverpool->regs;
+    const auto primitive_type = pipeline->GetGraphicsKey().prim_type;
     auto& dynamic_state = scheduler.GetDynamicState();
 
     const auto is_list_topology = [](const AmdGpu::PrimitiveType type) {
@@ -1318,13 +1388,13 @@ void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
 
     const auto prim_restart =
         (regs.enable_primitive_restart & 1) != 0 &&
-        (instance.IsListRestartSupported() || !is_list_topology(regs.primitive_type)) &&
-        (instance.IsPatchListRestartSupported() || !is_patch_list_topology(regs.primitive_type));
+        (instance.IsListRestartSupported() || !is_list_topology(primitive_type)) &&
+        (instance.IsPatchListRestartSupported() || !is_patch_list_topology(primitive_type));
     ASSERT_MSG(!is_indexed || !prim_restart || regs.primitive_restart_index == 0xFFFF ||
                    regs.primitive_restart_index == 0xFFFFFFFF,
                "Primitive restart index other than -1 is not supported yet");
 
-    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
+    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(primitive_type)
                                ? LiverpoolToVK::CullMode(regs.polygon_control.CullingMode())
                                : vk::CullModeFlagBits::eNone;
     const auto front_face = LiverpoolToVK::FrontFace(regs.polygon_control.front_face);

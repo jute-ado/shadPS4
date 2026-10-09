@@ -93,7 +93,7 @@ private:
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
-    void UpdatePrimitiveState(bool is_indexed) const;
+    void UpdatePrimitiveState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 

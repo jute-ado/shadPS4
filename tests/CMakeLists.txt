@@ -20,6 +20,12 @@ set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
+    shadps4_quad_list_indices_test
+)
+
+add_executable(shadps4_quad_list_indices_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/quad_list_indices.cpp
+    test_quad_list_indices.cpp
 )
 
 add_executable(shadps4_controller_trace_test
@@ -293,6 +299,9 @@ target_link_libraries(shadps4_gcn_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
     half::half
+)
+target_link_libraries(shadps4_quad_list_indices_test PRIVATE
+    GTest::gtest_main
 )
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR

@@ -25,6 +25,7 @@ void main() {
     while (word != 0u) {
         const uint store_index = atomicAdd(download_buffer32[0], 1u) + 1u;
         if (store_index >= MAX_PAGE_FAULTS) {
+            atomicMin(download_buffer32[0], MAX_PAGE_FAULTS - 1u);
             return;
         }
         const uint bit = findLSB(word);
