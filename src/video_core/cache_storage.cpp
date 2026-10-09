@@ -169,6 +169,7 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
 template <typename T>
 void LoadVector(BlobType type, std::filesystem::path& path, std::vector<T>& v) {
     using namespace Common::FS;
+    v.clear();
     path.replace_extension(GetBlobFileExtension(type));
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         int index{-1};
@@ -178,13 +179,26 @@ void LoadVector(BlobType type, std::filesystem::path& path, std::vector<T>& v) {
             return;
         }
         mz_zip_archive_file_stat stat{};
-        mz_zip_reader_file_stat(&zip_ar, index, &stat);
-        v.resize(stat.m_uncomp_size / sizeof(T));
-        mz_zip_reader_extract_to_mem(&zip_ar, index, v.data(), stat.m_uncomp_size, 0);
+        if (!mz_zip_reader_file_stat(&zip_ar, index, &stat) ||
+            !PrepareCacheBlobBuffer(type, stat.m_uncomp_size, v)) {
+            LOG_WARNING(Render, "Ignoring oversized or malformed cache blob {}",
+                        path.string().c_str());
+            return;
+        }
+        if (!mz_zip_reader_extract_to_mem(&zip_ar, index, v.data(), stat.m_uncomp_size, 0)) {
+            v.clear();
+        }
     } else {
         const auto file = IOFile{path, FileAccessMode::Read};
-        v.resize(file.GetSize() / sizeof(T));
-        file.Read(v);
+        const u64 size = file.GetSize();
+        if (!file.IsOpen() || !PrepareCacheBlobBuffer(type, size, v)) {
+            LOG_WARNING(Render, "Ignoring oversized or malformed cache blob {}",
+                        path.string().c_str());
+            return;
+        }
+        if (file.Read(v) != v.size()) {
+            v.clear();
+        }
     }
 }
 
@@ -238,9 +252,16 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
             mz_zip_reader_get_filename(&zip_ar, index, file_name.data(), file_name.size());
             if (std::string{file_name.data()}.ends_with(ext)) {
                 mz_zip_archive_file_stat stat{};
-                mz_zip_reader_file_stat(&zip_ar, index, &stat);
-                std::vector<u8> data(stat.m_uncomp_size);
-                mz_zip_reader_extract_to_mem(&zip_ar, index, data.data(), data.size(), 0);
+                std::vector<u8> data;
+                if (!mz_zip_reader_file_stat(&zip_ar, index, &stat) ||
+                    !PrepareCacheBlobBuffer(type, stat.m_uncomp_size, data)) {
+                    LOG_WARNING(Render, "Ignoring oversized or malformed archived cache blob {}",
+                                file_name.data());
+                    continue;
+                }
+                if (!mz_zip_reader_extract_to_mem(&zip_ar, index, data.data(), data.size(), 0)) {
+                    continue;
+                }
                 func(std::move(data));
             }
         }
@@ -250,8 +271,16 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
                 using namespace Common::FS;
                 const auto& file = IOFile{file_name, FileAccessMode::Read};
                 if (file.IsOpen()) {
-                    std::vector<u8> data(file.GetSize());
-                    file.Read(data);
+                    const u64 size = file.GetSize();
+                    std::vector<u8> data;
+                    if (!PrepareCacheBlobBuffer(type, size, data)) {
+                        LOG_WARNING(Render, "Ignoring oversized cache blob {}",
+                                    file_name.path().string().c_str());
+                        continue;
+                    }
+                    if (file.Read(data) != data.size()) {
+                        continue;
+                    }
                     func(std::move(data));
                 }
             }
