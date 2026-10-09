@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -91,13 +92,53 @@ struct EqueueEvent {
 
     void Clear() {
         is_triggered = false;
+        pending_events.clear();
+        graphics_trigger_sequence = 0;
         event.fflags = 0;
         event.data = 0;
     }
 
     void Trigger(void* data) {
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+            auto triggered_event = event;
+            triggered_event.fflags = ++graphics_trigger_sequence;
+            triggered_event.data = reinterpret_cast<uintptr_t>(data);
+            if (is_triggered) {
+                pending_events.push_back(triggered_event);
+            } else {
+                event = triggered_event;
+                is_triggered = true;
+            }
+            return;
+        }
         is_triggered = true;
         event.data = reinterpret_cast<uintptr_t>(data);
+    }
+
+    void ConsumeTrigger() {
+        if (pending_events.empty()) {
+            Clear();
+            return;
+        }
+        event = pending_events.front();
+        pending_events.pop_front();
+        is_triggered = true;
+    }
+
+    int DrainTriggers(OrbisKernelEvent* output, int capacity) {
+        int count = 0;
+        while (count < capacity && is_triggered) {
+            output[count++] = event;
+            if (event.flags & OrbisKernelEvent::Flags::OneShot) {
+                break;
+            }
+            if (event.flags & OrbisKernelEvent::Flags::Clear) {
+                ConsumeTrigger();
+            } else {
+                break;
+            }
+        }
+        return count;
     }
 
     void TriggerUser(void* data) {
@@ -137,8 +178,48 @@ struct EqueueEvent {
     }
 
 private:
+    std::deque<OrbisKernelEvent> pending_events;
+    u32 graphics_trigger_sequence{};
     bool is_triggered = false;
 };
+
+inline int DrainReadyEvents(std::vector<EqueueEvent>& events, OrbisKernelEvent* output,
+                            int capacity) {
+    int count = 0;
+    for (auto it = events.begin(); it != events.end() && count < capacity;) {
+        if (!it->IsTriggered()) {
+            ++it;
+            continue;
+        }
+
+        const bool one_shot = it->event.flags & OrbisKernelEvent::Flags::OneShot;
+        count += it->DrainTriggers(output + count, 1);
+        if (one_shot) {
+            it = events.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    bool drained_graphics_event;
+    do {
+        drained_graphics_event = false;
+        for (auto& event : events) {
+            if (count == capacity) {
+                break;
+            }
+            if (!event.IsTriggered() ||
+                event.event.filter != OrbisKernelEvent::Filter::GraphicsCore ||
+                !(event.event.flags & OrbisKernelEvent::Flags::Clear)) {
+                continue;
+            }
+            count += event.DrainTriggers(output + count, 1);
+            drained_graphics_event = true;
+        }
+    } while (drained_graphics_event && count < capacity);
+
+    return count;
+}
 
 class EqueueInternal {
     struct SmallTimer {
