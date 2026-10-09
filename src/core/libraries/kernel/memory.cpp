@@ -221,10 +221,6 @@ s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s
         LOG_ERROR(Kernel_Vmm, "Executable permissions are not allowed.");
         return ORBIS_KERNEL_ERROR_EACCES;
     }
-    if (Core::RequiresSubmissionBoundaryBeforeMapping(mem_prot)) {
-        GnmDriver::WaitForSubmissionBoundary();
-    }
-
     auto map_flags = static_cast<Core::MemoryMapFlags>(flags);
     const VAddr in_addr = reinterpret_cast<VAddr>(*addr);
 
@@ -286,10 +282,6 @@ s32 PS4_SYSV_ABI sceKernelMapDirectMemory2(void** addr, u64 len, s32 type, s32 p
         LOG_ERROR(Kernel_Vmm, "Executable permissions are not allowed.");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    if (Core::RequiresSubmissionBoundaryBeforeMapping(mem_prot)) {
-        GnmDriver::WaitForSubmissionBoundary();
-    }
-
     const auto map_flags = static_cast<Core::MemoryMapFlags>(flags);
     const VAddr in_addr = reinterpret_cast<VAddr>(*addr);
 
@@ -837,7 +829,9 @@ s32 PS4_SYSV_ABI sceKernelMunmap(void* addr, u64 len) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
     auto* memory = Core::Memory::Instance();
-    return memory->UnmapMemory(std::bit_cast<VAddr>(addr), len);
+    const VAddr virtual_addr = std::bit_cast<VAddr>(addr);
+    return memory->UnmapMemory(
+        virtual_addr, len, [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 }
 
 s32 PS4_SYSV_ABI posix_munmap(void* addr, u64 len) {

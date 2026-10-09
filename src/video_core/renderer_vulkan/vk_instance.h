@@ -4,9 +4,11 @@
 #pragma once
 
 #include <span>
+#include <string_view>
 #include <unordered_map>
 
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_device_fault_diagnostics.h"
 
 #define TRACY_VK_USE_SYMBOL_TABLE
 #include <tracy/TracyVulkan.hpp>
@@ -94,6 +96,11 @@ public:
         return vk12_features.shaderFloat16;
     }
 
+    /// Returns true when storage images may be multisampled in shaders.
+    bool IsShaderStorageImageMultisampleSupported() const {
+        return features.shaderStorageImageMultisample;
+    }
+
     /// Returns true if 64-bit floats are supported in shaders
     bool IsShaderFloat64Supported() const {
         return features.shaderFloat64;
@@ -112,6 +119,11 @@ public:
     /// Returns true if 8-bit ints are supported in shaders
     bool IsShaderInt8Supported() const {
         return vk12_features.shaderInt8;
+    }
+
+    /// Returns true when sampled-image descriptor arrays may use nonuniform indices.
+    bool IsSampledImageArrayNonUniformIndexingSupported() const {
+        return vk12_features.shaderSampledImageArrayNonUniformIndexing;
     }
 
     /// Returns true if VK_KHR_maintenance8 is supported
@@ -355,6 +367,25 @@ public:
         return push_descriptor_props.maxPushDescriptors;
     }
 
+    /// Returns the per-stage sampled-image descriptor limit used to cap emulated tables.
+    u32 MaxPerStageDescriptorSampledImages() const {
+        return properties.limits.maxPerStageDescriptorSampledImages;
+    }
+
+    /// Returns the sampled-image descriptor limit for one descriptor set.
+    u32 MaxDescriptorSetSampledImages() const {
+        return properties.limits.maxDescriptorSetSampledImages;
+    }
+
+    /// Returns the aggregate resource descriptor limit for one shader stage.
+    u32 MaxPerStageResources() const {
+        return properties.limits.maxPerStageResources;
+    }
+
+    const vk::PhysicalDeviceLimits& DescriptorLimits() const noexcept {
+        return properties.limits;
+    }
+
     /// Returns the vulkan 1.2 physical device properties.
     const vk::PhysicalDeviceVulkan12Properties& GetVk12Properties() const noexcept {
         return vk12_props;
@@ -442,6 +473,10 @@ public:
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
+    /// Emits an opt-in VMA heap snapshot for allocation or device-failure diagnostics.
+    void LogDeviceMemoryBudget(std::string_view reason,
+                              vk::Result result = vk::Result::eSuccess) const;
+
     /// Returns the total memory budget available to the device.
     [[nodiscard]] u64 GetTotalMemoryBudget() const {
         return total_memory_budget;
@@ -462,6 +497,9 @@ private:
     void CollectPhysicalMemoryInfo();
     void CollectImageFormatInfo();
     void CollectToolingInfo() const;
+
+    /// Emits a bounded, opt-in text report once after the logical device is lost.
+    void LogDeviceFault(std::string_view reason, vk::Result result) const;
 
     /// Gets the supported feature flags for a format.
     [[nodiscard]] vk::FormatFeatureFlags2 GetFormatFeatureFlags(vk::Format format) const;
@@ -520,6 +558,8 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool supports_memory_budget{};
+    bool device_fault_diagnostics{};
+    mutable DeviceFaultReportOnce device_fault_report;
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
