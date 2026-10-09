@@ -31,6 +31,7 @@ add_executable(shadps4_controller_trace_test
     test_controller_axis.cpp
     test_controller_button.cpp
     test_controller_connection.cpp
+    test_controller_lightbar.cpp
     test_controller_trace.cpp
 )
 target_include_directories(shadps4_controller_trace_test PRIVATE
@@ -42,6 +43,16 @@ target_link_libraries(shadps4_controller_trace_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
 )
+
+add_executable(shadps4_shadnet_client_version_test
+    test_shadnet_client_version.cpp
+)
+target_include_directories(shadps4_shadnet_client_version_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_shadnet_client_version_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_shadnet_client_version_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_shadnet_client_version_test)
 
 add_executable(shadps4_renderdoc_path_test
     ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
@@ -612,6 +623,7 @@ set(GCN_TEST_SOURCES
     # Tests
     gcn/test_buffer_access_range_pass.cpp
     gcn/test_barycentric_spirv.cpp
+    gcn/test_dynamic_image_table_policy.cpp
     gcn/test_gcn_instructions.cpp
     gcn/test_ssa_rewrite.cpp
 )
