@@ -125,6 +125,16 @@ target_link_libraries(shadps4_descriptor_image_layout_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_descriptor_image_layout_test)
 
+add_executable(shadps4_vulkan_device_features_test
+    test_vulkan_device_features.cpp
+)
+target_compile_features(shadps4_vulkan_device_features_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_vulkan_device_features_test PRIVATE
+    SHADPS4_VK_INSTANCE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_instance.cpp"
+)
+target_link_libraries(shadps4_vulkan_device_features_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_vulkan_device_features_test)
+
 add_executable(shadps4_pipeline_bind_tracker_test
     test_pipeline_bind_tracker.cpp
 )
