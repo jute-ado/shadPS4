@@ -47,14 +47,22 @@ struct UniqueBuffer {
     UniqueBuffer(const UniqueBuffer&) = delete;
     UniqueBuffer& operator=(const UniqueBuffer&) = delete;
 
-    UniqueBuffer(UniqueBuffer&& other)
-        : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+    UniqueBuffer(UniqueBuffer&& other) noexcept
+        : device{std::exchange(other.device, vk::Device{})},
+          allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
-          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)} {}
-    UniqueBuffer& operator=(UniqueBuffer&& other) {
+          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)},
+          bda_addr{std::exchange(other.bda_addr, 0)} {}
+    UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        Reset();
+        device = std::exchange(other.device, vk::Device{});
         buffer = std::exchange(other.buffer, VK_NULL_HANDLE);
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+        bda_addr = std::exchange(other.bda_addr, 0);
         return *this;
     }
 
@@ -67,9 +75,12 @@ struct UniqueBuffer {
 
     vk::Device device;
     VmaAllocator allocator;
-    VmaAllocation allocation;
+    VmaAllocation allocation{};
     vk::Buffer buffer{};
     vk::DeviceAddress bda_addr = 0;
+
+private:
+    void Reset() noexcept;
 };
 
 class Buffer {
@@ -149,6 +160,9 @@ public:
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
+
+    /// Makes device writes to a mapped range visible to the host.
+    [[nodiscard]] bool InvalidateMappedRange(u64 offset, u64 size) const;
 
 public:
     VAddr cpu_addr = 0;

@@ -5,12 +5,14 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <utility>
 #include <vector>
 
 #include "common/unique_function.h"
+#include "common/polyfill_thread.h"
 
 namespace AmdGpu {
 
@@ -18,6 +20,49 @@ class SubmissionCompletionQueue final {
 public:
     using Sequence = std::uint64_t;
     using Callback = Common::UniqueFunction<void>;
+
+    struct CompletionTicket {
+        Sequence sequence{};
+
+        [[nodiscard]] bool Wait(std::stop_token stop = {}) const {
+            std::unique_lock lock{state->mutex};
+            Common::CondvarWait(state->ready, lock, stop, [&] { return state->completed; });
+            return state->completed && !stop.stop_requested();
+        }
+
+    private:
+        struct State {
+            std::mutex mutex;
+            std::condition_variable_any ready;
+            bool completed{};
+        };
+
+        CompletionTicket(Sequence sequence_, std::shared_ptr<State> state_)
+            : sequence{sequence_}, state{std::move(state_)} {}
+
+        std::shared_ptr<State> state;
+        friend class SubmissionCompletionQueue;
+    };
+
+    [[nodiscard]] CompletionTicket CaptureCompletionTicket() {
+        std::scoped_lock lock{mutex};
+        auto state = std::make_shared<CompletionTicket::State>();
+        // Ticket identity and callback registration observe the same issuance boundary. The
+        // callback owns its state, never a waiter's stack or a raw queue/owner pointer.
+        boundaries.push_back({issued_sequence, [state] {
+                                  {
+                                      std::scoped_lock state_lock{state->mutex};
+                                      state->completed = true;
+                                  }
+                                  state->ready.notify_all();
+                              }});
+        return CompletionTicket{issued_sequence, std::move(state)};
+    }
+
+    [[nodiscard]] Sequence IssuedSequence() const {
+        std::scoped_lock lock{mutex};
+        return issued_sequence;
+    }
 
     [[nodiscard]] Sequence IssueSubmission() {
         std::scoped_lock lock{mutex};
