@@ -10,6 +10,7 @@
 #include "common/singleton.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/equeue.h"
+#include "core/libraries/kernel/equeue_poll.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
@@ -176,7 +177,7 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     if (timo != nullptr && *timo == 0) {
         // Effectively acts as a poll; only events that have already
         // arrived at the time of this function call can be received
-        return GetTriggeredEvents(ev, num);
+        return PollEventQueue(m_mutex, [&] { return GetTriggeredEvents(ev, num); });
     }
     const auto micros = timo ? *timo : 0u;
 
