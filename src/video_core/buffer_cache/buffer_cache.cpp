@@ -10,6 +10,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/vertex_buffer_range.h"
+#include "video_core/renderer_vulkan/gpu_span_admission.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -240,7 +241,7 @@ void BufferCache::CommitVertexInputState(const Vulkan::GraphicsPipeline& pipelin
     scheduler.CommandBuffer().setVertexInputEXT(bindings, attributes);
 }
 
-void BufferCache::BindIndexBuffer(
+bool BufferCache::BindIndexBuffer(
     u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
 
@@ -248,13 +249,19 @@ void BufferCache::BindIndexBuffer(
     const bool is_index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
     const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
-    const VAddr index_address =
-        regs.index_base_address.Address<VAddr>() + index_offset * index_size;
+    const VAddr index_base = regs.index_base_address.Address<VAddr>();
+    const auto byte_offset = Vulkan::CheckedGpuProduct(index_offset, index_size);
+    const auto byte_size = Vulkan::CheckedGpuProduct(regs.num_indices, index_size);
+    const auto index_span =
+        byte_offset && byte_size ? Vulkan::TryMakeGpuSpan(index_base, *byte_offset, *byte_size)
+                                 : std::optional<Vulkan::GpuSpan>{};
+    if (!index_span || !memory->IsValidMapping(index_span->address, index_span->size)) {
+        return false;
+    }
 
     // Bind index buffer.
-    const u32 index_buffer_size = regs.num_indices * index_size;
-    const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
-    if (IsRegionGpuModified(index_address, index_buffer_size)) {
+    const auto [vk_buffer, offset] = ObtainBuffer(index_span->address, index_span->size, false);
+    if (IsRegionGpuModified(index_span->address, index_span->size)) {
         if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
                                                  vk::PipelineStageFlagBits2::eIndexInput)) {
             barriers.emplace_back(*barrier);
@@ -262,6 +269,7 @@ void BufferCache::BindIndexBuffer(
     }
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
+    return true;
 }
 
 void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {

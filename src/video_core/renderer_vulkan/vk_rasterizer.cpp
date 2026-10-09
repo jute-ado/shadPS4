@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/gpu_span_admission.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
@@ -258,7 +259,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+        if (!buffer_cache.BindIndexBuffer(index_offset, buffer_barriers)) {
+            ResetBindings();
+            return;
+        }
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
@@ -305,6 +309,24 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    const auto arg_bytes = CheckedGpuProduct(stride, max_count);
+    const auto arg_span = arg_bytes ? TryMakeGpuSpan(arg_address, offset, *arg_bytes)
+                                    : std::optional<GpuSpan>{};
+    if (!arg_span || !memory->IsValidMapping(arg_span->address, arg_span->size)) {
+        ResetBindings();
+        return;
+    }
+
+    std::optional<GpuSpan> count_span;
+    if (count_address != 0) {
+        count_span = TryMakeGpuSpan(count_address, 0, sizeof(u32));
+    }
+    if (count_address != 0 &&
+        (!count_span || !memory->IsValidMapping(count_span->address, count_span->size))) {
+        ResetBindings();
+        return;
+    }
+
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
@@ -318,16 +340,20 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
+        if (!buffer_cache.BindIndexBuffer(0, buffer_barriers)) {
+            ResetBindings();
+            return;
+        }
     }
 
-    const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+    const auto [buffer, base] =
+        buffer_cache.ObtainBuffer(arg_span->address, arg_span->size, false);
 
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};
-    if (count_address != 0) {
-        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
+    if (count_span) {
+        std::tie(count_buffer, count_base) =
+            buffer_cache.ObtainBuffer(count_span->address, count_span->size, false);
     }
 
     if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
@@ -352,7 +378,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const PipelineCommandInfo command{
         .type = is_indexed ? PipelineCommandType::DrawIndexedIndirect
                            : PipelineCommandType::DrawIndirect,
-        .arguments = {arg_address + offset, max_count, stride},
+        .arguments = {arg_span->address, max_count, stride},
     };
     VideoCore::IssueDrawWithVertexInputState(
         instance.IsVertexInputDynamicState(),
@@ -429,6 +455,12 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
+    const auto indirect_span = TryMakeGpuSpan(address, offset, size);
+    if (!indirect_span || !memory->IsValidMapping(indirect_span->address, indirect_span->size)) {
+        ResetBindings();
+        return;
+    }
+
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
@@ -438,7 +470,8 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
-    const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
+    const auto [buffer, base] =
+        buffer_cache.ObtainBuffer(indirect_span->address, indirect_span->size, false);
 
     if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
                                           vk::PipelineStageFlagBits2::eDrawIndirect)) {
@@ -451,7 +484,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const auto cmdbuf = scheduler.CommandBuffer();
     const PipelineCommandInfo command{
         .type = PipelineCommandType::DispatchIndirect,
-        .arguments = {address + offset, size},
+        .arguments = {indirect_span->address, indirect_span->size},
     };
     RecordPipelineBind(instance, cmdbuf, *pipeline, command, diagnostic_buffer_bindings,
                        diagnostic_image_bindings);
