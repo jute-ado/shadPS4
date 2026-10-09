@@ -3,8 +3,9 @@
 
 #include "common/div_ceil.h"
 #include "video_core/buffer_cache/buffer_cache.h"
-#include "video_core/buffer_cache/fault_range.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/buffer_cache/fault_range.h"
+#include "video_core/buffer_cache/fault_record_snapshot.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -15,19 +16,20 @@
 
 namespace VideoCore {
 
-static constexpr size_t MaxPageFaults = 1024;
-static constexpr size_t PageFaultAreaSize = MaxPageFaults * sizeof(u64);
+static constexpr size_t MaxPageFaults = MaxGpuFaultRecords + 1;
+static constexpr size_t PageFaultAreaSize = GpuFaultSlotBytes;
 
 FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
                            BufferCache& buffer_cache_, PageManager& page_manager_,
                            u32 caching_pagebits, u64 caching_num_pages_)
-    : scheduler{scheduler_}, buffer_cache{buffer_cache_},
-      page_manager{page_manager_},
+    : scheduler{scheduler_}, buffer_cache{buffer_cache_}, page_manager{page_manager_},
       caching_pagesize{1ULL << caching_pagebits}, caching_num_pages{caching_num_pages_},
       fault_buffer_size{caching_num_pages_ / 8},
       fault_buffer{instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, fault_buffer_size},
       download_buffer{instance, scheduler, MemoryUsage::Download,
-                      0,        AllFlags,  MaxPendingFaults * PageFaultAreaSize} {
+                      0,        AllFlags,  MaxPendingFaults * PageFaultAreaSize},
+      completed_faults{
+          [this](std::span<const u64> records) { MakeCompletedFaultsResident(records); }} {
     const auto device = instance.GetDevice();
     Vulkan::SetObjectName(device, fault_buffer.Handle(), "Fault Buffer");
 
@@ -88,14 +90,12 @@ void FaultManager::ProcessFaultBuffer() {
     }
 
     const u32 offset = current_area * PageFaultAreaSize;
-    u8* mapped = download_buffer.mapped_data.data() + offset;
-    std::memset(mapped, 0, PageFaultAreaSize);
 
     const vk::BufferMemoryBarrier2 pre_barrier = {
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
         .buffer = fault_buffer.Handle(),
         .offset = 0,
         .size = fault_buffer_size,
@@ -104,10 +104,28 @@ void FaultManager::ProcessFaultBuffer() {
         .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
         .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
         .buffer = fault_buffer.Handle(),
         .offset = 0,
         .size = fault_buffer_size,
+    };
+    const vk::BufferMemoryBarrier2 reset_barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+        .buffer = download_buffer.Handle(),
+        .offset = offset,
+        .size = PageFaultAreaSize,
+    };
+    const vk::BufferMemoryBarrier2 readback_barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        .buffer = download_buffer.Handle(),
+        .offset = offset,
+        .size = PageFaultAreaSize,
     };
     const vk::DescriptorBufferInfo fault_buffer_info = {
         .buffer = fault_buffer.Handle(),
@@ -139,6 +157,13 @@ void FaultManager::ProcessFaultBuffer() {
     }};
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
+    // Slot reuse already waits for its previous GPU tick and copies the old records. Clear on
+    // the GPU so an atomic counter never depends on unflushed writes to noncoherent host memory.
+    cmdbuf.fillBuffer(download_buffer.Handle(), offset, PageFaultAreaSize, 0);
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &reset_barrier,
+    });
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 1,
@@ -157,51 +182,78 @@ void FaultManager::ProcessFaultBuffer() {
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &post_barrier,
     });
-
-    scheduler.DeferOperation([this, mapped, area = current_area] {
-        fault_ranges.Clear();
-        const u64* fault_buf = std::bit_cast<const u64*>(mapped);
-        const u32 fault_count = fault_buf[0];
-        const VAddr address_space_size = caching_num_pages * caching_pagesize;
-        u32 invalid_fault_count = 0;
-        VAddr first_invalid_fault = 0;
-        for (u32 i = 1; i <= fault_count; ++i) {
-            const VAddr start = fault_buf[i];
-            const VAddr end = start + caching_pagesize;
-            const bool is_processable = IsProcessableDmaFaultRange(
-                start, end, address_space_size,
-                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
-            if (!is_processable) {
-                if (invalid_fault_count++ == 0) {
-                    first_invalid_fault = start;
-                }
-                continue;
-            }
-            fault_ranges.Add(start, caching_pagesize);
-            LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", start);
-        }
-        if (invalid_fault_count != 0) {
-            LOG_WARNING(Render_Vulkan,
-                        "Ignored {} invalid or unmapped GPU fault page(s), first at {:#x}",
-                        invalid_fault_count, first_invalid_fault);
-        }
-        fault_ranges.ForEach([&](VAddr start, VAddr end) {
-            const bool is_processable = IsProcessableDmaFaultRange(
-                start, end, address_space_size,
-                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
-            if (!is_processable) {
-                LOG_WARNING(Render_Vulkan,
-                            "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}", start,
-                            end);
-                return;
-            }
-            MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));
-        });
-        fault_areas[area] = 0;
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &readback_barrier,
     });
+
+    scheduler.DeferOperation([this, area = current_area] { CollectCompletedFaults(area); });
 
     fault_areas[current_area++] = scheduler.CurrentTick();
     current_area %= MaxPendingFaults;
+}
+
+void FaultManager::CollectCompletedFaults(u32 area) {
+    const u32 offset = area * PageFaultAreaSize;
+    const auto slot =
+        std::span<const u8>{download_buffer.mapped_data}.subspan(offset, PageFaultAreaSize);
+    const auto snapshot = CaptureGpuFaultRecords(
+        slot, [&] { return download_buffer.InvalidateMappedRange(offset, PageFaultAreaSize); });
+    if (!snapshot) {
+        LOG_ERROR(Render_Vulkan, "Could not invalidate completed GPU fault readback slot {}", area);
+        fault_areas[area] = 0;
+        return;
+    }
+    if (snapshot->plan.truncated) {
+        LOG_WARNING(Render_Vulkan, "GPU fault slot reported {} records; only {} fit in the slot",
+                    snapshot->plan.reported_count, snapshot->plan.read_count);
+    }
+    // This completion can run inside a stream upload or an SRT snapshot's Finish. Only copy
+    // records here: creating/merging cached buffers would invalidate the suspended operation.
+    completed_faults.Enqueue(snapshot->Records());
+    fault_areas[area] = 0;
+}
+
+void FaultManager::DrainReadyFaults() {
+    completed_faults.Drain();
+}
+
+void FaultManager::MakeCompletedFaultsResident(std::span<const u64> records) {
+    RangeSet fault_ranges;
+    const VAddr address_space_size = caching_num_pages * caching_pagesize;
+    u32 invalid_fault_count = 0;
+    VAddr first_invalid_fault = 0;
+    for (const VAddr start : records) {
+        const VAddr end = start + caching_pagesize;
+        const bool is_processable = IsProcessableDmaFaultRange(
+            start, end, address_space_size,
+            [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+        if (!is_processable) {
+            if (invalid_fault_count++ == 0) {
+                first_invalid_fault = start;
+            }
+            continue;
+        }
+        fault_ranges.Add(start, caching_pagesize);
+        LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", start);
+    }
+    if (invalid_fault_count != 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignored {} invalid or unmapped GPU fault page(s), first at {:#x}",
+                    invalid_fault_count, first_invalid_fault);
+    }
+    fault_ranges.ForEach([&](VAddr start, VAddr end) {
+        const bool is_processable = IsProcessableDmaFaultRange(
+            start, end, address_space_size,
+            [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+        if (!is_processable) {
+            LOG_WARNING(Render_Vulkan,
+                        "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}", start,
+                        end);
+            return;
+        }
+        MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));
+    });
 }
 
 } // namespace VideoCore
