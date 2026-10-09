@@ -12,6 +12,7 @@
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
+#include "video_core/amdgpu/submission_eop_tracker.h"
 
 namespace {
 
@@ -224,4 +225,29 @@ TEST(SubmissionBoundaryQueue, PreservesConsecutiveCallbacksInFifoOrder) {
 
     EXPECT_TRUE(queue.Empty());
     EXPECT_EQ(order, (std::vector<int>{1, 2}));
+}
+
+TEST(SubmissionEopTracker, SynthesizesProgressForBoundaryWithoutInterruptingEop) {
+    AmdGpu::SubmissionEopTracker tracker;
+
+    EXPECT_TRUE(tracker.CompleteBoundary());
+}
+
+TEST(SubmissionEopTracker, DoesNotDuplicateAnInterruptingEopAtBoundary) {
+    AmdGpu::SubmissionEopTracker tracker;
+
+    tracker.ObserveInterruptingEop();
+
+    EXPECT_FALSE(tracker.CompleteBoundary());
+}
+
+TEST(SubmissionEopTracker, TracksEachSubmissionBoundaryIndependently) {
+    AmdGpu::SubmissionEopTracker tracker;
+
+    tracker.ObserveInterruptingEop();
+    EXPECT_FALSE(tracker.CompleteBoundary());
+    EXPECT_TRUE(tracker.CompleteBoundary());
+
+    tracker.ObserveInterruptingEop();
+    EXPECT_FALSE(tracker.CompleteBoundary());
 }

@@ -151,16 +151,26 @@ void Liverpool::Process(std::stop_token stoken) {
         }
         if (has_submit_done) {
             VideoCore::EndCapture();
+            const bool requires_eop_progress = submission_eop_tracker.CompleteBoundary();
+            auto complete_boundary = [requires_eop_progress,
+                                      completion = std::move(submit_done_callback)]() mutable {
+                if (requires_eop_progress) {
+                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                }
+                if (completion) {
+                    completion();
+                }
+            };
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 SubmitSubmissionBoundary(
-                    std::move(submit_done_callback),
+                    std::move(complete_boundary),
                     [this](Common::UniqueFunction<void>&& completion) {
                         rasterizer->DeferGpuCompletion(std::move(completion));
                     },
                     [this] { rasterizer->Flush(); });
-            } else if (submit_done_callback) {
-                submit_done_callback();
+            } else {
+                complete_boundary();
             }
         }
 
@@ -772,6 +782,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                if (event_eop->int_sel != InterruptSelect::None) {
+                    submission_eop_tracker.ObserveInterruptingEop();
+                }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
