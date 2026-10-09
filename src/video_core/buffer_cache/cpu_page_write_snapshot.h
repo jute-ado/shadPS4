@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -25,6 +26,23 @@ struct CpuPageUploadRange {
 
     auto operator<=>(const CpuPageUploadRange&) const = default;
 };
+
+struct CpuSnapshotCaptureRange {
+    VAddr address;
+    u64 size;
+};
+
+[[nodiscard]] constexpr std::optional<CpuSnapshotCaptureRange> PlanCpuSnapshotCapture(VAddr address,
+                                                                                      u64 size) {
+    constexpr u64 WordMask = sizeof(u32) - 1;
+    if (size == 0 || size > std::numeric_limits<VAddr>::max() - address ||
+        address + size > std::numeric_limits<VAddr>::max() - WordMask) {
+        return std::nullopt;
+    }
+    const VAddr begin = address & ~WordMask;
+    const VAddr end = (address + size + WordMask) & ~WordMask;
+    return CpuSnapshotCaptureRange{begin, end - begin};
+}
 
 class CpuPageWriteSnapshot {
 public:
@@ -57,6 +75,25 @@ public:
         const size_t word_begin = begin / UploadAlignment;
         const size_t word_end = (end + UploadAlignment - 1) / UploadAlignment;
 
+        ForEachCapturedUploadRange(current.subspan(word_begin * UploadAlignment,
+                                                   (word_end - word_begin) * UploadAlignment),
+                                   word_begin * UploadAlignment, std::forward<Func>(func));
+    }
+
+    // Inspect an immutable, word-aligned CPU capture without reading live guest memory.
+    // Partial output ranges still need their whole boundary words for the same dirty-word
+    // decision that the eventual GPU upload will make.
+    template <typename Func>
+    bool ForEachCapturedUploadRange(std::span<const u8> current, size_t page_offset,
+                                    Func&& func) const {
+        if (page_offset > TRACKER_BYTES_PER_PAGE ||
+            current.size() > TRACKER_BYTES_PER_PAGE - page_offset ||
+            page_offset % UploadAlignment != 0 || current.size() % UploadAlignment != 0) {
+            return false;
+        }
+        const size_t word_begin = page_offset / UploadAlignment;
+        const size_t word_end = (page_offset + current.size()) / UploadAlignment;
+
         size_t dirty_begin = WordsPerPage;
         const auto emit_dirty_range = [&](size_t dirty_end) {
             if (dirty_begin == WordsPerPage) {
@@ -73,7 +110,8 @@ public:
             const size_t offset = word * UploadAlignment;
             const bool is_dirty =
                 forced_words.test(word) ||
-                std::memcmp(before.data() + offset, current.data() + offset, UploadAlignment) != 0;
+                std::memcmp(before.data() + offset, current.data() + (offset - page_offset),
+                            UploadAlignment) != 0;
             if (is_dirty) {
                 if (dirty_begin == WordsPerPage) {
                     dirty_begin = word;
@@ -83,6 +121,7 @@ public:
             }
         }
         emit_dirty_range(word_end);
+        return true;
     }
 
 private:
@@ -124,6 +163,44 @@ public:
         snapshot->second.ForEachUploadRange(current, range_offset, range_size,
                                             std::forward<Func>(func));
         snapshots.erase(snapshot);
+        return true;
+    }
+
+    // Reapply newer CPU words to a private GPU/CPU snapshot. Neither consume the before-image
+    // nor change GPU ownership: later binding still needs to upload precisely these words.
+    [[nodiscard]] bool ApplyPendingWrites(VAddr captured_address, std::span<const u8> captured,
+                                          VAddr output_address, std::span<u8> output) {
+        constexpr size_t Alignment = CpuPageWriteSnapshot::UploadAlignment;
+        if (captured_address % Alignment != 0 || captured.size() % Alignment != 0 ||
+            captured.size() > std::numeric_limits<VAddr>::max() - captured_address ||
+            output_address < captured_address ||
+            output_address - captured_address > captured.size() ||
+            output.size() > captured.size() - (output_address - captured_address)) {
+            return false;
+        }
+        const VAddr output_end = output_address + output.size();
+        std::scoped_lock lock{mutex};
+        size_t consumed = 0;
+        while (consumed < captured.size()) {
+            const VAddr address = captured_address + consumed;
+            const VAddr page_address = address & ~(TRACKER_BYTES_PER_PAGE - 1);
+            const size_t page_offset = address - page_address;
+            const size_t length =
+                std::min(captured.size() - consumed, TRACKER_BYTES_PER_PAGE - page_offset);
+            if (const auto snapshot = snapshots.find(page_address); snapshot != snapshots.end()) {
+                snapshot->second.ForEachCapturedUploadRange(
+                    captured.subspan(consumed, length), page_offset, [&](CpuPageUploadRange range) {
+                        const VAddr begin = std::max(page_address + range.offset, output_address);
+                        const VAddr end =
+                            std::min(page_address + range.offset + range.size, output_end);
+                        if (begin < end) {
+                            std::memcpy(output.data() + (begin - output_address),
+                                        captured.data() + (begin - captured_address), end - begin);
+                        }
+                    });
+            }
+            consumed += length;
+        }
         return true;
     }
 
