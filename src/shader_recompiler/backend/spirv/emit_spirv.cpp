@@ -11,6 +11,7 @@
 #include "common/func_traits.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/spirv_image_coordinates.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -264,10 +265,25 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_fp64) {
         ctx.AddCapability(spv::Capability::Float64);
     }
-    if (info.has_storage_images) {
+    // The summary bit is normally populated by CollectShaderInfoPass, but EmitSPIRV also accepts
+    // already-populated IR/resource descriptions (cache replays and focused backend callers).
+    // Derive the storage requirement from those descriptions as a fallback so a multisampled
+    // storage image cannot reach SPIR-V without its required capability merely because the summary
+    // pass was skipped.
+    const bool has_storage_images =
+        info.has_storage_images || std::ranges::any_of(info.images, &ImageResource::is_written);
+    if (has_storage_images) {
         ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         ctx.AddCapability(spv::Capability::StorageImageReadWithoutFormat);
         ctx.AddCapability(spv::Capability::StorageImageWriteWithoutFormat);
+        const bool has_storage_image_multisample = std::ranges::any_of(
+            info.images, [&info](const ImageResource& image) {
+                return RequiresStorageImageMultisampleCapability(
+                    image.GetSharp(info).GetViewType(image.is_array), image.is_written);
+            });
+        if (has_storage_image_multisample && profile.supports_storage_image_multisample) {
+            ctx.AddCapability(spv::Capability::StorageImageMultisample);
+        }
         if (profile.supports_image_load_store_lod) {
             ctx.AddExtension("SPV_AMD_shader_image_load_store_lod");
             ctx.AddCapability(spv::Capability::ImageReadWriteLodAMD);
@@ -634,8 +650,22 @@ void PatchPhiNodes(const IR::Program& program, EmitContext& ctx) {
 } // Anonymous namespace
 
 std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info,
-                           const IR::Program& program, Bindings& binding) {
-    EmitContext ctx{profile, runtime_info, program.info, binding};
+                           const IR::Program& program, Bindings& binding,
+                           SrtMemoryReader reader) {
+    const bool has_unsupported_storage_image_multisample = std::ranges::any_of(
+        program.info.images, [&info = program.info](const ImageResource& image) {
+            return RequiresStorageImageMultisampleCapability(
+                image.GetSharp(info).GetViewType(image.is_array), image.is_written);
+        });
+    if (has_unsupported_storage_image_multisample && !profile.supports_storage_image_multisample) {
+        LOG_WARNING(Render_Recompiler,
+                    "Rejecting shader {:#x}: storage multisampled image is unsupported by the "
+                    "selected Vulkan device",
+                    program.info.pgm_hash);
+        program.info.translation_failed = true;
+        return {};
+    }
+    EmitContext ctx{profile, runtime_info, program.info, binding, reader};
     const Id main{DefineMain(ctx, program)};
     DefineEntryPoint(program.info, ctx, main);
     SetupCapabilities(program.info, profile, runtime_info, ctx);

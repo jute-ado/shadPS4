@@ -27,11 +27,12 @@ TEST(ImageLayoutPolicy, ClassifiesPrtThickAndExtraThickLayouts) {
     EXPECT_EQ(extra_thick.thickness, 8U);
 }
 
-TEST(ImageLayoutPolicy, LeavesLinearGeneralUnsupported) {
+TEST(ImageLayoutPolicy, ClassifiesLinearGeneralAsUnalignedLinear) {
     const auto layout =
         VideoCore::ClassifyImageArrayLayout(AmdGpu::ArrayMode::ArrayLinearGeneral);
 
-    EXPECT_EQ(layout.kind, VideoCore::ImageArrayLayoutKind::Invalid);
+    EXPECT_EQ(layout.kind, VideoCore::ImageArrayLayoutKind::LinearGeneral);
+    EXPECT_EQ(layout.thickness, 1U);
 }
 
 TEST(ImageLayoutPolicy, ClassifiesEverySupportedArrayMode) {
@@ -44,6 +45,7 @@ TEST(ImageLayoutPolicy, ClassifiesEverySupportedArrayMode) {
         u32 thickness;
     };
     constexpr std::array expected{
+        ExpectedLayout{ArrayMode::ArrayLinearGeneral, ImageArrayLayoutKind::LinearGeneral, 1},
         ExpectedLayout{ArrayMode::ArrayLinearAligned, ImageArrayLayoutKind::Linear, 1},
         ExpectedLayout{ArrayMode::Array1DTiledThin1, ImageArrayLayoutKind::MicroTiled, 1},
         ExpectedLayout{ArrayMode::Array1DTiledThick, ImageArrayLayoutKind::MicroTiled, 4},
@@ -67,6 +69,14 @@ TEST(ImageLayoutPolicy, ClassifiesEverySupportedArrayMode) {
         EXPECT_EQ(actual.thickness, item.thickness)
             << "array mode " << static_cast<u32>(item.mode);
     }
+}
+
+TEST(ImageLayoutPolicy, LinearGeneralPreservesUnalignedPitchAndSliceSize) {
+    const auto [pitch, height, size] = VideoCore::ImageSizeLinearGeneral(13, 7, 32, 1);
+
+    EXPECT_EQ(pitch, 13U);
+    EXPECT_EQ(height, 7U);
+    EXPECT_EQ(size, 13U * 7U * 4U);
 }
 
 TEST(ImageLayoutPolicy, ConvertsBlockCompressedMipGeometryToAndFromBlockUnits) {

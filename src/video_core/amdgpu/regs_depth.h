@@ -272,9 +272,9 @@ struct DepthBuffer {
         return z_info.format == ZFormat::Z32Float ? 32 : 16;
     }
 
-    u32 GetDepthSliceSize() const {
+    u64 GetDepthSliceSize() const {
         ASSERT(z_info.format != ZFormat::Invalid);
-        const auto bpe = NumBits() >> 3; // in bytes
+        const u64 bpe = NumBits() >> 3; // in bytes
         return (depth_slice.tile_max + 1) * 64 * bpe * NumSamples();
     }
 
