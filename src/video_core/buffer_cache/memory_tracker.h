@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <deque>
 #include <mutex>
 #include <type_traits>
@@ -12,6 +13,8 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
+#include "video_core/buffer_cache/cpu_dirty_policy.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -91,15 +94,45 @@ public:
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
                             auto&& on_upload) {
-        IteratePages<true>(query_cpu_range, query_size,
-                           [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
-                               manager->lock.lock();
-                               manager->template ForEachModifiedRange<Type::CPU, true>(
-                                   manager->GetCpuAddr() + offset, size, func);
-                               if (!is_written) {
-                                   manager->lock.unlock();
-                               }
-                           });
+        const bool is_stack_mapping = [&] {
+#ifdef _WIN32
+            void* stack_begin{};
+            void* stack_end{};
+            Core::Memory::Instance()->IsStack(query_cpu_range, &stack_begin, &stack_end);
+            if (stack_begin == nullptr || stack_end == nullptr) {
+                return false;
+            }
+            const VAddr stack_begin_addr = std::bit_cast<VAddr>(stack_begin);
+            const VAddr stack_end_addr = std::bit_cast<VAddr>(stack_end);
+            return query_cpu_range >= stack_begin_addr && query_cpu_range < stack_end_addr &&
+                   query_size <= stack_end_addr - query_cpu_range;
+#else
+            return false;
+#endif
+        }();
+#ifdef _WIN32
+        constexpr bool HasAlternateFaultStack = false;
+#else
+        constexpr bool HasAlternateFaultStack = true;
+#endif
+        const bool clear_cpu_dirty =
+            ShouldClearCpuDirtyAfterUpload(HasAlternateFaultStack, is_stack_mapping, is_written);
+
+        IteratePages<true>(
+            query_cpu_range, query_size,
+            [&func, is_written, clear_cpu_dirty](RegionManager* manager, u64 offset, size_t size) {
+                manager->lock.lock();
+                if (clear_cpu_dirty) {
+                    manager->template ForEachModifiedRange<Type::CPU, true>(
+                        manager->GetCpuAddr() + offset, size, func);
+                } else {
+                    manager->template ForEachModifiedRange<Type::CPU, false>(
+                        manager->GetCpuAddr() + offset, size, func);
+                }
+                if (!is_written) {
+                    manager->lock.unlock();
+                }
+            });
         on_upload();
         if (!is_written) {
             return;

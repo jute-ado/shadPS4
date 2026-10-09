@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include "core/windows_memory_protection.h"
+#include "video_core/buffer_cache/cpu_dirty_policy.h"
 #include "video_core/windows_fault_access.h"
 
 namespace {
@@ -125,6 +126,13 @@ TEST(WindowsFaultAccess, AcceptsDelayedWriteAfterAnotherThreadRestoresAccess) {
     EXPECT_EQ(page[0], 0x5a);
     EXPECT_TRUE(RemoveVectoredExceptionHandler(handler));
     EXPECT_TRUE(VirtualFree(const_cast<std::uint8_t*>(page), 0, MEM_RELEASE));
+}
+
+TEST(WindowsFaultAccess, KeepsReadOnlyGpuStackBuffersCpuDirtyWithoutAlternateFaultStack) {
+    EXPECT_FALSE(VideoCore::ShouldClearCpuDirtyAfterUpload(false, true, false));
+    EXPECT_TRUE(VideoCore::ShouldClearCpuDirtyAfterUpload(true, true, false));
+    EXPECT_TRUE(VideoCore::ShouldClearCpuDirtyAfterUpload(false, false, false));
+    EXPECT_TRUE(VideoCore::ShouldClearCpuDirtyAfterUpload(false, true, true));
 }
 
 TEST(WindowsMemoryProtection, DataWatchesPreservePerPageExecutePermission) {
