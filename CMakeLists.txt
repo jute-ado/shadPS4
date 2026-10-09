@@ -1042,6 +1042,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
                       src/shader_recompiler/ir/passes/inject_clip_distance_attributes.cpp
                       src/shader_recompiler/ir/passes/ir_passes.h
                       src/shader_recompiler/ir/passes/lower_buffer_format_to_raw.cpp
+                      src/shader_recompiler/ir/passes/lower_lane_id_to_local_invocation_index_pass.cpp
                       src/shader_recompiler/ir/passes/lower_fp64_to_fp32.cpp
                       src/shader_recompiler/ir/passes/lower_user_clip_planes.cpp
                       src/shader_recompiler/ir/passes/readlane_elimination_pass.cpp
