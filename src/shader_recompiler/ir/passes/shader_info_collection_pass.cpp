@@ -83,7 +83,25 @@ void Visit(Info& info, const IR::Inst& inst) {
         info.uses_fp64 = true;
         break;
     case IR::Opcode::ImageWrite:
+    case IR::Opcode::ImageAtomicIAdd32:
+    case IR::Opcode::ImageAtomicSMin32:
+    case IR::Opcode::ImageAtomicUMin32:
+    case IR::Opcode::ImageAtomicSMax32:
+    case IR::Opcode::ImageAtomicUMax32:
+    case IR::Opcode::ImageAtomicFMax32:
+    case IR::Opcode::ImageAtomicFMin32:
+    case IR::Opcode::ImageAtomicInc32:
+    case IR::Opcode::ImageAtomicDec32:
+    case IR::Opcode::ImageAtomicAnd32:
+    case IR::Opcode::ImageAtomicOr32:
+    case IR::Opcode::ImageAtomicXor32:
+    case IR::Opcode::ImageAtomicExchange32:
+    case IR::Opcode::ImageAtomicCmpSwap32:
         info.has_storage_images = true;
+        if (inst.GetOpcode() == IR::Opcode::ImageAtomicFMax32 ||
+            inst.GetOpcode() == IR::Opcode::ImageAtomicFMin32) {
+            info.uses_image_atomic_float_min_max = true;
+        }
         break;
     case IR::Opcode::QuadShuffle:
         info.uses_group_quad = true;
@@ -91,6 +109,8 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::ReadLane:
     case IR::Opcode::ReadFirstLane:
     case IR::Opcode::WriteLane:
+    case IR::Opcode::Ballot:
+    case IR::Opcode::BallotFindLsb:
         info.uses_group_ballot = true;
         break;
     case IR::Opcode::Discard:
@@ -107,10 +127,6 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::ImageQueryDimensions:
     case IR::Opcode::ImageQueryLod:
         info.has_image_query = true;
-        break;
-    case IR::Opcode::ImageAtomicFMax32:
-    case IR::Opcode::ImageAtomicFMin32:
-        info.uses_image_atomic_float_min_max = true;
         break;
     case IR::Opcode::BufferAtomicFMax32:
     case IR::Opcode::BufferAtomicFMin32:

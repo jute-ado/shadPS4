@@ -4,6 +4,8 @@
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
@@ -12,6 +14,7 @@
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/gnmdriver/gfx_boundary_wait_diagnostic.h"
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/libraries/gnmdriver/graphics_event.h"
@@ -27,6 +30,8 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern Frontend::WindowSDL* g_window;
+// Outlives the owner and its outstanding submission-boundary callbacks.
+static auto submission_gate = std::make_shared<Libraries::GnmDriver::SubmissionGate>();
 std::unique_ptr<Vulkan::Presenter> presenter;
 std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
@@ -65,18 +70,26 @@ static constexpr std::array indirect_sgpr_offsets{0u, 0u, 0x4cu, 0u, 0xccu, 0u, 
 // this flag in case we need it in the future.
 static constexpr bool UseNeoCompatSequences = false;
 
-// Keep host submissions and GPU-visible address-space changes out until the command processor
-// acknowledges the matching SubmitDone boundary.
-static SubmissionGate submission_gate{};
+static bool GfxBoundaryWaitDiagnosticEnabledForProcess() {
+    static const bool enabled = [] {
+        const bool enabled =
+            IsGfxBoundaryWaitDiagnosticEnabled(std::getenv("SHADPS4_GFX_BOUNDARY_WAIT_DIAGNOSTIC"));
+        if (enabled) {
+            LOG_WARNING(
+                Lib_GnmDriver,
+                "DIAGNOSTIC: GFX admission waits for the prior global SubmitDone parser boundary; "
+                "ASC admission remains open. Guest dependencies may stall; this is not a fix.");
+        }
+        return enabled;
+    }();
+    return enabled;
+}
+
 static u64 frames_submitted{};      // frame counter
 static bool send_init_packet{true}; // initialize HW state before first game's submit in a frame
 static s32 sdk_version{0};
 
 static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
-
-void WaitForSubmissionBoundary() {
-    submission_gate.WaitForBoundary();
-}
 
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
@@ -147,7 +160,7 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
 
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed() {
     LOG_TRACE(Lib_GnmDriver, "called");
-    return submission_gate.AreGuestSubmitsAllowed();
+    return submission_gate->AreGuestSubmitsAllowed();
 }
 
 int PS4_SYSV_ABI sceGnmBeginWorkload(u32 workload_stream, u64* workload) {
@@ -283,7 +296,7 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         return;
     }
 
-    auto submission = submission_gate.Enter();
+    auto submission = submission_gate->Enter();
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -2213,7 +2226,8 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
-    auto submission = submission_gate.Enter();
+    auto submission = EnterGraphicsSubmissionDiagnostic(
+        *submission_gate, GfxBoundaryWaitDiagnosticEnabledForProcess());
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -2299,7 +2313,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 int PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    auto boundary = submission_gate.BeginGuardedBoundary();
+    auto boundary = submission_gate->BeginGuardedBoundary();
     liverpool->SubmitDone(std::move(boundary.complete));
     send_init_packet = true;
     ++frames_submitted;
@@ -2861,6 +2875,9 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
     presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    auto owner_lifetime = std::make_shared<Core::GpuOwnerLifetime>();
+    liverpool->SetGpuOwnerLifetime(owner_lifetime);
+    Core::Memory::Instance()->SetGpuOwnerLifetime(std::move(owner_lifetime));
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {

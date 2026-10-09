@@ -13,6 +13,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
+#include "core/libraries/audio/sdl_audio_queue_policy.h"
 #include "core/libraries/kernel/threads.h"
 
 // SIMD support detection
@@ -34,8 +35,6 @@ constexpr u64 VOLUME_CHECK_INTERVAL_US = 50000; // Check every 50ms
 constexpr u64 MIN_SLEEP_THRESHOLD_US = 10;
 constexpr u64 TIMING_RESYNC_THRESHOLD_US = 100000; // Resync if >100ms behind
 
-// Queue management
-constexpr u32 QUEUE_MULTIPLIER = 4;
 // Memory alignment for SIMD
 constexpr size_t AUDIO_BUFFER_ALIGNMENT = 32;
 
@@ -58,8 +57,7 @@ enum ChannelPos : u8 {
 class SDLPortBackend : public PortBackend {
 public:
     explicit SDLPortBackend(const PortOut& port)
-        : frame_size(port.format_info.FrameSize()), guest_buffer_size(port.BufferSize()),
-          buffer_frames(port.buffer_frames), sample_rate(port.sample_rate),
+        : buffer_frames(port.buffer_frames), sample_rate(port.sample_rate),
           num_channels(port.format_info.num_channels), is_float(port.format_info.is_float),
           is_std(port.format_info.is_std), channel_layout(port.format_info.channel_layout) {
 
@@ -493,8 +491,10 @@ private:
             LOG_WARNING(Lib_AudioOut, "Failed to get SDL buffer size: {}", SDL_GetError());
         }
 
-        const u32 sdl_buffer_size = sdl_buffer_frames * sizeof(float) * num_channels;
-        queue_threshold = std::max(guest_buffer_size, sdl_buffer_size) * QUEUE_MULTIPLIER;
+        const u32 stream_channels = ps4_downmix ? 2u : num_channels;
+        const u32 stream_frame_bytes = sizeof(float) * stream_channels;
+        queue_threshold = CalculateAudioQueueThreshold(internal_buffer_size, stream_frame_bytes,
+                                                        sdl_buffer_frames);
 
         LOG_DEBUG(Lib_AudioOut, "Audio queue threshold: {} bytes (SDL buffer: {} frames)",
                   queue_threshold, sdl_buffer_frames);
@@ -623,8 +623,6 @@ private:
     }
 
     // Audio format parameters
-    const u32 frame_size;
-    const u32 guest_buffer_size;
     const u32 buffer_frames;
     const u32 sample_rate;
     const u32 num_channels;

@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "shader_recompiler/info.h"
+#include "video_core/buffer_cache/buffer_copy_endpoints.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -45,23 +48,20 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         copies.emplace_back(local_src_offset, local_dst_offset, local_size);
     }
 
-    scheduler.EndRendering();
-
-    static constexpr vk::MemoryBarrier READ_BARRIER{
-        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
-        .dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite,
-    };
-    static constexpr vk::MemoryBarrier WRITE_BARRIER{
-        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-        .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
-    };
-    scheduler.CommandBuffer().pipelineBarrier(
-        vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
-        vk::DependencyFlagBits::eByRegion, READ_BARRIER, {}, {});
-
     static constexpr vk::DeviceSize MaxDistanceForMerge = 64_MB;
-    u32 batch_start = 0;
-    u32 batch_end = 0;
+    struct CopyBatch {
+        u32 begin;
+        u32 end;
+        vk::DeviceSize src_min;
+        vk::DeviceSize src_max;
+        vk::DeviceSize dst_min;
+        vk::DeviceSize dst_max;
+    };
+    std::vector<CopyBatch> batches;
+    batches.reserve(copies.size());
+
+    u32 batch_start{};
+    u32 batch_end{};
 
     while (batch_end < copies.size()) {
         // Place first copy into the current batch
@@ -93,29 +93,102 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
             dst_offset_max = new_dst_offset_max;
         }
 
-        // Obtain buffers for the total source and destination ranges.
-        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
-            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min, false);
-        const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
-            dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min, true);
-
-        // Apply found buffer base.
-        const auto vk_copies = std::span{copies}.subspan(batch_start, batch_end - batch_start);
-        for (auto& copy : vk_copies) {
-            copy.srcOffset = copy.srcOffset - src_offset_min + src_buf_offset;
-            copy.dstOffset = copy.dstOffset - dst_offset_min + dst_buf_offset;
+        const VAddr source_address = src_buf_sharp.base_address + src_offset_min;
+        const VAddr destination_address = dst_buf_sharp.base_address + dst_offset_min;
+        const u64 source_size = src_offset_max - src_offset_min;
+        const u64 destination_size = dst_offset_max - dst_offset_min;
+        if (source_address < destination_address + destination_size &&
+            destination_address < source_address + source_size) {
+            // vkCmdCopyBuffer forbids overlapping source and destination ranges. Let the guest
+            // compute shader handle this command before any HLE batch has been published.
+            return false;
         }
-
-        // Execute buffer copies.
-        LOG_TRACE(Render_Vulkan, "HLE buffer copy: src_size = {}, dst_size = {}",
-                  src_offset_max - src_offset_min, dst_offset_max - dst_offset_min);
-        scheduler.CommandBuffer().copyBuffer(src_buf->Handle(), dst_buf->Handle(), vk_copies);
+        batches.push_back({batch_start, batch_end, src_offset_min, src_offset_max, dst_offset_min,
+                           dst_offset_max});
         batch_start = batch_end;
     }
 
-    scheduler.CommandBuffer().pipelineBarrier(
-        vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands,
-        vk::DependencyFlagBits::eByRegion, WRITE_BARRIER, {}, {});
+    for (const auto& batch : batches) {
+        const VAddr source_address = src_buf_sharp.base_address + batch.src_min;
+        const VAddr destination_address = dst_buf_sharp.base_address + batch.dst_min;
+        const u32 source_size = static_cast<u32>(batch.src_max - batch.src_min);
+        const u32 destination_size = static_cast<u32>(batch.dst_max - batch.dst_min);
+
+        const bool published = VideoCore::PrepareBufferCopyBatchThenPublish(
+            [&] { return buffer_cache.PrepareBufferBinding(destination_address, destination_size,
+                                                           true); },
+            [&] { buffer_cache.DrainReadyFaults(); },
+            [&] { return buffer_cache.PrepareBufferBinding(source_address, source_size, false); },
+            [&](const VideoCore::BufferCache::PreparedBufferBinding& prepared_source,
+                const VideoCore::BufferCache::PreparedBufferBinding& prepared_destination) {
+                VideoCore::BufferCache::BufferBindingBatch binding_batch;
+                const auto source = buffer_cache.FinalizeBufferBinding(
+                    prepared_source, vk::AccessFlagBits2::eTransferRead,
+                    vk::PipelineStageFlagBits2::eTransfer, binding_batch);
+                const auto destination = buffer_cache.FinalizeBufferBinding(
+                    prepared_destination, vk::AccessFlagBits2::eTransferWrite,
+                    vk::PipelineStageFlagBits2::eTransfer, binding_batch);
+                if (!source || !destination) {
+                    return false;
+                }
+
+                const VideoCore::BufferCopyEndpoint source_endpoint{source->buffer,
+                                                                    source->offset};
+                const VideoCore::BufferCopyEndpoint destination_endpoint{destination->buffer,
+                                                                         destination->offset};
+                if (VideoCore::BufferCopyRangesOverlap(source_endpoint, source_size,
+                                                       destination_endpoint, destination_size)) {
+                    return false;
+                }
+
+                boost::container::small_vector<vk::BufferMemoryBarrier2, 16> buffer_barriers;
+                buffer_cache.CommitBufferBindings(binding_batch, buffer_barriers);
+                scheduler.EndRendering();
+
+                static constexpr vk::MemoryBarrier2 READ_BARRIER{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                    .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                    .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                    .dstAccessMask = vk::AccessFlagBits2::eTransferRead |
+                                     vk::AccessFlagBits2::eTransferWrite,
+                };
+                scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
+                    .memoryBarrierCount = 1,
+                    .pMemoryBarriers = &READ_BARRIER,
+                    .bufferMemoryBarrierCount = static_cast<u32>(buffer_barriers.size()),
+                    .pBufferMemoryBarriers = buffer_barriers.data(),
+                });
+
+                boost::container::small_vector<vk::BufferCopy, 16> vk_copies;
+                vk_copies.reserve(batch.end - batch.begin);
+                for (u32 index = batch.begin; index < batch.end; ++index) {
+                    const auto& copy = copies[index];
+                    vk_copies.emplace_back(copy.srcOffset - batch.src_min + source->offset,
+                                           copy.dstOffset - batch.dst_min + destination->offset,
+                                           copy.size);
+                }
+
+                LOG_TRACE(Render_Vulkan, "HLE buffer copy: src_size = {}, dst_size = {}",
+                          source_size, destination_size);
+                scheduler.CommandBuffer().copyBuffer(source->buffer, destination->buffer,
+                                                     vk_copies);
+                return true;
+            });
+        if (!published) {
+            // No wait-capable operation follows source preparation. A failure here therefore
+            // indicates a broken cache invariant rather than a recoverable HLE decline.
+            UNREACHABLE_MSG("Failed to publish a prepared HLE copy batch");
+        }
+    }
+
+    static constexpr vk::MemoryBarrier2 WRITE_BARRIER{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    scheduler.CommandBuffer().pipelineBarrier2(
+        vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &WRITE_BARRIER});
 
     return true;
 }
@@ -124,6 +197,11 @@ bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
     case COPY_SHADER_HASH:
+        // Diagnostic escape hatch for comparing the guest shader against the optional fast path.
+        // The fallback is the already compiled guest compute pipeline, not a title-specific path.
+        if (std::getenv("SHADPS4_DISABLE_COPY_SHADER_HLE") != nullptr) {
+            return false;
+        }
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
     default:
         return false;

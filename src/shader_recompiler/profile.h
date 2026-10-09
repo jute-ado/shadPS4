@@ -12,6 +12,10 @@ struct Profile {
     u32 max_viewport_width{};
     u32 max_viewport_height{};
     u32 max_shared_memory_size{};
+    u32 max_sampled_images_per_stage{};
+    u32 max_sampled_images_per_set{};
+    u32 max_resources_per_stage{};
+    u32 max_sampled_images_per_descriptor_heap_set{};
     u32 supported_spirv{0x00010000};
     u32 subgroup_size{};
     bool support_int8{};
@@ -34,6 +38,11 @@ struct Profile {
     bool support_fp32_signed_zero_inf_nan_preserve{};
     bool support_fp64_signed_zero_inf_nan_preserve{};
     bool supports_image_load_store_lod{};
+    // VK_EXT? The core shaderStorageImageMultisample feature gates SPIR-V storage images
+    // whose image type is multisampled. Keep this in the shader profile so translation can
+    // reject such a resource on devices that cannot legally create the module.
+    bool supports_storage_image_multisample{};
+    bool supports_sampled_image_array_nonuniform_indexing{};
     bool supports_native_cube_calc{};
     bool supports_trinary_minmax{};
     bool supports_buffer_fp32_atomic_min_max{};

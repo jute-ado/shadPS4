@@ -109,11 +109,41 @@ bool IsVop3BEncoding(Opcode opcode) {
 }
 
 GcnInst GcnDecodeContext::decodeInstruction(GcnCodeSlice& code) {
+    if (!code.canRead(1)) {
+        m_decode_failed = true;
+        m_instruction = GcnInst{};
+        m_instruction.encoding = InstEncoding::ILLEGAL;
+        return m_instruction;
+    }
+
     const uint32_t token = code.at(0);
 
     InstEncoding encoding = GetInstructionEncoding(token);
-    ASSERT_MSG(encoding != InstEncoding::ILLEGAL, "illegal encoding: {:#x}", token);
+    if (encoding == InstEncoding::ILLEGAL) {
+        // Consume the offending dword so callers that inspect the slice after a failed decode do
+        // not repeatedly observe the same token. Translation callers stop immediately on error.
+        code.readu32();
+        m_decode_failed = true;
+        m_instruction = GcnInst{};
+        m_instruction.encoding = InstEncoding::ILLEGAL;
+        m_instruction.length = sizeof(u32);
+        LOG_WARNING(Render_Recompiler, "Rejecting illegal GCN instruction encoding {:#x}", token);
+        return m_instruction;
+    }
+
     uint32_t encodingLen = getEncodingLength(encoding);
+    const u32 encodingWords = encodingLen / sizeof(u32);
+    if (encodingWords == 0 || !code.canRead(encodingWords)) {
+        code.skipToEnd();
+        m_decode_failed = true;
+        m_instruction = GcnInst{};
+        m_instruction.encoding = InstEncoding::ILLEGAL;
+        m_instruction.length = sizeof(u32);
+        LOG_WARNING(Render_Recompiler,
+                    "Rejecting truncated GCN instruction encoding {:#x} ({} bytes needed)",
+                    token, encodingLen);
+        return m_instruction;
+    }
 
     // Clear the instruction
     m_instruction = GcnInst();
@@ -127,6 +157,9 @@ GcnInst GcnDecodeContext::decodeInstruction(GcnCodeSlice& code) {
 
     // Update instruction meta info.
     updateInstructionMeta(encoding);
+    if (m_decode_failed) {
+        return m_instruction;
+    }
 
     // Detect literal constant. Only 32 bits instructions may have literal constant.
     // Note: Literal constant decode must be performed after meta info updated.
@@ -264,11 +297,28 @@ void GcnDecodeContext::updateInstructionMeta(InstEncoding encoding) {
     uint32_t encodingOp = mapEncodingOp(encoding, m_instruction.opcode);
     InstFormat instFormat = InstructionFormat(encoding, encodingOp);
 
-    ASSERT_MSG(instFormat.src_type != ScalarType::Undefined &&
-                   instFormat.dst_type != ScalarType::Undefined,
-               "Instruction format table incomplete for opcode {} ({}, encoding = 0x{:x})",
-               magic_enum::enum_name(m_instruction.opcode), u32(m_instruction.opcode),
-               u32(encoding));
+    // Undefined operand types are intentional for instructions whose operands do not have one
+    // uniform scalar type (for example cache/control operations).  The format table represents a
+    // genuinely unsupported/reserved opcode with a completely default entry.  Only reject that
+    // sentinel; allowing a partially specified but otherwise classified entry preserves the
+    // decoder's existing opcode/category path, where the translator can make the narrower
+    // unsupported-operation decision.
+    const bool missing_format =
+        instFormat.inst_class == InstClass::Undefined &&
+        instFormat.inst_category == InstCategory::Undefined && instFormat.src_count == 0 &&
+        instFormat.dst_count == 0 && instFormat.src_type == ScalarType::Undefined &&
+        instFormat.dst_type == ScalarType::Undefined;
+    if (missing_format) {
+        m_decode_failed = true;
+        m_instruction.encoding = encoding;
+        m_instruction.length = getEncodingLength(encoding);
+        LOG_WARNING(Render_Recompiler,
+                    "Rejecting incomplete GCN instruction format for opcode {} ({}, encoding = "
+                    "0x{:x})",
+                    magic_enum::enum_name(m_instruction.opcode), u32(m_instruction.opcode),
+                    u32(encoding));
+        return;
+    }
 
     m_instruction.inst_class = instFormat.inst_class;
     m_instruction.category = instFormat.inst_category;
@@ -413,6 +463,10 @@ void GcnDecodeContext::decodeInstruction64(InstEncoding encoding, GcnCodeSlice& 
 
 void GcnDecodeContext::decodeLiteralConstant(InstEncoding encoding, GcnCodeSlice& code) {
     if (HasAdditionalLiteral(encoding, m_instruction.opcode)) {
+        if (m_instruction.src_count >= GcnMaxSrcCount || !code.canRead(1)) {
+            m_decode_failed = true;
+            return;
+        }
         u32 encoding_op = mapEncodingOp(encoding, m_instruction.opcode);
         InstFormat instFormat = InstructionFormat(encoding, encoding_op);
         m_instruction.src[m_instruction.src_count].field = OperandField::LiteralConst;
@@ -428,6 +482,10 @@ void GcnDecodeContext::decodeLiteralConstant(InstEncoding encoding, GcnCodeSlice
         return src.field == OperandField::LiteralConst;
     });
     if (it != m_instruction.src.end()) {
+        if (!code.canRead(1)) {
+            m_decode_failed = true;
+            return;
+        }
         it->code = code.readu32();
         m_instruction.length += sizeof(u32);
     }
@@ -436,6 +494,10 @@ void GcnDecodeContext::decodeLiteralConstant(InstEncoding encoding, GcnCodeSlice
 void GcnDecodeContext::decodeSubDwordAddressing(InstEncoding encoding, GcnCodeSlice& code) {
     // Find if the instruction contains SDWA (it's legal only as src0)
     if (m_instruction.src[0].field == OperandField::Sdwa) {
+        if (!code.canRead(1)) {
+            m_decode_failed = true;
+            return;
+        }
         m_instruction.src[0].code = code.readu32();
         m_instruction.length += sizeof(u32);
 
@@ -509,6 +571,10 @@ void GcnDecodeContext::decodeSubDwordAddressing(InstEncoding encoding, GcnCodeSl
 void GcnDecodeContext::decodeDataParallelPrimitive(InstEncoding encoding, GcnCodeSlice& code) {
     // Find if the instruction contains DPP
     if (m_instruction.src[0].field == OperandField::Dpp) {
+        if (!code.canRead(1)) {
+            m_decode_failed = true;
+            return;
+        }
         m_instruction.src[0].code = code.readu32();
         m_instruction.length += sizeof(u32);
 
