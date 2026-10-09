@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <limits>
 #include "common/alignment.h"
 #include "common/debug.h"
 #include "common/scope_exit.h"
@@ -10,6 +11,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/vertex_buffer_range.h"
+#include "video_core/renderer_vulkan/gpu_span_admission.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -179,6 +181,10 @@ void BufferCache::BindVertexBuffers(
     // Map buffers for merged ranges
     for (auto& range : ranges_merged) {
         const u64 size = range.GetSize();
+        if (!Vulkan::IsGpuSpanAdmissible(range.base_address, 0, size,
+                                         memory->IsValidMapping(range.base_address, size))) {
+            return;
+        }
         const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
@@ -240,7 +246,7 @@ void BufferCache::CommitVertexInputState(const Vulkan::GraphicsPipeline& pipelin
     scheduler.CommandBuffer().setVertexInputEXT(bindings, attributes);
 }
 
-void BufferCache::BindIndexBuffer(
+bool BufferCache::BindIndexBuffer(
     u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
 
@@ -248,8 +254,15 @@ void BufferCache::BindIndexBuffer(
     const bool is_index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
     const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
-    const VAddr index_address =
-        regs.index_base_address.Address<VAddr>() + index_offset * index_size;
+    const VAddr index_base = regs.index_base_address.Address<VAddr>();
+    const u64 byte_offset = static_cast<u64>(index_offset) * index_size;
+    const u64 byte_size = static_cast<u64>(regs.num_indices) * index_size;
+    if (byte_offset > std::numeric_limits<VAddr>::max() - index_base ||
+        byte_size > std::numeric_limits<u32>::max() ||
+        !memory->IsValidMapping(index_base + byte_offset, byte_size)) {
+        return false;
+    }
+    const VAddr index_address = index_base + byte_offset;
 
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
@@ -262,6 +275,7 @@ void BufferCache::BindIndexBuffer(
     }
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
+    return true;
 }
 
 void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {

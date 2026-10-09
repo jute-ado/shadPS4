@@ -115,7 +115,7 @@ public:
     void CommitVertexInputState(const Vulkan::GraphicsPipeline& pipeline);
 
     /// Bind host index buffer for the current draw.
-    void BindIndexBuffer(u32 index_offset,
+    bool BindIndexBuffer(u32 index_offset,
                          boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)

@@ -14,12 +14,14 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_bind_history.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/gpu_span_admission.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <cstring>
+#include <limits>
 
 #ifdef MemoryBarrier
 #undef MemoryBarrier
@@ -252,13 +254,17 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        ResetBindings();
         return;
     }
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+        if (!buffer_cache.BindIndexBuffer(index_offset, buffer_barriers)) {
+            ResetBindings();
+            return;
+        }
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
@@ -305,6 +311,20 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    const u64 arg_offset = offset;
+    const u64 arg_bytes = static_cast<u64>(stride) * max_count;
+    if (!IsGpuSpanAdmissible(arg_address, arg_offset, arg_bytes,
+                             memory->IsValidMapping(arg_address + arg_offset, arg_bytes))) {
+        ResetBindings();
+        return;
+    }
+    if (count_address != 0 &&
+        !IsGpuSpanAdmissible(count_address, 0, sizeof(u32),
+                             memory->IsValidMapping(count_address, sizeof(u32)))) {
+        ResetBindings();
+        return;
+    }
+
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
@@ -312,17 +332,21 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        ResetBindings();
         return;
     }
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
+        if (!buffer_cache.BindIndexBuffer(0, buffer_barriers)) {
+            ResetBindings();
+            return;
+        }
     }
 
     const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+        buffer_cache.ObtainBuffer(arg_address + offset, static_cast<u32>(arg_bytes), false);
 
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};
@@ -404,6 +428,7 @@ void Rasterizer::DispatchDirect() {
     }
 
     if (!BindResources(pipeline)) {
+        ResetBindings();
         return;
     }
 
@@ -435,6 +460,13 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     }
 
     if (!BindResources(pipeline)) {
+        ResetBindings();
+        return;
+    }
+
+    if (!IsGpuSpanAdmissible(address, offset, size,
+                             memory->IsValidMapping(address + offset, size))) {
+        ResetBindings();
         return;
     }
 
