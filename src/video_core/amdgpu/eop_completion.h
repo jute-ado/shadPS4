@@ -5,6 +5,8 @@
 
 #include <utility>
 
+#include "common/unique_function.h"
+
 namespace AmdGpu {
 
 template <typename Packet, typename WriteMemory, typename SignalInterrupt,
@@ -14,6 +16,18 @@ void PublishEop(Packet packet, WriteMemory&& write_memory, SignalInterrupt&& sig
     packet.SignalFence(std::forward<WriteMemory>(write_memory),
                        std::forward<SignalInterrupt>(signal_interrupt));
     std::forward<NotifyCompletion>(notify_completion)();
+}
+
+template <typename Packet, typename WriteMemory, typename SignalInterrupt,
+          typename DeferCompletion, typename NotifyCompletion>
+void PublishEopWithDeferredCompletion(Packet packet, WriteMemory&& write_memory,
+                                      SignalInterrupt&& signal_interrupt,
+                                      DeferCompletion&& defer_completion,
+                                      NotifyCompletion&& notify_completion) {
+    packet.SignalFence(std::forward<WriteMemory>(write_memory),
+                       std::forward<SignalInterrupt>(signal_interrupt));
+    std::forward<DeferCompletion>(defer_completion)(
+        Common::UniqueFunction<void>{std::forward<NotifyCompletion>(notify_completion)});
 }
 
 } // namespace AmdGpu
