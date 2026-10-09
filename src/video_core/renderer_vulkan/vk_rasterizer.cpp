@@ -199,7 +199,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
-
+    if (pipeline->GetStage(Shader::LogicalStage::Fragment).pgm_hash == 0xb1032a3fULL) {
+        scheduler.Finish();
+    }
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
@@ -247,7 +249,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline) {
         return;
     }
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
