@@ -97,15 +97,17 @@ void Liverpool::Process(std::stop_token stoken) {
         {
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(submit_cv, lk, stoken,
-                                [this] { return num_commands || num_submits || submit_done; });
+                                [this] {
+                                    return num_commands || num_submits ||
+                                           submission_completions.HasPendingBoundaries();
+                                });
         }
         if (stoken.stop_requested()) {
             break;
         }
 
-        VideoCore::StartCapture();
-
         curr_qid = -1;
+        submission_completions.DrainReadyBoundaries();
 
         while (num_submits || num_commands) {
             ProcessCommands();
@@ -114,35 +116,33 @@ void Liverpool::Process(std::stop_token stoken) {
 
             auto& queue = mapped_queues[curr_qid];
 
-            Task::Handle task{};
+            GpuQueue::Submission submission{};
             {
                 std::scoped_lock lock{queue.m_access};
                 if (queue.submits.empty()) {
                     continue;
                 }
-                task = queue.submits.front();
+                submission = queue.submits.front();
             }
+            const auto task = submission.handle;
             task.resume();
 
             if (task.done()) {
                 task.destroy();
 
-                std::scoped_lock lock{queue.m_access};
-                queue.submits.pop();
+                {
+                    std::scoped_lock lock{queue.m_access};
+                    queue.submits.pop();
+                }
 
                 --num_submits;
-                std::scoped_lock lock2{submit_mutex};
-                submit_cv.notify_all();
-            }
-        }
+                {
+                    std::scoped_lock lock2{submit_mutex};
+                    submit_cv.notify_all();
+                }
 
-        if (submit_done) {
-            VideoCore::EndCapture();
-            if (rasterizer) {
-                rasterizer->OnSubmit();
-                rasterizer->Flush();
+                submission_completions.CompleteSubmission(submission.sequence);
             }
-            submit_done = false;
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
@@ -215,8 +215,11 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_EXIT;
 }
 
-Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb) {
+Liverpool::Task Liverpool::ProcessGraphics(
+    std::span<const u32> dcb, std::span<const u32> ccb,
+    SubmissionCompletionQueue::Sequence submission_sequence, CmdBufferOwner owner) {
     FIBER_ENTER(dcb_task_name);
+    (void)owner;
 
     cblock.Reset();
 
@@ -830,7 +833,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
                 auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {},
+                    submission_sequence);
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
@@ -902,7 +906,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 }
 
 template <bool is_indirect>
-Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
+Liverpool::Task Liverpool::ProcessCompute(
+    std::span<const u32> acb, u32 vqid,
+    SubmissionCompletionQueue::Sequence submission_sequence) {
     FIBER_ENTER(acb_task_name[vqid]);
     auto& queue = asc_queues[{vqid}];
     const bool host_markers_enabled = rasterizer && EmulatorSettings.IsVkHostMarkersEnabled();
@@ -968,7 +974,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::IndirectBuffer: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
             auto task = ProcessCompute<true>(
-                {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid);
+                {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid,
+                submission_sequence);
             RESUME_ASC(task, vqid);
 
             while (!task.handle.done()) {
@@ -1175,50 +1182,21 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_EXIT;
 }
 
-Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb) {
-    auto& queue = mapped_queues[GfxQueueId];
-    ASSERT_MSG(queue.dcb_buffer.capacity() >= queue.dcb_buffer_offset + dcb.size(),
-               "dcb copy buffer out of reserved space");
-    ASSERT_MSG(queue.ccb_buffer.capacity() >= queue.ccb_buffer_offset + ccb.size(),
-               "ccb copy buffer out of reserved space");
-
-    queue.dcb_buffer.resize(
-        std::max(queue.dcb_buffer.size(), queue.dcb_buffer_offset + dcb.size()));
-    queue.ccb_buffer.resize(
-        std::max(queue.ccb_buffer.size(), queue.ccb_buffer_offset + ccb.size()));
-
-    const u32 prev_dcb_buffer_offset = queue.dcb_buffer_offset;
-    const u32 prev_ccb_buffer_offset = queue.ccb_buffer_offset;
-    if (!dcb.empty()) {
-        std::memcpy(queue.dcb_buffer.data() + queue.dcb_buffer_offset, dcb.data(),
-                    dcb.size_bytes());
-        queue.dcb_buffer_offset += dcb.size();
-        dcb = std::span<const u32>{queue.dcb_buffer.begin() + prev_dcb_buffer_offset,
-                                   queue.dcb_buffer.begin() + queue.dcb_buffer_offset};
-    }
-
-    if (!ccb.empty()) {
-        std::memcpy(queue.ccb_buffer.data() + queue.ccb_buffer_offset, ccb.data(),
-                    ccb.size_bytes());
-        queue.ccb_buffer_offset += ccb.size();
-        ccb = std::span<const u32>{queue.ccb_buffer.begin() + prev_ccb_buffer_offset,
-                                   queue.ccb_buffer.begin() + queue.ccb_buffer_offset};
-    }
-
-    return std::make_pair(dcb, ccb);
-}
-
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     auto& queue = mapped_queues[GfxQueueId];
 
+    CmdBufferOwner owner;
     if (EmulatorSettings.IsCopyGpuBuffers()) {
-        std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);
+        owner = OwnedCommandBuffers::Copy(dcb, ccb);
+        dcb = owner->Dcb();
+        ccb = owner->Ccb();
     }
 
-    auto task = ProcessGraphics(dcb, ccb);
+    const auto sequence = submission_completions.IssueSubmission();
+    auto task = ProcessGraphics(dcb, ccb, sequence, std::move(owner));
     {
         std::scoped_lock lock{queue.m_access};
-        queue.submits.emplace(task.handle);
+        queue.submits.push({task.handle, sequence});
     }
 
     std::scoped_lock lk{submit_mutex};
@@ -1231,15 +1209,31 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     auto& queue = mapped_queues[gnm_vqid];
 
     const auto vqid = gnm_vqid - 1;
-    const auto& task = ProcessCompute(acb, vqid);
+    const auto sequence = submission_completions.IssueSubmission();
+    const auto& task = ProcessCompute(acb, vqid, sequence);
     {
         std::scoped_lock lock{queue.m_access};
-        queue.submits.emplace(task.handle);
+        queue.submits.push({task.handle, sequence});
     }
 
     std::scoped_lock lk{submit_mutex};
     num_mapped_queues = std::max(num_mapped_queues, gnm_vqid + 1);
     ++num_submits;
+    submit_cv.notify_one();
+}
+
+void Liverpool::SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
+    submission_completions.EnqueueBoundary(
+        [this, completion = std::move(completion)]() mutable {
+            if (rasterizer) {
+                rasterizer->OnSubmit();
+                rasterizer->Flush();
+            }
+            if (completion) {
+                completion();
+            }
+        });
+    std::scoped_lock lk{submit_mutex};
     submit_cv.notify_one();
 }
 
