@@ -54,6 +54,22 @@ TEST_F(GcnTest, add_f32) {
     EXPECT_EQ(*result, 7.5f);
 }
 
+TEST_F(GcnTest, mad_f32_rounds_multiply_before_add) {
+    auto runner = gcn_test::Runner::instance().value();
+
+    const auto spirv = TranslateToSpirv(
+        VOP3A(OpcodeVOP3::V_MAD_F32, VOperand8::V0, SOperand9::V0, SOperand9::V1,
+              SOperand9::V2)
+            .Get());
+    const auto result = runner->run<u32>(
+        spirv, std::array{0x3f800001U, 0x3f800001U, 0xbf800002U});
+
+    ASSERT_TRUE(result.has_value());
+    // Rounded multiply: (1 + 2^-23)^2 rounds to 1 + 2^-22, then cancellation is exact.
+    // A fused multiply-add instead exposes the 2^-46 residue (0x28800000).
+    EXPECT_EQ(*result, 0U);
+}
+
 TEST_F(GcnTest, add_i32_carry_feeds_addc_u32) {
     auto runner = gcn_test::Runner::instance().value();
     const std::array<u64, 2> instructions{
