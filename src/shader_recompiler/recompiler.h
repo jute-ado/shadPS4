@@ -5,6 +5,7 @@
 
 #include "common/object_pool.h"
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
@@ -29,6 +30,6 @@ struct Pools {
 
 [[nodiscard]] IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools,
                                            Info& info, RuntimeInfo& runtime_info,
-                                           const Profile& profile);
+                                           const Profile& profile, SrtMemoryReader reader = {});
 
 } // namespace Shader

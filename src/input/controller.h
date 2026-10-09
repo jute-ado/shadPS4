@@ -16,6 +16,7 @@
 #include "core/libraries/system/userservice.h"
 #include "input/controller_axis.h"
 #include "input/controller_connection.h"
+#include "input/controller_lightbar.h"
 
 namespace Input {
 
@@ -28,9 +29,6 @@ struct TouchpadEntry {
     bool operator==(const TouchpadEntry&) const = default;
 };
 
-struct Colour {
-    u8 r, g, b;
-};
 static constexpr Input::Colour g_user_colours[4]{
     {0, 0, 255},   // blue
     {255, 0, 0},   // red

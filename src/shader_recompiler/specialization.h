@@ -4,6 +4,8 @@
 #pragma once
 
 #include <bitset>
+#include <utility>
+#include <vector>
 
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
@@ -30,12 +32,16 @@ struct BufferSpecialization {
     u32 num_format : 4;
     u32 index_stride : 2;
     u32 element_size : 2;
+    u32 add_tid_enable : 1;
+    bool is_coherent{};
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
 
     bool operator==(const BufferSpecialization& other) const {
         return stride == other.stride && is_storage == other.is_storage &&
+               is_coherent == other.is_coherent &&
                is_formatted == other.is_formatted && swizzle_enable == other.swizzle_enable &&
+               add_tid_enable == other.add_tid_enable &&
                (!is_formatted ||
                 (data_format == other.data_format && num_format == other.num_format &&
                  dst_select == other.dst_select && num_conversion == other.num_conversion)) &&
@@ -46,14 +52,20 @@ struct BufferSpecialization {
 
 struct ImageSpecialization {
     AmdGpu::ImageType type = AmdGpu::ImageType::Color2D;
-    bool is_integer = false;
+    AmdGpu::NumberClass number_class = AmdGpu::NumberClass::Float;
     bool is_storage = false;
     bool is_cube = false;
     bool is_srgb = false;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
-    // FIXME any pipeline cache changes needed?
+    // Atomic storage images encode an exact SPIR-V image format. NumberClass alone cannot
+    // distinguish formats such as R16f and R32f, which compile to different module types.
+    AmdGpu::DataFormat atomic_data_format = AmdGpu::DataFormat::FormatInvalid;
+    AmdGpu::NumberFormat atomic_number_format = AmdGpu::NumberFormat::Unorm;
     u32 num_bindings = 0;
+    u32 dynamic_descriptor_count = 0;
+    u32 dynamic_descriptor_stride_dw = 0;
+    bool requires_dynamic_oob_guard = false;
 
     bool operator==(const ImageSpecialization&) const = default;
 };
@@ -83,6 +95,10 @@ struct StageSpecialization {
 
     const Info* info{};
     RuntimeInfo runtime_info{};
+    // RuntimeInfo contains a view of the geometry copy shader. Keep the pointed-to words owned by
+    // the specialization so copies, moves, module retention and disk preloading cannot leave a
+    // dangling span.
+    std::vector<u32> owned_runtime_vs_copy;
     std::bitset<MaxStageResources> bitset{};
     std::optional<Gcn::FetchShaderData> fetch_shader_data{};
     boost::container::small_vector<VsAttribSpecialization, 32> vs_attribs;
@@ -91,41 +107,109 @@ struct StageSpecialization {
     boost::container::small_vector<FMaskSpecialization, 8> fmasks;
     boost::container::small_vector<SamplerSpecialization, 16> samplers;
     Backend::Bindings start{};
+    u32 user_data_mask{};
 
     StageSpecialization() = default;
+    StageSpecialization(const StageSpecialization& other) {
+        *this = other;
+    }
+    StageSpecialization& operator=(const StageSpecialization& other) {
+        if (this == &other) {
+            return *this;
+        }
+        info = other.info;
+        runtime_info = other.runtime_info;
+        owned_runtime_vs_copy = other.owned_runtime_vs_copy;
+        if (runtime_info.stage == Stage::Geometry && owned_runtime_vs_copy.empty() &&
+            !other.runtime_info.gs_info.vs_copy.empty()) {
+            owned_runtime_vs_copy.assign(other.runtime_info.gs_info.vs_copy.begin(),
+                                         other.runtime_info.gs_info.vs_copy.end());
+        }
+        bitset = other.bitset;
+        fetch_shader_data = other.fetch_shader_data;
+        vs_attribs = other.vs_attribs;
+        buffers = other.buffers;
+        images = other.images;
+        fmasks = other.fmasks;
+        samplers = other.samplers;
+        start = other.start;
+        user_data_mask = other.user_data_mask;
+        RebindOwnedRuntimeInfo();
+        return *this;
+    }
+    StageSpecialization(StageSpecialization&& other) {
+        *this = std::move(other);
+    }
+    StageSpecialization& operator=(StageSpecialization&& other) {
+        if (this == &other) {
+            return *this;
+        }
+        info = other.info;
+        runtime_info = other.runtime_info;
+        if (runtime_info.stage == Stage::Geometry && other.owned_runtime_vs_copy.empty() &&
+            !other.runtime_info.gs_info.vs_copy.empty()) {
+            owned_runtime_vs_copy.assign(other.runtime_info.gs_info.vs_copy.begin(),
+                                         other.runtime_info.gs_info.vs_copy.end());
+        } else {
+            owned_runtime_vs_copy = std::move(other.owned_runtime_vs_copy);
+        }
+        bitset = other.bitset;
+        fetch_shader_data = std::move(other.fetch_shader_data);
+        vs_attribs = std::move(other.vs_attribs);
+        buffers = std::move(other.buffers);
+        images = std::move(other.images);
+        fmasks = std::move(other.fmasks);
+        samplers = std::move(other.samplers);
+        start = other.start;
+        user_data_mask = other.user_data_mask;
+        RebindOwnedRuntimeInfo();
+        return *this;
+    }
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
-                        Backend::Bindings start_)
-        : info{&info_}, runtime_info{runtime_info_}, start{start_} {
-        fetch_shader_data = Gcn::ParseFetchShader(info_);
+                        Backend::Bindings start_, SrtMemoryReader reader = {})
+        : info{&info_}, runtime_info{runtime_info_}, start{start_},
+          user_data_mask{info_.ud_mask.mask} {
+        OwnRuntimeInfoViews();
+        fetch_shader_data = Gcn::ParseFetchShader(info_, reader);
         if (info_.stage == Stage::Vertex && fetch_shader_data) {
             // Specialize shader on VS input number types to follow spec.
-            ForEachSharp(vs_attribs, fetch_shader_data->attributes,
-                         [this](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                             using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
-                             if (const auto step_rate = desc.GetStepRate();
-                                 step_rate != InstanceIdType::None) {
-                                 spec.divisor = step_rate == InstanceIdType::OverStepRate0
-                                                    ? runtime_info.vs_info.step_rate_0
-                                                    : (step_rate == InstanceIdType::OverStepRate1
-                                                           ? runtime_info.vs_info.step_rate_1
-                                                           : 1);
-                             }
-                             spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
-                         });
+            ForEachSharp(
+                vs_attribs, fetch_shader_data->attributes,
+                [this](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                    using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
+                    if (const auto step_rate = desc.GetStepRate();
+                        step_rate != InstanceIdType::None) {
+                        spec.divisor = step_rate == InstanceIdType::OverStepRate0
+                                           ? runtime_info.vs_info.step_rate_0
+                                           : (step_rate == InstanceIdType::OverStepRate1
+                                                  ? runtime_info.vs_info.step_rate_1
+                                                  : 1);
+                    }
+                    spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
+                    spec.dst_select = sharp.DstSelect();
+                },
+                reader);
         }
         u32 binding{};
         ForEachSharp(binding, buffers, info->buffers,
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                          spec.stride = sharp.GetStride();
                          spec.is_storage = desc.IsStorage(sharp);
+                         spec.is_coherent = spec.is_storage && desc.IsCoherent(sharp);
                          spec.is_formatted = desc.is_formatted;
                          spec.swizzle_enable = sharp.swizzle_enable;
+                         spec.add_tid_enable = sharp.add_tid_enable;
                          if (spec.is_formatted) {
                              spec.data_format = static_cast<u32>(sharp.GetDataFmt());
                              spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
                              spec.dst_select = sharp.DstSelect();
-                             spec.num_conversion = sharp.GetNumberConversion();
+                             // Match production lowering: instruction formats override this
+                             // conversion, and an invalid resource lowers to zero/no-op.
+                             spec.num_conversion =
+                                 desc.is_instruction_formatted_only ||
+                                         sharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid
+                                     ? AmdGpu::NumberConversion::None
+                                     : sharp.GetNumberConversion();
                          }
                          if (spec.swizzle_enable) {
                              spec.index_stride = sharp.index_stride;
@@ -135,7 +219,7 @@ struct StageSpecialization {
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.type = sharp.GetViewType(desc.is_array);
-                         spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+                         spec.number_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
                          spec.is_storage = desc.is_written;
                          spec.is_cube = sharp.IsCube();
                          if (spec.is_storage) {
@@ -144,7 +228,14 @@ struct StageSpecialization {
                              spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
                          }
                          spec.num_conversion = sharp.GetNumberConversion();
+                         if (desc.is_atomic) {
+                             spec.atomic_data_format = sharp.GetDataFmt();
+                             spec.atomic_number_format = sharp.GetNumberFmt();
+                         }
                          spec.num_bindings = desc.NumBindings(*info);
+                         spec.dynamic_descriptor_count = desc.dynamic_descriptor_count;
+                         spec.dynamic_descriptor_stride_dw = desc.dynamic_descriptor_stride_dw;
+                         spec.requires_dynamic_oob_guard = desc.requires_dynamic_oob_guard;
                      });
         ForEachSharp(binding, fmasks, info->fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
@@ -161,15 +252,21 @@ struct StageSpecialization {
         if (info->l_stage == LogicalStage::TessellationControl ||
             info->l_stage == LogicalStage::TessellationEval) {
             TessellationDataConstantBuffer tess_constants{};
-            info->ReadTessConstantBuffer(tess_constants);
+            info->ReadTessConstantBuffer(tess_constants, reader);
             runtime_info.InitFromTessConstants(tess_constants);
         }
     }
 
-    void ForEachSharp(auto& spec_list, auto& desc_list, auto&& func) {
+    void ForEachSharp(auto& spec_list, auto& desc_list, auto&& func, SrtMemoryReader reader = {}) {
         for (const auto& desc : desc_list) {
             auto& spec = spec_list.emplace_back();
-            const auto sharp = desc.GetSharp(*info);
+            const auto sharp = [&] {
+                if constexpr (requires { desc.GetSharp(*info, reader); }) {
+                    return desc.GetSharp(*info, reader);
+                } else {
+                    return desc.GetSharp(*info);
+                }
+            }();
             if (!sharp) {
                 continue;
             }
@@ -181,11 +278,13 @@ struct StageSpecialization {
         for (const auto& desc : desc_list) {
             auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
-            if (!sharp) {
-                binding++;
-                continue;
+            if (sharp) {
+                bitset.set(binding);
             }
-            bitset.set(binding++);
+            ++binding;
+            // Descriptor layout and format fields can affect emitted SPIR-V even when the current
+            // guest binding is null. Normalize them from the descriptor/default SHARP while the
+            // bitset retains the observed runtime boundness for diagnostics and persistence only.
             func(spec, desc, sharp);
         }
     }
@@ -195,60 +294,70 @@ struct StageSpecialization {
     }
 
     bool operator==(const StageSpecialization& other) const {
-        if (!Valid()) {
+        if (!Valid() || !other.Valid()) {
             return false;
         }
-
-        if (vs_attribs != other.vs_attribs) {
+        if (vs_attribs != other.vs_attribs || runtime_info != other.runtime_info ||
+            fetch_shader_data != other.fetch_shader_data || fmasks != other.fmasks ||
+            user_data_mask != other.user_data_mask || buffers != other.buffers ||
+            images != other.images || samplers != other.samplers) {
             return false;
         }
-
-        if (runtime_info != other.runtime_info) {
+        if ((!buffers.empty() || !images.empty() || !samplers.empty()) &&
+            start.unified != other.start.unified) {
             return false;
         }
-
-        if (fetch_shader_data != other.fetch_shader_data) {
+        if (!buffers.empty() && start.buffer != other.start.buffer) {
             return false;
         }
-
-        if (fmasks != other.fmasks) {
-            return false;
-        }
-
-        // For VS which only generates geometry and doesn't have any inputs, its start
-        // bindings still may change as they depend on previously processed FS. The check below
-        // handles this case and prevents generation of redundant permutations. This is also safe
-        // for other types of shaders with no bindings.
-        if (bitset.none() && other.bitset.none()) {
-            return true;
-        }
-
-        if (start != other.start) {
-            return false;
-        }
-
-        u32 binding{};
-        for (u32 i = 0; i < buffers.size(); i++) {
-            if (other.bitset[binding++] && buffers[i] != other.buffers[i]) {
-                return false;
-            }
-        }
-        for (u32 i = 0; i < images.size(); i++) {
-            if (other.bitset[binding++] && images[i] != other.images[i]) {
-                return false;
-            }
-        }
-
-        for (u32 i = 0; i < samplers.size(); i++) {
-            if (samplers[i] != other.samplers[i]) {
-                return false;
-            }
-        }
-        return true;
+        return user_data_mask == 0 || start.user_data == other.start.user_data;
     }
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+
+    void RebindOwnedRuntimeInfo() noexcept {
+        if (runtime_info.stage == Stage::Geometry) {
+            runtime_info.gs_info.vs_copy = owned_runtime_vs_copy;
+        }
+    }
+
+private:
+    void OwnRuntimeInfoViews() {
+        if (runtime_info.stage != Stage::Geometry || runtime_info.gs_info.vs_copy.empty()) {
+            return;
+        }
+        owned_runtime_vs_copy.assign(runtime_info.gs_info.vs_copy.begin(),
+                                     runtime_info.gs_info.vs_copy.end());
+        RebindOwnedRuntimeInfo();
+    }
 };
+
+[[nodiscard]] inline std::optional<StageSpecialization> TryCreateStageSpecialization(
+    const Info& info, RuntimeInfo runtime_info, const Profile& profile, Backend::Bindings start,
+    SrtMemoryReader reader = {}) {
+    // Inspect the same owned descriptor snapshot used by the constructor. A stale aggregate
+    // cache probe may fail this check while a fresh translation can still succeed (for example
+    // when the current instruction, rather than the descriptor, supplies a buffer format).
+    for (const auto& desc : info.buffers) {
+        if (!desc.is_formatted || desc.is_instruction_formatted_only) {
+            continue;
+        }
+        const auto sharp = desc.GetSharp(info);
+        if (sharp.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid &&
+            !AmdGpu::TryMapNumberConversion(AmdGpu::NumberFormat(sharp.num_format),
+                                            AmdGpu::DataFormat(sharp.data_format))) {
+            return std::nullopt;
+        }
+    }
+    for (const auto& desc : info.images) {
+        const auto sharp = desc.GetSharp(info);
+        if (!AmdGpu::TryMapNumberConversion(AmdGpu::NumberFormat(sharp.num_format),
+                                            AmdGpu::DataFormat(sharp.data_format))) {
+            return std::nullopt;
+        }
+    }
+    return StageSpecialization{info, runtime_info, profile, start, reader};
+}
 
 } // namespace Shader
