@@ -850,6 +850,10 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/aerolib/aerolib.h
          src/core/address_space.cpp
          src/core/address_space.h
+         src/core/execution_stack_registry.cpp
+         src/core/execution_stack_registry.h
+         src/core/windows_exception_stack.cpp
+         src/core/windows_exception_stack.h
          src/core/windows_protection_snapshot.cpp
          src/core/windows_protection_snapshot.h
          src/core/file_sys/devices/base_device.cpp
@@ -898,6 +902,10 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/ipc/ipc.cpp
          src/core/ipc/ipc.h
          src/core/ipc/ipc_capabilities.h
+         src/core/ipc/presented_frame_input_queue.h
+         src/core/ipc/heap_size_summary.h
+         src/core/ipc/windows_heap_summary.cpp
+         src/core/ipc/windows_heap_summary.h
          src/core/test_lab_probe.cpp
          src/core/test_lab_probe.h
          src/core/loader/dwarf.cpp
@@ -1039,6 +1047,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
                       src/shader_recompiler/ir/passes/lower_fp64_to_fp32.cpp
                       src/shader_recompiler/ir/passes/lower_user_clip_planes.cpp
                       src/shader_recompiler/ir/passes/readlane_elimination_pass.cpp
+                      src/shader_recompiler/ir/passes/readlane_workgroup_pass.cpp
                       src/shader_recompiler/ir/passes/resource_tracking_pass.cpp
                       src/shader_recompiler/ir/passes/ring_access_elimination.cpp
                       src/shader_recompiler/ir/passes/shader_info_collection_pass.cpp
@@ -1122,6 +1131,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_pipeline_common.h
                src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
                src/video_core/renderer_vulkan/vk_pipeline_serialization.h
+               src/video_core/renderer_vulkan/vk_occlusion_query.cpp
+               src/video_core/renderer_vulkan/vk_occlusion_query.h
                src/video_core/renderer_vulkan/vk_platform.cpp
                src/video_core/renderer_vulkan/vk_platform.h
                src/video_core/renderer_vulkan/presented_frame_timing_trace.h

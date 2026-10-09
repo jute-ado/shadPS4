@@ -122,24 +122,23 @@ void LoadRenderDoc(const bool allow_offline_loading) {
 }
 
 void TriggerCapture() {
-    (void)capture_state.Trigger();
-}
-
-bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
-        return false;
+    if (!rdoc_api || !capture_state.TryBeginCapture()) {
+        return;
     }
 
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    rdoc_api->StartFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
-    return true;
+    // Start immediately so the capture includes game submissions produced before the
+    // presenter's final blit. Null handles ask RenderDoc to capture all active APIs/windows.
+    rdoc_api->StartFrameCapture(nullptr, nullptr);
+    LOG_WARNING(Common, "RenderDoc capture started at trigger time");
 }
 
-void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
+bool ConsumeCaptureForPresentedFrame(const bool is_reusing_frame) {
+    return rdoc_api && capture_state.ConsumeCaptureForPresentedFrame(is_reusing_frame);
+}
+
+void EndPresentedFrameCapture() {
     ASSERT(rdoc_api);
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
+    const u32 result = rdoc_api->EndFrameCapture(nullptr, nullptr);
     LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
 }
 

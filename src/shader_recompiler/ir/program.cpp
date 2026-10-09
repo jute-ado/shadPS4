@@ -19,7 +19,18 @@ namespace Shader::IR {
 void DumpProgram(const Program& program, const Info& info, const std::string& type) {
     using namespace Common::FS;
 
-    if (!EmulatorSettings.IsDumpShaders()) {
+    // TEMP Shadow diagnostic: retain IR only for the opaque-scene and list-building shaders.
+    if (!EmulatorSettings.IsDumpShaders() && info.pgm_hash != 0x675450f7 &&
+        info.pgm_hash != 0x87cf9b8a && info.pgm_hash != 0x79704cba &&
+        info.pgm_hash != 0x729c541e && info.pgm_hash != 0x291dbcd0 &&
+        info.pgm_hash != 0xa402ddac && info.pgm_hash != 0x0654a5a1 &&
+        info.pgm_hash != 0x617e09a3 && info.pgm_hash != 0xc61ae8f9 &&
+        info.pgm_hash != 0xef6bb4ef && info.pgm_hash != 0xa9027daa &&
+        info.pgm_hash != 0x0f76366e && info.pgm_hash != 0x944260e7 &&
+        info.pgm_hash != 0x93440267 && info.pgm_hash != 0x75aad501 &&
+        info.pgm_hash != 0xb33e9db6 && info.pgm_hash != 0x48c4e8ab &&
+        info.pgm_hash != 0xa5a21e78 && info.pgm_hash != 0x4db42a1a &&
+        info.pgm_hash != 0x862e4da8) {
         return;
     }
 

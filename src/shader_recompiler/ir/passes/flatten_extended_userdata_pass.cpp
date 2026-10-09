@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <unordered_map>
+#include <mutex>
 #include <boost/container/flat_map.hpp>
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
@@ -17,9 +18,11 @@
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/opcodes.h"
 #include "shader_recompiler/ir/passes/srt.h"
+#include "shader_recompiler/ir/passes/srt_walker_code_range.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reg.h"
 #include "shader_recompiler/ir/srt_gvn_table.h"
+#include "shader_recompiler/ir/passes/srt_pointer_use_policy.h"
 #include "shader_recompiler/ir/value.h"
 
 #ifdef ARCH_X86_64
@@ -27,7 +30,11 @@
 using namespace Xbyak::util;
 
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
-static const u8* g_srt_codegen_start = nullptr;
+static Shader::SrtWalkerCodeRange g_srt_walker_code_range;
+
+namespace {
+void RegisterSrtWalkerCodeRange(const u8* code, size_t size);
+}
 
 namespace Shader {
 
@@ -35,6 +42,7 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
+    RegisterSrtWalkerCodeRange(reinterpret_cast<const u8*>(func_addr), size);
     return func_addr;
 }
 
@@ -68,15 +76,13 @@ static void DumpSrtProgram(const Shader::Info& info, const u8* code, size_t code
 }
 
 static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
-    // Only handle if the fault address is within the SRT code range
-    const u8* code_start = g_srt_codegen_start;
-    const u8* code_end = code_start + g_srt_codegen.getSize();
     const void* code = Common::GetRip(context);
-    if (code < code_start || code >= code_end) {
+    if (!g_srt_walker_code_range.Contains(reinterpret_cast<std::uintptr_t>(code))) {
         return false; // Not in SRT code range
     }
 
-    // Patch instruction to zero register
+    // Recover this invocation without modifying the cached walker. Permanently patching the
+    // generated instruction would also discard valid pointers on every later invocation.
     ZydisDecodedInstruction instruction;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
     ZyanStatus status = Common::Decoder::Instance()->decodeInstruction(instruction, operands,
@@ -86,44 +92,43 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
            operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
            operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY);
 
-    size_t len = instruction.length;
-    const size_t patch_size = 3;
-    u8* code_patch = const_cast<u8*>(reinterpret_cast<const u8*>(code));
-
     // We can only encounter rdi or r10d as the first operand in a
     // fault memory access for SRT walker.
     switch (operands[0].reg.value) {
     case ZYDIS_REGISTER_RDI:
-        // mov rdi, [rdi + (off_dw << 2)] -> xor rdi, rdi
-        code_patch[0] = 0x48;
-        code_patch[1] = 0x31;
-        code_patch[2] = 0xFF;
+        Common::SetX64GprToZero(context, Common::X64Gpr::Rdi);
         break;
     case ZYDIS_REGISTER_R10D:
-        // mov r10d, [rdi + (off_dw << 2)] -> xor r10d, r10d
-        code_patch[0] = 0x45;
-        code_patch[1] = 0x31;
-        code_patch[2] = 0xD2;
+        Common::SetX64GprToZero(context, Common::X64Gpr::R10);
         break;
     default:
         UNREACHABLE_MSG("Unsupported register for SRT walker patch");
         return false;
     }
 
-    // Fill nops
-    memset(code_patch + patch_size, 0x90, len - patch_size);
-
-    LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}", code,
-                fault_address);
+    Common::IncrementRip(context, instruction.length);
+    LOG_DEBUG(Render_Recompiler, "Recovered SRT walker load at {}, fault address {}", code,
+              fault_address);
 
     return true;
+}
+
+static void RegisterSrtWalkerCodeRange(const u8* code, size_t size) {
+    static std::once_flag register_handler_once;
+    std::call_once(register_handler_once, [] {
+        // Run after the memory invalidation handler so ordinary guest faults get first refusal.
+        constexpr u32 priority = 1;
+        Core::Signals::Instance()->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
+    });
+    g_srt_walker_code_range.Include(reinterpret_cast<std::uintptr_t>(code), size);
 }
 
 using namespace Shader;
 
 struct PassInfo {
     // map offset to inst
-    using PtrUserList = boost::container::flat_map<u32, Shader::IR::Inst*>;
+    using PtrUserList = boost::container::flat_map<
+        u32, boost::container::small_vector<Shader::IR::Inst*, 2>>;
 
     Optimization::SrtGvnTable gvn_table;
     // keys are GetUserData or ReadConst instructions that are used as pointers
@@ -181,18 +186,22 @@ static void VisitPointer(u32 off_dw, IR::Inst* subtree, PassInfo& pass_info,
     // flattened buffer.
     // TODO src and dst are contiguous. Optimize with wider loads/stores
     // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
-    for (auto [src_off_dw, use] : *use_list) {
+    for (auto& [src_off_dw, uses] : *use_list) {
         c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
         c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
 
-        use->SetFlags<u32>(pass_info.dst_off_dw);
+        for (auto* use : uses) {
+            use->SetFlags<u32>(pass_info.dst_off_dw);
+        }
         pass_info.dst_off_dw++;
     }
 
     // Then visit any children used as pointers
-    for (const auto [src_off_dw, use] : *use_list) {
-        if (pass_info.GetUsesAsPointer(use)) {
-            VisitPointer(src_off_dw, use, pass_info, c);
+    for (const auto& [src_off_dw, uses] : *use_list) {
+        for (auto* use : uses) {
+            if (pass_info.GetUsesAsPointer(use)) {
+                VisitPointer(src_off_dw, use, pass_info, c);
+            }
         }
     }
 
@@ -204,15 +213,6 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
     if (pass_info.srt_roots.empty()) {
         return;
-    }
-
-    // Register the signal handler for SRT walker, if not already registered
-    if (g_srt_codegen_start == nullptr) {
-        g_srt_codegen_start = c.getCurr();
-        auto* signals = Core::Signals::Instance();
-        // Call after the memory invalidation handler
-        constexpr u32 priority = 1;
-        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
     }
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
@@ -228,6 +228,8 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
     info.srt_info.walker_func_size =
         c.getCurr() - reinterpret_cast<const u8*>(info.srt_info.walker_func);
+    RegisterSrtWalkerCodeRange(reinterpret_cast<const u8*>(info.srt_info.walker_func),
+                               info.srt_info.walker_func_size);
 
     if (EmulatorSettings.IsDumpShaders()) {
         DumpSrtProgram(info, reinterpret_cast<const u8*>(info.srt_info.walker_func),
@@ -246,12 +248,14 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
     // traverse at end and assign offsets to duplicate readconsts, using
     // vn_to_inst as the source
     boost::container::small_vector<IR::Inst*, 32> all_readconsts;
+    boost::container::small_vector<IR::Inst*, 32> all_pointer_reads;
 
     for (auto r_it = program.post_order_blocks.rbegin(); r_it != program.post_order_blocks.rend();
          r_it++) {
         IR::Block* block = *r_it;
         for (IR::Inst& inst : *block) {
             if (inst.GetOpcode() == IR::Opcode::ReadConst) {
+                all_pointer_reads.push_back(&inst);
                 if (!inst.Arg(1).IsImmediate()) {
                     LOG_WARNING(Render_Recompiler, "ReadConst has non-immediate offset");
                     continue;
@@ -288,7 +292,7 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
                     pass_info.pointer_uses.try_emplace(ptr_lo, PassInfo::PtrUserList{});
                 PassInfo::PtrUserList& user_list = ptr_uses_kv.first->second;
 
-                user_list[inst.Arg(1).U32()] = &inst;
+                Optimization::AddSrtPointerUse(user_list, inst.Arg(1).U32(), &inst);
 
                 if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
                     IR::ScalarReg ud_reg = ptr_lo->Arg(0).ScalarReg();
@@ -305,6 +309,86 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
         IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
         readconst->SetFlags<u32>(original->Flags<u32>());
+    }
+
+    if (info.pgm_hash == 0xf76366e || info.pgm_hash == 0x944260e7 ||
+        info.pgm_hash == 0x93440267 || info.pgm_hash == 0xa5a21e78 ||
+        info.pgm_hash == 0x4db42a1a || info.pgm_hash == 0x862e4da8) {
+        const auto pointer_source = [](IR::Inst* inst) -> std::optional<IR::Inst*> {
+            if (inst->GetOpcode() == IR::Opcode::GetUserData ||
+                inst->GetOpcode() == IR::Opcode::ReadConst) {
+                return inst;
+            }
+            return std::nullopt;
+        };
+        for (IR::Inst* readconst : all_readconsts) {
+            IR::Inst* composite = readconst->Arg(0).InstRecursive();
+            const auto base = IR::BreadthFirstSearch(composite->Arg(0), pointer_source);
+            const bool base_is_readconst =
+                base && base.value()->GetOpcode() == IR::Opcode::ReadConst;
+            const u32 base_index = !base ? ~0U
+                                   : base_is_readconst
+                                       ? base.value()->Flags<u32>()
+                                       : static_cast<u32>(base.value()->Arg(0).ScalarReg());
+            LOG_INFO(Render_Recompiler,
+                     "TEMP Shadow SRT shader={:#x} flat_dw={} src_dw={} base_kind={} base_index={}",
+                     info.pgm_hash, readconst->Flags<u32>(), readconst->Arg(1).U32(),
+                     base_is_readconst ? "readconst" : "userdata", base_index);
+        }
+    }
+
+    const auto pointer_source = [](IR::Inst* inst) -> std::optional<IR::Inst*> {
+        if (inst->GetOpcode() == IR::Opcode::GetUserData ||
+            inst->GetOpcode() == IR::Opcode::ReadConst) {
+            return inst;
+        }
+        return std::nullopt;
+    };
+    for (IR::Inst* readconst : all_pointer_reads) {
+        IR::Inst* composite = readconst->Arg(0).InstRecursive();
+        const auto base0 = IR::BreadthFirstSearch(composite->Arg(0), pointer_source);
+        const auto base1 = IR::BreadthFirstSearch(composite->Arg(1), pointer_source);
+        if (!base0 || !base1 || base0.value()->GetOpcode() != base1.value()->GetOpcode()) {
+            continue;
+        }
+        u32 pointer_lo_flat_index{};
+        if (base0.value()->GetOpcode() == IR::Opcode::GetUserData) {
+            const u32 lo = static_cast<u32>(base0.value()->Arg(0).ScalarReg());
+            const u32 hi = static_cast<u32>(base1.value()->Arg(0).ScalarReg());
+            if (lo + 1U != hi || hi >= NUM_USER_DATA_REGS) {
+                continue;
+            }
+            pointer_lo_flat_index = lo;
+        } else {
+            const u32 lo = base0.value()->Flags<u32>();
+            const u32 hi = base1.value()->Flags<u32>();
+            if (lo + 1U != hi) {
+                continue;
+            }
+            pointer_lo_flat_index = lo;
+        }
+        const bool dynamic_offset = !readconst->Arg(1).IsImmediate();
+        const u32 offset = dynamic_offset ? 0U : readconst->Arg(1).U32();
+        auto begin = info.readconst_pointer_roots.begin();
+        auto end = begin + info.num_readconst_pointer_roots;
+        auto root = std::ranges::find(begin, end, pointer_lo_flat_index,
+                                     &ReadConstPointerRoot::pointer_lo_flat_index);
+        if (root == end) {
+            if (info.num_readconst_pointer_roots == info.readconst_pointer_roots.size()) {
+                info.num_readconst_pointer_roots = 0;
+                info.readconst_pointer_roots_overflow = true;
+                break;
+            }
+            root = info.readconst_pointer_roots.begin() + info.num_readconst_pointer_roots++;
+            *root = {.pointer_lo_flat_index = pointer_lo_flat_index,
+                     .minimum_offset_dwords = offset,
+                     .maximum_offset_dwords = offset,
+                     .dynamic_offset = dynamic_offset};
+        } else {
+            root->minimum_offset_dwords = std::min(root->minimum_offset_dwords, offset);
+            root->maximum_offset_dwords = std::max(root->maximum_offset_dwords, offset);
+            root->dynamic_offset |= dynamic_offset;
+        }
     }
 
     info.RefreshFlatBuf();

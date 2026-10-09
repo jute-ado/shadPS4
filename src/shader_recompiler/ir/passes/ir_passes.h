@@ -19,6 +19,7 @@ void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);
+void ReadLaneWorkgroupPass(IR::Program& program, RuntimeInfo& runtime_info, const Profile& profile);
 void ResourceTrackingPass(IR::Program& program, const Profile& profile);
 void BufferAccessRangePass(IR::Program& program);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);

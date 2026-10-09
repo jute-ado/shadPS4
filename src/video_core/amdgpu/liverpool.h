@@ -21,6 +21,7 @@
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/owned_command_buffers.h"
 #include "video_core/amdgpu/regs.h"
+#include "video_core/amdgpu/predication_policy.h"
 #include "video_core/amdgpu/submission_completion_queue.h"
 
 namespace Vulkan {
@@ -193,6 +194,7 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    StaticPredicationState predication;
     EopFlipTracker eop_flip_tracker;
     struct ConstantEngine {
         void Reset() {

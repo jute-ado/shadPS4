@@ -3,11 +3,14 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <utility>
 #include <vector>
 #include "common/types.h"
+#include "video_core/buffer_cache/buffer_barrier_policy.h"
+#include "video_core/buffer_cache/buffer_write_range_tracker.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -116,32 +119,49 @@ public:
         return lru_id;
     }
 
-    vk::Buffer Handle() const noexcept {
-        return buffer;
-    }
+    vk::Buffer Handle() const noexcept;
 
-    vk::DeviceAddress BufferDeviceAddress() const noexcept {
-        ASSERT_MSG(buffer.bda_addr != 0, "Can't get BDA from a non BDA buffer");
-        return buffer.bda_addr;
+    vk::DeviceAddress BufferDeviceAddress() const noexcept;
+
+    [[nodiscard]] u64 LastUseTick() const noexcept {
+        return last_use_tick;
     }
 
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
                                                        vk::PipelineStageFlagBits2 dst_stage,
-                                                       u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
+                                                       u32 offset = 0, u64 requested_size = 0) {
+        constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
+                                     vk::AccessFlagBits2::eShaderWrite |
+                                     vk::AccessFlagBits2::eMemoryWrite;
+        const bool source_access_writes = static_cast<bool>(access_mask & write_flags);
+        const bool destination_access_writes = static_cast<bool>(dst_acess_mask & write_flags);
+        if (offset >= size_bytes) {
+            return {};
+        }
+        const u64 barrier_size =
+            requested_size == 0 ? size_bytes - offset
+                                : std::min<u64>(requested_size, size_bytes - offset);
+        const bool overlaps_pending_write =
+            pending_write_ranges.Transition(destination_access_writes, offset, barrier_size);
+        if (!NeedsBufferBarrier(dst_acess_mask == access_mask, stage == dst_stage,
+                                source_access_writes) &&
+            !overlaps_pending_write) {
             return {};
         }
 
-        DEBUG_ASSERT(offset < size_bytes);
+        const vk::PipelineStageFlags2 source_stage =
+            overlaps_pending_write ? vk::PipelineStageFlagBits2::eAllCommands : stage;
+        const vk::AccessFlags2 source_access =
+            overlaps_pending_write ? access_mask | vk::AccessFlagBits2::eMemoryWrite : access_mask;
 
         const auto barrier = vk::BufferMemoryBarrier2{
-            .srcStageMask = stage,
-            .srcAccessMask = access_mask,
+            .srcStageMask = source_stage,
+            .srcAccessMask = source_access,
             .dstStageMask = dst_stage,
             .dstAccessMask = dst_acess_mask,
-            .buffer = buffer.buffer,
+            .buffer = Handle(),
             .offset = offset,
-            .size = size_bytes - offset,
+            .size = barrier_size,
         };
         access_mask = dst_acess_mask;
         stage = dst_stage;
@@ -158,6 +178,8 @@ public:
     int stream_score = 0;
     size_t size_bytes = 0;
     u64 lru_id = 0;
+    mutable u64 last_use_tick = 0;
+    BufferWriteRangeTracker pending_write_ranges;
     std::span<u8> mapped_data;
     const Vulkan::Instance* instance;
     Vulkan::Scheduler* scheduler;

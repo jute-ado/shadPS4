@@ -7,11 +7,18 @@
 
 namespace Common {
 
+enum class X64Gpr {
+    Rdi,
+    R10,
+};
+
 void* GetXmmPointer(void* ctx, u8 index);
 
 void* GetRip(void* ctx);
 
 void IncrementRip(void* ctx, u64 length);
+
+void SetX64GprToZero(void* ctx, X64Gpr reg);
 
 bool IsWriteError(void* ctx);
 

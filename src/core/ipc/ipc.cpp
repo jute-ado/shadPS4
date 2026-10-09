@@ -3,6 +3,7 @@
 
 #include "ipc.h"
 #include "ipc_capabilities.h"
+#include "windows_heap_summary.h"
 
 #include <iostream>
 #include <string>
@@ -56,6 +57,8 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - ENABLE_SCREENSHOT: enables SCREENSHOT and SCREENSHOT_WITH_OVERLAYS commands
  *   - ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
  *   - ENABLE_GAMEPAD
+ *   - ENABLE_PRESENTED_FRAME_GAMEPAD: schedules gamepad input against presented frames
+ *   - ENABLE_PRESENTED_FRAME_SCREENSHOT: schedules overlay screenshots against presented frames
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -70,10 +73,13 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
  *   - SCREENSHOT: capture the next game-only frame
  *   - SCREENSHOT_WITH_OVERLAYS: capture the next presented frame, including overlays
+ *   - SCREENSHOT_WITH_OVERLAYS_AT_PRESENTED_FRAME(frame)
  *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc when loaded
  *   - GAMEPAD_BUTTON
  *     - button: player-one button name
  *     - pressed: 1 to press, 0 to release
+ *   - GAMEPAD_BUTTON_AT_PRESENTED_FRAME(frame, button, pressed)
+ *   - GAMEPAD_AXIS_AT_PRESENTED_FRAME(frame, axis, value)
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -96,6 +102,7 @@ void IPC::Init() {
         Common::SetCurrentThreadName("IPC Read thread");
         this->InputLoop();
     });
+    Core::Ipc::MaybeStartWindowsHeapSummary(heap_summary_thread);
 
     std::cerr << ";#IPC_ENABLED\n";
     for (const auto capability : Core::Ipc::IpcCapabilities(VideoCore::IsRenderDocLoaded())) {
@@ -118,6 +125,44 @@ void IPC::SendRestart(const std::vector<std::string>& args) {
         std::cerr << ";" << arg << "\n";
     }
     std::cerr.flush();
+}
+
+namespace {
+
+void PushPresentedFrameInput(const Core::Ipc::PresentedFrameInput& input) {
+    if (input.type == Core::Ipc::PresentedFrameInputType::ScreenshotWithOverlays) {
+        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays,
+                                     VideoCore::ScreenshotRequestOrigin::Automation);
+        return;
+    }
+    SDL_Event event;
+    SDL_memset(&event, 0, sizeof(event));
+    event.type = input.type == Core::Ipc::PresentedFrameInputType::Button
+                     ? SDL_EVENT_INJECT_GAMEPAD_BUTTON
+                     : SDL_EVENT_INJECT_GAMEPAD_AXIS;
+    event.user.code = static_cast<Sint32>(input.code);
+    event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(input.value));
+    SDL_PushEvent(&event);
+}
+
+} // namespace
+
+void IPC::BeforePresentedFrame() {
+    if (!enabled) {
+        return;
+    }
+    for (const auto& screenshot : presented_frame_screenshots.Advance()) {
+        PushPresentedFrameInput(screenshot);
+    }
+}
+
+void IPC::AfterPresentedFrame() {
+    if (!enabled) {
+        return;
+    }
+    for (const auto& input : presented_frame_inputs.Advance()) {
+        PushPresentedFrameInput(input);
+    }
 }
 
 void IPC::InputLoop() {
@@ -176,6 +221,15 @@ void IPC::InputLoop() {
         } else if (cmd == "SCREENSHOT_WITH_OVERLAYS") {
             VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays,
                                          VideoCore::ScreenshotRequestOrigin::Automation);
+        } else if (cmd == "SCREENSHOT_WITH_OVERLAYS_AT_PRESENTED_FRAME") {
+            const u64 frame = next_u64();
+            if (!presented_frame_screenshots.Push({
+                    .frame = frame,
+                    .type = Core::Ipc::PresentedFrameInputType::ScreenshotWithOverlays,
+                })) {
+                std::cerr << ";INVALID PRESENTED FRAME SCREENSHOT: " << frame << '\n';
+                std::cerr.flush();
+            }
         } else if (cmd == "RENDERDOC_CAPTURE") {
             VideoCore::TriggerCapture();
         } else if (cmd == "GAMEPAD_BUTTON") {
@@ -208,6 +262,38 @@ void IPC::InputLoop() {
             event.user.code = static_cast<Sint32>(*axis);
             event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(value));
             SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_BUTTON_AT_PRESENTED_FRAME") {
+            const u64 frame = next_u64();
+            const std::string name = next_str();
+            const auto button = Input::ParseControllerButton(name);
+            const u64 pressed = next_u64();
+            if (!button || pressed > 1 ||
+                !presented_frame_inputs.Push({
+                    .frame = frame,
+                    .type = Core::Ipc::PresentedFrameInputType::Button,
+                    .code = static_cast<u32>(*button),
+                    .value = static_cast<u8>(pressed),
+                })) {
+                std::cerr << ";INVALID PRESENTED FRAME GAMEPAD BUTTON: " << frame << ' ' << name
+                          << ' ' << pressed << '\n';
+                std::cerr.flush();
+            }
+        } else if (cmd == "GAMEPAD_AXIS_AT_PRESENTED_FRAME") {
+            const u64 frame = next_u64();
+            const std::string name = next_str();
+            const auto axis = Input::ParseControllerAxis(name);
+            const u64 value = next_u64();
+            if (!axis || value > 255 ||
+                !presented_frame_inputs.Push({
+                    .frame = frame,
+                    .type = Core::Ipc::PresentedFrameInputType::Axis,
+                    .code = static_cast<u32>(*axis),
+                    .value = static_cast<u8>(value),
+                })) {
+                std::cerr << ";INVALID PRESENTED FRAME GAMEPAD AXIS: " << frame << ' ' << name
+                          << ' ' << value << '\n';
+                std::cerr.flush();
+            }
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());
             bool is_game_specific = next_u64() != 0;

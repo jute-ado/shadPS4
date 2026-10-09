@@ -23,7 +23,8 @@ using namespace Shader;
 
 namespace {
 TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_insts,
-                                               std::optional<u64> source_buffer_base);
+                                               std::optional<u64> source_buffer_base,
+                                               bool dx10_clamp = false);
 }
 
 namespace Shader::Optimization {
@@ -36,6 +37,12 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
 
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
     return TranslateToSpirvWithInfo(raw_gcn_insts).spirv;
+}
+
+std::vector<u32> TranslateToSpirvWithDx10Clamp(u64 raw_gcn_inst, bool dx10_clamp) {
+    return TranslateToSpirvWithInfoImpl(std::span<const u64>{&raw_gcn_inst, 1}, std::nullopt,
+                                        dx10_clamp)
+        .spirv;
 }
 
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst) {
@@ -67,7 +74,8 @@ TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_
 
 namespace {
 TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_insts,
-                                               std::optional<u64> source_buffer_base) {
+                                               std::optional<u64> source_buffer_base,
+                                               bool dx10_clamp) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -117,6 +125,7 @@ TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_inst
 
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);
+    runtime_info.dx10_clamp = dx10_clamp;
     runtime_info.num_user_data = 8;
     runtime_info.cs_info.workgroup_size = {1, 1, 1};
 

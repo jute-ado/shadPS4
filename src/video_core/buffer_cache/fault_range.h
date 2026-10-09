@@ -29,4 +29,11 @@ void MakeDmaFaultRangeResident(BufferCache& buffer_cache, VAddr start, u32 size)
     buffer_cache.SynchronizeBuffersInRange(start, size);
 }
 
+template <typename BufferCache>
+void MakeDmaFaultRangeCpuVisible(BufferCache& buffer_cache, VAddr start, u32 size) {
+    MakeDmaFaultRangeResident(buffer_cache, start, size);
+    buffer_cache.SynchronizeGpuModifiedMemoryForCpuRead(start, size);
+}
+
+
 } // namespace VideoCore

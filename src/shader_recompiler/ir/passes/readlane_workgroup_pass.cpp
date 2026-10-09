@@ -1,0 +1,516 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <algorithm>
+#include <optional>
+#include <unordered_set>
+#include <vector>
+
+#include "common/alignment.h"
+#include "shader_recompiler/ir/breadth_first_search.h"
+#include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/profile.h"
+#include "shader_recompiler/runtime_info.h"
+
+namespace Shader::Optimization {
+namespace {
+
+constexpr u32 GcnWaveSize = 64;
+constexpr u32 DwordSize = sizeof(u32);
+constexpr u32 LaneRetirementScratchSize = GcnWaveSize * DwordSize;
+
+using BlockSet = std::unordered_set<IR::Block*>;
+using ReadBatch = std::vector<IR::Inst*>;
+
+struct LaneRetirementPattern {
+    IR::Block* init_block;
+    IR::U1 outer_cond;
+    struct SyncPoint {
+        IR::Block* block;
+        IR::U1 condition;
+        bool invert;
+    };
+    std::vector<SyncPoint> entry_syncs;
+    std::vector<SyncPoint> retirement_syncs;
+    IR::Inst* entry_read;
+    IR::Inst* read;
+};
+
+struct LoopCandidate {
+    IR::Block* merge;
+    u32 conditional_depth{};
+    std::vector<LaneRetirementPattern::SyncPoint> entry_syncs;
+    std::vector<LaneRetirementPattern::SyncPoint> retirement_syncs;
+    IR::Inst* entry_read{};
+    IR::Inst* read{};
+    size_t direct_read_count{};
+    bool break_seen_before_read{};
+    bool ambiguous_entry_reads{};
+    bool unsafe_exit{};
+};
+
+struct OuterIfScope {
+    IR::Block* init_block;
+    IR::U1 cond;
+    IR::Block* merge;
+    std::vector<LaneRetirementPattern> candidates;
+};
+
+struct SelectionScope {
+    IR::Block* init_block;
+    IR::U1 cond;
+    IR::Block* merge;
+    std::vector<IR::Inst*> direct_reads;
+};
+
+// A guest scalar loop can retire lanes while the host executes its two halves as independent
+// 32-lane subgroups. Restrict cross-subgroup synchronization to a shape where participation is
+// provable: one direct, unconditional loop inside a top-level selection, exactly one exit from
+// that loop, one semantic ReadFirstLane after the exit test, and no early invocation exit.
+IR::Value ResolveCondition(IR::Value value) {
+    while (!value.IsImmediate()) {
+        IR::Inst* const inst = value.InstRecursive();
+        if (inst->GetOpcode() != IR::Opcode::ConditionRef &&
+            inst->GetOpcode() != IR::Opcode::Identity) {
+            break;
+        }
+        value = inst->Arg(0);
+    }
+    return value;
+}
+
+bool IsUnconditionalRepeat(const IR::U1& cond) {
+    const IR::Value value = ResolveCondition(cond);
+    return value.IsImmediate() && value.Type() == IR::Type::U1 && value.U1();
+}
+
+std::vector<LaneRetirementPattern> FindLaneRetirementPatterns(IR::Program& program) {
+    using Type = IR::AbstractSyntaxNode::Type;
+
+    std::vector<LaneRetirementPattern> patterns;
+    std::vector<IR::Block*> loop_stack;
+    std::optional<OuterIfScope> outer_if;
+    std::optional<LoopCandidate> candidate;
+    IR::Block* current_block{};
+    u32 if_depth{};
+    std::vector<SelectionScope> selection_stack;
+
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        switch (node.type) {
+        case Type::Block:
+            current_block = node.data.block;
+            if (!candidate && loop_stack.empty() && !selection_stack.empty()) {
+                for (IR::Inst& inst : current_block->Instructions()) {
+                    if (inst.GetOpcode() == IR::Opcode::ReadFirstLane && inst.HasUses()) {
+                        selection_stack.back().direct_reads.push_back(&inst);
+                    }
+                }
+            }
+            if (candidate) {
+                for (IR::Inst& inst : current_block->Instructions()) {
+                    if (inst.GetOpcode() == IR::Opcode::Discard ||
+                        inst.GetOpcode() == IR::Opcode::DiscardCond) {
+                        candidate->unsafe_exit = true;
+                    }
+                    if (loop_stack.size() != 1 ||
+                        if_depth != candidate->conditional_depth ||
+                        inst.GetOpcode() != IR::Opcode::ReadFirstLane || !inst.HasUses()) {
+                        continue;
+                    }
+                    ++candidate->direct_read_count;
+                    if (!candidate->retirement_syncs.empty()) {
+                        candidate->read = &inst;
+                        candidate->break_seen_before_read = true;
+                    }
+                }
+            }
+            break;
+        case Type::If:
+            if (if_depth == 0 && loop_stack.empty() && current_block != nullptr) {
+                outer_if.emplace(OuterIfScope{
+                    .init_block = current_block,
+                    .cond = node.data.if_node.cond,
+                    .merge = node.data.if_node.merge,
+                });
+            }
+            selection_stack.push_back({
+                .init_block = current_block,
+                .cond = node.data.if_node.cond,
+                .merge = node.data.if_node.merge,
+                .direct_reads = {},
+            });
+            ++if_depth;
+            break;
+        case Type::EndIf:
+            if (if_depth != 0) {
+                --if_depth;
+            }
+            if (outer_if && loop_stack.empty() && !selection_stack.empty() &&
+                selection_stack.back().merge == node.data.end_if.merge &&
+                selection_stack.back().direct_reads.size() == 1) {
+                std::vector<LaneRetirementPattern::SyncPoint> entry_syncs;
+                for (size_t index = 1; index < selection_stack.size(); ++index) {
+                    entry_syncs.push_back({
+                        .block = selection_stack[index].init_block,
+                        .condition = selection_stack[index].cond,
+                        .invert = false,
+                    });
+                }
+                outer_if->candidates.push_back({
+                    .init_block = outer_if->init_block,
+                    .outer_cond = outer_if->cond,
+                    .entry_syncs = std::move(entry_syncs),
+                    .retirement_syncs = {},
+                    .entry_read = selection_stack.back().direct_reads.front(),
+                    .read = nullptr,
+                });
+                selection_stack.back().direct_reads.clear();
+            }
+            if (outer_if && if_depth == 0 && node.data.end_if.merge == outer_if->merge) {
+                patterns.insert(patterns.end(), outer_if->candidates.begin(),
+                                outer_if->candidates.end());
+                outer_if.reset();
+            }
+            if (!selection_stack.empty() &&
+                selection_stack.back().merge == node.data.end_if.merge) {
+                selection_stack.pop_back();
+            }
+            break;
+        case Type::Loop:
+            if (outer_if && if_depth >= 1 && loop_stack.empty()) {
+                std::vector<LaneRetirementPattern::SyncPoint> entry_syncs;
+                std::vector<IR::Inst*> entry_reads;
+                for (size_t index = 1; index < selection_stack.size(); ++index) {
+                    entry_syncs.push_back({
+                        .block = selection_stack[index].init_block,
+                        .condition = selection_stack[index].cond,
+                        .invert = false,
+                    });
+                    entry_reads.insert(entry_reads.end(),
+                                       selection_stack[index].direct_reads.begin(),
+                                       selection_stack[index].direct_reads.end());
+                    selection_stack[index].direct_reads.clear();
+                }
+                candidate.emplace(LoopCandidate{
+                    .merge = node.data.loop.merge,
+                    .conditional_depth = if_depth,
+                    .entry_syncs = std::move(entry_syncs),
+                    .entry_read = entry_reads.size() == 1 ? entry_reads.front() : nullptr,
+                    .ambiguous_entry_reads = entry_reads.size() > 1,
+                });
+            }
+            loop_stack.push_back(node.data.loop.merge);
+            break;
+        case Type::Break:
+            if (candidate && node.data.break_node.merge == candidate->merge) {
+                if (if_depth == candidate->conditional_depth && loop_stack.size() == 1 &&
+                    current_block != nullptr) {
+                    candidate->retirement_syncs.push_back({
+                        .block = current_block,
+                        .condition = node.data.break_node.cond,
+                        .invert = true,
+                    });
+                }
+            }
+            break;
+        case Type::Repeat:
+            if (candidate && loop_stack.size() == 1 &&
+                node.data.repeat.merge == candidate->merge) {
+                if (outer_if && !candidate->retirement_syncs.empty() &&
+                    candidate->direct_read_count == 1 && candidate->break_seen_before_read &&
+                    !candidate->ambiguous_entry_reads && !candidate->unsafe_exit &&
+                    IsUnconditionalRepeat(node.data.repeat.cond)) {
+                    outer_if->candidates.push_back({
+                        .init_block = outer_if->init_block,
+                        .outer_cond = outer_if->cond,
+                        .entry_syncs = std::move(candidate->entry_syncs),
+                        .retirement_syncs = std::move(candidate->retirement_syncs),
+                        .entry_read = candidate->entry_read,
+                        .read = candidate->read,
+                    });
+                }
+                candidate.reset();
+            }
+            if (!loop_stack.empty()) {
+                loop_stack.pop_back();
+            }
+            break;
+        case Type::Return:
+        case Type::Unreachable:
+            if (candidate) {
+                candidate->unsafe_exit = true;
+            }
+            break;
+        }
+    }
+    return patterns;
+}
+
+BlockSet FindConvergedBlocks(const IR::Program& program) {
+    using Type = IR::AbstractSyntaxNode::Type;
+
+    BlockSet blocks;
+    u32 conditional_depth{};
+    u32 loop_depth{};
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        switch (node.type) {
+        case Type::Block:
+            if (conditional_depth == 0 && loop_depth == 0) {
+                blocks.emplace(node.data.block);
+            }
+            break;
+        case Type::If:
+            ++conditional_depth;
+            break;
+        case Type::EndIf:
+            if (conditional_depth != 0) {
+                --conditional_depth;
+            }
+            break;
+        case Type::Loop:
+            ++loop_depth;
+            break;
+        case Type::Repeat:
+            if (loop_depth != 0) {
+                --loop_depth;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return blocks;
+}
+
+bool IsWorkgroupRead(const IR::Inst& inst) {
+    if (!inst.HasUses()) {
+        return false;
+    }
+    if (inst.GetOpcode() == IR::Opcode::ReadFirstLane) {
+        return true;
+    }
+    return inst.GetOpcode() == IR::Opcode::ReadLane && inst.Arg(1).IsImmediate() &&
+           inst.Arg(1).U32() < GcnWaveSize;
+}
+
+bool DependsOnBatch(const IR::Value& value, const ReadBatch& batch) {
+    const auto dependency =
+        IR::BreadthFirstSearch(value, [&batch](IR::Inst* inst) -> std::optional<bool> {
+            if (std::ranges::find(batch, inst) != batch.end()) {
+                return true;
+            }
+            return std::nullopt;
+        });
+    return dependency.value_or(false);
+}
+
+std::vector<ReadBatch> FindBatches(IR::Program& program, const BlockSet& converged_blocks) {
+    std::vector<ReadBatch> batches;
+    for (IR::Block* const block : program.blocks) {
+        if (!converged_blocks.contains(block)) {
+            continue;
+        }
+
+        ReadBatch batch;
+        const auto flush_batch = [&] {
+            if (!batch.empty()) {
+                batches.emplace_back(std::move(batch));
+                batch.clear();
+            }
+        };
+        for (IR::Inst& inst : block->Instructions()) {
+            if (!IsWorkgroupRead(inst)) {
+                // SSA register setters remain in the list until dead-code elimination. They have
+                // no observable effect and should not prevent adjacent guest lane reads from
+                // sharing one exchange.
+                if (inst.HasUses() || inst.MayHaveSideEffects()) {
+                    flush_batch();
+                }
+                continue;
+            }
+            if (DependsOnBatch(inst.Arg(0), batch)) {
+                flush_batch();
+            }
+            batch.push_back(&inst);
+        }
+        flush_batch();
+    }
+    return batches;
+}
+
+IR::U32 LocalInvocationIndex(IR::IREmitter& ir, const ComputeRuntimeInfo& cs_info) {
+    const IR::U32 x = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 0);
+    const IR::U32 y = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 1);
+    const IR::U32 z = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 2);
+    const IR::U32 xy = ir.IAdd(x, ir.IMul(y, ir.Imm32(cs_info.workgroup_size[0])));
+    return ir.IAdd(xy, ir.IMul(z, ir.Imm32(cs_info.workgroup_size[0] * cs_info.workgroup_size[1])));
+}
+
+void LowerBatch(const ReadBatch& batch, size_t begin, size_t count, u32 scratch_base, u32 bank_size,
+                const ComputeRuntimeInfo& cs_info) {
+    IR::Block* const block = batch[begin]->GetParent();
+    const auto insert_point = IR::Block::InstructionList::s_iterator_to(*batch[begin]);
+    IR::IREmitter ir{*block, insert_point};
+
+    const IR::U32 invocation_index = LocalInvocationIndex(ir, cs_info);
+    const IR::U32 invocation_byte_offset = ir.IMul(invocation_index, ir.Imm32(DwordSize));
+    const IR::U32 wave_index = ir.BitwiseAnd(invocation_index, ir.Imm32(~(GcnWaveSize - 1U)));
+    const IR::U32 wave_byte_offset = ir.IMul(wave_index, ir.Imm32(DwordSize));
+
+    for (size_t index = 0; index < count; ++index) {
+        IR::Inst* const read = batch[begin + index];
+        const u32 bank_base = scratch_base + static_cast<u32>(index) * bank_size;
+        const IR::U32 write_offset = ir.IAdd(ir.Imm32(bank_base), invocation_byte_offset);
+        ir.WriteShared(32, read->Arg(0), write_offset);
+    }
+    ir.Barrier();
+
+    std::vector<IR::Value> replacements;
+    replacements.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+        IR::Inst* const read = batch[begin + index];
+        const u32 lane_byte_offset =
+            read->GetOpcode() == IR::Opcode::ReadFirstLane ? 0 : read->Arg(1).U32() * DwordSize;
+        const u32 bank_base = scratch_base + static_cast<u32>(index) * bank_size;
+        const IR::U32 read_offset =
+            ir.IAdd(ir.Imm32(bank_base + lane_byte_offset), wave_byte_offset);
+        replacements.emplace_back(ir.LoadShared(32, false, read_offset));
+    }
+    ir.Barrier();
+
+    for (size_t index = 0; index < count; ++index) {
+        batch[begin + index]->ReplaceUsesWithAndRemove(replacements[index]);
+    }
+}
+
+void LowerLaneRetirementPatterns(const std::vector<LaneRetirementPattern>& patterns,
+                                 u32 scratch_base, const ComputeRuntimeInfo& cs_info) {
+    for (size_t pattern_index = 0; pattern_index < patterns.size(); ++pattern_index) {
+        const LaneRetirementPattern& pattern = patterns[pattern_index];
+        const u32 pattern_scratch_base =
+            scratch_base + static_cast<u32>(pattern_index) * LaneRetirementScratchSize;
+        {
+            // Initialize before the top-level selection, while all workgroup invocations are
+            // converged. Unique per-invocation writes clear the scratch bank without a data race;
+            // the following atomic initialization records which host subgroups enter the branch.
+            IR::IREmitter ir{*pattern.init_block};
+            const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
+            const IR::U32 byte_offset =
+                ir.IAdd(ir.Imm32(pattern_scratch_base),
+                        ir.IMul(invocation, ir.Imm32(DwordSize)));
+            ir.WriteShared(32, ir.Imm32(0U), byte_offset);
+            ir.Barrier();
+            ir.Wave64LaneRetirementInit(pattern.outer_cond, invocation,
+                                        ir.Imm32(pattern_scratch_base));
+            ir.Barrier();
+        }
+        for (const auto& sync : pattern.entry_syncs) {
+            IR::IREmitter ir{*sync.block};
+            const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
+            const IR::U1 continues = sync.invert ? ir.LogicalNot(sync.condition) : sync.condition;
+            ir.Wave64LaneRetirementSync(continues, invocation,
+                                        ir.Imm32(pattern_scratch_base));
+        }
+        if (pattern.entry_read != nullptr) {
+            const auto insert_point =
+                IR::Block::InstructionList::s_iterator_to(*pattern.entry_read);
+            IR::IREmitter ir{*pattern.entry_read->GetParent(), insert_point};
+            const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
+            const IR::U32 replacement = ir.Wave64ReadFirstLane(
+                IR::U32{pattern.entry_read->Arg(0)}, invocation,
+                ir.Imm32(pattern_scratch_base));
+            pattern.entry_read->ReplaceUsesWithAndRemove(replacement);
+        }
+        for (const auto& sync : pattern.retirement_syncs) {
+            IR::IREmitter ir{*sync.block};
+            const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
+            const IR::U1 continues = sync.invert ? ir.LogicalNot(sync.condition) : sync.condition;
+            ir.Wave64LaneRetirementSync(continues, invocation,
+                                        ir.Imm32(pattern_scratch_base));
+        }
+        if (pattern.read != nullptr) {
+            const auto insert_point =
+                IR::Block::InstructionList::s_iterator_to(*pattern.read);
+            IR::IREmitter ir{*pattern.read->GetParent(), insert_point};
+            const IR::U32 invocation = LocalInvocationIndex(ir, cs_info);
+            const IR::U32 replacement = ir.Wave64ReadFirstLane(
+                IR::U32{pattern.read->Arg(0)}, invocation, ir.Imm32(pattern_scratch_base));
+            pattern.read->ReplaceUsesWithAndRemove(replacement);
+        }
+    }
+}
+
+} // Anonymous namespace
+
+void ReadLaneWorkgroupPass(IR::Program& program, RuntimeInfo& runtime_info,
+                           const Profile& profile) {
+    // A fixed GCN lane number addresses the whole 64-lane guest wave. ReadFirstLane at a converged
+    // point likewise selects guest lane zero. Native SPIR-V subgroup broadcast cannot preserve
+    // either meaning when the host splits the wave into smaller subgroups: lane 0 in the second
+    // host subgroup is guest lane 32, for example. At converged points in a one-wave compute
+    // workgroup, shared memory provides an exact cross-subgroup exchange without relying on an
+    // out-of-range subgroup lane.
+    if (program.info.stage != Stage::Compute || profile.subgroup_size == 0 ||
+        profile.subgroup_size >= GcnWaveSize || profile.supports_compute_subgroup_size_64) {
+        return;
+    }
+
+    auto& cs_info = runtime_info.cs_info;
+    const u64 thread_count = static_cast<u64>(cs_info.workgroup_size[0]) *
+                             cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
+    // A workgroup barrier can safely emulate a wave operation only when the workgroup is exactly
+    // one guest wave. Multiple guest waves may take independent scalar control-flow paths.
+    if (thread_count != GcnWaveSize) {
+        return;
+    }
+
+    const std::vector<LaneRetirementPattern> retirement_patterns =
+        profile.subgroup_size == 32 ? FindLaneRetirementPatterns(program)
+                                    : std::vector<LaneRetirementPattern>{};
+    if (!retirement_patterns.empty()) {
+        const u32 scratch_base = Common::AlignUp(cs_info.shared_memory_size, DwordSize);
+        const u64 scratch_size =
+            static_cast<u64>(retirement_patterns.size()) * LaneRetirementScratchSize;
+        if (scratch_base <= profile.max_shared_memory_size &&
+            scratch_size <= profile.max_shared_memory_size - scratch_base) {
+            cs_info.shared_memory_size = scratch_base + static_cast<u32>(scratch_size);
+            LowerLaneRetirementPatterns(retirement_patterns, scratch_base, cs_info);
+        }
+    }
+
+    const BlockSet converged_blocks = FindConvergedBlocks(program);
+    const std::vector<ReadBatch> batches = FindBatches(program, converged_blocks);
+    if (batches.empty()) {
+        return;
+    }
+
+    const u32 scratch_base = Common::AlignUp(cs_info.shared_memory_size, DwordSize);
+    const u64 bank_size = thread_count * DwordSize;
+    if (scratch_base >= profile.max_shared_memory_size ||
+        bank_size > profile.max_shared_memory_size - scratch_base) {
+        return;
+    }
+
+    size_t largest_batch{};
+    for (const ReadBatch& batch : batches) {
+        largest_batch = std::max(largest_batch, batch.size());
+    }
+    const size_t available_banks =
+        static_cast<size_t>((profile.max_shared_memory_size - scratch_base) / bank_size);
+    const size_t bank_count = std::min(largest_batch, available_banks);
+    if (bank_count == 0) {
+        return;
+    }
+
+    const u32 bank_size_u32 = static_cast<u32>(bank_size);
+    cs_info.shared_memory_size = scratch_base + static_cast<u32>(bank_count) * bank_size_u32;
+    for (const ReadBatch& batch : batches) {
+        for (size_t begin = 0; begin < batch.size(); begin += bank_count) {
+            const size_t count = std::min(bank_count, batch.size() - begin);
+            LowerBatch(batch, begin, count, scratch_base, bank_size_u32, cs_info);
+        }
+    }
+}
+
+} // namespace Shader::Optimization

@@ -38,6 +38,10 @@ public:
     /// Returns whether the entire range is mapped for GPU access.
     [[nodiscard]] bool IsGpuMapped(VAddr address, size_t size) const;
 
+    /// Diagnostic-only: traps the next CPU access to pages covering a guest range.
+    bool ArmDiagnosticReadWatch(VAddr address, u64 size) const;
+    bool HandleDiagnosticReadWatchFault(void* context, VAddr address, bool is_write) const;
+
     /// Updates watches in the pages touching the specified region.
     template <bool track>
     void UpdatePageWatchers(VAddr addr, u64 size) const;

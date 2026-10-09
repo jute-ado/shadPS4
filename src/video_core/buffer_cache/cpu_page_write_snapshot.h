@@ -85,6 +85,29 @@ public:
         emit_dirty_range(word_end);
     }
 
+    [[nodiscard]] bool AcknowledgeRangeAndHasPending(
+        std::span<const u8, TRACKER_BYTES_PER_PAGE> current, size_t range_offset,
+        size_t range_size) noexcept {
+        const size_t begin = std::min(range_offset, TRACKER_BYTES_PER_PAGE);
+        const size_t length = std::min(range_size, TRACKER_BYTES_PER_PAGE - begin);
+        const size_t end = begin + length;
+        const size_t word_begin = begin / UploadAlignment;
+        const size_t word_end = (end + UploadAlignment - 1) / UploadAlignment;
+        for (size_t word = word_begin; word < word_end; ++word) {
+            const size_t offset = word * UploadAlignment;
+            std::memcpy(before.data() + offset, current.data() + offset, UploadAlignment);
+            forced_words.reset(word);
+        }
+        for (size_t word = 0; word < WordsPerPage; ++word) {
+            const size_t offset = word * UploadAlignment;
+            if (forced_words.test(word) ||
+                std::memcmp(before.data() + offset, current.data() + offset, UploadAlignment) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 private:
     std::array<u8, TRACKER_BYTES_PER_PAGE> before{};
     std::bitset<WordsPerPage> forced_words{};
@@ -123,8 +146,27 @@ public:
         }
         snapshot->second.ForEachUploadRange(current, range_offset, range_size,
                                             std::forward<Func>(func));
-        snapshots.erase(snapshot);
+        if (!snapshot->second.AcknowledgeRangeAndHasPending(current, range_offset, range_size)) {
+            snapshots.erase(snapshot);
+        }
         return true;
+    }
+
+    template <typename Func>
+    [[nodiscard]] bool ConsumeBufferPage(
+        VAddr page_addr, std::span<const u8, TRACKER_BYTES_PER_PAGE> current, VAddr buffer_addr,
+        size_t buffer_size, Func&& func) {
+        const VAddr buffer_end =
+            buffer_addr + std::min<u64>(buffer_size,
+                                        std::numeric_limits<VAddr>::max() - buffer_addr);
+        const VAddr page_end = page_addr + TRACKER_BYTES_PER_PAGE;
+        const VAddr begin = std::max(page_addr, buffer_addr);
+        const VAddr end = std::min(page_end, buffer_end);
+        if (begin >= end) {
+            return false;
+        }
+        return Consume(page_addr, current, begin - page_addr, end - begin,
+                       std::forward<Func>(func));
     }
 
     void Discard(VAddr addr, size_t size) noexcept {

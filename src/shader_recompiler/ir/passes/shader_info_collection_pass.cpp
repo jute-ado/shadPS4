@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/emulator_settings.h"
+#include "shader_recompiler/direct_memory_access_policy.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -88,10 +89,30 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::QuadShuffle:
         info.uses_group_quad = true;
         break;
-    case IR::Opcode::ReadLane:
-    case IR::Opcode::ReadFirstLane:
+    case IR::Opcode::ShuffleXor:
+        info.uses_lane_id = true;
+        break;
     case IR::Opcode::WriteLane:
+        info.uses_lane_id = true;
+        [[fallthrough]];
+    case IR::Opcode::ReadLane:
+        info.uses_lane_id = true;
+        info.uses_read_lane = true;
+        [[fallthrough]];
+    case IR::Opcode::ReadFirstLane:
+    case IR::Opcode::Ballot:
+    case IR::Opcode::MaterializeScalarMaskWord:
+    case IR::Opcode::BallotFindLsb:
         info.uses_group_ballot = true;
+        break;
+    case IR::Opcode::Wave64LaneRetirementInit:
+    case IR::Opcode::Wave64LaneRetirementSync:
+    case IR::Opcode::Wave64ReadFirstLane:
+        info.shared_types |= IR::Type::U32;
+        info.uses_group_ballot = true;
+        break;
+    case IR::Opcode::GroupAny:
+        info.uses_group_vote = true;
         break;
     case IR::Opcode::Discard:
     case IR::Opcode::DiscardCond:
@@ -166,7 +187,8 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         }
     }
 
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+    if (!ShouldUseDirectMemoryAccess(EmulatorSettings.IsDirectMemoryAccessEnabled(),
+                                     info.l_stage == LogicalStage::Compute, info.pgm_hash)) {
         info.uses_dma = false;
         info.readconst_types = Info::ReadConstType::None;
     }

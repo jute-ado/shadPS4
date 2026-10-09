@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <boost/container/small_vector.hpp>
+#include <atomic>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/range_lock.h"
 #include "common/signal_context.h"
+#include "core/execution_stack_registry.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
@@ -38,6 +40,14 @@ namespace VideoCore {
 
 constexpr size_t PM_PAGE_SIZE = 4_KB;
 constexpr size_t PM_PAGE_BITS = 12;
+
+struct DiagnosticReadWatchState {
+    std::atomic<VAddr> address{};
+    std::atomic<u64> size{};
+    std::atomic<VAddr> page_address{};
+    std::atomic<u64> page_size{};
+    std::atomic<bool> armed{};
+};
 
 struct PageManager::Impl {
     struct PageState {
@@ -88,6 +98,7 @@ struct PageManager::Impl {
     static constexpr size_t NUM_ADDRESS_PAGES = 1ULL << (40 - PM_PAGE_BITS);
     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / PAGES_PER_LOCK;
     inline static Vulkan::Rasterizer* rasterizer;
+    inline static DiagnosticReadWatchState diagnostic_read_watch;
 #ifdef ENABLE_USERFAULTFD
     Impl(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
@@ -204,19 +215,80 @@ struct PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
+#ifdef _WIN64
+        if (perms == Core::MemoryPermission::ReadWrite) {
+            impl.ProtectForTracking(address, size, perms);
+            return;
+        }
+
+        auto& stacks = Core::GetExecutionStackRegistry();
+        if (!stacks.Overlaps(address, size)) {
+            impl.ProtectForTracking(address, size, perms);
+            return;
+        }
+        for (const auto& range : stacks.GetWatchableRanges(address, size)) {
+            impl.ProtectForTracking(range.address, range.size, perms);
+        }
+#else
         impl.ProtectForTracking(address, size, perms);
+#endif
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
-        if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, 8);
-        } else {
-            return rasterizer->ReadMemory(addr, 8);
-        }
-        return false;
+        const bool is_write = Common::IsWriteError(context);
+        const bool diagnostic_handled =
+            rasterizer->HandleDiagnosticReadWatchFault(context, addr, is_write);
+        const bool cache_handled =
+            is_write ? rasterizer->InvalidateMemory(addr, 8) : rasterizer->ReadMemory(addr, 8);
+        return diagnostic_handled || cache_handled;
     }
 #endif
+
+    bool ArmDiagnosticReadWatch(const VAddr address, const u64 size) {
+        if (diagnostic_read_watch.armed.load(std::memory_order_acquire)) {
+            return false;
+        }
+        const VAddr page_address = Common::AlignDown(address, PM_PAGE_SIZE);
+        const VAddr page_end = Common::AlignUp(address + size, PM_PAGE_SIZE);
+        diagnostic_read_watch.address.store(address, std::memory_order_relaxed);
+        diagnostic_read_watch.size.store(size, std::memory_order_relaxed);
+        diagnostic_read_watch.page_address.store(page_address, std::memory_order_relaxed);
+        diagnostic_read_watch.page_size.store(page_end - page_address, std::memory_order_relaxed);
+        diagnostic_read_watch.armed.store(true, std::memory_order_release);
+        Protect(page_address, page_end - page_address, Core::MemoryPermission::None);
+        return true;
+    }
+
+    bool HandleDiagnosticReadWatchFault(void* context, const VAddr fault_address,
+                                        const bool is_write) {
+        if (!diagnostic_read_watch.armed.load(std::memory_order_acquire)) {
+            return false;
+        }
+        const VAddr page_address = diagnostic_read_watch.page_address.load(std::memory_order_relaxed);
+        const u64 page_size = diagnostic_read_watch.page_size.load(std::memory_order_relaxed);
+        if (fault_address < page_address || fault_address - page_address >= page_size) {
+            return false;
+        }
+        if (!diagnostic_read_watch.armed.exchange(false, std::memory_order_acq_rel)) {
+            return false;
+        }
+
+        const VAddr address = diagnostic_read_watch.address.load(std::memory_order_relaxed);
+        const u64 size = diagnostic_read_watch.size.load(std::memory_order_relaxed);
+        for (VAddr page = page_address; page < page_address + page_size; page += PM_PAGE_SIZE) {
+            const size_t page_index = page >> PM_PAGE_BITS;
+            std::scoped_lock lk(locks[page_index / PAGES_PER_LOCK]);
+            Protect(page, PM_PAGE_SIZE, cached_pages[page_index].Perms());
+        }
+        const bool inside_report = fault_address >= address && fault_address - address < size;
+        LOG_WARNING(Render,
+                    "TEMP LOD_STATS CPU access rip={} address={:#x} report={:#x}:{:#x} "
+                    "inside={} write={}",
+                    fmt::ptr(Common::GetRip(context)), fault_address, address, size, inside_report,
+                    is_write);
+        return true;
+    }
 
     template <bool track, bool is_read>
     void UpdatePageWatchers(VAddr addr, u64 size) {
@@ -379,6 +451,15 @@ void PageManager::OnGpuUnmap(VAddr address, size_t size) {
 
 bool PageManager::IsGpuMapped(VAddr address, size_t size) const {
     return impl->rasterizer->IsMapped(address, size);
+}
+
+bool PageManager::ArmDiagnosticReadWatch(const VAddr address, const u64 size) const {
+    return impl->ArmDiagnosticReadWatch(address, size);
+}
+
+bool PageManager::HandleDiagnosticReadWatchFault(void* context, const VAddr address,
+                                                 const bool is_write) const {
+    return impl->HandleDiagnosticReadWatchFault(context, address, is_write);
 }
 
 template <bool track>

@@ -6,6 +6,9 @@
 #include "common/assert.h"
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/tls.h"
+#ifdef _WIN32
+#include "core/windows_exception_stack.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -207,7 +210,12 @@ Tcb* GetTcbBase() {
 thread_local std::once_flag init_tls_flag;
 
 void InitializeTLS() {
-    std::call_once(init_tls_flag, [] { SetTcbBase(Libraries::Kernel::g_curthread->tcb); });
+    std::call_once(init_tls_flag, [] {
+#ifdef _WIN32
+        PrepareWindowsExceptionStack();
+#endif
+        SetTcbBase(Libraries::Kernel::g_curthread->tcb);
+    });
 }
 
 } // namespace Core

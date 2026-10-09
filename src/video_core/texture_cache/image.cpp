@@ -28,14 +28,13 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
             usage |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
         } else {
             usage |= vk::ImageUsageFlagBits::eColorAttachment;
-            if (instance->IsAttachmentFeedbackLoopLayoutSupported()) {
-                usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
-            }
             // Always create images with storage flag to avoid needing re-creation in case of e.g
             // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
             // flag is also used.
             usage |= vk::ImageUsageFlagBits::eStorage;
         }
+        usage = WithAttachmentFeedbackLoopUsage(
+            usage, instance->IsAttachmentFeedbackLoopLayoutSupported());
     } else {
         // Similarly to above, we specify storage usage. This is typically not supported by
         // compressed formats, but may be used for uncompressed views. In order to satisfy this,

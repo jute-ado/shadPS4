@@ -63,7 +63,10 @@ struct ShaderProgram {
         FpRoundMode fp_round_mode64 : 2;
         FpDenormMode fp_denorm_mode32 : 2;
         FpDenormMode fp_denorm_mode64 : 2;
-        u32 : 4;
+        u32 priv : 1;
+        u32 dx10_clamp : 1;
+        u32 debug_mode : 1;
+        u32 ieee_mode : 1;
         u32 vgpr_comp_cnt : 2;
         u32 : 6;
         u32 scratch_en : 1;

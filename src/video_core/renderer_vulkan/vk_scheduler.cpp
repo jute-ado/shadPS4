@@ -5,15 +5,286 @@
 #include "common/debug.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
+#include "video_core/renderer_vulkan/diagnostic_gpu_marker_policy.h"
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_submission_chunk_policy.h"
+
+#include <vk_mem_alloc.h>
 
 namespace Vulkan {
+
+namespace {
+
+struct DiagnosticSubmission {
+    u64 signal_value{};
+    size_t gpu_marker_begin{};
+    size_t gpu_marker_end{};
+    std::vector<DiagnosticCheckpointMarker> commands;
+};
+
+std::mutex diagnostic_mutex;
+std::deque<DiagnosticCheckpointMarker> diagnostic_commands;
+std::deque<DiagnosticSubmission> diagnostic_submissions;
+std::atomic_flag diagnostic_loss_logged;
+constexpr size_t DiagnosticGpuMarkerCapacity = 8 * 1024 * 1024;
+VkBuffer diagnostic_gpu_buffer{};
+VmaAllocation diagnostic_gpu_allocation{};
+u32* diagnostic_gpu_mapped{};
+VmaAllocator diagnostic_gpu_allocator{};
+std::vector<DiagnosticCheckpointMarker> diagnostic_gpu_commands;
+size_t diagnostic_sealed_gpu_marker_end{};
+
+} // Anonymous namespace
+
+void InitializeDiagnosticGpuMarkers(const Instance& instance) {
+    const bool diagnostic_opt_in =
+        std::getenv("SHADPS4_DIAGNOSTIC_GPU_MARKERS") != nullptr;
+    if (!ShouldEnableDiagnosticGpuMarkers(instance.SupportsBufferMarker(), diagnostic_opt_in) ||
+        diagnostic_gpu_buffer) {
+        return;
+    }
+    const VkBufferCreateInfo buffer_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = DiagnosticGpuMarkerCapacity * sizeof(u32),
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    const VmaAllocationCreateInfo allocation_info{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        .preferredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    VmaAllocationInfo created_info{};
+    diagnostic_gpu_allocator = instance.GetAllocator();
+    const VkResult result = vmaCreateBuffer(diagnostic_gpu_allocator, &buffer_info,
+                                            &allocation_info, &diagnostic_gpu_buffer,
+                                            &diagnostic_gpu_allocation, &created_info);
+    ASSERT_MSG(result == VK_SUCCESS, "Failed to create diagnostic marker buffer: {}",
+               vk::to_string(vk::Result{result}));
+    diagnostic_gpu_mapped = static_cast<u32*>(created_info.pMappedData);
+    std::memset(diagnostic_gpu_mapped, 0, buffer_info.size);
+    diagnostic_gpu_commands.reserve(DiagnosticGpuMarkerCapacity);
+}
+
+void RecordDiagnosticGpuMarker(vk::CommandBuffer cmdbuf,
+                               const DiagnosticCheckpointMarker& marker) {
+    if (!diagnostic_gpu_buffer ||
+        diagnostic_gpu_commands.size() == DiagnosticGpuMarkerCapacity) {
+        return;
+    }
+    const u32 marker_index = static_cast<u32>(diagnostic_gpu_commands.size());
+    diagnostic_gpu_commands.emplace_back(marker);
+    const VkPipelineStageFlagBits marker_stage =
+        marker.kind == DiagnosticCheckpointKind::Compute
+            ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            : VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdWriteBufferMarkerAMD(
+        static_cast<VkCommandBuffer>(cmdbuf), marker_stage, diagnostic_gpu_buffer,
+        static_cast<VkDeviceSize>(marker_index) * sizeof(u32), marker_index + 1);
+}
+
+void RecordDiagnosticCommand(const DiagnosticCheckpointMarker& marker) {
+    if (diagnostic_gpu_mapped) {
+        vmaInvalidateAllocation(diagnostic_gpu_allocator, diagnostic_gpu_allocation, 0,
+                                VK_WHOLE_SIZE);
+    }
+    const std::scoped_lock lock{diagnostic_mutex};
+    if (!diagnostic_commands.empty()) {
+        const auto& previous = diagnostic_commands.back();
+        if (previous.kind == marker.kind && previous.first_hash == marker.first_hash &&
+            previous.second_hash == marker.second_hash) {
+            return;
+        }
+    }
+    static constexpr size_t MaxCommands = 8192;
+    if (diagnostic_commands.size() == MaxCommands) {
+        diagnostic_commands.pop_front();
+    }
+    diagnostic_commands.emplace_back(marker);
+}
+
+void SealDiagnosticSubmission(u64 signal_value) {
+    const std::scoped_lock lock{diagnostic_mutex};
+    DiagnosticSubmission submission{.signal_value = signal_value,
+                                    .gpu_marker_begin = diagnostic_sealed_gpu_marker_end,
+                                    .gpu_marker_end = diagnostic_gpu_commands.size()};
+    diagnostic_sealed_gpu_marker_end = submission.gpu_marker_end;
+    submission.commands.assign(diagnostic_commands.begin(), diagnostic_commands.end());
+    diagnostic_commands.clear();
+    diagnostic_submissions.emplace_back(std::move(submission));
+    static constexpr size_t MaxSubmissions = 64;
+    if (diagnostic_submissions.size() > MaxSubmissions) {
+        diagnostic_submissions.pop_front();
+    }
+}
+
+void LogDiagnosticCheckpoints(const Instance& instance) {
+    LogDiagnosticCheckpoints(instance, 0);
+}
+
+void LogDiagnosticCheckpoints(const Instance& instance, u64 last_known_tick) {
+    if (!instance.SupportsDiagnosticCheckpoints()) {
+        return;
+    }
+    if (diagnostic_loss_logged.test_and_set()) {
+        return;
+    }
+
+    u32 checkpoint_count{};
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV(
+        static_cast<VkQueue>(instance.GetGraphicsQueue()), &checkpoint_count, nullptr);
+    std::vector<VkCheckpointDataNV> checkpoints(
+        checkpoint_count, VkCheckpointDataNV{VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV(
+        static_cast<VkQueue>(instance.GetGraphicsQueue()), &checkpoint_count, checkpoints.data());
+    LOG_ERROR(Render_Vulkan, "Device-lost checkpoint count={}", checkpoint_count);
+    for (const auto& checkpoint : checkpoints) {
+        const auto* marker =
+            static_cast<const DiagnosticCheckpointMarker*>(checkpoint.pCheckpointMarker);
+        if (!marker || marker->magic != DiagnosticCheckpointMarker::Magic) {
+            LOG_ERROR(Render_Vulkan, "Device-lost checkpoint stage={:#x} marker={}",
+                      static_cast<u32>(checkpoint.stage), checkpoint.pCheckpointMarker);
+        } else if (marker->kind == DiagnosticCheckpointKind::Graphics) {
+            LOG_ERROR(Render_Vulkan,
+                      "Device-lost checkpoint stage={:#x} vertex_shader={:#x} fragment_shader={:#x}",
+                      static_cast<u32>(checkpoint.stage), marker->first_hash,
+                      marker->second_hash);
+        } else {
+            LOG_ERROR(Render_Vulkan, "Device-lost checkpoint stage={:#x} compute_shader={:#x}",
+                      static_cast<u32>(checkpoint.stage), marker->first_hash);
+        }
+    }
+
+    const std::scoped_lock lock{diagnostic_mutex};
+    LOG_ERROR(Render_Vulkan,
+              "Device-lost recorded submissions={} last_known_gpu_tick={}",
+              diagnostic_submissions.size(), last_known_tick);
+    for (const auto& submission : diagnostic_submissions) {
+        if (submission.signal_value <= last_known_tick) {
+            continue;
+        }
+        LOG_ERROR(Render_Vulkan, "Device-lost submission tick={} commands={}",
+                  submission.signal_value, submission.commands.size());
+        for (size_t index = 0; index < submission.commands.size(); ++index) {
+            const auto& marker = submission.commands[index];
+            if (marker.kind == DiagnosticCheckpointKind::Graphics) {
+                LOG_ERROR(Render_Vulkan,
+                          "Device-lost command={} graphics vertex_shader={:#x} fragment_shader={:#x} "
+                          "draw={} instances={} indexed={} phase={:#x} index_address={:#x}",
+                          index, marker.first_hash, marker.second_hash, marker.runtime[0],
+                          marker.runtime[1], marker.runtime[2], marker.runtime[3],
+                          u64{marker.runtime[4]} | (u64{marker.runtime[5]} << 32));
+            } else {
+                LOG_ERROR(Render_Vulkan, "Device-lost command={} compute_shader={:#x}", index,
+                          marker.first_hash);
+            }
+        }
+        if (diagnostic_gpu_mapped) {
+            LOG_ERROR(Render_Vulkan, "Device-lost submission GPU marker range=[{}, {})",
+                      submission.gpu_marker_begin, submission.gpu_marker_end);
+            for (size_t index = submission.gpu_marker_begin;
+                 index < submission.gpu_marker_end; ++index) {
+                const auto& marker = diagnostic_gpu_commands[index];
+                const bool did_complete = diagnostic_gpu_mapped[index] == index + 1;
+                if (marker.kind == DiagnosticCheckpointKind::Graphics) {
+                    LOG_ERROR(Render_Vulkan,
+                              "Device-lost submission marker={} completed={} graphics "
+                              "vertex_shader={:#x} fragment_shader={:#x} draw={} instances={} "
+                              "indexed={} phase={:#x} index_address={:#x}",
+                              index, did_complete, marker.first_hash, marker.second_hash,
+                              marker.runtime[0], marker.runtime[1], marker.runtime[2],
+                              marker.runtime[3],
+                              u64{marker.runtime[4]} | (u64{marker.runtime[5]} << 32));
+                } else {
+                    LOG_ERROR(Render_Vulkan,
+                              "Device-lost submission marker={} completed={} compute_shader={:#x} dispatch={}x{}x{} phase={:#x}",
+                              index, did_complete, marker.first_hash, marker.runtime[0],
+                              marker.runtime[1], marker.runtime[2], marker.runtime[3]);
+                }
+            }
+        }
+    }
+
+    if (diagnostic_gpu_mapped) {
+        size_t completed{};
+        while (completed < diagnostic_gpu_commands.size() &&
+               diagnostic_gpu_mapped[completed] == completed + 1) {
+            ++completed;
+        }
+        LOG_ERROR(Render_Vulkan, "Device-lost GPU markers completed={} recorded={}", completed,
+                  diagnostic_gpu_commands.size());
+        const size_t first = completed > 16 ? completed - 16 : 0;
+        const size_t last = std::min(diagnostic_gpu_commands.size(), completed + 16);
+        for (size_t index = first; index < last; ++index) {
+            const auto& marker = diagnostic_gpu_commands[index];
+            const bool did_complete = index < completed;
+            if (marker.kind == DiagnosticCheckpointKind::Graphics) {
+                LOG_ERROR(Render_Vulkan,
+                          "Device-lost GPU marker={} completed={} graphics vertex_shader={:#x} "
+                          "fragment_shader={:#x} draw={} instances={} indexed={} phase={:#x} "
+                          "index_address={:#x}",
+                          index, did_complete, marker.first_hash, marker.second_hash,
+                          marker.runtime[0], marker.runtime[1], marker.runtime[2],
+                          marker.runtime[3],
+                          u64{marker.runtime[4]} | (u64{marker.runtime[5]} << 32));
+            } else {
+                LOG_ERROR(Render_Vulkan,
+                          "Device-lost GPU marker={} completed={} compute_shader={:#x} dispatch={}x{}x{} phase={:#x}",
+                          index, did_complete, marker.first_hash, marker.runtime[0],
+                          marker.runtime[1], marker.runtime[2], marker.runtime[3]);
+            }
+        }
+    }
+}
+
+void LogDeviceFault(const Instance& instance) {
+    if (!instance.SupportsDeviceFault()) {
+        return;
+    }
+    VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult result = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(
+        static_cast<VkDevice>(instance.GetDevice()), &counts, nullptr);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+        LOG_ERROR(Render_Vulkan, "TEMP device fault count query failed: {}",
+                  vk::to_string(vk::Result{result}));
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+    std::vector<std::byte> binary(counts.vendorBinarySize);
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendors.data(),
+        .pVendorBinaryData = binary.data(),
+    };
+    result = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(
+        static_cast<VkDevice>(instance.GetDevice()), &counts, &info);
+    LOG_ERROR(Render_Vulkan,
+              "TEMP device fault result={} description='{}' addresses={} vendors={} binary={}",
+              vk::to_string(vk::Result{result}), info.description, counts.addressInfoCount,
+              counts.vendorInfoCount, counts.vendorBinarySize);
+    for (const auto& address : addresses) {
+        LOG_ERROR(Render_Vulkan, "TEMP device fault address type={} address={:#x} precision={:#x}",
+                  vk::to_string(vk::DeviceFaultAddressTypeEXT{address.addressType}),
+                  address.reportedAddress, address.addressPrecision);
+    }
+    for (const auto& vendor : vendors) {
+        LOG_ERROR(Render_Vulkan,
+                  "TEMP device fault vendor description='{}' code={:#x} data={:#x}",
+                  vendor.description, vendor.vendorFaultCode, vendor.vendorFaultData);
+    }
+}
 
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, master_semaphore{instance}, command_pool{instance, &master_semaphore} {
+    InitializeDiagnosticGpuMarkers(instance);
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
@@ -163,6 +434,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     EndRendering();
     Check(current_cmdbuf.end());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        SealDiagnosticSubmission(signal_value);
+    }
 
     const vk::Semaphore timeline = master_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
@@ -192,9 +466,20 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        LogDeviceFault(instance);
+        if (instance.SupportsDiagnosticCheckpoints()) {
+            LogDiagnosticCheckpoints(instance);
+        }
+    }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     master_semaphore.Refresh();
+    static constexpr u64 MaxGpuSubmissionLead = 8;
+    if (const auto wait_tick = SubmissionBackpressureWaitTick(
+            signal_value, master_semaphore.KnownGpuTick(), MaxGpuSubmissionLead)) {
+        master_semaphore.Wait(*wait_tick);
+    }
     AllocateWorkerCommandBuffers();
 
     // Apply pending operations
@@ -380,9 +665,7 @@ void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmd
     }
     if (dirty_state.feedback_loop_enabled && instance.IsAttachmentFeedbackLoopLayoutSupported()) {
         dirty_state.feedback_loop_enabled = false;
-        cmdbuf.setAttachmentFeedbackLoopEnableEXT(feedback_loop_enabled
-                                                      ? vk::ImageAspectFlagBits::eColor
-                                                      : vk::ImageAspectFlagBits::eNone);
+        cmdbuf.setAttachmentFeedbackLoopEnableEXT(feedback_loop_aspects);
     }
 }
 

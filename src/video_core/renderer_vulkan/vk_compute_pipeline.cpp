@@ -3,8 +3,11 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "common/io_file.h"
+#include "common/path_util.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
+#include "video_core/renderer_vulkan/vk_compute_dispatch_policy.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -103,7 +106,16 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
+    vk::PipelineCreateFlags pipeline_flags = ComputeDispatchNeedsBasePipeline(info->pgm_hash)
+                                                 ? vk::PipelineCreateFlagBits::eDispatchBase
+                                                 : vk::PipelineCreateFlags{};
+    const bool capture_executable = false;
+    if (capture_executable) {
+        pipeline_flags |= vk::PipelineCreateFlagBits::eCaptureInternalRepresentationsKHR |
+                          vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
+    }
     const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+        .flags = pipeline_flags,
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };
@@ -113,6 +125,117 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+
+    // TEMP Shadow diagnostic: query the NVIDIA compiler's register/spill statistics for the
+    // pathological compute shader. Remove with the executable-properties extension after use.
+    if (capture_executable) {
+        const VkPipelineInfoKHR pipeline_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR,
+            .pNext = nullptr,
+            .pipeline = static_cast<VkPipeline>(*pipeline),
+        };
+        u32 executable_count{};
+        const auto raw_device = static_cast<VkDevice>(device);
+        auto& dispatcher = VULKAN_HPP_DEFAULT_DISPATCHER;
+        if (dispatcher.vkGetPipelineExecutablePropertiesKHR(
+                raw_device, &pipeline_info, &executable_count, nullptr) == VK_SUCCESS) {
+            std::vector<VkPipelineExecutablePropertiesKHR> executables(
+                executable_count, VkPipelineExecutablePropertiesKHR{
+                                      .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+            dispatcher.vkGetPipelineExecutablePropertiesKHR(raw_device, &pipeline_info,
+                                                              &executable_count,
+                                                              executables.data());
+            for (u32 executable_index = 0; executable_index < executable_count;
+                 ++executable_index) {
+                const auto& executable = executables[executable_index];
+                LOG_INFO(Render_Vulkan,
+                         "TEMP Shadow 87 executable {} name='{}' description='{}' subgroup={}",
+                         executable_index, executable.name, executable.description,
+                         executable.subgroupSize);
+                const VkPipelineExecutableInfoKHR executable_info{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+                    .pNext = nullptr,
+                    .pipeline = static_cast<VkPipeline>(*pipeline),
+                    .executableIndex = executable_index,
+                };
+                u32 statistic_count{};
+                dispatcher.vkGetPipelineExecutableStatisticsKHR(
+                    raw_device, &executable_info, &statistic_count, nullptr);
+                std::vector<VkPipelineExecutableStatisticKHR> statistics(
+                    statistic_count, VkPipelineExecutableStatisticKHR{
+                                         .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+                if (dispatcher.vkGetPipelineExecutableStatisticsKHR(
+                        raw_device, &executable_info, &statistic_count,
+                        statistics.data()) != VK_SUCCESS) {
+                    continue;
+                }
+                for (const auto& statistic : statistics) {
+                    switch (statistic.format) {
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                        LOG_INFO(Render_Vulkan, "TEMP Shadow 87 stat {} ({})={}", statistic.name,
+                                 statistic.description, statistic.value.b32);
+                        break;
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                        LOG_INFO(Render_Vulkan, "TEMP Shadow 87 stat {} ({})={}", statistic.name,
+                                 statistic.description, statistic.value.i64);
+                        break;
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                        LOG_INFO(Render_Vulkan, "TEMP Shadow 87 stat {} ({})={}", statistic.name,
+                                 statistic.description, statistic.value.u64);
+                        break;
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                        LOG_INFO(Render_Vulkan, "TEMP Shadow 87 stat {} ({})={}", statistic.name,
+                                 statistic.description, statistic.value.f64);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+                u32 representation_count{};
+                dispatcher.vkGetPipelineExecutableInternalRepresentationsKHR(
+                    raw_device, &executable_info, &representation_count, nullptr);
+                std::vector<VkPipelineExecutableInternalRepresentationKHR> representations(
+                    representation_count);
+                for (auto& representation : representations) {
+                    representation.sType =
+                        VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR;
+                }
+                if (dispatcher.vkGetPipelineExecutableInternalRepresentationsKHR(
+                        raw_device, &executable_info, &representation_count,
+                        representations.data()) != VK_SUCCESS) {
+                    continue;
+                }
+                std::vector<std::vector<u8>> representation_data(representation_count);
+                for (u32 index = 0; index < representation_count; ++index) {
+                    representation_data[index].resize(representations[index].dataSize);
+                    representations[index].pData = representation_data[index].data();
+                }
+                if (dispatcher.vkGetPipelineExecutableInternalRepresentationsKHR(
+                        raw_device, &executable_info, &representation_count,
+                        representations.data()) != VK_SUCCESS) {
+                    continue;
+                }
+                using namespace Common::FS;
+                const auto dump_dir = GetUserPath(PathType::ShaderDir) / "dumps";
+                std::filesystem::create_directories(dump_dir);
+                for (u32 index = 0; index < representation_count; ++index) {
+                    const auto& representation = representations[index];
+                    LOG_INFO(Render_Vulkan,
+                             "TEMP Shadow 87 representation {} name='{}' description='{}' "
+                             "text={} bytes={}",
+                             index, representation.name, representation.description,
+                             representation.isText, representation.dataSize);
+                    const auto extension = representation.isText ? "txt" : "bin";
+                    const auto path = dump_dir / fmt::format("cs_0x{:016x}_native_{}.{}",
+                                                              info->pgm_hash, index, extension);
+                    const IOFile file{path, FileAccessMode::Create};
+                    file.WriteSpan(std::span<const u8>{representation_data[index].data(),
+                                                       representation.dataSize});
+                }
+            }
+        }
+    }
 }
 
 ComputePipeline::~ComputePipeline() = default;

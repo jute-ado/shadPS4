@@ -8,6 +8,8 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/buffer_format_policy.h"
+#include "shader_recompiler/ir/passes/sharp_source_traversal.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -395,10 +397,11 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
             continue;
         }
         found_read_const_buffer |= inst->GetOpcode() == IR::Opcode::ReadConstBuffer;
-        if (inst->GetOpcode() != IR::Opcode::Phi) {
+        const auto range = SharpSourceTraversalRange(inst->GetOpcode(), inst->NumArgs());
+        if (range.begin == range.end) {
             continue;
         }
-        for (size_t arg = inst->NumArgs(); arg--;) {
+        for (size_t arg = range.end; arg-- > range.begin;) {
             const IR::Value arg_value = inst->Arg(arg);
             if (arg_value.IsImmediate()) {
                 continue;
@@ -574,7 +577,7 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
         // If the mip level to IMAGE_(LOAD/STORE)_MIP is a constant, set up ImageResource
         // so that we will only bind a single level.
         // If index is dynamic, we will bind levels as an array
-        const auto view_type = image.GetViewType(image_res.is_array);
+        const auto view_type = image.GetShaderViewType(image_res.is_array);
 
         IR::Inst* body = inst.Arg(1).InstRecursive();
         const auto lod_arg = [&] -> IR::Value {
@@ -806,9 +809,8 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         const IR::U32 vgpr_index = IR::GetBufferIndexArg(&inst);
         index = ir.IAdd(index, vgpr_index);
     }
-    if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.l_stage == LogicalStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
+    if (ShouldApplyBufferThreadId(buffer.add_tid_enable,
+                                  info.l_stage == LogicalStage::Compute)) {
         const IR::U32 thread_id{ir.LaneId()};
         index = ir.IAdd(index, thread_id);
     }
@@ -889,7 +891,7 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     const auto inst_info = inst.Flags<IR::TextureInstInfo>();
-    const auto view_type = image.GetViewType(image_res.is_array);
+    const auto view_type = image.GetShaderViewType(image_res.is_array);
 
     IR::Inst* body1 = inst.Arg(2).InstRecursive();
     IR::Inst* body2 = inst.Arg(3).InstRecursive();
@@ -1092,7 +1094,7 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     auto inst_info = inst.Flags<IR::TextureInstInfo>();
-    const auto view_type = image.GetViewType(image_res.is_array);
+    const auto view_type = image.GetShaderViewType(image_res.is_array);
 
     // Now that we know the image type, adjust texture coordinate vector.
     IR::Inst* body = inst.Arg(1).InstRecursive();

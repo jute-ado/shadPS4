@@ -3,12 +3,24 @@
 
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#include "shader_recompiler/precise_float_policy.h"
 
 namespace Shader::Backend::SPIRV {
 
-Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
-    ctx.Decorate(op, spv::Decoration::NoContraction);
-    return op;
+Id PreserveF32MultiplyRounding(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
+    if (!RequiresSeparateMultiplyRounding(inst)) {
+        return ctx.OpFMul(ctx.F32[1], a, b);
+    }
+    // Fma(a, b, signed_zero(a * b)) produces the rounded F32 product as a single operation.
+    // Keeping the operation explicit prevents a host compiler from contracting it with the
+    // following guest add, without the severe loop performance cost of NoContraction on NVIDIA.
+    // Match the product's zero sign so the replacement also preserves signed-zero multiplication.
+    const Id sign_bits{ctx.OpBitwiseAnd(
+        ctx.U32[1], ctx.OpBitwiseXor(ctx.U32[1], ctx.OpBitcast(ctx.U32[1], a),
+                                    ctx.OpBitcast(ctx.U32[1], b)),
+        ctx.ConstU32(0x80000000u))};
+    const Id signed_zero{ctx.OpBitcast(ctx.F32[1], sign_bits)};
+    return ctx.OpFma(ctx.F32[1], a, b, signed_zero);
 }
 
 Id EmitFPAbs32(EmitContext& ctx, Id value) {
@@ -20,23 +32,23 @@ Id EmitFPAbs64(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPAdd32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFAdd(ctx.F32[1], a, b));
+    return ctx.OpFAdd(ctx.F32[1], a, b);
 }
 
 Id EmitFPAdd64(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFAdd(ctx.F64[1], a, b));
+    return ctx.OpFAdd(ctx.F64[1], a, b);
 }
 
 Id EmitFPSub32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFSub(ctx.F32[1], a, b));
+    return ctx.OpFSub(ctx.F32[1], a, b);
 }
 
 Id EmitFPFma32(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
-    return Decorate(ctx, inst, ctx.OpFma(ctx.F32[1], a, b, c));
+    return ctx.OpFma(ctx.F32[1], a, b, c);
 }
 
 Id EmitFPFma64(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
-    return Decorate(ctx, inst, ctx.OpFma(ctx.F64[1], a, b, c));
+    return ctx.OpFma(ctx.F64[1], a, b, c);
 }
 
 Id EmitFPMax32(EmitContext& ctx, Id a, Id b) {
@@ -78,19 +90,23 @@ Id EmitFPMedTri32(EmitContext& ctx, Id a, Id b, Id c) {
 }
 
 Id EmitFPMul32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFMul(ctx.F32[1], a, b));
+    return PreserveF32MultiplyRounding(ctx, inst, a, b);
 }
 
 Id EmitFPMul64(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFMul(ctx.F64[1], a, b));
+    const Id product{ctx.OpFMul(ctx.F64[1], a, b)};
+    if (RequiresSeparateMultiplyRounding(inst)) {
+        ctx.Decorate(product, spv::Decoration::NoContraction);
+    }
+    return product;
 }
 
 Id EmitFPDiv32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFDiv(ctx.F32[1], a, b));
+    return ctx.OpFDiv(ctx.F32[1], a, b);
 }
 
 Id EmitFPDiv64(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFDiv(ctx.F64[1], a, b));
+    return ctx.OpFDiv(ctx.F64[1], a, b);
 }
 
 Id EmitFPNeg32(EmitContext& ctx, Id value) {
@@ -389,8 +405,56 @@ Id EmitFPIsInf64(EmitContext& ctx, Id value) {
     return ctx.OpIsInf(ctx.U1[1], value);
 }
 
-void EmitFPCmpClass32(EmitContext&) {
-    UNREACHABLE();
+Id EmitFPCmpClass32(EmitContext& ctx, Id value, Id class_mask) {
+    const Id bits = ctx.OpBitcast(ctx.U32[1], value);
+    const Id exponent =
+        ctx.OpBitwiseAnd(ctx.U32[1], bits, ctx.ConstU32(0x7f800000u));
+    const Id mantissa =
+        ctx.OpBitwiseAnd(ctx.U32[1], bits, ctx.ConstU32(0x007fffffu));
+    const Id is_negative = ctx.OpINotEqual(
+        ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], bits, ctx.ConstU32(0x80000000u)),
+        ctx.u32_zero_value);
+    const Id exponent_is_zero =
+        ctx.OpIEqual(ctx.U1[1], exponent, ctx.u32_zero_value);
+    const Id exponent_is_max =
+        ctx.OpIEqual(ctx.U1[1], exponent, ctx.ConstU32(0x7f800000u));
+    const Id mantissa_is_zero =
+        ctx.OpIEqual(ctx.U1[1], mantissa, ctx.u32_zero_value);
+    const Id is_quiet_nan = ctx.OpINotEqual(
+        ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], mantissa, ctx.ConstU32(0x00400000u)),
+        ctx.u32_zero_value);
+
+    const Id nan_class =
+        ctx.OpSelect(ctx.U32[1], is_quiet_nan,
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::QuietNan)),
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::SignalingNan)));
+    const Id infinity_class =
+        ctx.OpSelect(ctx.U32[1], is_negative,
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::NegativeInfinity)),
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::PositiveInfinity)));
+    const Id zero_class =
+        ctx.OpSelect(ctx.U32[1], is_negative,
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::NegativeZero)),
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::PositiveZero)));
+    const Id denorm_class =
+        ctx.OpSelect(ctx.U32[1], is_negative,
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::NegativeDenorm)),
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::PositiveDenorm)));
+    const Id normal_class =
+        ctx.OpSelect(ctx.U32[1], is_negative,
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::NegativeNormal)),
+                     ctx.ConstU32(static_cast<u32>(IR::FloatClassFunc::PositiveNormal)));
+
+    const Id finite_zero_or_denorm =
+        ctx.OpSelect(ctx.U32[1], mantissa_is_zero, zero_class, denorm_class);
+    const Id finite_class =
+        ctx.OpSelect(ctx.U32[1], exponent_is_zero, finite_zero_or_denorm, normal_class);
+    const Id nan_or_infinity =
+        ctx.OpSelect(ctx.U32[1], mantissa_is_zero, infinity_class, nan_class);
+    const Id value_class =
+        ctx.OpSelect(ctx.U32[1], exponent_is_max, nan_or_infinity, finite_class);
+    const Id selected_class = ctx.OpBitwiseAnd(ctx.U32[1], value_class, class_mask);
+    return ctx.OpINotEqual(ctx.U1[1], selected_class, ctx.u32_zero_value);
 }
 
 } // namespace Shader::Backend::SPIRV

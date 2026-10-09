@@ -8,12 +8,15 @@
 #include "common/div_ceil.h"
 #include "common/scope_exit.h"
 #include "core/emulator_settings.h"
+#include "core/execution_stack_registry.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_usage_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -225,7 +228,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 
     if (recreate) {
         auto new_info = requested_info;
-        new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
+        ExpandImageResources(new_info, cache_image.info.resources);
         const auto new_image_id =
             slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info);
         RegisterImage(new_image_id);
@@ -239,7 +242,10 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 
         if (cache_image.info.num_samples == 1 && new_info.num_samples == 1) {
             // Perform depth<->color copy using the intermediate copy buffer.
-            if (instance.IsMaintenance8Supported()) {
+            const bool requires_buffer_copy = RequiresBufferCopyForDepthFormatMismatch(
+                cache_image.info.pixel_format, new_image.info.pixel_format,
+                cache_image.info.props.is_depth, new_image.info.props.is_depth);
+            if (instance.IsMaintenance8Supported() && !requires_buffer_copy) {
                 new_image.CopyImage(cache_image);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
@@ -784,13 +790,14 @@ void TextureCache::RefreshImage(Image& image) {
         });
     }
 
-    const auto [buffer, offset] =
-        tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
+    auto detiled = tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
     for (auto& copy : image_copies) {
-        copy.bufferOffset += offset;
+        copy.bufferOffset += detiled.offset;
     }
 
-    image.Upload(image_copies, buffer, offset);
+    RecordThenRetireTransientResource(
+        [&] { image.Upload(image_copies, detiled.buffer, detiled.offset); },
+        [&] { tile_manager.Retire(detiled); });
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
@@ -849,6 +856,15 @@ void TextureCache::TrackImage(ImageId image_id) {
     }
     const auto image_begin = image.info.guest_address;
     const auto image_end = image.info.guest_address + image.info.guest_size;
+#ifdef _WIN32
+    if (Core::GetExecutionStackRegistry().Overlaps(image_begin, image.info.guest_size)) {
+        if (image.IsTracked()) {
+            UntrackImage(image_id);
+        }
+        image.flags |= ImageFlagBits::CpuDirty;
+        return;
+    }
+#endif
     if (image_begin == image.track_addr && image_end == image.track_addr_end) {
         return;
     }
@@ -1092,7 +1108,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
 
     // Reclaim image and any image views it references.
-    scheduler.DeferOperation([this, image_id] {
+    // A guest unmap can race a GPU thread that already retained this image for command recording.
+    // Keep the image and all of its views alive through the following submission as well.
+    scheduler.DeferOperationAfterNextSubmit([this, image_id] {
         Image& image = slot_images[image_id];
         for (auto& backing : image.backing_images) {
             for (const ImageViewId image_view_id : backing.image_view_ids) {

@@ -78,6 +78,9 @@ struct InfoPersistent {
     std::array<Addr64PointerRoot, MaxAddr64PointerRoots> addr64_pointer_roots{};
     u32 num_addr64_pointer_roots{};
     bool addr64_pointer_roots_overflow{};
+    std::array<ReadConstPointerRoot, MaxReadConstPointerRoots> readconst_pointer_roots{};
+    u32 num_readconst_pointer_roots{};
+    bool readconst_pointer_roots_overflow{};
 
     InfoPersistent() = default;
     InfoPersistent(Stage stage_, LogicalStage l_stage_, u64 pgm_hash_)
@@ -121,7 +124,7 @@ struct Info : InfoPersistent {
     };
 
     std::span<const u32> user_data;
-    std::vector<u32> flattened_ud_buf;
+    mutable std::vector<u32> flattened_ud_buf;
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -139,8 +142,10 @@ struct Info : InfoPersistent {
     bool uses_buffer_atomic_float_min_max{};
     bool uses_image_atomic_float_min_max{};
     bool uses_lane_id{};
+    bool uses_read_lane{};
     bool uses_group_quad{};
     bool uses_group_ballot{};
+    bool uses_group_vote{};
     IR::Type shared_types{};
     bool uses_fp16{};
     bool uses_fp64{};
@@ -192,7 +197,7 @@ struct Info : InfoPersistent {
         bnd.user_data += ud_mask.NumRegs();
     }
 
-    void RefreshFlatBuf() {
+    void RefreshFlatBuf() const {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());

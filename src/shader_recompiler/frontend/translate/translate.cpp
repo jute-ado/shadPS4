@@ -913,6 +913,47 @@ template pk_type<IR::U32> Translator::GetSrcPk<IR::U32, true>(const InstOperand&
 template pk_type<IR::U32> Translator::GetSrcPk<IR::U32, false>(const InstOperand&);
 template pk_type<IR::F32> Translator::GetSrcPk<IR::F32, false>(const InstOperand&);
 
+static bool HasFloatingPointAluResult(const IR::Value& value) {
+    const IR::Inst* inst = value.TryInstRecursive();
+    if (inst == nullptr) {
+        return false;
+    }
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::FPAbs32:
+    case IR::Opcode::FPAdd32:
+    case IR::Opcode::FPSub32:
+    case IR::Opcode::FPFma32:
+    case IR::Opcode::FPMax32:
+    case IR::Opcode::FPMin32:
+    case IR::Opcode::FPMinTri32:
+    case IR::Opcode::FPMaxTri32:
+    case IR::Opcode::FPMedTri32:
+    case IR::Opcode::FPMul32:
+    case IR::Opcode::FPDiv32:
+    case IR::Opcode::FPNeg32:
+    case IR::Opcode::FPRecip32:
+    case IR::Opcode::FPRecipSqrt32:
+    case IR::Opcode::FPSqrt:
+    case IR::Opcode::FPSin:
+    case IR::Opcode::FPExp2:
+    case IR::Opcode::FPPow:
+    case IR::Opcode::FPLdexp:
+    case IR::Opcode::FPCos:
+    case IR::Opcode::FPLog2:
+    case IR::Opcode::FPSaturate32:
+    case IR::Opcode::FPClamp32:
+    case IR::Opcode::FPRoundEven32:
+    case IR::Opcode::FPFloor32:
+    case IR::Opcode::FPCeil32:
+    case IR::Opcode::FPTrunc32:
+    case IR::Opcode::FPFract32:
+    case IR::Opcode::FPFrexpSig32:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void Translator::SetDst1(const InstOperand& operand, const IR::U1& value) {
     switch (operand.field) {
     case OperandField::VccLo:
@@ -937,6 +978,10 @@ void Translator::SetDst(const InstOperand& operand, const IR::U32F32& value) {
         }
         if (operand.output_modifier.clamp) {
             result = ir.FPSaturate(result);
+        }
+        if (runtime_info.dx10_clamp && HasFloatingPointAluResult(value)) {
+            result = IR::U32F32{IR::F32{
+                ir.Select(ir.FPIsNan(result), ir.Imm32(0.0f), result)}};
         }
     }
 

@@ -8,7 +8,10 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_occlusion_query.h"
+#include "video_core/renderer_vulkan/vk_submission_chunk_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/image_usage_policy.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -60,12 +63,19 @@ public:
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size);
+    bool ArmDiagnosticReadWatch(VAddr addr, u64 size);
+    bool HandleDiagnosticReadWatchFault(void* context, VAddr addr, bool is_write);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);
 
     void CpSync();
+
+    OcclusionQueryManager& GetOcclusionQueries() {
+        return occlusion_queries;
+    }
+
     u64 Flush();
     void Finish();
     void OnSubmit();
@@ -116,6 +126,9 @@ private:
     bool IsComputeImageCopy(const Pipeline* pipeline);
     bool IsComputeImageClear(const Pipeline* pipeline);
 
+    void RecordGpuWork();
+    void RecordSparseDiagnosticCheckpoint(bool is_compute, u64 first_hash, u64 second_hash = 0);
+
 private:
     friend class VideoCore::BufferCache;
 
@@ -124,6 +137,7 @@ private:
     VideoCore::PageManager page_manager;
     VideoCore::BufferCache buffer_cache;
     VideoCore::TextureCache texture_cache;
+    OcclusionQueryManager occlusion_queries;
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;
@@ -147,9 +161,14 @@ private:
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
-    bool attachment_feedback_loop{};
+    vk::ImageAspectFlags attachment_feedback_loop_aspects{};
     u32 prepared_host_scale{1};
     u32 current_host_scale{1};
+    VideoCore::LodFeedbackImageTracker lod_feedback_images;
+    SubmissionChunkPolicy submission_chunk_policy{128};
+    u32 last_sparse_diagnostic_kind{std::numeric_limits<u32>::max()};
+    u64 last_sparse_diagnostic_first_hash{};
+    u64 last_sparse_diagnostic_second_hash{};
 };
 
 } // namespace Vulkan

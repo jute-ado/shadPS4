@@ -124,6 +124,17 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     is_coherent = property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 }
 
+vk::Buffer Buffer::Handle() const noexcept {
+    last_use_tick = std::max(last_use_tick, scheduler->CurrentTick());
+    return buffer;
+}
+
+vk::DeviceAddress Buffer::BufferDeviceAddress() const noexcept {
+    last_use_tick = std::max(last_use_tick, scheduler->CurrentTick());
+    ASSERT_MSG(buffer.bda_addr != 0, "Can't get BDA from a non BDA buffer");
+    return buffer.bda_addr;
+}
+
 void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
     scheduler->EndRendering();
     ASSERT_MSG(offset % 4 == 0 && num_bytes % 4 == 0,
@@ -134,7 +145,7 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
         .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
         .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
-        .buffer = buffer,
+        .buffer = Handle(),
         .offset = offset,
         .size = num_bytes,
     };
@@ -143,7 +154,7 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        .buffer = buffer,
+        .buffer = Handle(),
         .offset = offset,
         .size = num_bytes,
     };
@@ -152,7 +163,7 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &pre_barrier,
     });
-    cmdbuf.fillBuffer(buffer, offset, num_bytes, value);
+    cmdbuf.fillBuffer(Handle(), offset, num_bytes, value);
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 1,

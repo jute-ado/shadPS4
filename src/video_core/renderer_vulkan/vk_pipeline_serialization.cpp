@@ -12,7 +12,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 4u;
+static constexpr u32 ShaderBinaryVersion = 8u;
 static constexpr u32 ShaderMetaVersion = 4u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
@@ -293,9 +293,14 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             module = CompileSPV(spv, instance.GetDevice());
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    std::unique_ptr<Shader::Info> permutation_info;
+    if (!new_program) {
+        permutation_info = std::make_unique<Shader::Info>(std::move(program->info));
+    }
+    Shader::Info* selected_info = it_pgm.value()->InsertPermut(
+        module, std::move(spec), perm_idx, std::move(permutation_info));
 
-    infos[stage] = &it_pgm.value()->info;
+    infos[stage] = selected_info;
     modules[stage] = module;
 
     return true;

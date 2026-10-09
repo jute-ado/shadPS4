@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "core/emulator_settings.h"
+#include "shader_recompiler/direct_memory_access_policy.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/attribute.h"
@@ -58,7 +59,8 @@ Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     const u32 flatbuf_off_dw = inst->Flags<u32>();
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+    if (!ShouldUseDirectMemoryAccess(EmulatorSettings.IsDirectMemoryAccessEnabled(),
+                                     ctx.l_stage == LogicalStage::Compute, ctx.info.pgm_hash)) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }
     // We can only provide a fallback for immediate offsets.
@@ -82,7 +84,8 @@ Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
 }
 
 Id EmitReadConstBufferAddr64(EmitContext& ctx, u32 handle, Id addr, Id offset) {
-    if (EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+    if (ShouldUseDirectMemoryAccess(EmulatorSettings.IsDirectMemoryAccessEnabled(),
+                                    ctx.l_stage == LogicalStage::Compute, ctx.info.pgm_hash)) {
         return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
     }
 
@@ -156,8 +159,10 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
             ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.frag_coord, ctx.ConstU32(comp)));
         if (comp < 2) {
             const Id host_inv_scale = ctx.OpLoad(
-                ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.push_data_block,
-                                              ctx.ConstU32(PushData::HostInvScaleIndex)));
+                ctx.F32[1],
+                ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]),
+                                  ctx.push_data_block,
+                                  ctx.ConstU32(PushData::HostInvScaleIndex)));
             return ctx.OpFMul(ctx.F32[1], coordinate, host_inv_scale);
         }
         return coordinate;

@@ -164,7 +164,7 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset,
                                              const ImageInfo& info) {
     if (!info.props.is_tiled) {
-        return {in_buffer, in_offset};
+        return {in_buffer, in_offset, VK_NULL_HANDLE};
     }
 
     TilingInfo params{};
@@ -187,9 +187,6 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     };
 
     const auto [out_buffer, out_allocation] = GetScratchBuffer(info.guest_size);
-    scheduler.DeferOperation([this, out_buffer, out_allocation]() {
-        vmaDestroyBuffer(instance.GetAllocator(), out_buffer, out_allocation);
-    });
 
     scheduler.EndRendering();
 
@@ -238,7 +235,16 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
 
     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
     cmdbuf.dispatch(dim_x, 1, 1);
-    return {out_buffer, 0};
+    return {out_buffer, 0, out_allocation};
+}
+
+void TileManager::Retire(Result result) {
+    if (result.allocation == VK_NULL_HANDLE) {
+        return;
+    }
+    scheduler.DeferOperation([this, result]() {
+        vmaDestroyBuffer(instance.GetAllocator(), result.buffer, result.allocation);
+    });
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
@@ -272,9 +278,6 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     };
 
     const auto [temp_buffer, temp_allocation] = GetScratchBuffer(info.guest_size);
-    scheduler.DeferOperation([this, temp_buffer, temp_allocation]() {
-        vmaDestroyBuffer(instance.GetAllocator(), temp_buffer, temp_allocation);
-    });
 
     const auto cmdbuf = scheduler.CommandBuffer();
     in_image.Download(buffer_copies, temp_buffer, 0, copy_size);
@@ -323,6 +326,10 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
 
     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
     cmdbuf.dispatch(dim_x, 1, 1);
+
+    scheduler.DeferOperation([this, temp_buffer, temp_allocation]() {
+        vmaDestroyBuffer(instance.GetAllocator(), temp_buffer, temp_allocation);
+    });
 }
 
 } // namespace VideoCore
