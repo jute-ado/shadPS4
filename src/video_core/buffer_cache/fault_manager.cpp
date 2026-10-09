@@ -158,7 +158,8 @@ void FaultManager::ProcessFaultBuffer() {
     scheduler.DeferOperation([this, mapped, area = current_area] {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
-        const u32 fault_count = fault_buf[0];
+        const u32 fault_count =
+            BoundRecordedFaultCount(static_cast<u32>(fault_buf[0]), MaxPageFaults - 1);
         const VAddr address_space_size = caching_num_pages * caching_pagesize;
         u32 invalid_fault_count = 0;
         VAddr first_invalid_fault = 0;
