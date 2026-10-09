@@ -328,6 +328,22 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    if (cs.pgm_hash == 0x0a57ac2f) {
+        static u64 dispatch_count = 0;
+        ++dispatch_count;
+        if (dispatch_count == 1 || (dispatch_count & 1023) == 0) {
+            for (u32 index = 0; index < cs.buffers.size(); ++index) {
+                const auto& desc = cs.buffers[index];
+                const auto sharp = desc.GetSharp(cs);
+                LOG_WARNING(Render_Vulkan,
+                            "Diagnostic compute 0a57 dispatch={} buffer={} addr={:#x} size={:#x} "
+                            "stride={:#x} records={:#x} written={}",
+                            dispatch_count, index, sharp.base_address, sharp.GetSize(),
+                            sharp.GetStride(), sharp.num_records, desc.is_written);
+            }
+        }
+    }
+
     if (!BindResources(pipeline)) {
         return;
     }
