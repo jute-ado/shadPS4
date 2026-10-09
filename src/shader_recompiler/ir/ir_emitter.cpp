@@ -132,9 +132,24 @@ U1 IREmitter::GetThreadBitScalarReg(IR::ScalarReg reg) {
     return Inst<U1>(Opcode::GetThreadBitScalarReg, reg);
 }
 
+U1 IREmitter::GetStoredThreadBitScalarReg(IR::ScalarReg reg) {
+    ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
+    return Inst<U1>(Opcode::GetStoredThreadBitScalarReg, reg);
+}
+
+U1 IREmitter::IsThreadBitScalarRegLow(IR::ScalarReg reg) {
+    ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
+    return Inst<U1>(Opcode::IsThreadBitScalarRegLow, reg);
+}
+
 void IREmitter::SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value) {
     ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
     Inst(Opcode::SetThreadBitScalarReg, reg, value);
+}
+
+void IREmitter::SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value) {
+    ASSERT(static_cast<u32>(reg) + 1 < IR::NumScalarRegs);
+    Inst(Opcode::SetThreadBitScalarRegPair, reg, value);
 }
 
 template <>
@@ -215,7 +230,12 @@ void IREmitter::SetGotoVariable(u32 id, const U1& value) {
 }
 
 void IREmitter::SetMaskLaneVariable(IR::VectorReg vgpr, u32 lane, const U1& value) {
-    Inst(Opcode::SetMaskLaneVariable, vgpr, Imm32(lane), value);
+    SetMaskLaneVariable(vgpr, lane, value, Imm1(true));
+}
+
+void IREmitter::SetMaskLaneVariable(IR::VectorReg vgpr, u32 lane, const U1& value,
+                                    const U1& provenance) {
+    Inst(Opcode::SetMaskLaneVariable, vgpr, Imm32(lane), value, provenance);
 }
 
 U1 IREmitter::GetScc() {

@@ -105,15 +105,18 @@ void Translator::V_READLANE_B32(const GcnInst& inst) {
     const IR::U32 lane{GetSrc(inst.src[1])};
     SetDst(inst.dst[0], ir.ReadLane(value, lane));
 
-    // Restore a thread mask's per-lane bool spilled by V_WRITELANE_B32. Only the low (even) half
-    // of a 64-bit mask carries the view; SetDst1 routes it to the SGPR, VCC, or EXEC.
+    // Restore a proven thread mask's per-lane bool spilled by V_WRITELANE_B32. Scalar pair bases
+    // need not be even; mask-lane provenance determines whether this optional view is usable.
     if (lane.IsImmediate()) {
         ASSERT(lane.U32() < 64);
         const auto& dst = inst.dst[0];
-        const bool is_mask_lo = (dst.field == OperandField::ScalarGPR && dst.code % 2 == 0) ||
-                                dst.field == OperandField::VccLo ||
-                                dst.field == OperandField::ExecLo;
-        if (is_mask_lo) {
+        if (dst.field == OperandField::ScalarGPR) {
+            // V_READLANE_B32 writes one dword, so retain only this word's hidden mask view. Using
+            // SetDst1 here would reclassify and effectively overwrite the untouched dst + 1 SGPR.
+            ir.SetThreadBitScalarReg(
+                IR::ScalarReg(dst.code),
+                ir.GetMaskLaneVariable(IR::VectorReg(inst.src[0].code), lane.U32()));
+        } else if (dst.field == OperandField::VccLo || dst.field == OperandField::ExecLo) {
             SetDst1(dst, ir.GetMaskLaneVariable(IR::VectorReg(inst.src[0].code), lane.U32()));
         }
     }
@@ -121,22 +124,34 @@ void Translator::V_READLANE_B32(const GcnInst& inst) {
 
 void Translator::V_WRITELANE_B32(const GcnInst& inst) {
     const IR::VectorReg dst{inst.dst[0].code};
-    const IR::U32 value{GetSrc(inst.src[0])};
     const IR::U32 lane{GetSrc(inst.src[1])};
-    const IR::U32 old_value{GetSrc(inst.dst[0])};
-    ir.SetVectorReg(dst, ir.WriteLane(old_value, value, lane));
 
-    // A thread mask may be spilled from a scalar to a vector lane. Shadow the low (even) half's
-    // per-lane bool so V_READLANE_B32 can restore it; the high half and plain data store nothing.
+    // Capture the compiler representation before GetSrc materializes the scalar dword. The
+    // explicit low-word proof replaces the old absolute-SGPR-parity guess.
+    IR::U1 mask_value{};
+    IR::U1 mask_provenance{};
+    bool has_mask_candidate = false;
     if (lane.IsImmediate()) {
         ASSERT(lane.U32() < 64);
         const auto& src = inst.src[0];
-        const bool is_mask_lo = (src.field == OperandField::ScalarGPR && src.code % 2 == 0) ||
-                                src.field == OperandField::VccLo ||
-                                src.field == OperandField::ExecLo;
-        if (is_mask_lo) {
-            ir.SetMaskLaneVariable(dst, lane.U32(), GetSrc1(src));
+        if (src.field == OperandField::ScalarGPR && src.code + 1 < IR::NumScalarRegs) {
+            const auto reg = IR::ScalarReg(src.code);
+            mask_value = ir.GetStoredThreadBitScalarReg(reg);
+            mask_provenance = ir.IsThreadBitScalarRegLow(reg);
+            has_mask_candidate = true;
+        } else if (src.field == OperandField::VccLo || src.field == OperandField::ExecLo) {
+            mask_value = GetSrc1(src);
+            mask_provenance = ir.Imm1(true);
+            has_mask_candidate = true;
         }
+    }
+
+    const IR::U32 value{GetSrc(inst.src[0])};
+    const IR::U32 old_value{GetSrc(inst.dst[0])};
+    ir.SetVectorReg(dst, ir.WriteLane(old_value, value, lane));
+
+    if (has_mask_candidate) {
+        ir.SetMaskLaneVariable(dst, lane.U32(), mask_value, mask_provenance);
     }
 }
 

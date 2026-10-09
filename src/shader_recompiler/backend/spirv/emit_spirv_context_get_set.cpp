@@ -562,7 +562,19 @@ void EmitGetThreadBitScalarReg(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
+void EmitGetStoredThreadBitScalarReg(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitIsThreadBitScalarRegLow(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
 void EmitSetThreadBitScalarReg(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitSetThreadBitScalarRegPair(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
