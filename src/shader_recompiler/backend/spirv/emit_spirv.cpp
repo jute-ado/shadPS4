@@ -170,7 +170,7 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             const Id continue_label{node.data.loop.continue_block->Definition<Id>()};
             const Id endloop_label{node.data.loop.merge->Definition<Id>()};
 
-            ctx.OpLoopMerge(endloop_label, continue_label, spv::LoopControlMask::MaskNone);
+            ctx.OpLoopMerge(endloop_label, continue_label, spv::LoopControlMask::DontUnroll);
             ctx.OpBranch(body_label);
             break;
         }
