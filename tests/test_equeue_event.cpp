@@ -22,7 +22,7 @@ TEST(GnmGraphicsEvent, RegistrationUsesClearSemantics) {
     EXPECT_EQ(event.event.udata, user_data);
 }
 
-TEST(EqueueEvent, ClearGraphicsEventsCoalesceRepeatedTriggers) {
+TEST(EqueueEvent, ClearGraphicsEventsCoalesceAndCountRepeatedTriggers) {
     EqueueEvent event{};
     event.event.filter = OrbisKernelEvent::Filter::GraphicsCore;
 
@@ -30,8 +30,11 @@ TEST(EqueueEvent, ClearGraphicsEventsCoalesceRepeatedTriggers) {
     event.Trigger(reinterpret_cast<void*>(0x40));
     event.Trigger(reinterpret_cast<void*>(0x40));
 
+    EXPECT_EQ(event.event.fflags, 3u);
+
     event.ConsumeTrigger();
     EXPECT_FALSE(event.IsTriggered());
+    EXPECT_EQ(event.event.fflags, 0u);
     EXPECT_EQ(event.event.data, 0u);
 }
 
