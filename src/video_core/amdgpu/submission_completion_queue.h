@@ -59,6 +59,11 @@ public:
         return !boundaries.empty();
     }
 
+    [[nodiscard]] bool HasReadyBoundaries() const {
+        std::scoped_lock lock{mutex};
+        return !boundaries.empty() && boundaries.front().target_sequence <= completed_sequence;
+    }
+
 private:
     struct Boundary {
         Sequence target_sequence{};

@@ -3,29 +3,16 @@
 
 #include "common/elf_info.h"
 #include "common/io_file.h"
-#include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
 
 #include "video_core/cache_storage.h"
-#include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 
 #include <miniz.h>
 
-#include <condition_variable>
 #include <functional>
-#include <future>
-#include <mutex>
-#include <queue>
 
 namespace {
-
-std::mutex submit_mutex{};
-u32 num_requests{};
-std::condition_variable_any request_cv{};
-std::queue<std::packaged_task<void()>> req_queue{};
-std::mutex m_request{};
 
 mz_zip_archive zip_ar{};
 bool ar_is_read_only{true};
@@ -33,40 +20,6 @@ bool ar_is_read_only{true};
 } // namespace
 
 namespace Storage {
-
-void ProcessIO(const std::stop_token& stoken) {
-    Common::SetCurrentThreadName("shadPS4:PipelineCacheIO");
-
-    while (!stoken.stop_requested()) {
-        {
-            std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests; });
-        }
-
-        if (stoken.stop_requested()) {
-            break;
-        }
-
-        while (num_requests) {
-            std::packaged_task<void()> request{};
-            {
-                std::scoped_lock lock{m_request};
-                if (req_queue.empty()) {
-                    continue;
-                }
-                request = std::move(req_queue.front());
-                req_queue.pop();
-            }
-
-            if (request.valid()) {
-                request();
-                request.get_future().wait();
-            }
-
-            --num_requests;
-        }
-    }
-}
 
 constexpr std::string GetBlobFileExtension(BlobType type) {
     switch (type) {
@@ -88,6 +41,7 @@ constexpr std::string GetBlobFileExtension(BlobType type) {
 }
 
 void DataBase::Open() {
+    std::scoped_lock lifecycle_lock{lifecycle_mutex};
     if (opened) {
         return;
     }
@@ -116,54 +70,45 @@ void DataBase::Open() {
         }
     }
 
-    io_worker = std::jthread{ProcessIO};
-    opened = true;
+    io_queue.Open([] { Common::SetCurrentThreadName("shadPS4:PipelineCacheIO"); });
+    opened.store(true, std::memory_order_release);
 }
 
 void DataBase::Close() {
-    if (!IsOpened()) {
+    std::scoped_lock lifecycle_lock{lifecycle_mutex};
+    if (!opened.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
 
-    io_worker.request_stop();
-    io_worker.join();
+    // AsyncWriteQueue closes submission and drains every accepted write before
+    // the archive is finalized or the directory cache is reported complete.
+    io_queue.Close();
 
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_writer_finalize_archive(&zip_ar);
         mz_zip_writer_end(&zip_ar);
     }
-
-    opened = false;
     LOG_INFO(Render, "Cache dumped");
 }
 
 template <typename T>
-bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector<T>&& v) {
-    {
-        auto request = std::packaged_task<void()>{[=]() {
-            auto path{path_};
-            path.replace_extension(GetBlobFileExtension(type));
-            if (EmulatorSettings.IsPipelineCacheArchived()) {
-                ASSERT_MSG(!ar_is_read_only,
-                           "The archive is read-only. Did you forget to call `FinishPreload`?");
-                if (!mz_zip_writer_add_mem(&zip_ar, path.string().c_str(), v.data(),
-                                           v.size() * sizeof(T), MZ_BEST_COMPRESSION)) {
-                    LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
-                }
-            } else {
-                using namespace Common::FS;
-                const auto file = IOFile{path, FileAccessMode::Create};
-                file.Write(v);
+bool WriteVector(Detail::AsyncWriteQueue& io_queue, const BlobType type,
+                 std::filesystem::path&& path, std::vector<T>&& data) {
+    return io_queue.Submit([type, path = std::move(path), data = std::move(data)]() mutable {
+        path.replace_extension(GetBlobFileExtension(type));
+        if (EmulatorSettings.IsPipelineCacheArchived()) {
+            ASSERT_MSG(!ar_is_read_only,
+                       "The archive is read-only. Did you forget to call `FinishPreload`?");
+            if (!mz_zip_writer_add_mem(&zip_ar, path.string().c_str(), data.data(),
+                                       data.size() * sizeof(T), MZ_BEST_COMPRESSION)) {
+                LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
             }
-        }};
-        std::scoped_lock lock{m_request};
-        req_queue.emplace(std::move(request));
-    }
-
-    std::scoped_lock lk{submit_mutex};
-    ++num_requests;
-    request_cv.notify_one();
-    return true;
+        } else {
+            using namespace Common::FS;
+            const auto file = IOFile{path, FileAccessMode::Create};
+            file.Write(data);
+        }
+    });
 }
 
 template <typename T>
@@ -195,7 +140,7 @@ bool DataBase::Save(BlobType type, const std::string& name, std::vector<u8>&& da
 
     auto path = EmulatorSettings.IsPipelineCacheArchived() ? std::filesystem::path{name}
                                                            : cache_path / name;
-    return WriteVector(type, std::move(path), std::move(data));
+    return WriteVector(io_queue, type, std::move(path), std::move(data));
 }
 
 bool DataBase::Save(BlobType type, const std::string& name, std::vector<u32>&& data) {
@@ -205,7 +150,7 @@ bool DataBase::Save(BlobType type, const std::string& name, std::vector<u32>&& d
 
     auto path = EmulatorSettings.IsPipelineCacheArchived() ? std::filesystem::path{name}
                                                            : cache_path / name;
-    return WriteVector(type, std::move(path), std::move(data));
+    return WriteVector(io_queue, type, std::move(path), std::move(data));
 }
 
 void DataBase::Load(BlobType type, const std::string& name, std::vector<u8>& data) {

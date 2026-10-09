@@ -26,6 +26,45 @@ static bool IsBufferFormatStore(const IR::Inst& inst) {
     return inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32;
 }
 
+static bool CanLowerBufferFormat(AmdGpu::DataFormat data_format,
+                                 AmdGpu::NumberFormat num_format) {
+    const auto is_norm_or_integer = [num_format] {
+        return num_format == AmdGpu::NumberFormat::Unorm ||
+               num_format == AmdGpu::NumberFormat::Snorm ||
+               num_format == AmdGpu::NumberFormat::Uint ||
+               num_format == AmdGpu::NumberFormat::Sint;
+    };
+
+    switch (data_format) {
+    case AmdGpu::DataFormat::FormatInvalid:
+        return true;
+    case AmdGpu::DataFormat::Format8:
+    case AmdGpu::DataFormat::Format8_8:
+    case AmdGpu::DataFormat::Format8_8_8_8:
+    case AmdGpu::DataFormat::Format2_10_10_10:
+        return is_norm_or_integer();
+    case AmdGpu::DataFormat::Format16:
+    case AmdGpu::DataFormat::Format16_16:
+    case AmdGpu::DataFormat::Format16_16_16_16:
+        return is_norm_or_integer() || num_format == AmdGpu::NumberFormat::Float;
+    case AmdGpu::DataFormat::Format10_11_11:
+        return num_format == AmdGpu::NumberFormat::Float;
+    case AmdGpu::DataFormat::Format32:
+    case AmdGpu::DataFormat::Format32_32:
+    case AmdGpu::DataFormat::Format32_32_32:
+    case AmdGpu::DataFormat::Format32_32_32_32:
+        return num_format == AmdGpu::NumberFormat::Uint ||
+               num_format == AmdGpu::NumberFormat::Sint ||
+               num_format == AmdGpu::NumberFormat::Float;
+    default:
+        return false;
+    }
+}
+
+static IR::Value MakeZeroFormattedLoad(IR::IREmitter& ir) {
+    return ir.CompositeConstruct(ir.Imm32(0.f), ir.Imm32(0.f), ir.Imm32(0.f), ir.Imm32(0.f));
+}
+
 static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                                   const IR::BufferInstInfo info, const FormatInfo& format_info) {
     IR::Value interpreted;
@@ -109,6 +148,12 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
                               const FormatInfo& format_info) {
+    // An invalid descriptor format represents a null formatted store. Do not try to construct a
+    // value from its zero components before reaching the no-op switch case below.
+    if (format_info.data_format == AmdGpu::DataFormat::FormatInvalid) {
+        return;
+    }
+
     // Extract actual number of components and apply additional modifications.
     const auto swizzled = ApplySwizzle(ir, value, format_info.swizzle.Inverse());
     boost::container::static_vector<IR::Value, 4> components;
@@ -198,11 +243,25 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     const auto is_inst_typed = flags.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
     const auto data_format =
         is_inst_typed ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value()) : buffer.GetDataFmt();
+    const auto num_format =
+        is_inst_typed ? AmdGpu::RemapNumberFormat(flags.inst_num_fmt.Value(), data_format)
+                      : buffer.GetNumberFmt();
+
+    // DFMT and NFMT are not an arbitrary cross product. Reject combinations that this guest-format
+    // lowerer cannot represent before invoking a pair-specific pack/unpack operation. A malformed
+    // or stale descriptor must not terminate asynchronous compilation or write invented data.
+    if (!CanLowerBufferFormat(data_format, num_format)) {
+        if (IsBufferFormatLoad(inst)) {
+            inst.ReplaceUsesWithAndRemove(MakeZeroFormattedLoad(ir));
+        } else {
+            inst.Invalidate();
+        }
+        return;
+    }
+
     const auto format_info = FormatInfo{
         .data_format = data_format,
-        .num_format = is_inst_typed
-                          ? AmdGpu::RemapNumberFormat(flags.inst_num_fmt.Value(), data_format)
-                          : buffer.GetNumberFmt(),
+        .num_format = num_format,
         .swizzle = is_inst_typed
                        ? AmdGpu::RemapSwizzle(flags.inst_data_fmt.Value(), AmdGpu::IdentityMapping)
                        : buffer.DstSelect(),

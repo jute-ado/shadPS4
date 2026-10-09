@@ -7,6 +7,7 @@
 #include "common/polyfill_thread.h"
 #include "core/libraries/videoout/video_out.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -55,8 +56,26 @@ struct VideoOutPort {
         vo_cv.wait(lk, pred);
     }
 
+    void WaitVoLabel(auto&& pred, auto&& interrupt_pred) {
+        std::unique_lock lk{vo_mutex};
+        vo_cv.wait(lk, [&] { return pred() || interrupt_pred(); });
+    }
+
+    template <typename Rep, typename Period>
+    bool WaitVoLabelFor(auto&& pred, auto&& interrupt_pred,
+                        const std::chrono::duration<Rep, Period>& timeout) {
+        std::unique_lock lk{vo_mutex};
+        return vo_cv.wait_for(lk, timeout, [&] { return pred() || interrupt_pred(); });
+    }
+
     void SignalVoLabel() {
         std::scoped_lock lk{vo_mutex};
+        vo_cv.notify_one();
+    }
+
+    // Wakes the interruptible GPU wait for an atomic non-label predicate. Unlike SignalVoLabel,
+    // this need not publish a buffer-label write and therefore must not contend on vo_mutex.
+    void InterruptVoWait() noexcept {
         vo_cv.notify_one();
     }
 

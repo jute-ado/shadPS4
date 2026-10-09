@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstring>
+#include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -25,6 +29,103 @@ struct Archive;
 }
 
 namespace Shader {
+
+namespace Gcn {
+struct FetchShaderData;
+}
+
+struct Info;
+
+struct CompileGuestRead {
+    VAddr address{};
+    std::vector<u8> bytes;
+};
+
+// Owns all mutable guest-memory bytes consumed while selecting and compiling one shader
+// permutation. Flattened SRT data is stored separately because it is replayed as one image;
+// direct reads are recorded by address and replayed without falling back to live guest memory.
+struct CompileResourceSnapshot {
+    std::vector<u32> flattened_user_data;
+    std::vector<CompileGuestRead> guest_reads;
+    bool valid{};
+
+    [[nodiscard]] bool ReadGuestMemory(VAddr address, void* output, u64 size) const noexcept {
+        if (!output || size == 0 || address > std::numeric_limits<VAddr>::max() - size) {
+            return false;
+        }
+        auto* destination = static_cast<u8*>(output);
+        VAddr cursor = address;
+        u64 remaining = size;
+        while (remaining != 0) {
+            const auto read = std::ranges::find_if(guest_reads, [&](const CompileGuestRead& item) {
+                return cursor >= item.address && cursor - item.address < item.bytes.size();
+            });
+            if (read == guest_reads.end()) {
+                return false;
+            }
+            const u64 offset = cursor - read->address;
+            const u64 copy_size = std::min<u64>(remaining, read->bytes.size() - offset);
+            std::memcpy(destination, read->bytes.data() + offset, copy_size);
+            destination += copy_size;
+            cursor += copy_size;
+            remaining -= copy_size;
+        }
+        return true;
+    }
+
+    void RecordGuestMemory(VAddr address, const void* input, u64 size) {
+        ASSERT(input && size != 0 && size <= std::numeric_limits<size_t>::max());
+        const auto existing =
+            std::ranges::find_if(guest_reads, [&](const CompileGuestRead& item) {
+                return item.address == address && item.bytes.size() == size;
+            });
+        if (existing != guest_reads.end()) {
+            ASSERT(std::memcmp(existing->bytes.data(), input, size) == 0);
+            return;
+        }
+        auto& read = guest_reads.emplace_back();
+        read.address = address;
+        read.bytes.resize(static_cast<size_t>(size));
+        std::memcpy(read.bytes.data(), input, size);
+    }
+
+    static bool PS4_SYSV_ABI ReplayRead(void* context, VAddr address, void* output, u64 size) {
+        return static_cast<const CompileResourceSnapshot*>(context)->ReadGuestMemory(address, output,
+                                                                                     size);
+    }
+
+    static CompileResourceSnapshot Capture(const Info& info);
+};
+
+// Wraps one coherent memory reader while recording every direct guest-memory read. The same
+// underlying SrtMemoryReadSession should also be passed to RefreshFlatBuf so both paths observe the
+// same cached tracking-page generation.
+class CompileResourceCapture {
+public:
+    explicit CompileResourceCapture(SrtMemoryReader source_) : source{source_} {}
+
+    [[nodiscard]] SrtMemoryReader Reader() noexcept {
+        return {&CompileResourceCapture::CaptureRead, this, &read_failed};
+    }
+
+    CompileResourceSnapshot Finish(const Info& info, bool epoch_valid = true);
+
+private:
+    static bool PS4_SYSV_ABI CaptureRead(void* context, VAddr address, void* output, u64 size) {
+        auto& capture = *static_cast<CompileResourceCapture*>(context);
+        if (!capture.source.Valid() || !capture.source.callback ||
+            !capture.source.callback(capture.source.context, address, output, size)) {
+            capture.read_failed = true;
+            return false;
+        }
+        capture.snapshot.RecordGuestMemory(address, output, size);
+        return true;
+    }
+
+    SrtMemoryReader source{};
+    CompileResourceSnapshot snapshot{};
+    bool read_failed{};
+};
 
 enum class Qualifier : u8 {
     None,
@@ -70,7 +171,6 @@ struct InfoPersistent {
     IR::ScalarReg tess_consts_ptr_base = IR::ScalarReg::Max;
     Stage stage;
     LogicalStage l_stage;
-
     u8 mrt_mask{};
     bool has_fetch_shader{};
     bool has_bitwise_xor{};
@@ -122,6 +222,11 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    // Compile-call-local replay state. This is intentionally excluded from InfoPersistent and
+    // therefore from the serialized shader-cache ABI.
+    std::optional<CompileResourceSnapshot> compile_resource_snapshot;
+    SrtMemoryReader compile_guest_memory_reader{};
+    const Gcn::FetchShaderData* compile_fetch_shader_snapshot{};
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -141,7 +246,12 @@ struct Info : InfoPersistent {
     bool uses_lane_id{};
     bool uses_group_quad{};
     bool uses_group_ballot{};
+    bool uses_group_vote{};
     IR::Type shared_types{};
+    // Host-generated workgroup scratch appended after the guest-visible LDS range. This is
+    // compile-call-local code-generation state and is deliberately not part of the guest
+    // RuntimeInfo or serialized InfoPersistent ABI.
+    u32 workgroup_scratch_memory_size{};
     bool uses_fp16{};
     bool uses_fp64{};
     bool uses_pack_10_11_11{};
@@ -166,14 +276,51 @@ struct Info : InfoPersistent {
 
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
-        T data;
-        const u32* base = user_data.data();
-        if (ptr_index != IR::NumScalarRegs) {
-            std::memcpy(&base, &user_data[ptr_index], sizeof(base));
-            base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+        T data{};
+        const u64 byte_offset = u64{dword_offset} * sizeof(u32);
+        std::span<const u32> root_user_data = user_data;
+        if (compile_resource_snapshot && compile_resource_snapshot->valid &&
+            compile_resource_snapshot->flattened_user_data.size() >= NUM_USER_DATA_REGS) {
+            root_user_data = std::span<const u32>{compile_resource_snapshot->flattened_user_data}
+                                 .first(NUM_USER_DATA_REGS);
         }
-        std::memcpy(&data, base + dword_offset, sizeof(T));
+        if (ptr_index == IR::NumScalarRegs) {
+            if (byte_offset > root_user_data.size_bytes() ||
+                sizeof(T) > root_user_data.size_bytes() - byte_offset) {
+                return data;
+            }
+            std::memcpy(&data, reinterpret_cast<const u8*>(root_user_data.data()) + byte_offset,
+                        sizeof(T));
+            return data;
+        }
+        if (ptr_index + 1U >= root_user_data.size()) {
+            return data;
+        }
+        u64 raw_pointer{};
+        std::memcpy(&raw_pointer, &root_user_data[ptr_index], sizeof(raw_pointer));
+        const VAddr base_address = raw_pointer & 0xFFFFFFFFFFFFULL;
+        if (base_address == 0 || base_address > std::numeric_limits<VAddr>::max() - byte_offset ||
+            !ReadGuestMemory(base_address + byte_offset, &data, sizeof(T))) {
+            return T{};
+        }
         return data;
+    }
+
+    [[nodiscard]] bool ReadGuestMemory(VAddr address, void* output, u64 size) const noexcept {
+        if (!output || address == 0 || size == 0 ||
+            address > std::numeric_limits<VAddr>::max() - size) {
+            return false;
+        }
+        if (compile_resource_snapshot) {
+            return compile_resource_snapshot->valid &&
+                   compile_resource_snapshot->ReadGuestMemory(address, output, size);
+        }
+        if (compile_guest_memory_reader.callback) {
+            return compile_guest_memory_reader.callback(compile_guest_memory_reader.context,
+                                                         address, output, size);
+        }
+        std::memcpy(output, reinterpret_cast<const void*>(address), size);
+        return true;
     }
 
     void PushUd(Backend::Bindings& bnd, PushData& push) const {
@@ -192,28 +339,112 @@ struct Info : InfoPersistent {
         bnd.user_data += ud_mask.NumRegs();
     }
 
-    void RefreshFlatBuf() {
+    void RefreshFlatBuf(SrtMemoryReader reader = {}) {
+        if (compile_resource_snapshot.has_value()) {
+            ASSERT_MSG(ReplayCompileResourceSnapshot(),
+                       "Cached shader permutation changed its flattened descriptor layout");
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+            srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), reader.callback,
+                                 reader.context);
         }
+
+        for (const auto& reservation : srt_info.range_reservations) {
+            ASSERT(reservation.pointer_lo_flat_index + 1U < flattened_ud_buf.size());
+            ASSERT(reservation.destination_flat_offset_dw + reservation.span_dw <=
+                   flattened_ud_buf.size());
+            auto destination = std::span{flattened_ud_buf}.subspan(
+                reservation.destination_flat_offset_dw, reservation.span_dw);
+            const auto zero_destination = [&] { std::ranges::fill(destination, 0U); };
+            if (!reader.callback) {
+                zero_destination();
+                continue;
+            }
+            const u64 raw_pointer = flattened_ud_buf[reservation.pointer_lo_flat_index] |
+                                    u64{flattened_ud_buf[reservation.pointer_lo_flat_index + 1U]}
+                                        << 32;
+            const VAddr base_address = raw_pointer & 0xFFFFFFFFFFFFULL;
+            const u64 source_offset = u64{reservation.source_offset_dw} * sizeof(u32);
+            if (base_address == 0 ||
+                base_address > std::numeric_limits<VAddr>::max() - source_offset) {
+                zero_destination();
+                continue;
+            }
+            const VAddr source_address = base_address + source_offset;
+            if (!reader.callback(reader.context, source_address, destination.data(),
+                                 destination.size_bytes())) {
+                zero_destination();
+            }
+        }
+    }
+
+    void UseCompileCaptureReader(SrtMemoryReader reader) noexcept {
+        compile_resource_snapshot.reset();
+        compile_guest_memory_reader = reader;
+    }
+
+    void UseCompileResourceSnapshot(CompileResourceSnapshot snapshot) {
+        compile_resource_snapshot = std::move(snapshot);
+        compile_guest_memory_reader = {};
+    }
+
+    void ClearCompileResourceAccess() noexcept {
+        compile_resource_snapshot.reset();
+        compile_guest_memory_reader = {};
+    }
+
+    void ClearCompileCaptureReader() noexcept {
+        compile_guest_memory_reader = {};
+    }
+
+    void UseCompileFetchShaderSnapshot(const Gcn::FetchShaderData& snapshot) noexcept {
+        compile_fetch_shader_snapshot = &snapshot;
+    }
+
+    void ClearCompileFetchShaderSnapshot() noexcept {
+        compile_fetch_shader_snapshot = nullptr;
+    }
+
+    bool ReplayCompileResourceSnapshot() {
+        if (!compile_resource_snapshot || !compile_resource_snapshot->valid ||
+            compile_resource_snapshot->flattened_user_data.size() !=
+                srt_info.flattened_bufsize_dw) {
+            return false;
+        }
+        flattened_ud_buf = compile_resource_snapshot->flattened_user_data;
+        return true;
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
                                              static_cast<u32>(tess_consts_dword_offset));
-        VAddr tess_constants_addr = buf.base_address;
-        memcpy(&tess_constants,
-               reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
-               sizeof(tess_constants));
+        if (!ReadGuestMemory(buf.base_address, &tess_constants, sizeof(tess_constants))) {
+            tess_constants = {};
+        }
     }
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
 };
+
+inline CompileResourceSnapshot CompileResourceSnapshot::Capture(const Info& info) {
+    return {
+        .flattened_user_data = info.flattened_ud_buf,
+        .valid = info.flattened_ud_buf.size() == info.srt_info.flattened_bufsize_dw,
+    };
+}
+
+inline CompileResourceSnapshot CompileResourceCapture::Finish(const Info& info, bool epoch_valid) {
+    snapshot.flattened_user_data = info.flattened_ud_buf;
+    snapshot.valid = epoch_valid && !read_failed && source.Valid() &&
+                     info.flattened_ud_buf.size() == info.srt_info.flattened_bufsize_dw;
+    return std::move(snapshot);
+}
 DECLARE_ENUM_FLAG_OPERATORS(Info::ReadConstType);
 
 } // namespace Shader

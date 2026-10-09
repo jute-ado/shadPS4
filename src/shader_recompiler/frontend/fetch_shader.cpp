@@ -39,20 +39,36 @@ static bool IsTypedBufferLoad(const Gcn::GcnInst& inst) {
            inst.opcode == Opcode::TBUFFER_LOAD_FORMAT_XYZW;
 }
 
-const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
-    const u32* code;
-    std::memcpy(&code, &info.user_data[sgpr_base], sizeof(code));
-    return code;
+static VAddr GetFetchShaderAddress(const Info& info, u32 sgpr_base) {
+    const u64 code_address = info.ReadUdReg<u64>(IR::NumScalarRegs, sgpr_base);
+    return code_address & 0xFFFFFFFFFFFFULL;
+}
+
+std::optional<std::vector<u8>> ReadFetchShaderProgram(const Info& info, u32 sgpr_base, u32 size) {
+    const VAddr code_address = GetFetchShaderAddress(info, sgpr_base);
+    if (code_address == 0 || size == 0 || size > MaxFetchShaderProgramSize) {
+        return std::nullopt;
+    }
+    std::vector<u8> owned_code(size);
+    if (!info.ReadGuestMemory(code_address, owned_code.data(), owned_code.size())) {
+        return std::nullopt;
+    }
+    return owned_code;
 }
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     if (!info.has_fetch_shader) {
         return std::nullopt;
     }
+    if (info.compile_fetch_shader_snapshot) {
+        return *info.compile_fetch_shader_snapshot;
+    }
 
-    const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+    const VAddr code_address = GetFetchShaderAddress(info, info.fetch_shader_sgpr_base);
+    if (code_address == 0) {
+        return std::nullopt;
+    }
     FetchShaderData data{};
-    GcnCodeSlice code_slice(code, code + std::numeric_limits<u32>::max());
     GcnDecodeContext decoder;
 
     struct VsharpLoad {
@@ -62,15 +78,51 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     std::array<VsharpLoad, 104> loads{};
 
     u32 semantic_index = 0;
-    while (!code_slice.atEnd()) {
-        const auto inst = decoder.decodeInstruction(code_slice);
+    while (data.size < MaxFetchShaderProgramSize) {
+        // GCN instructions contain at most the base dword plus two extension dwords. Probe the
+        // length from owned, zero-initialized storage, then fill every requested extension through
+        // the compile-time reader before using the decoded instruction.
+        std::array<u32, 3> owned_instruction{};
+        if (!info.ReadGuestMemory(code_address + data.size, owned_instruction.data(),
+                                  sizeof(u32))) {
+            return std::nullopt;
+        }
+
+        u32 captured_size = sizeof(u32);
+        GcnInst inst{};
+        while (true) {
+            if (GetInstructionEncoding(owned_instruction[0]) == InstEncoding::ILLEGAL) {
+                return std::nullopt;
+            }
+            GcnCodeSlice instruction_slice(owned_instruction.data(),
+                                           owned_instruction.data() + owned_instruction.size());
+            inst = decoder.decodeInstruction(instruction_slice);
+            if (inst.length < sizeof(u32) || inst.length > sizeof(owned_instruction) ||
+                inst.length % sizeof(u32) != 0 ||
+                inst.length > MaxFetchShaderProgramSize - data.size) {
+                return std::nullopt;
+            }
+            if (inst.length <= captured_size) {
+                break;
+            }
+            if (!info.ReadGuestMemory(code_address + data.size + captured_size,
+                                      reinterpret_cast<u8*>(owned_instruction.data()) +
+                                          captured_size,
+                                      inst.length - captured_size)) {
+                return std::nullopt;
+            }
+            captured_size = inst.length;
+        }
         data.size += inst.length;
 
         if (inst.opcode == Opcode::S_SETPC_B64) {
-            break;
+            return data;
         }
 
         if (inst.inst_class == InstClass::ScalarMemRd) {
+            if (inst.dst[0].code >= loads.size()) {
+                return std::nullopt;
+            }
             loads[inst.dst[0].code] = VsharpLoad{inst.control.smrd.offset, inst.src[0].code * 2};
             continue;
         }
@@ -93,6 +145,9 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         if (inst.inst_class == InstClass::VectorMemBufFmt) {
             // SRSRC is in units of 4 SPGRs while SBASE is in pairs of SGPRs
             const u32 base_sgpr = inst.src[2].code * 4;
+            if (base_sgpr >= loads.size()) {
+                return std::nullopt;
+            }
             auto& attrib = data.attributes.emplace_back();
             attrib.semantic = semantic_index++;
             attrib.dest_vgpr = inst.src[1].code;
@@ -108,7 +163,7 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         }
     }
 
-    return data;
+    return std::nullopt;
 }
 
 } // namespace Shader::Gcn

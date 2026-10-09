@@ -19,6 +19,7 @@
 #include <variant>
 
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/opcodes.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reg.h"
@@ -56,6 +57,19 @@ struct MaskLaneVariable : FlagTag {
     u32 lane{};
 };
 
+// Whether a mask-lane value has a matching V_WRITELANE mask producer on every reaching path.
+// Keep this separate from the value: a proven mask spill may itself carry an undefined bit, while
+// an absent optional shadow must not reclassify an ordinary V_READLANE result as a thread mask.
+struct MaskLaneProvenance : FlagTag {
+    MaskLaneProvenance() = default;
+    explicit MaskLaneProvenance(IR::VectorReg vgpr_, u32 lane_) : vgpr{vgpr_}, lane{lane_} {}
+
+    auto operator<=>(const MaskLaneProvenance&) const noexcept = default;
+
+    IR::VectorReg vgpr{};
+    u32 lane{};
+};
+
 struct ThreadBitScalar : FlagTag {
     ThreadBitScalar() = default;
     explicit ThreadBitScalar(IR::ScalarReg sgpr_) : sgpr{sgpr_} {}
@@ -65,9 +79,22 @@ struct ThreadBitScalar : FlagTag {
     IR::ScalarReg sgpr;
 };
 
+// SGPRs can hold either an ordinary scalar dword or one dword of a flattened 64-lane mask.
+// Keep the representation discriminator in SSA as well: materializing a mask into a scalar word
+// is observable and must happen only when a scalar consumer actually requests that word.
+struct ScalarIsThreadBit : FlagTag {
+    ScalarIsThreadBit() = default;
+    explicit ScalarIsThreadBit(IR::ScalarReg sgpr_) : sgpr{sgpr_} {}
+
+    auto operator<=>(const ScalarIsThreadBit&) const noexcept = default;
+
+    IR::ScalarReg sgpr;
+};
+
 using Variant =
     std::variant<IR::ScalarReg, IR::VectorReg, IR::VirtualReg, GotoVariable, MaskLaneVariable,
-                 ThreadBitScalar, SccFlagTag, ExecFlagTag, VccFlagTag, VccLoTag, VccHiTag, M0Tag>;
+                 MaskLaneProvenance, ThreadBitScalar, ScalarIsThreadBit, SccFlagTag, ExecFlagTag,
+                 VccFlagTag, VccLoTag, VccHiTag, M0Tag>;
 using ValueMap = std::unordered_map<IR::Block*, IR::Value>;
 
 struct DefTable {
@@ -110,11 +137,29 @@ struct DefTable {
         return (u32(RegIndex(variable.vgpr)) << 6) | variable.lane;
     }
 
+    static u32 MaskLaneKey(MaskLaneProvenance variable) {
+        return (u32(RegIndex(variable.vgpr)) << 6) | variable.lane;
+    }
+
+    const IR::Value& Def(IR::Block* block, MaskLaneProvenance variable) {
+        return mask_lane_provenance[MaskLaneKey(variable)][block];
+    }
+    void SetDef(IR::Block* block, MaskLaneProvenance variable, const IR::Value& value) {
+        mask_lane_provenance[MaskLaneKey(variable)].insert_or_assign(block, value);
+    }
+
     const IR::Value& Def(IR::Block* block, ThreadBitScalar variable) {
         return block->ssa_sbit_values[RegIndex(variable.sgpr)];
     }
     void SetDef(IR::Block* block, ThreadBitScalar variable, const IR::Value& value) {
         block->ssa_sbit_values[RegIndex(variable.sgpr)] = value;
+    }
+
+    const IR::Value& Def(IR::Block* block, ScalarIsThreadBit variable) {
+        return scalar_is_thread_bit[RegIndex(variable.sgpr)][block];
+    }
+    void SetDef(IR::Block* block, ScalarIsThreadBit variable, const IR::Value& value) {
+        scalar_is_thread_bit[RegIndex(variable.sgpr)].insert_or_assign(block, value);
     }
 
     const IR::Value& Def(IR::Block* block, SccFlagTag) {
@@ -160,7 +205,9 @@ struct DefTable {
 
     std::unordered_map<u32, ValueMap> goto_vars;
     std::unordered_map<u32, ValueMap> mask_lane_vars;
+    std::unordered_map<u32, ValueMap> mask_lane_provenance;
     std::unordered_map<u64, ValueMap> reg_vars;
+    std::unordered_map<u32, ValueMap> scalar_is_thread_bit;
     ValueMap scc_flag;
     ValueMap exec_flag;
     ValueMap vcc_flag;
@@ -343,17 +390,102 @@ private:
     DefTable current_def;
 };
 
+IR::ScalarReg NextScalarReg(IR::ScalarReg reg) {
+    ASSERT(RegIndex(reg) + 1 < IR::NumScalarRegs);
+    return static_cast<IR::ScalarReg>(RegIndex(reg) + 1);
+}
+
+IR::Value ReadScalarWord(Pass& pass, IR::Block* block, IR::Inst& inst, IR::ScalarReg reg) {
+    const IR::Value is_thread_bit = pass.ReadVariable(ScalarIsThreadBit{reg}, block);
+    if (is_thread_bit.IsImmediate() && !is_thread_bit.U1()) {
+        return pass.ReadVariable(reg, block);
+    }
+
+    IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+    const IR::U1 bit{pass.ReadVariable(ThreadBitScalar{reg}, block)};
+    const IR::Value scalar = pass.ReadVariable(reg, block);
+    const IR::Inst* const scalar_inst = scalar.Resolve().TryInstRecursive();
+    const bool has_scalar_lineage =
+        scalar.IsImmediate() ||
+        (scalar_inst != nullptr && scalar_inst->GetOpcode() != IR::Opcode::UndefU32);
+
+    IR::Value value{};
+    if (has_scalar_lineage || !is_thread_bit.IsImmediate()) {
+        value = ir.MaterializeScalarMaskWord(IR::U1{is_thread_bit}, bit, IR::U32{scalar},
+                                             RegIndex(reg) & 1U);
+    } else {
+        const IR::Value ballot = ir.Ballot(bit);
+        value = ir.CompositeExtract(ballot, RegIndex(reg) & 1U);
+    }
+
+    // Once a dword has been materialized, later scalar reads should reuse the exact SSA value.
+    pass.WriteVariable(reg, block, value);
+    pass.WriteVariable(ScalarIsThreadBit{reg}, block, ir.Imm1(false));
+    return value;
+}
+
+IR::U1 ScalarWordBit(IR::IREmitter& ir, const IR::Value& scalar, const IR::U32& lane) {
+    const IR::U32 shift{ir.BitwiseAnd(lane, ir.Imm32(31U))};
+    const IR::U32 shifted{ir.ShiftRightLogical(IR::U32{scalar}, shift)};
+    return ir.INotEqual(ir.BitwiseAnd(shifted, ir.Imm32(1U)), ir.Imm32(0U));
+}
+
+IR::U1 ReadThreadBitScalar(Pass& pass, IR::Block* block, IR::Inst& inst,
+                           IR::ScalarReg requested_reg) {
+    const IR::ScalarReg lo_reg = requested_reg;
+    const IR::ScalarReg hi_reg = NextScalarReg(lo_reg);
+    const IR::Value lo_is_thread_bit = pass.ReadVariable(ScalarIsThreadBit{lo_reg}, block);
+    const IR::Value hi_is_thread_bit = pass.ReadVariable(ScalarIsThreadBit{hi_reg}, block);
+    if (lo_is_thread_bit.IsImmediate() && hi_is_thread_bit.IsImmediate() &&
+        lo_is_thread_bit.U1() && hi_is_thread_bit.U1()) {
+        const IR::Value lo_thread_bit = pass.ReadVariable(ThreadBitScalar{lo_reg}, block);
+        const IR::Value hi_thread_bit = pass.ReadVariable(ThreadBitScalar{hi_reg}, block);
+        if (lo_thread_bit.Resolve() == hi_thread_bit.Resolve()) {
+            return IR::U1{lo_thread_bit};
+        }
+    }
+
+    IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+    const IR::U32 lane = ir.LaneId();
+    const auto read_word = [&](IR::ScalarReg reg, const IR::Value& is_thread_bit) -> IR::U1 {
+        if (is_thread_bit.IsImmediate() && is_thread_bit.U1()) {
+            return IR::U1{pass.ReadVariable(ThreadBitScalar{reg}, block)};
+        }
+        const IR::U1 scalar_bit = ScalarWordBit(ir, pass.ReadVariable(reg, block), lane);
+        if (is_thread_bit.IsImmediate()) {
+            return scalar_bit;
+        }
+        const IR::U1 thread_bit{pass.ReadVariable(ThreadBitScalar{reg}, block)};
+        return IR::U1{ir.Select(IR::U1{is_thread_bit}, thread_bit, scalar_bit)};
+    };
+
+    const IR::U1 lo = read_word(lo_reg, lo_is_thread_bit);
+    const IR::U1 hi = read_word(hi_reg, hi_is_thread_bit);
+    return IR::U1{ir.Select(ir.ILessThan(lane, ir.Imm32(32U), false), lo, hi)};
+}
+
 void VisitInst(Pass& pass, IR::Block* block, IR::Inst& inst) {
     const IR::Opcode opcode{inst.GetOpcode()};
     switch (opcode) {
     case IR::Opcode::SetThreadBitScalarReg: {
         const IR::ScalarReg reg{inst.Arg(0).ScalarReg()};
         pass.WriteVariable(ThreadBitScalar{reg}, block, inst.Arg(1));
+        pass.WriteVariable(ScalarIsThreadBit{reg}, block, IR::Value{true});
+        break;
+    }
+    case IR::Opcode::SetThreadBitScalarRegPair: {
+        const IR::ScalarReg reg{inst.Arg(0).ScalarReg()};
+        const IR::ScalarReg hi_reg = NextScalarReg(reg);
+        pass.WriteVariable(ThreadBitScalar{reg}, block, inst.Arg(1));
+        pass.WriteVariable(ThreadBitScalar{hi_reg}, block, inst.Arg(1));
+        pass.WriteVariable(ScalarIsThreadBit{reg}, block, IR::Value{true});
+        pass.WriteVariable(ScalarIsThreadBit{hi_reg}, block, IR::Value{true});
         break;
     }
     case IR::Opcode::SetScalarRegister: {
         const IR::ScalarReg reg{inst.Arg(0).ScalarReg()};
         pass.WriteVariable(reg, block, inst.Arg(1));
+        pass.WriteVariable(ScalarIsThreadBit{reg}, block, IR::Value{false});
         break;
     }
     case IR::Opcode::SetVectorRegister: {
@@ -370,6 +502,8 @@ void VisitInst(Pass& pass, IR::Block* block, IR::Inst& inst) {
     case IR::Opcode::SetMaskLaneVariable:
         pass.WriteVariable(MaskLaneVariable{inst.Arg(0).VectorReg(), inst.Arg(1).U32()}, block,
                            inst.Arg(2));
+        pass.WriteVariable(MaskLaneProvenance{inst.Arg(0).VectorReg(), inst.Arg(1).U32()}, block,
+                           IR::Value{true});
         break;
     case IR::Opcode::SetExec:
         pass.WriteVariable(ExecFlagTag{}, block, inst.Arg(0));
@@ -391,14 +525,12 @@ void VisitInst(Pass& pass, IR::Block* block, IR::Inst& inst) {
         break;
     case IR::Opcode::GetThreadBitScalarReg: {
         const IR::ScalarReg reg{inst.Arg(0).ScalarReg()};
-        const IR::Value value = pass.ReadVariable(ThreadBitScalar{reg}, block);
-        inst.ReplaceUsesWith(value);
+        inst.ReplaceUsesWith(ReadThreadBitScalar(pass, block, inst, reg));
         break;
     }
     case IR::Opcode::GetScalarRegister: {
         const IR::ScalarReg reg{inst.Arg(0).ScalarReg()};
-        const IR::Value value = pass.ReadVariable(reg, block);
-        inst.ReplaceUsesWith(value);
+        inst.ReplaceUsesWith(ReadScalarWord(pass, block, inst, reg));
         break;
     }
     case IR::Opcode::GetVectorRegister: {
@@ -413,10 +545,30 @@ void VisitInst(Pass& pass, IR::Block* block, IR::Inst& inst) {
     case IR::Opcode::GetGotoVariable:
         inst.ReplaceUsesWith(pass.ReadVariable(GotoVariable{inst.Arg(0).U32()}, block));
         break;
-    case IR::Opcode::GetMaskLaneVariable:
-        inst.ReplaceUsesWith(
-            pass.ReadVariable(MaskLaneVariable{inst.Arg(0).VectorReg(), inst.Arg(1).U32()}, block));
+    case IR::Opcode::GetMaskLaneVariable: {
+        const IR::VectorReg vgpr = inst.Arg(0).VectorReg();
+        const u32 lane = inst.Arg(1).U32();
+        const IR::Value provenance =
+            pass.ReadVariable(MaskLaneProvenance{vgpr, lane}, block);
+        if (!provenance.IsImmediate() || !provenance.U1()) {
+            // The shadow is optional. If a matching mask spill cannot be proven on every path,
+            // discard only the speculative restore and retain the ordinary scalar/flag write.
+            for (const auto& [user, _] : inst.Uses()) {
+                switch (user->GetOpcode()) {
+                case IR::Opcode::SetThreadBitScalarReg:
+                case IR::Opcode::SetThreadBitScalarRegPair:
+                case IR::Opcode::SetExec:
+                case IR::Opcode::SetVcc:
+                    user->Invalidate();
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+        inst.ReplaceUsesWith(pass.ReadVariable(MaskLaneVariable{vgpr, lane}, block));
         break;
+    }
     case IR::Opcode::GetExec:
         inst.ReplaceUsesWith(pass.ReadVariable(ExecFlagTag{}, block));
         break;
@@ -451,6 +603,27 @@ void VisitBlock(Pass& pass, IR::Block* block) {
 
 void SsaRewritePass(IR::Program& program) {
     Pass pass{program.blocks.front()};
+    for (IR::Block* const root : program.blocks) {
+        if (!root->ImmPredecessors().empty()) {
+            continue;
+        }
+        for (size_t index = 0; index < IR::NumScalarRegs; ++index) {
+            const auto reg = static_cast<IR::ScalarReg>(index);
+            pass.WriteVariable(ScalarIsThreadBit{reg}, root, IR::Value{false});
+        }
+        // Optional mask-lane shadows are absent until a matching V_WRITELANE mask spill defines
+        // them. Seed only keys that are actually queried, avoiding a dense VGPR-by-lane table.
+        for (IR::Block* const block : program.blocks) {
+            for (const IR::Inst& inst : block->Instructions()) {
+                if (inst.GetOpcode() != IR::Opcode::GetMaskLaneVariable) {
+                    continue;
+                }
+                pass.WriteVariable(
+                    MaskLaneProvenance{inst.Arg(0).VectorReg(), inst.Arg(1).U32()}, root,
+                    IR::Value{false});
+            }
+        }
+    }
     const auto end = program.post_order_blocks.rend();
     for (auto it = program.post_order_blocks.rbegin(); it != end; ++it) {
         VisitBlock(pass, *it);

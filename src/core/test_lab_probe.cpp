@@ -14,6 +14,7 @@ std::string_view TestLabProbeJson() {
     "console_profile_ps4",
     "console_profile_ps4_pro",
     "async_graphics_pipeline_compilation",
+    "audio_pipeline_metadata_trace",
     "controller_recording",
     "controller_replay",
     "emulator_control",

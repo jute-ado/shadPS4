@@ -38,6 +38,27 @@ Id EmitBallot(EmitContext& ctx, Id bit) {
     return ctx.OpGroupNonUniformBallot(ctx.U32[4], SubgroupScope(ctx), bit);
 }
 
+Id EmitMaterializeScalarMaskWord(EmitContext& ctx, Id is_thread_bit, Id bit, Id scalar,
+                                 u32 word) {
+    ASSERT(word < 2);
+    const Id ballot_label = ctx.OpLabel();
+    const Id scalar_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(is_thread_bit, ballot_label, scalar_label);
+
+    ctx.AddLabel(ballot_label);
+    const Id ballot = EmitBallot(ctx, bit);
+    const Id ballot_word = ctx.OpCompositeExtract(ctx.U32[1], ballot, word);
+    ctx.OpBranch(merge_label);
+
+    ctx.AddLabel(scalar_label);
+    ctx.OpBranch(merge_label);
+
+    ctx.AddLabel(merge_label);
+    return ctx.OpPhi(ctx.U32[1], ballot_word, ballot_label, scalar, scalar_label);
+}
+
 Id EmitBallotFindLsb(EmitContext& ctx, Id mask) {
     return ctx.OpGroupNonUniformBallotFindLSB(ctx.U32[1], SubgroupScope(ctx), mask);
 }

@@ -146,6 +146,7 @@ TEST(SubmissionCompletionQueue, ReadyBoundaryIsNotStarvedByLaterSubmissions) {
     const auto before_boundary = queue.IssueSubmission();
     bool boundary_completed{};
     queue.EnqueueBoundary([&] { boundary_completed = true; });
+    EXPECT_FALSE(queue.HasReadyBoundaries());
     const auto after_boundary = queue.IssueSubmission();
 
     queue.CompleteSubmission(before_boundary);
@@ -193,6 +194,7 @@ TEST(SubmissionCompletionQueue, BoundaryWithoutSubmissionsRunsOnExplicitDrain) {
     queue.EnqueueBoundary([&] { boundary_completed = true; });
 
     EXPECT_FALSE(boundary_completed);
+    EXPECT_TRUE(queue.HasReadyBoundaries());
     queue.DrainReadyBoundaries();
 
     EXPECT_TRUE(boundary_completed);

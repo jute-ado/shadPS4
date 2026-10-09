@@ -14,6 +14,10 @@ struct Archive;
 
 namespace Shader::Gcn {
 
+// Fetch programs are generated from at most 32 vertex inputs and are normally only a few hundred
+// bytes. Keep a full-page ceiling so malformed guest code cannot make compilation scan forever.
+inline constexpr u32 MaxFetchShaderProgramSize = 4 * 1024;
+
 struct VertexAttribute {
     enum InstanceIdType : u8 {
         None = 0,
@@ -49,7 +53,9 @@ struct VertexAttribute {
     bool operator==(const VertexAttribute& other) const {
         return semantic == other.semantic && dest_vgpr == other.dest_vgpr &&
                num_elements == other.num_elements && sgpr_base == other.sgpr_base &&
-               dword_offset == other.dword_offset && instance_data == other.instance_data;
+               dword_offset == other.dword_offset && instance_data == other.instance_data &&
+               inst_offset == other.inst_offset && data_format == other.data_format &&
+               num_format == other.num_format;
     }
 };
 
@@ -68,7 +74,7 @@ struct FetchShaderData {
     bool Deserialize(Serialization::Archive& buffer);
 };
 
-const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
+std::optional<std::vector<u8>> ReadFetchShaderProgram(const Info& info, u32 sgpr_base, u32 size);
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info);
 

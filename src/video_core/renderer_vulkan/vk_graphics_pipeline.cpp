@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -168,6 +169,13 @@ GraphicsPipeline::GraphicsPipeline(
 
     boost::container::static_vector<vk::PipelineShaderStageCreateInfo, MaxShaderStages>
         shader_stages;
+    boost::container::static_vector<vk::UniqueShaderModule, 3> auxiliary_shader_modules;
+    const auto compile_auxiliary_spv = [&](std::span<const u32> code) {
+        auto module = CompileSPVUnique(code, device);
+        const auto handle = *module;
+        auxiliary_shader_modules.emplace_back(std::move(module));
+        return handle;
+    };
     auto stage = u32(Shader::LogicalStage::Vertex);
     if (infos[stage]) {
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
@@ -199,7 +207,7 @@ GraphicsPipeline::GraphicsPipeline(
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
-            .module = CompileSPV(sdata.tcs, instance.GetDevice()),
+            .module = compile_auxiliary_spv(sdata.tcs),
             .pName = "main",
         });
     }
@@ -218,7 +226,7 @@ GraphicsPipeline::GraphicsPipeline(
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
-            .module = CompileSPV(sdata.tes, instance.GetDevice()),
+            .module = compile_auxiliary_spv(sdata.tes),
             .pName = "main",
         });
     }
@@ -239,7 +247,7 @@ GraphicsPipeline::GraphicsPipeline(
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eFragment,
-            .module = CompileSPV(sdata.fragment, instance.GetDevice()),
+            .module = compile_auxiliary_spv(sdata.fragment),
             .pName = "main",
         });
     }
@@ -448,7 +456,7 @@ template void GraphicsPipeline::GetVertexInputs(
 
 void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
-    u32 binding{};
+    VideoCore::DescriptorBindingCursor binding;
 
     for (const auto* stage : stages) {
         if (!stage) {
@@ -460,7 +468,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 preloading ? AmdGpu::Buffer{}
                            : buffer.GetSharp(*stage); // See for the comment in compute PL creation
             bindings.push_back({
-                .binding = binding++,
+                .binding = binding.Add(),
                 .descriptorType = buffer.IsStorage(sharp) ? vk::DescriptorType::eStorageBuffer
                                                           : vk::DescriptorType::eUniformBuffer,
                 .descriptorCount = 1,
@@ -470,24 +478,23 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);
             bindings.push_back({
-                .binding = binding,
+                .binding = binding.Add(num_bindings),
                 .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
                                                    : vk::DescriptorType::eSampledImage,
                 .descriptorCount = num_bindings,
                 .stageFlags = stage_bit,
             });
-            binding += num_bindings;
         }
         for (const auto& sampler : stage->samplers) {
             bindings.push_back({
-                .binding = binding++,
+                .binding = binding.Add(),
                 .descriptorType = vk::DescriptorType::eSampler,
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
         }
     }
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors = binding.CanUsePushDescriptors(instance.MaxPushDescriptors());
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};

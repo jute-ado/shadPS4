@@ -5,6 +5,7 @@
 
 #include "common/object_pool.h"
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
@@ -19,7 +20,8 @@ struct Pools {
     Common::ObjectPool<IR::Inst> inst_pool;
     Common::ObjectPool<IR::Block> block_pool;
 
-    explicit Pools() : inst_pool{InstPoolSize}, block_pool{BlockPoolSize} {}
+    explicit Pools(u32 inst_pool_size = InstPoolSize, u32 block_pool_size = BlockPoolSize)
+        : inst_pool{inst_pool_size}, block_pool{block_pool_size} {}
 
     void ReleaseContents() {
         inst_pool.ReleaseContents();
@@ -29,6 +31,6 @@ struct Pools {
 
 [[nodiscard]] IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools,
                                            Info& info, RuntimeInfo& runtime_info,
-                                           const Profile& profile);
+                                           const Profile& profile, SrtMemoryReader reader = {});
 
 } // namespace Shader

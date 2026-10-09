@@ -4,6 +4,8 @@
 #pragma once
 
 #include <bitset>
+#include <utility>
+#include <vector>
 
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
@@ -30,12 +32,14 @@ struct BufferSpecialization {
     u32 num_format : 4;
     u32 index_stride : 2;
     u32 element_size : 2;
+    u32 add_tid_enable : 1;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
 
     bool operator==(const BufferSpecialization& other) const {
         return stride == other.stride && is_storage == other.is_storage &&
                is_formatted == other.is_formatted && swizzle_enable == other.swizzle_enable &&
+               add_tid_enable == other.add_tid_enable &&
                (!is_formatted ||
                 (data_format == other.data_format && num_format == other.num_format &&
                  dst_select == other.dst_select && num_conversion == other.num_conversion)) &&
@@ -46,10 +50,11 @@ struct BufferSpecialization {
 
 struct ImageSpecialization {
     AmdGpu::ImageType type = AmdGpu::ImageType::Color2D;
-    bool is_integer = false;
+    AmdGpu::NumberClass number_class = AmdGpu::NumberClass::Float;
     bool is_storage = false;
     bool is_cube = false;
     bool is_srgb = false;
+    bool has_supported_dynamic_model = true;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
     // FIXME any pipeline cache changes needed?
@@ -83,6 +88,9 @@ struct StageSpecialization {
 
     const Info* info{};
     RuntimeInfo runtime_info{};
+    // Owns stage-specific variable-length runtime metadata restored from disk. RuntimeInfo itself
+    // only carries views, so persisted views must be rebound before the specialization is used.
+    std::vector<u32> owned_runtime_vs_copy;
     std::bitset<MaxStageResources> bitset{};
     std::optional<Gcn::FetchShaderData> fetch_shader_data{};
     boost::container::small_vector<VsAttribSpecialization, 32> vs_attribs;
@@ -91,11 +99,61 @@ struct StageSpecialization {
     boost::container::small_vector<FMaskSpecialization, 8> fmasks;
     boost::container::small_vector<SamplerSpecialization, 16> samplers;
     Backend::Bindings start{};
+    u32 user_data_mask{};
 
     StageSpecialization() = default;
+    StageSpecialization(const StageSpecialization& other) {
+        *this = other;
+    }
+    StageSpecialization& operator=(const StageSpecialization& other) {
+        if (this == &other) {
+            return *this;
+        }
+        info = other.info;
+        runtime_info = other.runtime_info;
+        owned_runtime_vs_copy = other.owned_runtime_vs_copy;
+        bitset = other.bitset;
+        fetch_shader_data = other.fetch_shader_data;
+        vs_attribs = other.vs_attribs;
+        buffers = other.buffers;
+        images = other.images;
+        fmasks = other.fmasks;
+        samplers = other.samplers;
+        start = other.start;
+        user_data_mask = other.user_data_mask;
+        if (!owned_runtime_vs_copy.empty()) {
+            RebindOwnedRuntimeInfo();
+        }
+        return *this;
+    }
+    StageSpecialization(StageSpecialization&& other) noexcept {
+        *this = std::move(other);
+    }
+    StageSpecialization& operator=(StageSpecialization&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        info = other.info;
+        runtime_info = other.runtime_info;
+        owned_runtime_vs_copy = std::move(other.owned_runtime_vs_copy);
+        bitset = other.bitset;
+        fetch_shader_data = std::move(other.fetch_shader_data);
+        vs_attribs = std::move(other.vs_attribs);
+        buffers = std::move(other.buffers);
+        images = std::move(other.images);
+        fmasks = std::move(other.fmasks);
+        samplers = std::move(other.samplers);
+        start = other.start;
+        user_data_mask = other.user_data_mask;
+        if (!owned_runtime_vs_copy.empty()) {
+            RebindOwnedRuntimeInfo();
+        }
+        return *this;
+    }
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
                         Backend::Bindings start_)
-        : info{&info_}, runtime_info{runtime_info_}, start{start_} {
+        : info{&info_}, runtime_info{runtime_info_}, start{start_},
+          user_data_mask{info_.ud_mask.mask} {
         fetch_shader_data = Gcn::ParseFetchShader(info_);
         if (info_.stage == Stage::Vertex && fetch_shader_data) {
             // Specialize shader on VS input number types to follow spec.
@@ -121,6 +179,7 @@ struct StageSpecialization {
                          spec.is_storage = desc.IsStorage(sharp);
                          spec.is_formatted = desc.is_formatted;
                          spec.swizzle_enable = sharp.swizzle_enable;
+                         spec.add_tid_enable = sharp.add_tid_enable;
                          if (spec.is_formatted) {
                              spec.data_format = static_cast<u32>(sharp.GetDataFmt());
                              spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
@@ -135,7 +194,7 @@ struct StageSpecialization {
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.type = sharp.GetViewType(desc.is_array);
-                         spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+                         spec.number_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
                          spec.is_storage = desc.is_written;
                          spec.is_cube = sharp.IsCube();
                          if (spec.is_storage) {
@@ -143,6 +202,10 @@ struct StageSpecialization {
                          } else {
                              spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
                          }
+                         // An unsupported dynamic-table model removes the sample from translated
+                         // IR. Keep that code-generation decision in the permutation key so an
+                         // invalid-first zero-sample module cannot hide a later valid generation.
+                         spec.has_supported_dynamic_model = desc.HasSupportedDynamicModel(*info);
                          spec.num_conversion = sharp.GetNumberConversion();
                          spec.num_bindings = desc.NumBindings(*info);
                      });
@@ -181,11 +244,13 @@ struct StageSpecialization {
         for (const auto& desc : desc_list) {
             auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
-            if (!sharp) {
-                binding++;
-                continue;
+            if (sharp) {
+                bitset.set(binding);
             }
-            bitset.set(binding++);
+            ++binding;
+            // Static resource layout still affects emitted SPIR-V when the current descriptor is
+            // unbound. Populate the normalized specialization from the null SHARP as well, while
+            // retaining the bitset as the bound/unbound discriminator.
             func(spec, desc, sharp);
         }
     }
@@ -195,7 +260,7 @@ struct StageSpecialization {
     }
 
     bool operator==(const StageSpecialization& other) const {
-        if (!Valid()) {
+        if (!Valid() || !other.Valid()) {
             return false;
         }
 
@@ -215,28 +280,32 @@ struct StageSpecialization {
             return false;
         }
 
-        // For VS which only generates geometry and doesn't have any inputs, its start
-        // bindings still may change as they depend on previously processed FS. The check below
-        // handles this case and prevents generation of redundant permutations. This is also safe
-        // for other types of shaders with no bindings.
-        if (bitset.none() && other.bitset.none()) {
-            return true;
-        }
-
-        if (start != other.start) {
+        // Resource descriptors are emitted even when their current SHARP is unbound. Keep their
+        // list cardinality and descriptor/user-data binding origins in the permutation key so a
+        // module compiled for one pipeline layout cannot be reused at another binding offset.
+        if (buffers.size() != other.buffers.size() || images.size() != other.images.size() ||
+            samplers.size() != other.samplers.size()) {
             return false;
         }
 
-        u32 binding{};
-        for (u32 i = 0; i < buffers.size(); i++) {
-            if (other.bitset[binding++] && buffers[i] != other.buffers[i]) {
-                return false;
-            }
+        if ((!buffers.empty() || !images.empty() || !samplers.empty()) &&
+            start.unified != other.start.unified) {
+            return false;
         }
-        for (u32 i = 0; i < images.size(); i++) {
-            if (other.bitset[binding++] && images[i] != other.images[i]) {
-                return false;
-            }
+        if (!buffers.empty() && start.buffer != other.start.buffer) {
+            return false;
+        }
+        if (user_data_mask != other.user_data_mask ||
+            ((user_data_mask != 0 || other.user_data_mask != 0) &&
+             start.user_data != other.start.user_data)) {
+            return false;
+        }
+
+        // Boundness itself is runtime descriptor state, not emitted SPIR-V shape. The normalized
+        // resource specializations below still distinguish every descriptor property consumed by
+        // code generation, including the static layout of a currently unbound resource.
+        if (buffers != other.buffers || images != other.images) {
+            return false;
         }
 
         for (u32 i = 0; i < samplers.size(); i++) {
@@ -249,6 +318,11 @@ struct StageSpecialization {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+    void RebindOwnedRuntimeInfo() noexcept {
+        if (runtime_info.stage == Stage::Geometry) {
+            runtime_info.gs_info.vs_copy = owned_runtime_vs_copy;
+        }
+    }
 };
 
 } // namespace Shader
