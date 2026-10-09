@@ -32,6 +32,18 @@ static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
+struct EopFlowDiagnostics {
+    u64 eop_packets{};
+    u64 interrupting_eops{};
+    u64 flips{};
+    u64 non_interrupting_flip_associations{};
+    u64 last_eop_sequence{};
+    u64 pending_following_flips{};
+    bool last_eop_interrupting{};
+};
+
+static EopFlowDiagnostics eop_flow_diagnostics;
+
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
@@ -274,6 +286,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     const auto eop_position = DecodeFlipEopPosition(nop->header.count.Value());
+                    auto& flow = eop_flow_diagnostics;
+                    ++flow.flips;
+                    if (eop_position == FlipEopPosition::Following) {
+                        ++flow.pending_following_flips;
+                    } else if (!flow.last_eop_interrupting) {
+                        const auto anomalies = ++flow.non_interrupting_flip_associations;
+                        if (anomalies <= 8 || (anomalies & 0x3fu) == 0) {
+                            LOG_WARNING(Lib_GnmDriver,
+                                        "EOP flow non-interrupting preceding association "
+                                        "flip={} eop={} anomalies={}",
+                                        flow.flips, flow.last_eop_sequence, anomalies);
+                        }
+                    }
+                    if ((flow.flips & 0x7fu) == 0) {
+                        LOG_WARNING(Lib_GnmDriver,
+                                    "EOP flow flips={} eops={} interrupting_eops={} "
+                                    "pending_following={} non_interrupting_associations={}",
+                                    flow.flips, flow.eop_packets, flow.interrupting_eops,
+                                    flow.pending_following_flips,
+                                    flow.non_interrupting_flip_associations);
+                    }
                     ASSERT_MSG(
                         eop_flip_tracker.QueueFlip(eop_position,
                                                    [this] {
@@ -729,6 +762,34 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                auto& flow = eop_flow_diagnostics;
+                const auto eop_sequence = ++flow.eop_packets;
+                const bool interrupting = event_eop->int_sel != InterruptSelect::None;
+                flow.interrupting_eops += interrupting;
+                if (flow.pending_following_flips != 0 && !interrupting) {
+                    flow.non_interrupting_flip_associations += flow.pending_following_flips;
+                    const auto anomalies = flow.non_interrupting_flip_associations;
+                    if (anomalies <= 8 || (anomalies & 0x3fu) == 0) {
+                        LOG_WARNING(Lib_GnmDriver,
+                                    "EOP flow non-interrupting following association "
+                                    "eop={} flips={} anomalies={}",
+                                    eop_sequence, flow.pending_following_flips, anomalies);
+                    }
+                }
+                flow.pending_following_flips = 0;
+                flow.last_eop_sequence = eop_sequence;
+                flow.last_eop_interrupting = interrupting;
+                if ((eop_sequence & 0x7fu) == 0) {
+                    LOG_WARNING(Lib_GnmDriver,
+                                "EOP flow packets={} interrupting={} flips={} "
+                                "non_interrupting_associations={} int_sel={} data_sel={} "
+                                "event_type={}",
+                                eop_sequence, flow.interrupting_eops, flow.flips,
+                                flow.non_interrupting_flip_associations,
+                                static_cast<u32>(event_eop->int_sel.Value()),
+                                static_cast<u32>(event_eop->data_sel.Value()),
+                                event_eop->event_type.Value());
+                }
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }

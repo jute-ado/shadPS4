@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -23,6 +24,9 @@ extern void KernelSignalRequest();
 
 static std::unordered_map<s32, EqueueInternal*> kqueues;
 static constexpr auto HrTimerSpinlockThresholdNs = 1200000u;
+static std::atomic<u64> gfx_eop_events_produced{};
+static std::atomic<u64> gfx_eop_events_coalesced{};
+static std::atomic<u64> gfx_eop_events_delivered{};
 
 EqueueInternal* GetEqueue(OrbisKernelEqueue eq) {
     if (!kqueues.contains(eq)) {
@@ -211,6 +215,7 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
         std::scoped_lock lock{m_mutex};
         for (auto& event : m_events) {
             if (event.event.ident == ident && event.event.filter == filter) {
+                const bool was_triggered = event.IsTriggered();
                 if (filter == OrbisKernelEvent::Filter::VideoOut) {
                     event.TriggerDisplay(trigger_data);
                 } else if (filter == OrbisKernelEvent::Filter::User) {
@@ -220,6 +225,24 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
                     event.TriggerTimer();
                 } else {
                     event.Trigger(trigger_data);
+                }
+                if (filter == OrbisKernelEvent::Filter::GraphicsCore && ident == 0x40) {
+                    const auto produced =
+                        gfx_eop_events_produced.fetch_add(1, std::memory_order_relaxed) + 1;
+                    u64 coalesced = gfx_eop_events_coalesced.load(std::memory_order_relaxed);
+                    if (was_triggered) {
+                        coalesced = gfx_eop_events_coalesced.fetch_add(1,
+                                                                      std::memory_order_relaxed) +
+                                    1;
+                    }
+                    if ((produced & 0x7fu) == 0 ||
+                        (was_triggered && (coalesced <= 8 || (coalesced & 0x3fu) == 0))) {
+                        LOG_WARNING(Kernel_Event,
+                                    "GfxEop event flow produced={} delivered={} coalesced={}",
+                                    produced,
+                                    gfx_eop_events_delivered.load(std::memory_order_relaxed),
+                                    coalesced);
+                    }
                 }
                 has_found = true;
             }
@@ -234,6 +257,17 @@ int EqueueInternal::GetTriggeredEvents(OrbisKernelEvent* ev, int num) {
     for (auto it = m_events.begin(); it != m_events.end();) {
         if (it->IsTriggered()) {
             ev[count++] = it->event;
+            if (it->event.filter == OrbisKernelEvent::Filter::GraphicsCore &&
+                it->event.ident == 0x40) {
+                const auto delivered =
+                    gfx_eop_events_delivered.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (delivered <= 8 || (delivered & 0x7fu) == 0) {
+                    LOG_WARNING(Kernel_Event,
+                                "GfxEop event delivery produced={} delivered={} coalesced={}",
+                                gfx_eop_events_produced.load(std::memory_order_relaxed), delivered,
+                                gfx_eop_events_coalesced.load(std::memory_order_relaxed));
+                }
+            }
             if (it->event.flags & OrbisKernelEvent::Flags::Clear) {
                 it->Clear();
             }
