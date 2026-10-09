@@ -98,13 +98,35 @@ void Translator::V_INTERP_MOV_F32(const GcnInst& inst) {
     const IR::Attribute attrib = IR::Attribute::Param0 + attr_index;
     const auto& attr = runtime_info.fs_info.inputs[attr_index];
     auto& interp = info.fs_interpolation[attr_index];
-    ASSERT(attr.is_flat || inst.src[0].code == 2);
+    const u32 parameter = inst.src[0].code;
+    ASSERT_MSG(parameter <= 2, "Invalid interpolation parameter {}", parameter);
+    if (attr.IsDefault()) {
+        interp = {Qualifier::Flat, Qualifier::None};
+        const f32 value =
+            parameter == 2 ? DefaultValTable[attr.default_value][inst.control.vintrp.chan] : 0.0f;
+        SetDst(inst.dst[0], ir.Imm32(value));
+        return;
+    }
+    ASSERT(attr.is_flat || parameter == 2);
     if (profile.supports_amd_shader_explicit_vertex_parameter ||
         profile.supports_fragment_shader_barycentric) {
         // VSRC 0=P10, 1=P20, 2=P0
-        interp.primary = Qualifier::PerVertex;
-        SetDst(inst.dst[0],
-               ir.GetAttribute(attrib, inst.control.vintrp.chan, (inst.src[0].code + 1) % 3));
+        interp = {Qualifier::PerVertex, Qualifier::None};
+        const IR::F32 p0 = ir.GetAttribute(attrib, inst.control.vintrp.chan, 0);
+        IR::F32 value = p0;
+        switch (parameter) {
+        case 0:
+            value = ir.FPSub(ir.GetAttribute(attrib, inst.control.vintrp.chan, 1), p0);
+            break;
+        case 1:
+            value = ir.FPSub(ir.GetAttribute(attrib, inst.control.vintrp.chan, 2), p0);
+            break;
+        case 2:
+            break;
+        default:
+            UNREACHABLE();
+        }
+        SetDst(inst.dst[0], value);
     } else {
         interp.primary = Qualifier::Flat;
         SetDst(inst.dst[0], ir.GetAttribute(attrib, inst.control.vintrp.chan));

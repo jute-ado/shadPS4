@@ -969,6 +969,12 @@ if (ARCHITECTURE STREQUAL "x86_64")
              ${FIBER_LIB})
 endif()
 
+if (WIN32 AND ARCHITECTURE STREQUAL "x86_64")
+    list(APPEND CORE
+         src/core/windows_exception_stack.cpp
+         src/core/windows_exception_stack.h)
+endif()
+
 set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
                       src/shader_recompiler/profile.h
                       src/shader_recompiler/recompiler.cpp

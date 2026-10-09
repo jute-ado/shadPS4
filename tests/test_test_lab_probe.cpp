@@ -20,6 +20,7 @@ TEST(TestLabProbe, EmitsCanonicalProtocolOneCapabilityDocument) {
               (std::vector<std::string>{
                   "console_profile_ps4",
                   "console_profile_ps4_pro",
+                  "async_graphics_pipeline_compilation",
                   "controller_recording",
                   "controller_replay",
                   "emulator_control",

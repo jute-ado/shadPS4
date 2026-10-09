@@ -71,6 +71,11 @@ target_include_directories(shadps4_ipc_capabilities_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_ipc_capabilities_test PRIVATE
+    SHADPS4_IPC_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/ipc/ipc.cpp"
+    SHADPS4_PRESENTER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_presenter.cpp"
+    SHADPS4_PRESENTED_FRAME_QUEUE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/ipc/presented_frame_input_queue.h"
+)
 target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
 
@@ -354,9 +359,21 @@ if (WIN32)
         SHADPS4_ASSERT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/common/assert.cpp"
         SHADPS4_EMULATOR_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/emulator.cpp"
         SHADPS4_SIGNALS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/signals.cpp"
+        SHADPS4_THREAD_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/thread.cpp"
     )
     target_link_libraries(shadps4_windows_exception_policy_test PRIVATE GTest::gtest_main)
     list(APPEND TEST_TARGETS shadps4_windows_exception_policy_test)
+
+endif()
+
+if (WIN32 AND ARCHITECTURE STREQUAL "x86_64")
+    add_executable(shadps4_windows_exception_stack_test
+        ${CMAKE_SOURCE_DIR}/src/core/libraries/kernel/threads/stack_asm.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/windows_exception_stack.cpp
+        test_windows_exception_stack.cpp
+    )
+    target_link_libraries(shadps4_windows_exception_stack_test PRIVATE GTest::gtest_main)
+    list(APPEND TEST_TARGETS shadps4_windows_exception_stack_test)
 endif()
 
 add_executable(shadps4_depth_association_test

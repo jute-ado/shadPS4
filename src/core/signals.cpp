@@ -10,6 +10,9 @@
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
 #include "core/windows_exception_policy.h"
+#if defined(_WIN64) && defined(ARCH_X86_64)
+#include "core/windows_exception_stack.h"
+#endif
 #include "emulator.h"
 
 #ifdef _WIN32
@@ -27,7 +30,8 @@ namespace Core {
 
 #if defined(_WIN32)
 
-static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+static std::intptr_t SignalHandlerBody(void* opaque) noexcept {
+    auto* const pExp = static_cast<EXCEPTION_POINTERS*>(opaque);
     using namespace Libraries::Kernel;
     const auto* signals = Signals::Instance();
     // Windows static guest red-zone protection
@@ -147,6 +151,16 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
+
+#if defined(_WIN64) && defined(ARCH_X86_64)
+static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+    return static_cast<LONG>(RunOnWindowsExceptionStack(SignalHandlerBody, pExp));
+}
+#else
+static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+    return static_cast<LONG>(SignalHandlerBody(pExp));
+}
+#endif
 
 #else
 

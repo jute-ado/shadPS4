@@ -8,6 +8,9 @@
 #ifdef _WIN64
 #include <windows.h>
 #include "common/ntapi.h"
+#ifdef ARCH_X86_64
+#include "core/windows_exception_stack.h"
+#endif
 #else
 #include <csignal>
 #include <pthread.h>
@@ -47,6 +50,9 @@ void NativeThread::Exit() {
     tid = 0;
 
 #ifdef _WIN64
+#ifdef ARCH_X86_64
+    ReleaseWindowsExceptionStackForThreadExit();
+#endif
     native_handle = nullptr;
     ExitThread(0);
 #else
@@ -72,6 +78,9 @@ void NativeThread::Initialize() {
 #endif
 #if _WIN64
     tid = GetCurrentThreadId();
+#ifdef ARCH_X86_64
+    (void)PrepareWindowsExceptionStack();
+#endif
 #else
     tid = (u64)pthread_self();
 
