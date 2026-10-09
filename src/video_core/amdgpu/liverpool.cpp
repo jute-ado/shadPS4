@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -16,6 +18,7 @@
 #include "video_core/amdgpu/eop_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/amdgpu/pm4_lod_stats.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -257,6 +260,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            const bool packet_predicated =
+                header->type3.predicate == PM4Predicate::PredEnable;
+            static const bool diagnostic_force_predicated_packets =
+                std::getenv("SHADPS4_DIAGNOSTIC_FORCE_PREDICATED_PACKETS") != nullptr;
+            if (predication.ShouldSkip(packet_predicated,
+                                       diagnostic_force_predicated_packets)) {
+                u32 skip_count = count + 1;
+                if (opcode == PM4ItOpcode::PredExec) {
+                    const auto* pred_exec = reinterpret_cast<const PM4CmdPredExec*>(header);
+                    skip_count += pred_exec->exec_count.Value();
+                }
+                dcb = NextPacket(dcb, skip_count);
+                continue;
+            }
             switch (opcode) {
             case PM4ItOpcode::Nop: {
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -419,9 +436,52 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
-                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
+                const auto* set_pred = reinterpret_cast<const PM4CmdSetPredication*>(header);
+                const auto pred_op = set_pred->pred_op.Value();
+                const bool draw_visible = set_pred->draw_visible.Value() != 0;
+                const bool combine = set_pred->continue_predication.Value() != 0;
+                const VAddr address = set_pred->Address();
+                switch (pred_op) {
+                case PredicationOp::Clear:
+                    predication.Disable();
+                    break;
+                case PredicationOp::Zpass: {
+                    const size_t counter_count = size_t{num_counter_pairs} * 2;
+                    const size_t counter_bytes = counter_count * sizeof(u64);
+                    std::optional<bool> visible;
+                    if (address != 0 && counter_count != 0 &&
+                        Core::Memory::Instance()->IsValidMapping(address, counter_bytes)) {
+                        const auto counters = std::span{
+                            reinterpret_cast<const u64*>(address), counter_count};
+                        visible = EvaluateZpassVisibility(counters, num_counter_pairs);
+                    }
+                    predication.Set(visible, draw_visible, combine);
+                    break;
+                }
+                case PredicationOp::Bool64:
+                case PredicationOp::Bool32: {
+                    const size_t width = pred_op == PredicationOp::Bool64 ? sizeof(u64) : sizeof(u32);
+                    std::optional<bool> visible;
+                    if (address != 0 &&
+                        Core::Memory::Instance()->IsValidMapping(address, width)) {
+                        visible = pred_op == PredicationOp::Bool64
+                                      ? *reinterpret_cast<const u64*>(address) != 0
+                                      : *reinterpret_cast<const u32*>(address) != 0;
+                    }
+                    predication.Set(visible, draw_visible, combine);
+                    break;
+                }
+                default:
+                    LOG_WARNING(Render, "Unsupported IT_SET_PREDICATION op {} addr={:#x}; "
+                                        "executing predicated packets",
+                                static_cast<u32>(pred_op), address);
+                    predication.Disable();
+                    break;
+                }
                 break;
             }
+            case PM4ItOpcode::PredExec:
+                break;
             case PM4ItOpcode::IndexType: {
                 const auto* index_type = reinterpret_cast<const PM4CmdDrawIndexType*>(header);
                 regs.index_buffer_type.raw = index_type->raw;
@@ -686,15 +746,25 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // TODO: handle proper synchronization, for now signal that update is done
                     // immediately
                     regs.cp_strmout_cntl.offset_update_done = 1;
+                } else if (event->event_type.Value() == EventType::PixelPipeStatReset) {
+                    if (rasterizer) {
+                        rasterizer->GetOcclusionQueries().ResetCounting();
+                    }
+                } else if (event->event_type.Value() == EventType::PixelPipeStatControl) {
+                    if (rasterizer) {
+                        rasterizer->GetOcclusionQueries().ToggleCounting();
+                    }
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
-                        static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
-                        static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
-                        u64* results = event->Address<u64*>();
-                        for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
-                            *results = pixel_counter | OcclusionCounterValidMask;
+                        if (rasterizer) {
+                            rasterizer->GetOcclusionQueries().DumpCounters(
+                                event->Address<VAddr>(), num_counter_pairs);
+                        } else {
+                            u64* results = event->Address<u64*>();
+                            for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
+                                *results = OcclusionCounterValidMask;
+                            }
                         }
-                        pixel_counter += OcclusionCounterStep;
                     }
                 }
                 break;
@@ -882,7 +952,45 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS");
+                static u32 lod_stats_samples{};
+                const u32 request_index = lod_stats_samples++;
+                const auto* body = reinterpret_cast<const u32*>(header) + 1;
+                const auto request = DecodeLodStatsRequest(std::span<const u32, 3>{body, 3});
+                bool report_initialized = false;
+                if (request.address != 0 && IsLodStatsReportSizeSupported(request.size)) {
+                    std::vector<std::byte> report(request.size);
+                    InitializeLodStatsReport(report);
+                    report_initialized = Core::Memory::Instance()->TryWriteBacking(
+                        reinterpret_cast<void*>(request.address), report.data(), report.size());
+                }
+                static const bool watch_lod_stats_reads =
+                    std::getenv("SHADPS4_DIAGNOSTIC_WATCH_LOD_STATS_READS") != nullptr;
+                if (ShouldInspectLodStats(request_index) && !watch_lod_stats_reads) {
+                    std::vector<u32> report(request.size / sizeof(u32));
+                    const bool readable = Core::Memory::Instance()->TryReadBacking(
+                        reinterpret_cast<const void*>(request.address), report.data(),
+                        request.size);
+                    const auto summary = SummarizeLodStatsReport(report);
+                    LOG_WARNING(Render_Vulkan,
+                                "TEMP GET_LOD_STATS request={} count={} raw=[{:#x},{:#x},{:#x}] "
+                                "size={:#x} address={:#x} reset={} "
+                                "force={} report_reset={} interval={} initialized={} readable={} nonzero={} first_dw={} "
+                                "first_value={:#x} words=[{:#x},{:#x},{:#x},{:#x}]",
+                                request_index, count, body[0], body[1], body[2], request.size,
+                                request.address, request.reset_count,
+                                request.force_reset, request.report_and_reset,
+                                request.reporting_interval, report_initialized, readable,
+                                summary.nonzero_dwords,
+                                summary.first_nonzero_dword, summary.first_nonzero_value, report[0],
+                                report[1], report[2], report[3]);
+                }
+                if (watch_lod_stats_reads && rasterizer &&
+                    rasterizer->ArmDiagnosticReadWatch(request.address, request.size)) {
+                    LOG_WARNING(Render_Vulkan,
+                                "TEMP GET_LOD_STATS armed CPU read watch request={} "
+                                "address={:#x} size={:#x}",
+                                request_index, request.address, request.size);
+                }
                 break;
             }
             case PM4ItOpcode::CondExec: {

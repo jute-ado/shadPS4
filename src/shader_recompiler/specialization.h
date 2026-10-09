@@ -134,7 +134,7 @@ struct StageSpecialization {
                      });
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         spec.type = sharp.GetViewType(desc.is_array);
+                         spec.type = sharp.GetShaderViewType(desc.is_array);
                          spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
                          spec.is_storage = desc.is_written;
                          spec.is_cube = sharp.IsCube();
@@ -229,12 +229,12 @@ struct StageSpecialization {
 
         u32 binding{};
         for (u32 i = 0; i < buffers.size(); i++) {
-            if (other.bitset[binding++] && buffers[i] != other.buffers[i]) {
+            if (bitset[binding++] && buffers[i] != other.buffers[i]) {
                 return false;
             }
         }
         for (u32 i = 0; i < images.size(); i++) {
-            if (other.bitset[binding++] && images[i] != other.images[i]) {
+            if (bitset[binding++] && images[i] != other.images[i]) {
                 return false;
             }
         }

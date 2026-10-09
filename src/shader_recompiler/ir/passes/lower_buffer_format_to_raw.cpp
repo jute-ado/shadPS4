@@ -6,6 +6,7 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
+#include "shader_recompiler/ir/passes/buffer_format_policy.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
@@ -16,7 +17,26 @@ struct FormatInfo {
     AmdGpu::CompMapping swizzle;
     AmdGpu::NumberConversion num_conversion;
     u32 num_components;
+    bool packed_snorm_nz;
 };
+
+static IR::F32 ApplyPackedSnormNzRead(IR::IREmitter& ir, const IR::F32& value, u32 component) {
+    const IR::U32 adjusted =
+        ir.IAdd(ir.IMul(ir.BitCast<IR::U32>(value), ir.Imm32(2)), ir.Imm32(1));
+    const IR::F32 converted = ir.ConvertSToF(32, 32, adjusted);
+    return ir.FPDiv(converted,
+                    ir.Imm32(static_cast<float>(Packed10_11_11SnormNzMax(component))));
+}
+
+static IR::F32 ApplyPackedSnormNzWrite(IR::IREmitter& ir, const IR::F32& value, u32 component) {
+    const IR::F32 maximum =
+        ir.Imm32(static_cast<float>(Packed10_11_11SnormNzMax(component)));
+    const IR::F32 scaled =
+        ir.FPMul(ir.FPClamp(value, ir.Imm32(-1.f), ir.Imm32(1.f)), maximum);
+    const IR::U32 raw =
+        ir.ConvertFToS(32, ir.FPDiv(ir.FPSub(scaled, ir.Imm32(1.f)), ir.Imm32(2.f)));
+    return ir.BitCast<IR::F32>(raw);
+}
 
 static bool IsBufferFormatLoad(const IR::Inst& inst) {
     return inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32;
@@ -79,14 +99,18 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
     case AmdGpu::DataFormat::Format32_32:
     case AmdGpu::DataFormat::Format32_32_32:
     case AmdGpu::DataFormat::Format32_32_32_32: {
-        ASSERT(format_info.num_format == AmdGpu::NumberFormat::Uint ||
-               format_info.num_format == AmdGpu::NumberFormat::Sint ||
-               format_info.num_format == AmdGpu::NumberFormat::Float);
+        ASSERT_MSG(format_info.num_format == AmdGpu::NumberFormat::Uint ||
+                       format_info.num_format == AmdGpu::NumberFormat::Sint ||
+                       format_info.num_format == AmdGpu::NumberFormat::Float,
+                   "32-bit buffer load data_format={} num_format={} conversion={}",
+                   u32(format_info.data_format), u32(format_info.num_format),
+                   u32(format_info.num_conversion));
         interpreted = ir.LoadBufferF32(format_info.num_components, handle, address, info);
         break;
     }
     default:
-        UNREACHABLE_MSG("Unsupported buffer data format: {}", format_info.data_format);
+        UNREACHABLE_MSG("Unsupported buffer data format: {}",
+                        static_cast<u32>(format_info.data_format));
     }
 
     // Pad to 4 components and apply additional modifications.
@@ -96,8 +120,10 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
             const auto component =
                 IR::F32{format_info.num_components == 1 ? interpreted
                                                         : ir.CompositeExtract(interpreted, i)};
-            components.push_back(
-                ApplyReadNumberConversion(ir, component, format_info.num_conversion));
+            components.push_back(format_info.packed_snorm_nz
+                                     ? ApplyPackedSnormNzRead(ir, component, i)
+                                     : ApplyReadNumberConversion(ir, component,
+                                                                 format_info.num_conversion));
         } else {
             components.push_back(ir.Imm32(0.f));
         }
@@ -109,12 +135,19 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
                               const FormatInfo& format_info) {
+    if (!ShouldLowerBufferFormatStore(static_cast<u32>(format_info.data_format))) {
+        return;
+    }
+
     // Extract actual number of components and apply additional modifications.
     const auto swizzled = ApplySwizzle(ir, value, format_info.swizzle.Inverse());
     boost::container::static_vector<IR::Value, 4> components;
     for (u32 i = 0; i < format_info.num_components; i++) {
         const auto component = IR::F32{ir.CompositeExtract(swizzled, i)};
-        components.push_back(ApplyWriteNumberConversion(ir, component, format_info.num_conversion));
+        components.push_back(format_info.packed_snorm_nz
+                                 ? ApplyPackedSnormNzWrite(ir, component, i)
+                                 : ApplyWriteNumberConversion(ir, component,
+                                                              format_info.num_conversion));
     }
     const auto real_value =
         components.size() == 1 ? components[0] : ir.CompositeConstruct(components);
@@ -185,7 +218,8 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
         break;
     }
     default:
-        UNREACHABLE_MSG("Unsupported buffer data format: {}", format_info.data_format);
+        UNREACHABLE_MSG("Unsupported buffer data format: {}",
+                        static_cast<u32>(format_info.data_format));
     }
 }
 
@@ -196,8 +230,15 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     const auto buffer{desc.GetSharp(info)};
 
     const auto is_inst_typed = flags.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
-    const auto data_format =
-        is_inst_typed ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value()) : buffer.GetDataFmt();
+    const auto raw_data_format = SelectBufferDataFormat(
+        is_inst_typed, static_cast<u32>(flags.inst_data_fmt.Value()), buffer.data_format);
+    const auto raw_num_format = SelectBufferNumberFormat(
+        is_inst_typed, static_cast<u32>(flags.inst_num_fmt.Value()), buffer.num_format);
+    const auto data_format = AmdGpu::RemapDataFormat(static_cast<AmdGpu::DataFormat>(
+        NormalizeBufferDataFormat(raw_data_format)));
+    const bool packed_snorm_nz = IsPacked10_11_11SnormNz(
+        static_cast<AmdGpu::DataFormat>(raw_data_format),
+        static_cast<AmdGpu::NumberFormat>(raw_num_format));
     const auto format_info = FormatInfo{
         .data_format = data_format,
         .num_format = is_inst_typed
@@ -206,10 +247,15 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
         .swizzle = is_inst_typed
                        ? AmdGpu::RemapSwizzle(flags.inst_data_fmt.Value(), AmdGpu::IdentityMapping)
                        : buffer.DstSelect(),
-        .num_conversion = is_inst_typed ? AmdGpu::MapNumberConversion(flags.inst_num_fmt.Value(),
-                                                                      flags.inst_data_fmt.Value())
-                                        : buffer.GetNumberConversion(),
+        .num_conversion =
+            ShouldMapBufferNumberConversion(static_cast<u32>(data_format)) && !packed_snorm_nz
+                ? is_inst_typed
+                      ? AmdGpu::MapNumberConversion(flags.inst_num_fmt.Value(),
+                                                    flags.inst_data_fmt.Value())
+                      : buffer.GetNumberConversion()
+                : AmdGpu::NumberConversion::None,
         .num_components = AmdGpu::NumComponents(data_format),
+        .packed_snorm_nz = packed_snorm_nz,
     };
 
     if (IsBufferFormatLoad(inst)) {

@@ -19,3 +19,17 @@ TEST(IpcCapabilities, AdvertisesRenderDocWhenRuntimeIsLoaded) {
 
     EXPECT_NE(std::ranges::find(capabilities, "ENABLE_RENDERDOC_CAPTURE"), capabilities.end());
 }
+
+TEST(IpcCapabilities, AdvertisesPresentedFrameGamepadScheduling) {
+    const auto capabilities = Core::Ipc::IpcCapabilities(false);
+
+    EXPECT_NE(std::ranges::find(capabilities, "ENABLE_PRESENTED_FRAME_GAMEPAD"),
+              capabilities.end());
+}
+
+TEST(IpcCapabilities, AdvertisesPresentedFrameScreenshotScheduling) {
+    const auto capabilities = Core::Ipc::IpcCapabilities(false);
+
+    EXPECT_NE(std::ranges::find(capabilities, "ENABLE_PRESENTED_FRAME_SCREENSHOT"),
+              capabilities.end());
+}

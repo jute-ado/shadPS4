@@ -7,28 +7,42 @@
 
 #include "video_core/renderdoc_capture_state.h"
 
-TEST(RenderDocCaptureState, TriggerSchedulesExactlyOnePresentedFrame) {
+TEST(RenderDocCaptureState, BeginCaptureSpansACompletePresentedFrameInterval) {
     VideoCore::RenderDocCaptureState state;
 
-    EXPECT_TRUE(state.Trigger());
-    EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
-    EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
+    EXPECT_TRUE(state.TryBeginCapture());
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(false));
+    EXPECT_TRUE(state.ConsumeCaptureForPresentedFrame(false));
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(false));
 }
 
-TEST(RenderDocCaptureState, TriggerIsPublishedAcrossThreads) {
+TEST(RenderDocCaptureState, CaptureStartIsPublishedAcrossThreads) {
     VideoCore::RenderDocCaptureState state;
 
-    std::thread trigger_thread{[&state] { EXPECT_TRUE(state.Trigger()); }};
+    std::thread trigger_thread{[&state] { EXPECT_TRUE(state.TryBeginCapture()); }};
     trigger_thread.join();
 
-    EXPECT_TRUE(state.ConsumePresentedFrameTrigger());
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(false));
+    EXPECT_TRUE(state.ConsumeCaptureForPresentedFrame(false));
 }
 
-TEST(RenderDocCaptureState, RepeatedTriggerDoesNotQueueAnotherCapture) {
+TEST(RenderDocCaptureState, RepeatedStartDoesNotOverlapCapture) {
     VideoCore::RenderDocCaptureState state;
 
-    ASSERT_TRUE(state.Trigger());
-    EXPECT_FALSE(state.Trigger());
-    ASSERT_TRUE(state.ConsumePresentedFrameTrigger());
-    EXPECT_FALSE(state.ConsumePresentedFrameTrigger());
+    ASSERT_TRUE(state.TryBeginCapture());
+    EXPECT_FALSE(state.TryBeginCapture());
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(false));
+    ASSERT_TRUE(state.ConsumeCaptureForPresentedFrame(false));
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(false));
+}
+
+TEST(RenderDocCaptureState, ReusedHostFramesDoNotAdvanceGuestFrameCapture) {
+    VideoCore::RenderDocCaptureState state;
+
+    ASSERT_TRUE(state.TryBeginCapture());
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(true));
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(true));
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(false));
+    EXPECT_FALSE(state.ConsumeCaptureForPresentedFrame(true));
+    EXPECT_TRUE(state.ConsumeCaptureForPresentedFrame(false));
 }

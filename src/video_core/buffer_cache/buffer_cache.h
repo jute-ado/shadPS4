@@ -111,6 +111,8 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
+    /// Makes GPU-written buffer data immediately visible to CPU-side renderer helpers.
+
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
                            boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
@@ -141,6 +143,7 @@ public:
 
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
+    [[nodiscard]] bool IsRegionGpuModifiedExact(VAddr addr, size_t size) const;
 
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
@@ -150,6 +153,9 @@ public:
 
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
+
+    /// Downloads GPU-owned contents before an emulator CPU-side reader consumes the range.
+    void SynchronizeGpuModifiedMemoryForCpuRead(VAddr device_addr, u64 size);
 
     /// Synchronizes all buffers neede for DMA.
     void SynchronizeDmaBuffers();
@@ -191,7 +197,7 @@ private:
                            bool is_texel_buffer, bool is_registered = true);
 
     vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
-                            size_t total_size_bytes);
+                            size_t total_size_bytes, std::unique_ptr<Buffer>& temporary_buffer);
 
     bool SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size);
 
@@ -200,6 +206,7 @@ private:
     void TouchBuffer(const Buffer& buffer);
 
     void DeleteBuffer(BufferId buffer_id);
+    void RetireBuffer(BufferId buffer_id);
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;

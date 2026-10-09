@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <cstring>
+#include <optional>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -8,16 +12,23 @@
 #include "shader_recompiler/addr64_pointer_residency.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_barrier_policy.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/fault_range.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/depth_stencil_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_compute_dispatch_policy.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/depth_association.h"
+#include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/image_view.h"
+#include "video_core/texture_cache/image_usage_policy.h"
+#include "video_core/texture_cache/sampler_usage_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 #ifdef MemoryBarrier
@@ -25,6 +36,11 @@
 #endif
 
 namespace Vulkan {
+
+// Per-command GPU markers are intentionally disabled outside narrowly scoped diagnostics. Shadow
+// can execute millions of draws during its intro, making unconditional markers materially alter
+// memory pressure and GPU scheduling. Device-fault reporting remains available in the scheduler.
+static constexpr bool EnablePerCommandGpuDiagnostics = false;
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -42,6 +58,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, page_manager{this},
       buffer_cache{instance, scheduler, liverpool_, texture_cache, page_manager},
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
+      occlusion_queries{instance, scheduler},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool} {
     if (!EmulatorSettings.IsNullGPU()) {
@@ -229,20 +246,58 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
-
+    const auto& vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
+    const auto* fs = pipeline->TryGetStage(Shader::LogicalStage::Fragment);
+    const u64 diagnostic_index_address =
+        is_indexed ? regs.index_base_address.Address<VAddr>() +
+                         index_offset * (regs.index_buffer_type.index_type ==
+                                                 AmdGpu::IndexType::Index16
+                                             ? sizeof(u16)
+                                             : sizeof(u32))
+                   : 0;
+    DiagnosticCheckpointMarker draw_marker{
+        .kind = DiagnosticCheckpointKind::Graphics,
+        .first_hash = vs.pgm_hash,
+        .second_hash = fs ? fs->pgm_hash : 0,
+        .runtime = {regs.num_indices, regs.num_instances.NumInstances(), is_indexed, 0,
+                    static_cast<u32>(diagnostic_index_address),
+                    static_cast<u32>(diagnostic_index_address >> 32)},
+    };
+    const DiagnosticCheckpointMarker* checkpoint_marker{};
+    if (EnablePerCommandGpuDiagnostics && instance.SupportsDiagnosticCheckpoints()) {
+        checkpoint_marker = MakeDiagnosticCheckpoint(DiagnosticCheckpointKind::Graphics,
+                                                     draw_marker.first_hash,
+                                                     draw_marker.second_hash);
+        RecordDiagnosticCommand(draw_marker);
+    }
+    const auto record_draw_phase = [&](u32 phase) {
+        if (!checkpoint_marker) {
+            return;
+        }
+        draw_marker.runtime[3] = phase;
+        const auto diagnostic_cmdbuf = scheduler.CommandBuffer();
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetCheckpointNV(
+            static_cast<VkCommandBuffer>(diagnostic_cmdbuf), checkpoint_marker);
+        RecordDiagnosticGpuMarker(diagnostic_cmdbuf, draw_marker);
+    };
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
-    if (is_indexed) {
-        buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
-    }
+    VideoCore::PrepareDrawBuffersThenBindDynamicVertexState(
+        [] {},
+        [&] {
+            if (is_indexed) {
+                buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
+            }
+        },
+        [&] { buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers); });
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
+    const auto zpass_query = occlusion_queries.PrepareDrawQuery();
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
@@ -251,7 +306,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Graphics, pipeline->Handle());
-
+    RecordSparseDiagnosticCheckpoint(false, vs.pgm_hash, fs ? fs->pgm_hash : 0);
+    occlusion_queries.BeginDraw(cmdbuf, zpass_query);
+    record_draw_phase(0xB3);
     if (is_indexed) {
         cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
                            s32(vertex_offset), instance_offset);
@@ -259,9 +316,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
                     instance_offset);
     }
+    occlusion_queries.EndDraw(cmdbuf, zpass_query);
+    record_draw_phase(0xA3);
     DebugState.IncDrawCall();
 
     ResetBindings();
+    RecordGpuWork();
 }
 
 void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 stride,
@@ -278,40 +338,46 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline) {
         return;
     }
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
-    if (is_indexed) {
-        buffer_cache.BindIndexBuffer(0, buffer_barriers);
-    }
-
-    const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
-
+    VideoCore::Buffer* buffer{};
+    u32 base{};
     VideoCore::Buffer* count_buffer{};
     u32 count_base{};
-    if (count_address != 0) {
-        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
-    }
-
-    if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                          vk::PipelineStageFlagBits2::eDrawIndirect)) {
-        buffer_barriers.emplace_back(*barrier);
-    }
-    if (count_buffer) {
-        if (auto barrier = count_buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
-                                                    vk::PipelineStageFlagBits2::eDrawIndirect)) {
-            buffer_barriers.emplace_back(*barrier);
-        }
-    }
+    VideoCore::PrepareDrawBuffersThenBindDynamicVertexState(
+        [&] {
+            std::tie(buffer, base) =
+                buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+            if (count_address != 0) {
+                std::tie(count_buffer, count_base) =
+                    buffer_cache.ObtainBuffer(count_address, 4, false);
+            }
+            if (auto barrier = buffer->GetBarrier(vk::AccessFlagBits2::eIndirectCommandRead,
+                                                  vk::PipelineStageFlagBits2::eDrawIndirect)) {
+                buffer_barriers.emplace_back(*barrier);
+            }
+            if (count_buffer) {
+                if (auto barrier = count_buffer->GetBarrier(
+                        vk::AccessFlagBits2::eIndirectCommandRead,
+                        vk::PipelineStageFlagBits2::eDrawIndirect)) {
+                    buffer_barriers.emplace_back(*barrier);
+                }
+            }
+        },
+        [&] {
+            if (is_indexed) {
+                buffer_cache.BindIndexBuffer(0, buffer_barriers);
+            }
+        },
+        [&] { buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers); });
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
+    const auto zpass_query = occlusion_queries.PrepareDrawQuery();
     scheduler.BeginRendering(state);
 
     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
@@ -319,7 +385,26 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Graphics, pipeline->Handle());
-
+    occlusion_queries.BeginDraw(cmdbuf, zpass_query);
+    const auto& vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
+    const auto* fs = pipeline->TryGetStage(Shader::LogicalStage::Fragment);
+    RecordSparseDiagnosticCheckpoint(false, vs.pgm_hash, fs ? fs->pgm_hash : 0);
+    DiagnosticCheckpointMarker draw_marker{
+        .kind = DiagnosticCheckpointKind::Graphics,
+        .first_hash = vs.pgm_hash,
+        .second_hash = fs ? fs->pgm_hash : 0,
+        .runtime = {max_count, stride, is_indexed, 0xB3},
+    };
+    const DiagnosticCheckpointMarker* checkpoint_marker{};
+    if (EnablePerCommandGpuDiagnostics && instance.SupportsDiagnosticCheckpoints()) {
+        checkpoint_marker = MakeDiagnosticCheckpoint(DiagnosticCheckpointKind::Graphics,
+                                                     draw_marker.first_hash,
+                                                     draw_marker.second_hash);
+        RecordDiagnosticCommand(draw_marker);
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetCheckpointNV(
+            static_cast<VkCommandBuffer>(cmdbuf), checkpoint_marker);
+        RecordDiagnosticGpuMarker(cmdbuf, draw_marker);
+    }
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
 
@@ -341,39 +426,170 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
         DebugState.IncDrawCall();
     }
-
+    if (checkpoint_marker) {
+        draw_marker.runtime[3] = 0xA3;
+        RecordDiagnosticGpuMarker(cmdbuf, draw_marker);
+    }
+    occlusion_queries.EndDraw(cmdbuf, zpass_query);
     ResetBindings();
+    RecordGpuWork();
 }
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
+    const auto& cs_program = liverpool->GetCsRegs();
+    const auto& max_group_count = instance.GetPhysicalDeviceLimits().maxComputeWorkGroupCount;
+    if (!IsComputeDispatchWithinHostLimits(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z,
+                                           max_group_count)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping invalid direct compute dispatch {}x{}x{}; host limit is {}x{}x{}",
+                    cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, max_group_count[0],
+                    max_group_count[1], max_group_count[2]);
+        return;
+    }
+
     scheduler.PopPendingOperations();
 
-    const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
     }
-
     const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+    // TEMP Shadow diagnostic: capture first-use pointer metadata for scene-list shaders.
+    static bool logged_scene_list_build = false;
+    static bool logged_scene_list_reduce = false;
+    static bool logged_shadow_lighting_a = false;
+    static bool logged_shadow_lighting_b = false;
+    static std::array<bool, 7> logged_shadow_intro_stall{};
+    constexpr std::array<u64, 7> shadow_intro_stall_hashes{
+        0x73b8c213, 0x8ad8f333, 0xd035685b, 0x99288157, 0xbd1957a9, 0x181538e7,
+        0x87cf9b8a};
+    bool* intro_stall_log{};
+    for (u32 index = 0; index < shadow_intro_stall_hashes.size(); ++index) {
+        if (cs.pgm_hash == shadow_intro_stall_hashes[index]) {
+            intro_stall_log = &logged_shadow_intro_stall[index];
+            break;
+        }
+    }
+    bool* logged = cs.pgm_hash == 0x79704cba ? &logged_scene_list_build
+                   : cs.pgm_hash == 0x729c541e ? &logged_scene_list_reduce
+                   : cs.pgm_hash == 0xa402ddac ? &logged_shadow_lighting_a
+                   : cs.pgm_hash == 0x0654a5a1 ? &logged_shadow_lighting_b
+                                              : intro_stall_log;
+    if (logged && !*logged) {
+        *logged = true;
+        LOG_INFO(Render_Vulkan,
+                 "TEMP Shadow compute {:#x}: dma={} readconst={} roots={} overflow={} "
+                 "read_roots={} read_overflow={} flat_dw={}",
+                 cs.pgm_hash, cs.uses_dma, static_cast<u32>(cs.readconst_types),
+                 cs.num_addr64_pointer_roots, cs.addr64_pointer_roots_overflow,
+                 cs.num_readconst_pointer_roots, cs.readconst_pointer_roots_overflow,
+                 cs.flattened_ud_buf.size());
+        LOG_INFO(Render_Vulkan,
+                 "TEMP Shadow compute {:#x}: groups={}x{}x{} threads={}x{}x{} buffers={} "
+                 "images={}",
+                 cs.pgm_hash, cs_program.dim_x, cs_program.dim_y, cs_program.dim_z,
+                 cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                 cs_program.num_thread_z.full, cs.buffers.size(), cs.images.size());
+        for (u32 index = 0; index < cs.flattened_ud_buf.size(); ++index) {
+            LOG_INFO(Render_Vulkan, "TEMP Shadow compute {:#x}: flat[{}]={:#x}", cs.pgm_hash,
+                     index, cs.flattened_ud_buf[index]);
+        }
+        u32 buffer_ordinal{};
+        for (const auto& desc : cs.buffers) {
+            const auto sharp = desc.GetSharp(cs);
+            LOG_INFO(Render_Vulkan,
+                     "TEMP Shadow compute {:#x}: buffer[{}] sharp_dw={} addr={:#x} stride={} "
+                     "records={} size={} written={} special={}",
+                     cs.pgm_hash, buffer_ordinal++, desc.sharp_idx, sharp.base_address,
+                     sharp.stride, sharp.num_records, sharp.GetSize(), desc.is_written,
+                     desc.IsSpecial());
+        }
+    }
+    static u32 logged_shadow_b33_dispatches = 0;
+    static u32 logged_shadow_875_dispatches = 0;
+    const bool log_shadow_dispatch =
+        (cs.pgm_hash == 0xb33e9db6 && logged_shadow_b33_dispatches < 8) ||
+        (cs.pgm_hash == 0x875e4f39 && logged_shadow_875_dispatches < 8);
+    if (log_shadow_dispatch) {
+        const u32 set = cs.pgm_hash == 0xb33e9db6 ? logged_shadow_b33_dispatches
+                                                   : logged_shadow_875_dispatches;
+        LOG_INFO(Render_Vulkan,
+                 "TEMP Shadow dispatch shader={:#x} set={}: groups={}x{}x{} threads={}x{}x{}",
+                 cs.pgm_hash, set, cs_program.dim_x, cs_program.dim_y,
+                 cs_program.dim_z, cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                 cs_program.num_thread_z.full);
+        if (cs.pgm_hash == 0xb33e9db6) {
+            ++logged_shadow_b33_dispatches;
+        } else {
+            ++logged_shadow_875_dispatches;
+        }
+    }
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         return;
     }
-
     if (!BindResources(pipeline)) {
         return;
     }
 
     scheduler.EndRendering();
-    pipeline->BindResources(set_writes, buffer_barriers, push_data);
-
-    const auto cmdbuf = scheduler.CommandBuffer();
-    scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
-    cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    if (ComputeDispatchRequiresIdleBeforeChunks(cs.pgm_hash)) {
+        scheduler.Finish();
+    }
+    const u32 max_chunk_x = ComputeDispatchMaxChunkX(cs.pgm_hash, cs_program.dim_x);
+    const u32 max_chunk_y = ComputeDispatchMaxChunkY(cs.pgm_hash, cs_program.dim_y);
+    const DiagnosticCheckpointMarker* diagnostic_marker{};
+    DiagnosticCheckpointMarker recorded_marker{};
+    if (EnablePerCommandGpuDiagnostics && instance.SupportsDiagnosticCheckpoints()) {
+        diagnostic_marker =
+            MakeDiagnosticCheckpoint(DiagnosticCheckpointKind::Compute, cs.pgm_hash);
+        recorded_marker = *diagnostic_marker;
+        recorded_marker.runtime[0] = cs_program.dim_x;
+        recorded_marker.runtime[1] = cs_program.dim_y;
+        recorded_marker.runtime[2] = cs_program.dim_z;
+        RecordDiagnosticCommand(recorded_marker);
+    }
+    const u32 chunk_count = ComputeDispatchChunk2DCount(cs_program.dim_x, cs_program.dim_y,
+                                                        max_chunk_x, max_chunk_y);
+    const bool submit_chunks = ComputeDispatchRequiresChunkSubmissions(cs.pgm_hash);
+    RecordSparseDiagnosticCheckpoint(true, cs.pgm_hash);
+    if (diagnostic_marker) {
+        const auto cmdbuf = scheduler.CommandBuffer();
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetCheckpointNV(
+            static_cast<VkCommandBuffer>(cmdbuf), diagnostic_marker);
+        recorded_marker.runtime[3] = 0xB4;
+        RecordDiagnosticGpuMarker(cmdbuf, recorded_marker);
+    }
+    bool needs_binding = true;
+    for (u32 chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+        if (needs_binding) {
+            pipeline->BindResources(set_writes, buffer_barriers, push_data);
+            needs_binding = false;
+        }
+        const auto cmdbuf = scheduler.CommandBuffer();
+        scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+        const auto chunk = ComputeDispatchChunk2DAt(cs_program.dim_x, cs_program.dim_y,
+                                                    max_chunk_x, max_chunk_y, chunk_index);
+        if (!ComputeDispatchChunkNeedsBase(chunk)) {
+            cmdbuf.dispatch(chunk.group_count_x, chunk.group_count_y, cs_program.dim_z);
+        } else {
+            cmdbuf.dispatchBase(chunk.base_x, chunk.base_y, 0, chunk.group_count_x,
+                               chunk.group_count_y, cs_program.dim_z);
+        }
+        if (submit_chunks && chunk_index + 1 < chunk_count) {
+            scheduler.Flush();
+            needs_binding = true;
+        }
+    }
+    if (diagnostic_marker) {
+        recorded_marker.runtime[3] = 0xA4;
+        RecordDiagnosticGpuMarker(scheduler.CommandBuffer(), recorded_marker);
+    }
     DebugState.IncDispatch();
 
     ResetBindings();
+    RecordGpuWork();
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -386,7 +602,6 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     if (!pipeline) {
         return;
     }
-
     if (!BindResources(pipeline)) {
         return;
     }
@@ -403,10 +618,41 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+    const auto& info = pipeline->GetStage(Shader::LogicalStage::Compute);
+    RecordSparseDiagnosticCheckpoint(true, info.pgm_hash);
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
 
     ResetBindings();
+    RecordGpuWork();
+}
+
+void Rasterizer::RecordGpuWork() {
+    if (submission_chunk_policy.RecordGpuWork()) {
+        scheduler.Flush();
+    }
+}
+
+void Rasterizer::RecordSparseDiagnosticCheckpoint(bool is_compute, u64 first_hash,
+                                                   u64 second_hash) {
+    if (!instance.SupportsDiagnosticCheckpoints()) {
+        return;
+    }
+    const auto kind = is_compute ? DiagnosticCheckpointKind::Compute
+                                 : DiagnosticCheckpointKind::Graphics;
+    const u32 kind_value = static_cast<u32>(kind);
+    if (last_sparse_diagnostic_kind == kind_value &&
+        last_sparse_diagnostic_first_hash == first_hash &&
+        last_sparse_diagnostic_second_hash == second_hash) {
+        return;
+    }
+    last_sparse_diagnostic_kind = kind_value;
+    last_sparse_diagnostic_first_hash = first_hash;
+    last_sparse_diagnostic_second_hash = second_hash;
+    const auto* marker = MakeDiagnosticCheckpoint(kind, first_hash, second_hash);
+    RecordDiagnosticCommand(*marker);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetCheckpointNV(
+        static_cast<VkCommandBuffer>(scheduler.CommandBuffer()), marker);
 }
 
 u64 Rasterizer::Flush() {
@@ -451,10 +697,64 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         if (!stage) {
             continue;
         }
+        if (stage->pgm_hash == 0x57bd9f27) {
+            u64 signature = 1469598103934665603ULL;
+            for (const u32 value : stage->flattened_ud_buf) {
+                signature = (signature ^ value) * 1099511628211ULL;
+            }
+            static u64 last_signature{};
+            static u32 logged_signatures{};
+            if (signature != last_signature && logged_signatures++ < 128) {
+                last_signature = signature;
+                const auto& cs = liverpool->GetCsRegs();
+                LOG_INFO(Render_Vulkan,
+                         "TEMP Shadow 57bd resources signature={:#x} dispatch={}x{}x{} "
+                         "buffers={} images={} flat_dw={}",
+                         signature, cs.dim_x, cs.dim_y, cs.dim_z, stage->buffers.size(),
+                         stage->images.size(), stage->flattened_ud_buf.size());
+                u32 ordinal{};
+                for (const auto& desc : stage->buffers) {
+                    const auto sharp = desc.GetSharp(*stage);
+                    LOG_INFO(Render_Vulkan,
+                             "TEMP Shadow 57bd buffer[{}] sharp_dw={} addr={:#x} stride={} "
+                             "records={} size={} written={} special={}",
+                             ordinal++, desc.sharp_idx, sharp.base_address, sharp.stride,
+                             sharp.num_records, sharp.GetSize(), desc.is_written,
+                             desc.IsSpecial());
+                }
+                ordinal = 0;
+                for (const auto& desc : stage->images) {
+                    const auto sharp = desc.GetSharp(*stage);
+                    LOG_INFO(Render_Vulkan,
+                             "TEMP Shadow 57bd image[{}] sharp_dw={} addr={:#x} pitch={} "
+                             "extent={}x{}x{} levels={} type={} tile={} format={} num={} "
+                             "written={}",
+                             ordinal++, desc.sharp_idx, sharp.Address(), sharp.pitch + 1U,
+                             sharp.width + 1U, sharp.height + 1U, sharp.depth + 1U,
+                             sharp.last_level + 1U, static_cast<u32>(sharp.GetType()),
+                             static_cast<u32>(sharp.GetTileMode()),
+                             static_cast<u32>(sharp.GetDataFmt()),
+                             static_cast<u32>(sharp.GetNumberFmt()), desc.is_written);
+                }
+            }
+        }
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
         stage->PushUd(binding, push_data);
-        PrepareAddr64PointerResidency(*stage);
+        Shader::PrepareReadConstPointersThenRefresh(
+            stage->num_readconst_pointer_roots + 1U,
+            [&] {
+                std::array<u64, Shader::MaxReadConstPointerRoots> pointers{};
+                for (u32 ordinal = 0; ordinal < stage->num_readconst_pointer_roots; ++ordinal) {
+                    const u32 index = stage->readconst_pointer_roots[ordinal].pointer_lo_flat_index;
+                    if (index + 1U < stage->flattened_ud_buf.size()) {
+                        pointers[ordinal] = u64{stage->flattened_ud_buf[index]} |
+                                            (u64{stage->flattened_ud_buf[index + 1U]} << 32U);
+                    }
+                }
+                return pointers;
+            },
+            [&] { PrepareAddr64PointerResidency(*stage); }, [&] { stage->RefreshFlatBuf(); });
         BindBuffers(*stage, binding, push_data);
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
@@ -470,6 +770,43 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 }
 
 void Rasterizer::PrepareAddr64PointerResidency(const Shader::Info& stage) {
+    // TEMP Shadow diagnostic: inspect the main deferred-lighting shader's pointer roots.
+    static bool logged_shadow_deferred_lighting = false;
+    static bool logged_shadow_scene_light = false;
+    static bool logged_shadow_corrupt_texture = false;
+    static bool logged_shadow_missing_terrain = false;
+    static bool logged_shadow_predicated_scene = false;
+    bool* logged = stage.pgm_hash == 0x291dbcd0 ? &logged_shadow_deferred_lighting
+                   : stage.pgm_hash == 0x617e09a3 ? &logged_shadow_scene_light
+                   : stage.pgm_hash == 0xc61ae8f9 ? &logged_shadow_corrupt_texture
+                   : stage.pgm_hash == 0xef6bb4ef ? &logged_shadow_missing_terrain
+                   : stage.pgm_hash == 0xa9027daa ? &logged_shadow_predicated_scene
+                                                   : nullptr;
+    if (logged && !*logged) {
+        *logged = true;
+        LOG_INFO(Render_Vulkan,
+                 "TEMP Shadow lighting {:#x}: dma={} readconst={} roots={} overflow={} "
+                 "read_roots={} read_overflow={} flat_dw={}",
+                 stage.pgm_hash, stage.uses_dma, static_cast<u32>(stage.readconst_types),
+                 stage.num_addr64_pointer_roots, stage.addr64_pointer_roots_overflow,
+                 stage.num_readconst_pointer_roots, stage.readconst_pointer_roots_overflow,
+                 stage.flattened_ud_buf.size());
+        for (u32 ordinal = 0; ordinal < stage.num_readconst_pointer_roots; ++ordinal) {
+            const auto& root = stage.readconst_pointer_roots[ordinal];
+            const u32 lo = root.pointer_lo_flat_index < stage.flattened_ud_buf.size()
+                               ? stage.flattened_ud_buf[root.pointer_lo_flat_index]
+                               : 0;
+            const u32 hi = root.pointer_lo_flat_index + 1U < stage.flattened_ud_buf.size()
+                               ? stage.flattened_ud_buf[root.pointer_lo_flat_index + 1U]
+                               : 0;
+            LOG_INFO(Render_Vulkan,
+                     "TEMP Shadow lighting {:#x} root[{}]: flat={} ptr={:#x}:{:#x} "
+                     "offset_dw={}..{} dynamic={}",
+                     stage.pgm_hash, ordinal, root.pointer_lo_flat_index, hi, lo,
+                     root.minimum_offset_dwords,
+                     root.maximum_offset_dwords, root.dynamic_offset);
+        }
+    }
     if (stage.addr64_pointer_roots_overflow) {
         return;
     }
@@ -494,6 +831,62 @@ void Rasterizer::PrepareAddr64PointerResidency(const Shader::Info& stage) {
             continue;
         }
         VideoCore::MakeDmaFaultRangeResident(buffer_cache, plan.address, plan.size);
+    }
+
+    if (stage.readconst_pointer_roots_overflow) {
+        return;
+    }
+    constexpr u64 page_size = VideoCore::BufferCache::CACHING_PAGESIZE;
+    constexpr u64 address_space_size = page_size * VideoCore::BufferCache::CACHING_NUMPAGES;
+    static bool logged_shadow_scene_readconst_ownership = false;
+    static bool logged_shadow_corrupt_texture_readconst_ownership = false;
+    static bool logged_shadow_missing_terrain_readconst_ownership = false;
+    static bool logged_shadow_predicated_scene_readconst_ownership = false;
+    const bool log_shadow_scene_readconst_ownership =
+        (stage.pgm_hash == 0x617e09a3 && !logged_shadow_scene_readconst_ownership) ||
+        (stage.pgm_hash == 0xc61ae8f9 &&
+         !logged_shadow_corrupt_texture_readconst_ownership) ||
+        (stage.pgm_hash == 0xef6bb4ef &&
+         !logged_shadow_missing_terrain_readconst_ownership) ||
+        (stage.pgm_hash == 0xa9027daa &&
+         !logged_shadow_predicated_scene_readconst_ownership);
+    for (u32 ordinal = 0; ordinal < stage.num_readconst_pointer_roots; ++ordinal) {
+        const auto& root = stage.readconst_pointer_roots[ordinal];
+        if (root.pointer_lo_flat_index + 1U >= stage.flattened_ud_buf.size()) {
+            continue;
+        }
+        const auto plan = Shader::PlanReadConstPointerResidency(
+            stage.flattened_ud_buf[root.pointer_lo_flat_index],
+            stage.flattened_ud_buf[root.pointer_lo_flat_index + 1U],
+            root.minimum_offset_dwords, root.maximum_offset_dwords, root.dynamic_offset,
+            page_size, address_space_size);
+        if (!plan.valid || !VideoCore::IsProcessableDmaFaultRange(
+                               plan.address, plan.address + plan.size, address_space_size,
+                               [this](VAddr address, u64 size) {
+                                   return page_manager.IsGpuMapped(address, size);
+                               })) {
+            continue;
+        }
+        if (log_shadow_scene_readconst_ownership) {
+            LOG_INFO(Render_Vulkan,
+                     "TEMP Shadow scene readconst root[{}]: guest={:#x}:{:#x} tracked_gpu={} "
+                     "exact_gpu={}",
+                     ordinal, plan.address, plan.size,
+                     buffer_cache.IsRegionGpuModified(plan.address, plan.size),
+                     buffer_cache.IsRegionGpuModifiedExact(plan.address, plan.size));
+        }
+        VideoCore::MakeDmaFaultRangeCpuVisible(buffer_cache, plan.address, plan.size);
+    }
+    if (log_shadow_scene_readconst_ownership) {
+        if (stage.pgm_hash == 0x617e09a3) {
+            logged_shadow_scene_readconst_ownership = true;
+        } else if (stage.pgm_hash == 0xc61ae8f9) {
+            logged_shadow_corrupt_texture_readconst_ownership = true;
+        } else if (stage.pgm_hash == 0xef6bb4ef) {
+            logged_shadow_missing_terrain_readconst_ownership = true;
+        } else {
+            logged_shadow_predicated_scene_readconst_ownership = true;
+        }
     }
 }
 
@@ -583,8 +976,12 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Perform image copy
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
-    if (instance.IsMaintenance8Supported() ||
-        src_image.info.props.is_depth == dst_image.info.props.is_depth) {
+    const bool requires_buffer_copy = VideoCore::RequiresBufferCopyForDepthFormatMismatch(
+        src_image.info.pixel_format, dst_image.info.pixel_format, src_image.info.props.is_depth,
+        dst_image.info.props.is_depth);
+    if ((instance.IsMaintenance8Supported() ||
+         src_image.info.props.is_depth == dst_image.info.props.is_depth) &&
+        !requires_buffer_copy) {
         dst_image.CopyImage(src_image);
     } else {
         const auto& copy_buffer =
@@ -659,16 +1056,96 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
+    static bool logged_shadow_scene_buffers = false;
+    static u32 logged_shadow_terrain_buffer_sets = 0;
+    static u32 logged_shadow_terrain_indices = 0;
+    static u32 logged_shadow_b33_buffer_sets = 0;
+    static u32 logged_shadow_87_buffer_states = 0;
+    const bool log_shadow_terrain_buffers =
+        stage.pgm_hash == 0xef6bb4ef && liverpool->regs.num_indices >= 10000 &&
+        liverpool->regs.num_indices != logged_shadow_terrain_indices &&
+        logged_shadow_terrain_buffer_sets < 32;
+    const bool log_shadow_scene_buffers =
+        (stage.pgm_hash == 0x617e09a3 && !logged_shadow_scene_buffers) ||
+        log_shadow_terrain_buffers ||
+        (stage.pgm_hash == 0xb33e9db6 && logged_shadow_b33_buffer_sets < 8);
+    u32 shadow_scene_buffer_ordinal = 0;
+
+    struct GpuModifiedReadBarrier {
+        VideoCore::Buffer* buffer;
+        bool needs_fallback{};
+        bool write_dependency_covered{};
+    };
+    boost::container::small_vector<GpuModifiedReadBarrier, Shader::NUM_BUFFERS> read_barriers;
 
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
-        if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
+        if (log_shadow_scene_buffers ||
+            (stage.pgm_hash == 0xef6bb4ef && !vsharp.Valid())) {
+            LOG_INFO(Render_Vulkan,
+                     "TEMP Shadow buffer shader={:#x} draw_indices={} set={} ordinal={} "
+                     "sharp_dw={} special={} type={} valid={} addr={:#x} stride={} records={} "
+                     "size={} written={} clip_cntl={:#010x} clip_space={}",
+                     stage.pgm_hash, liverpool->regs.num_indices,
+                     logged_shadow_terrain_buffer_sets, shadow_scene_buffer_ordinal,
+                     desc.sharp_idx, desc.IsSpecial(),
+                     static_cast<u32>(desc.buffer_type), vsharp.Valid(), vsharp.base_address,
+                     vsharp.stride, vsharp.num_records, vsharp.GetSize(), desc.is_written,
+                     std::bit_cast<u32>(liverpool->regs.clipper_control),
+                     static_cast<u32>(liverpool->regs.clipper_control.clip_space));
+        }
+        ++shadow_scene_buffer_ordinal;
+        const bool has_gpu_mapping = !desc.IsSpecial() && vsharp.base_address != 0 &&
+                                     memory->IsValidGpuMapping(vsharp.base_address, 0);
+        const bool has_cpu_mapping = !desc.IsSpecial() && vsharp.base_address != 0 &&
+                                     memory->IsMappedMemory(vsharp.base_address, 1);
+        if (VideoCore::IsGuestBufferDescriptorBindable(
+                desc.IsSpecial(), vsharp.base_address, vsharp.GetSize(), has_gpu_mapping,
+                has_cpu_mapping)) {
             const u64 binding_size = desc.GetBindingSize(vsharp);
             const u64 size = memory->ClampRangeSize(vsharp.base_address, binding_size);
+            if (size > 64_MB) {
+                LOG_ERROR(Render_Vulkan,
+                          "TEMP oversized buffer binding shader={:#x} stage={} sharp_dw={} "
+                          "addr={:#x} stride={} records={} raw_size={} binding_size={} "
+                          "clamped_size={} written={} formatted={}",
+                          stage.pgm_hash, stage.stage, desc.sharp_idx, vsharp.base_address,
+                          vsharp.stride, vsharp.num_records, vsharp.GetSize(), binding_size, size,
+                          desc.is_written, desc.is_formatted);
+            }
             const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
             buffer_bindings.emplace_back(buffer_id, vsharp, size);
+            if (stage.pgm_hash == 0xef6bb4ef && logged_shadow_terrain_buffer_sets < 8) {
+                LOG_INFO(Render_Vulkan,
+                         "TEMP Shadow bound buffer shader={:#x} ordinal={} sharp_dw={} "
+                         "gpu_mapping={} cpu_mapping={} binding_size={} clamped_size={} "
+                         "buffer_id={}",
+                         stage.pgm_hash, shadow_scene_buffer_ordinal - 1, desc.sharp_idx,
+                         has_gpu_mapping, has_cpu_mapping, binding_size, size,
+                         buffer_id.index);
+            }
         } else {
             buffer_bindings.emplace_back(VideoCore::BufferId{}, vsharp, 0);
+            if (stage.pgm_hash == 0xef6bb4ef && logged_shadow_terrain_buffer_sets < 8) {
+                LOG_INFO(Render_Vulkan,
+                         "TEMP Shadow unbound buffer shader={:#x} ordinal={} sharp_dw={} "
+                         "special={} addr_nonzero={} size_nonzero={} gpu_mapping={} "
+                         "cpu_mapping={}",
+                         stage.pgm_hash, shadow_scene_buffer_ordinal - 1, desc.sharp_idx,
+                         desc.IsSpecial(), vsharp.base_address != 0, vsharp.GetSize() > 0,
+                         has_gpu_mapping, has_cpu_mapping);
+            }
+        }
+    }
+    if (log_shadow_scene_buffers) {
+        if (stage.pgm_hash == 0x617e09a3) {
+            logged_shadow_scene_buffers = true;
+        } else {
+            logged_shadow_terrain_indices = liverpool->regs.num_indices;
+            ++logged_shadow_terrain_buffer_sets;
+        }
+        if (stage.pgm_hash == 0xb33e9db6) {
+            ++logged_shadow_b33_buffer_sets;
         }
     }
 
@@ -689,6 +1166,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u32 ubo_size = stage.flattened_ud_buf.size() * sizeof(u32);
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
+
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
             } else if (desc.buffer_type == Shader::BufferType::ClipPlanes) {
                 // Permutations compiled without enabled planes never read the buffer, so the
@@ -726,8 +1204,64 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             }
         } else {
-            const auto [vk_buffer, offset] = buffer_cache.ObtainBuffer(
+            const bool was_gpu_modified = !desc.is_written &&
+                                          buffer_cache.IsRegionGpuModifiedExact(
+                                              vsharp.base_address, size);
+            auto [vk_buffer, offset] = buffer_cache.ObtainBuffer(
                 vsharp.base_address, size, desc.is_written, desc.is_formatted, buffer_id);
+            bool gpu_snapshot = false;
+            if (VideoCore::ShouldSnapshotGpuModifiedComputeControl(
+                    was_gpu_modified, stage.stage == Shader::Stage::Compute, desc.is_written,
+                    desc.is_formatted, size)) {
+                auto& snapshot = buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Stream);
+                const auto [snapshot_data, snapshot_offset] = snapshot.Map(size, alignment);
+                ASSERT(snapshot_data != nullptr);
+                snapshot.Commit();
+                scheduler.EndRendering();
+                const auto cmdbuf = scheduler.CommandBuffer();
+                const std::array pre_barriers{
+                    vk::BufferMemoryBarrier2{
+                        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+                        .buffer = vk_buffer->Handle(),
+                        .offset = offset,
+                        .size = size,
+                    },
+                    vk::BufferMemoryBarrier2{
+                        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                        .buffer = snapshot.Handle(),
+                        .offset = snapshot_offset,
+                        .size = size,
+                    },
+                };
+                cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                    .bufferMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+                    .pBufferMemoryBarriers = pre_barriers.data(),
+                });
+                cmdbuf.copyBuffer(vk_buffer->Handle(), snapshot.Handle(),
+                                  vk::BufferCopy{offset, snapshot_offset, size});
+                const vk::BufferMemoryBarrier2 post_barrier{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                    .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                    .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                    .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+                    .buffer = snapshot.Handle(),
+                    .offset = snapshot_offset,
+                    .size = size,
+                };
+                cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                    .bufferMemoryBarrierCount = 1,
+                    .pBufferMemoryBarriers = &post_barrier,
+                });
+                vk_buffer = &snapshot;
+                offset = static_cast<u32>(snapshot_offset);
+                gpu_snapshot = true;
+            }
             const u32 offset_aligned = Common::AlignDown(offset, alignment);
             const u32 adjust = offset - offset_aligned;
             if (adjust % 4 != 0) {
@@ -736,11 +1270,41 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             }
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
-            if (auto barrier =
-                    vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
-                                                          : vk::AccessFlagBits2::eShaderRead,
-                                          vk::PipelineStageFlagBits2::eAllCommands)) {
+            const auto shader_access = VideoCore::GetBufferShaderAccess(desc.is_written);
+            const vk::AccessFlags2 access_mask =
+                shader_access == VideoCore::BufferShaderAccess::ReadWrite
+                    ? vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite
+                    : vk::AccessFlagBits2::eShaderRead;
+            bool write_dependency_covered = gpu_snapshot;
+            if (!gpu_snapshot) {
+                if (auto barrier = vk_buffer->GetBarrier(
+                        access_mask, vk::PipelineStageFlagBits2::eAllCommands, offset_aligned,
+                        size + adjust)) {
+                constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
+                                             vk::AccessFlagBits2::eShaderWrite |
+                                             vk::AccessFlagBits2::eMemoryWrite;
+                write_dependency_covered = static_cast<bool>(barrier->srcAccessMask & write_flags);
                 buffer_barriers.emplace_back(*barrier);
+                }
+            }
+
+            auto candidate = std::ranges::find(read_barriers, vk_buffer,
+                                               &GpuModifiedReadBarrier::buffer);
+            if (candidate == read_barriers.end()) {
+                candidate = read_barriers.emplace(read_barriers.end(), vk_buffer);
+            }
+            candidate->write_dependency_covered |= write_dependency_covered;
+            candidate->needs_fallback |= VideoCore::NeedsGpuModifiedReadBarrier(
+                was_gpu_modified, desc.is_written, write_dependency_covered);
+            if (stage.pgm_hash == 0x87cf9b8a && logged_shadow_87_buffer_states < 32) {
+                LOG_INFO(Render_Vulkan,
+                         "TEMP Shadow 87 buffer state ordinal={} addr={:#x} size={} "
+                         "written={} formatted={} gpu_modified={} snapshot={} "
+                         "write_dependency={} fallback={}",
+                         i, vsharp.base_address, size, desc.is_written, desc.is_formatted,
+                         was_gpu_modified, gpu_snapshot, write_dependency_covered,
+                         candidate->needs_fallback);
+                ++logged_shadow_87_buffer_states;
             }
             if (desc.is_written && desc.is_formatted) {
                 texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
@@ -757,6 +1321,21 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
     }
+
+    for (const auto& candidate : read_barriers) {
+        if (!candidate.needs_fallback || candidate.write_dependency_covered) {
+            continue;
+        }
+        buffer_barriers.emplace_back(vk::BufferMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+            .buffer = candidate.buffer->Handle(),
+            .offset = 0,
+            .size = candidate.buffer->SizeBytes(),
+        });
+    }
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
@@ -769,13 +1348,41 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
     boost::container::small_vector<std::pair<bool, bool>, 8> image_native_extent_requirements;
-    const auto append_invalid_image_binding = [&] {
-        image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+    const auto append_invalid_image_binding = [&](bool is_storage) {
+        auto& binding_entry = image_bindings.emplace_back(
+            std::piecewise_construct, std::tuple{}, std::tuple{});
+        binding_entry.second.type = is_storage ? VideoCore::TextureCache::BindingType::Storage
+                                               : VideoCore::TextureCache::BindingType::Texture;
         image_descriptor_array_sizes.push_back(1);
         image_native_extent_requirements.emplace_back(false, false);
     };
 
+    static bool logged_shadow_scene_images = false;
+    static bool logged_shadow_corrupt_texture_images = false;
+    static bool logged_shadow_predicated_scene_images = false;
+    static u32 logged_shadow_b33_image_sets = 0;
+    static u32 logged_shadow_875_image_sets = 0;
+    const bool log_shadow_scene_images =
+        (stage.pgm_hash == 0x617e09a3 && !logged_shadow_scene_images) ||
+        (stage.pgm_hash == 0xc61ae8f9 && !logged_shadow_corrupt_texture_images) ||
+        (stage.pgm_hash == 0xa9027daa && !logged_shadow_predicated_scene_images) ||
+        (stage.pgm_hash == 0xb33e9db6 && logged_shadow_b33_image_sets < 8) ||
+        (stage.pgm_hash == 0x875e4f39 && logged_shadow_875_image_sets < 8);
+    u32 shadow_scene_image_ordinal = 0;
     for (const auto& image_desc : stage.images) {
+        if (log_shadow_scene_images) {
+            const auto raw = stage.ReadUdSharp<AmdGpu::Image>(image_desc.sharp_idx);
+            LOG_INFO(Render_Vulkan,
+                     "TEMP Shadow scene image[{}]: sharp_dw={} valid={} addr={:#x} "
+                     "pitch={} width={} height={} depth={} type={} levels={} data_format={} "
+                     "num_format={} is_depth={} written={}",
+                     shadow_scene_image_ordinal, image_desc.sharp_idx, raw.Valid(), raw.Address(),
+                     raw.pitch, raw.width, raw.height, raw.depth, static_cast<u32>(raw.GetType()),
+                     raw.last_level + 1U, static_cast<u32>(raw.GetDataFmt()),
+                     static_cast<u32>(raw.GetNumberFmt()), image_desc.is_depth,
+                     image_desc.is_written);
+        }
+        ++shadow_scene_image_ordinal;
         const auto tsharp = image_desc.GetSharp(stage);
         if (texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
@@ -784,27 +1391,210 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            append_invalid_image_binding();
+            append_invalid_image_binding(image_desc.is_written);
             continue;
         }
 
         if (!memory->IsValidGpuMapping(tsharp.Address(), 0) || tsharp.pitch < tsharp.width ||
-            !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt)) {
+            !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
+            !VideoCore::IsImageComponentMappingUsable(tsharp.dst_sel_x, tsharp.dst_sel_y,
+                                                      tsharp.dst_sel_z, tsharp.dst_sel_w) ||
+            !VideoCore::IsImageDescriptorFormatUsable(
+                data_fmt, num_fmt, LiverpoolToVK::IsSurfaceFormatSupported)) {
             LOG_WARNING(Render_Vulkan,
-                        "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
-                        "data_format={}, num_format={}",
-                        tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
-                        static_cast<u32>(num_fmt));
-            append_invalid_image_binding();
+                        "Rejecting invalid T# shader={:#x} stage={} sharp_dw={} address={:#x}, "
+                        "pitch={}, width={}, height={}, depth={}, data_format={}, num_format={}, "
+                        "type={}, tile_mode={}, read_roots={}, read_overflow={}, flat_dw={}",
+                        stage.pgm_hash, stage.stage, image_desc.sharp_idx, tsharp.Address(),
+                        tsharp.pitch, tsharp.width, tsharp.height, tsharp.depth,
+                        static_cast<u32>(data_fmt), static_cast<u32>(num_fmt),
+                        static_cast<u32>(tsharp.GetType()), static_cast<u32>(tsharp.GetTileMode()),
+                        stage.num_readconst_pointer_roots, stage.readconst_pointer_roots_overflow,
+                        stage.flattened_ud_buf.size());
+            static std::array<u64, 16> logged_invalid_shadow_texture_shaders{};
+            static u32 logged_invalid_shadow_texture_count = 0;
+            static bool logged_shadow_862e_invalid_texture = false;
+            bool log_invalid_shadow_texture = false;
+            if (stage.pgm_hash == 0x862e4da8 && !logged_shadow_862e_invalid_texture) {
+                logged_shadow_862e_invalid_texture = true;
+                log_invalid_shadow_texture = true;
+            }
+            {
+                bool already_logged = false;
+                for (u32 index = 0; index < logged_invalid_shadow_texture_count; ++index) {
+                    already_logged |= logged_invalid_shadow_texture_shaders[index] == stage.pgm_hash;
+                }
+                if (!already_logged && logged_invalid_shadow_texture_count <
+                                           logged_invalid_shadow_texture_shaders.size()) {
+                    logged_invalid_shadow_texture_shaders[logged_invalid_shadow_texture_count++] =
+                        stage.pgm_hash;
+                    log_invalid_shadow_texture = true;
+                }
+            }
+            if (log_invalid_shadow_texture) {
+                for (u32 offset = 0; offset < 8; ++offset) {
+                    const u32 index = image_desc.sharp_idx + offset;
+                    const u32 value = index < stage.flattened_ud_buf.size()
+                                          ? stage.flattened_ud_buf[index]
+                                          : 0;
+                    LOG_INFO(Render_Vulkan,
+                             "TEMP Shadow invalid T# shader={:#x} flat[{}]={:#x}",
+                             stage.pgm_hash, index, value);
+                }
+                for (u32 ordinal = 0; ordinal < stage.num_readconst_pointer_roots; ++ordinal) {
+                    const auto& root = stage.readconst_pointer_roots[ordinal];
+                    const u32 lo = root.pointer_lo_flat_index < stage.flattened_ud_buf.size()
+                                       ? stage.flattened_ud_buf[root.pointer_lo_flat_index]
+                                       : 0;
+                    const u32 hi = root.pointer_lo_flat_index + 1U < stage.flattened_ud_buf.size()
+                                       ? stage.flattened_ud_buf[root.pointer_lo_flat_index + 1U]
+                                       : 0;
+                    const auto plan = Shader::PlanReadConstPointerResidency(
+                        lo, hi, root.minimum_offset_dwords, root.maximum_offset_dwords,
+                        root.dynamic_offset, VideoCore::BufferCache::CACHING_PAGESIZE,
+                        VideoCore::BufferCache::CACHING_PAGESIZE *
+                            VideoCore::BufferCache::CACHING_NUMPAGES);
+                    LOG_INFO(Render_Vulkan,
+                             "TEMP Shadow invalid T# shader={:#x} root[{}] flat={} "
+                             "ptr={:#x}:{:#x} offset_dw={}..{} dynamic={} plan={:#x}:{:#x} "
+                             "tracked_gpu={} exact_gpu={}",
+                             stage.pgm_hash, ordinal, root.pointer_lo_flat_index,
+                             hi, lo, root.minimum_offset_dwords, root.maximum_offset_dwords,
+                             root.dynamic_offset, plan.address, plan.size,
+                             plan.valid && buffer_cache.IsRegionGpuModified(plan.address, plan.size),
+                             plan.valid &&
+                                 buffer_cache.IsRegionGpuModifiedExact(plan.address, plan.size));
+                }
+            }
+            append_invalid_image_binding(image_desc.is_written);
+            continue;
+        }
+
+        const auto& device_limits = instance.GetPhysicalDeviceLimits();
+        const VideoCore::HostImageResourceLimits host_image_limits{
+            .max_1d_dimension = device_limits.maxImageDimension1D,
+            .max_2d_dimension = device_limits.maxImageDimension2D,
+            .max_3d_dimension = device_limits.maxImageDimension3D,
+            .max_array_layers = device_limits.maxImageArrayLayers,
+            .max_mip_levels = 32,
+        };
+        const auto descriptor_type = tsharp.GetType();
+        const auto base_type = tsharp.GetBaseType();
+        const VideoCore::HostImageResourceExtent host_extent{
+            .width = static_cast<u32>(tsharp.width + 1U),
+            .height = static_cast<u32>(tsharp.height + 1U),
+            .depth = base_type == AmdGpu::ImageType::Color3D
+                         ? static_cast<u32>(tsharp.depth + 1U)
+                         : 1U,
+        };
+        const VideoCore::HostImageSubresourceExtent host_resources{
+            .levels = tsharp.NumLevels(),
+            .layers = tsharp.NumLayers(),
+        };
+        if (!VideoCore::IsImageResourceWithinHostLimits(descriptor_type, host_extent,
+                                                        host_resources, host_image_limits)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Rejecting T# outside host image limits shader={:#x} stage={} "
+                        "sharp_dw={} address={:#x} extent={}x{}x{} levels={} layers={} type={}",
+                        stage.pgm_hash, stage.stage, image_desc.sharp_idx, tsharp.Address(),
+                        host_extent.width, host_extent.height, host_extent.depth,
+                        host_resources.levels, host_resources.layers,
+                        static_cast<u32>(descriptor_type));
+            append_invalid_image_binding(image_desc.is_written);
+            continue;
+        }
+        if (!VideoCore::IsImageEstimatedAllocationWithinLimit(
+                host_extent, host_resources, AmdGpu::NumBitsPerBlock(data_fmt),
+                AmdGpu::IsBlockCoded(data_fmt), tsharp.NumSamples(),
+                instance.GetTotalMemoryBudget())) {
+            LOG_WARNING(Render_Vulkan,
+                        "Rejecting T# whose minimum allocation exceeds the device budget "
+                        "shader={:#x} stage={} sharp_dw={} address={:#x} extent={}x{}x{} "
+                        "levels={} layers={} bits={} block={}",
+                        stage.pgm_hash, stage.stage, image_desc.sharp_idx, tsharp.Address(),
+                        host_extent.width, host_extent.height, host_extent.depth,
+                        host_resources.levels, host_resources.layers,
+                        AmdGpu::NumBitsPerBlock(data_fmt), AmdGpu::IsBlockCoded(data_fmt));
+            append_invalid_image_binding(image_desc.is_written);
             continue;
         }
 
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
+        const auto array_mode = AmdGpu::GetArrayMode(tsharp.GetTileMode());
+        const VideoCore::ImageInfo guest_info{tsharp, image_desc};
+        const bool fully_mapped = guest_info.guest_size != 0 &&
+                                  memory->IsMappedMemory(guest_info.guest_address,
+                                                         guest_info.guest_size);
+        if (tsharp.lod_hw_cnt_en) {
+            static u32 lod_counter_binding_logs{};
+            if (lod_counter_binding_logs++ < 128) {
+                LOG_WARNING(Render_Vulkan,
+                            "TEMP PRT LOD counter shader={:#x} stage={} sharp_dw={} bank={} "
+                            "min_lod_warn={:#x} base_level={} last_level={} tile_mode={} "
+                            "array_mode={} address={:#x} size={:#x} fully_mapped={} written={}",
+                            stage.pgm_hash, stage.stage, image_desc.sharp_idx,
+                            tsharp.counter_bank_id, tsharp.min_lod_warn, tsharp.base_level,
+                            tsharp.last_level, static_cast<u32>(tsharp.GetTileMode()),
+                            static_cast<u32>(array_mode), guest_info.guest_address,
+                            guest_info.guest_size, fully_mapped, image_desc.is_written);
+            }
+        }
+        static const bool diagnostic_allow_incomplete_non_sparse =
+            std::getenv("SHADPS4_DIAGNOSTIC_ALLOW_INCOMPLETE_NON_SPARSE_IMAGES") != nullptr;
+        lod_feedback_images.Observe(guest_info.guest_address, guest_info.guest_size,
+                                    tsharp.lod_hw_cnt_en);
+        const bool allow_incomplete_non_sparse = lod_feedback_images.CanUseIncompleteBacking(
+            guest_info.guest_address, guest_info.guest_size, image_desc.is_written,
+            diagnostic_allow_incomplete_non_sparse);
+        if (!VideoCore::IsImageGuestBackingUsable(array_mode, fully_mapped,
+                                                  allow_incomplete_non_sparse)) {
+            static u32 rejected_unmapped_image_logs = 0;
+            if (rejected_unmapped_image_logs++ < 32) {
+                LOG_WARNING(Render_Vulkan,
+                            "Rejecting non-sparse T# without complete guest backing "
+                            "shader={:#x} stage={} sharp_dw={} address={:#x} size={:#x} "
+                            "tile_mode={} lod_feedback={} written={} diagnostic_enabled={} "
+                            "diagnostic_allowed={}",
+                            stage.pgm_hash, stage.stage, image_desc.sharp_idx,
+                            guest_info.guest_address, guest_info.guest_size,
+                            static_cast<u32>(tsharp.GetTileMode()), tsharp.lod_hw_cnt_en,
+                            image_desc.is_written, diagnostic_allow_incomplete_non_sparse,
+                            allow_incomplete_non_sparse);
+            }
+            append_invalid_image_binding(image_desc.is_written);
+            continue;
+        }
+        if (array_mode == AmdGpu::ArrayMode::ArrayPrt3DTiledThick) {
+            LOG_ERROR(Render_Vulkan,
+                      "TEMP Shadow PRT3D thick shader={:#x} stage={} sharp_dw={} addr={:#x} "
+                      "pitch={} width={} height={} depth={} levels={} data_format={} num_format={} "
+                      "tile_mode={} type={} base_type={} layers={} samples={} pow2pad={}",
+                      stage.pgm_hash, stage.stage, image_desc.sharp_idx, tsharp.Address(),
+                      tsharp.pitch, tsharp.width, tsharp.height, tsharp.depth,
+                      tsharp.last_level + 1U, static_cast<u32>(data_fmt),
+                      static_cast<u32>(num_fmt), static_cast<u32>(tsharp.GetTileMode()),
+                      static_cast<u32>(tsharp.GetType()), static_cast<u32>(tsharp.GetBaseType()),
+                      tsharp.NumLayers(), tsharp.NumSamples(), tsharp.pow2pad);
+        }
 
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings.emplace_back(
                 std::piecewise_construct, std::tuple{}, std::tuple{tsharp, image_desc});
+            if (array_mode == AmdGpu::ArrayMode::ArrayPrt3DTiledThick) {
+                LOG_ERROR(Render_Vulkan,
+                          "TEMP Shadow PRT3D info shader={:#x} sharp_dw={} addr={:#x} "
+                          "type={} volume={} block={} extent={}x{}x{} levels={} layers={} "
+                          "bits={} guest_size={:#x} mip0_size={:#x} mip0_pitch={} "
+                          "mip0_height={}",
+                          stage.pgm_hash, image_desc.sharp_idx, desc.info.guest_address,
+                          static_cast<u32>(desc.info.type), bool(desc.info.props.is_volume),
+                          bool(desc.info.props.is_block), desc.info.size.width, desc.info.size.height,
+                          desc.info.size.depth, desc.info.resources.levels,
+                          desc.info.resources.layers, desc.info.num_bits, desc.info.guest_size,
+                          desc.info.mips_layout[0].size, desc.info.mips_layout[0].pitch,
+                          desc.info.mips_layout[0].height);
+            }
             image_native_extent_requirements.emplace_back(image_desc.uses_integer_coordinates,
                                                           image_desc.queries_dimensions);
 
@@ -837,6 +1627,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         image_descriptor_array_sizes.push_back(num_bindings);
     }
+    if (stage.pgm_hash == 0xb33e9db6 && log_shadow_scene_images) {
+        ++logged_shadow_b33_image_sets;
+    } else if (stage.pgm_hash == 0x875e4f39 && log_shadow_scene_images) {
+        ++logged_shadow_875_image_sets;
+    }
+    if (log_shadow_scene_images) {
+        if (stage.pgm_hash == 0x617e09a3) {
+            logged_shadow_scene_images = true;
+        } else if (stage.pgm_hash == 0xc61ae8f9) {
+            logged_shadow_corrupt_texture_images = true;
+        } else {
+            logged_shadow_predicated_scene_images = true;
+        }
+    }
 
     // Second pass to re-bind images that were updated after binding
     ASSERT(image_native_extent_requirements.size() == image_bindings.size());
@@ -863,11 +1667,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             }
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            // The image is either bound as storage in a separate descriptor or bound as render
-            // target in feedback loop. Depth images are excluded because they can't be bound as
-            // storage and feedback loop doesn't make sense for them
-            if ((image.binding.force_general || image.binding.is_target) &&
-                !image.info.props.is_depth) {
+            // The image is either bound as storage in a separate descriptor or bound as a render
+            // target in a feedback loop. The feedback-loop layout applies to color and depth.
+            if (image.binding.force_general ||
+                (image.binding.is_target &&
+                 instance.IsAttachmentFeedbackLoopLayoutSupported())) {
                 image.Transit(instance.IsAttachmentFeedbackLoopLayoutSupported() &&
                                       image.binding.is_target
                                   ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
@@ -921,6 +1725,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     for (const auto& sampler : stage.samplers) {
         auto ssharp = sampler.GetSharp(stage);
+        const auto normalized_anisotropy = VideoCore::NormalizeSamplerAnisotropy(
+            static_cast<AmdGpu::AnisoRatio>(ssharp.max_aniso.Value()));
+        if (normalized_anisotropy != ssharp.max_aniso.Value()) {
+            LOG_WARNING(Render_Vulkan,
+                        "Reserved sampler anisotropy encoding {}; falling back to 1x",
+                        static_cast<u32>(ssharp.max_aniso.Value()));
+            ssharp.max_aniso.Assign(normalized_anisotropy);
+        }
+        const auto normalized_mip_filter = VideoCore::NormalizeSamplerMipFilter(
+            static_cast<AmdGpu::MipFilter>(ssharp.mip_filter.Value()));
+        if (normalized_mip_filter != ssharp.mip_filter.Value()) {
+            LOG_WARNING(Render_Vulkan,
+                        "Reserved sampler mip-filter encoding {}; falling back to none",
+                        static_cast<u32>(ssharp.mip_filter.Value()));
+            ssharp.mip_filter.Assign(normalized_mip_filter);
+        }
         if (sampler.disable_aniso) {
             const auto& tsharp = stage.images[sampler.associated_image].GetSharp(stage);
             if (tsharp.base_level == 0 && tsharp.last_level == 0) {
@@ -940,7 +1760,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
-    attachment_feedback_loop = false;
+    attachment_feedback_loop_aspects = {};
     const auto& regs = liverpool->regs;
     const auto& key = pipeline->GetGraphicsKey();
     RenderState state;
@@ -997,7 +1817,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                                ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
                                : vk::ImageLayout::eGeneral,
                            vk::AccessFlagBits2::eColorAttachmentWrite, {});
-            attachment_feedback_loop = true;
+            attachment_feedback_loop_aspects |= vk::ImageAspectFlagBits::eColor;
         } else {
             image->Transit(vk::ImageLayout::eColorAttachmentOptimal,
                            vk::AccessFlagBits2::eColorAttachmentWrite |
@@ -1048,7 +1868,11 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         // Stencil writes can be enabled while depth writes are off.
         const bool stencil_write =
             has_stencil && regs.depth_control.stencil_enable && !desc.view_info.is_storage;
-        const auto new_layout = desc.view_info.is_storage
+        const bool feedback_loop = image.binding.is_bound &&
+                                   instance.IsAttachmentFeedbackLoopLayoutSupported();
+        const auto new_layout = feedback_loop
+                                    ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
+                                : desc.view_info.is_storage
                                     ? has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
                                                   : vk::ImageLayout::eDepthAttachmentOptimal
                                 : stencil_write
@@ -1058,7 +1882,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         image.Transit(new_layout,
                       vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
                           vk::AccessFlagBits2::eDepthStencilAttachmentRead,
-                      desc.view_info.range);
+                      feedback_loop ? std::optional<VideoCore::SubresourceRange>{}
+                                    : std::optional{desc.view_info.range});
+        if (feedback_loop) {
+            attachment_feedback_loop_aspects |= VideoCore::AttachmentFeedbackLoopAspects(
+                true, has_stencil);
+        }
 
         const auto host_extent = image.GetHostExtent();
         state.width = std::min<u32>(state.width, host_extent.width);
@@ -1208,6 +2037,15 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size) {
     return true;
 }
 
+bool Rasterizer::ArmDiagnosticReadWatch(const VAddr addr, const u64 size) {
+    return page_manager.ArmDiagnosticReadWatch(addr, size);
+}
+
+bool Rasterizer::HandleDiagnosticReadWatchFault(void* context, const VAddr addr,
+                                                const bool is_write) {
+    return page_manager.HandleDiagnosticReadWatchFault(context, addr, is_write);
+}
+
 void Rasterizer::ProcessDownloadImages() {
     texture_cache.ProcessDownloadImages();
 }
@@ -1236,6 +2074,7 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    lod_feedback_images.Invalidate(addr, size);
     buffer_cache.InvalidateMemory(addr, size);
     texture_cache.UnmapMemory(addr, size);
     page_manager.OnGpuUnmap(addr, size);
@@ -1526,7 +2365,7 @@ void Rasterizer::UpdateColorBlendingState(const GraphicsPipeline* pipeline) cons
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetBlendConstants(regs.blend_constants);
     dynamic_state.SetColorWriteMasks(pipeline->GetGraphicsKey().write_masks);
-    dynamic_state.SetAttachmentFeedbackLoopEnabled(attachment_feedback_loop);
+    dynamic_state.SetAttachmentFeedbackLoopAspects(attachment_feedback_loop_aspects);
 }
 
 void Rasterizer::ScopeMarkerBegin(const std::string_view& str, bool from_guest) {

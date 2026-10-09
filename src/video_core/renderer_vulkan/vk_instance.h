@@ -89,6 +89,10 @@ public:
         return features.depthBounds;
     }
 
+    bool IsHostQueryResetSupported() const {
+        return vk12_features.hostQueryReset;
+    }
+
     /// Returns true if 16-bit floats are supported in shaders
     bool IsShaderFloat16Supported() const {
         return vk12_features.shaderFloat16;
@@ -233,6 +237,16 @@ public:
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
     }
 
+    bool SupportsShaderMaximalReconvergence() const {
+        return shader_maximal_reconvergence &&
+               shader_maximal_reconvergence_features.shaderMaximalReconvergence;
+    }
+
+    bool SupportsShaderSubgroupUniformControlFlow() const {
+        return shader_subgroup_uniform_control_flow &&
+               shader_subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow;
+    }
+
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
     bool IsWorkgroupMemoryExplicitLayoutSupported() const {
         return workgroup_memory_explicit_layout &&
@@ -340,6 +354,10 @@ public:
         return properties.limits.maxComputeSharedMemorySize;
     }
 
+    const vk::PhysicalDeviceLimits& GetPhysicalDeviceLimits() const noexcept {
+        return properties.limits;
+    }
+
     /// Returns the maximum sampler LOD bias.
     float MaxSamplerLodBias() const {
         return properties.limits.maxSamplerLodBias;
@@ -439,6 +457,26 @@ public:
         return supports_memory_budget;
     }
 
+    bool SupportsDiagnosticCheckpoints() const {
+        return diagnostic_checkpoints;
+    }
+
+    bool SupportsPipelineExecutableProperties() const {
+        return pipeline_executable_properties;
+    }
+
+    bool SupportsPipelineRobustness() const {
+        return pipeline_robustness;
+    }
+
+    bool SupportsDeviceFault() const {
+        return device_fault;
+    }
+
+    bool SupportsBufferMarker() const {
+        return buffer_marker;
+    }
+
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
@@ -485,6 +523,10 @@ private:
         workgroup_memory_explicit_layout_features;
     vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT image_2d_view_of_3d_features;
     vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT list_restart_features;
+    vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR
+        shader_maximal_reconvergence_features;
+    vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR
+        shader_subgroup_uniform_control_flow_features;
     vk::DriverIdKHR driver_id;
     vk::UniqueDebugUtilsMessengerEXT debug_callback{};
     std::string vendor_name;
@@ -521,6 +563,13 @@ private:
     bool image_view_min_lod{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
+    bool diagnostic_checkpoints{};
+    bool pipeline_executable_properties{};
+    bool pipeline_robustness{};
+    bool device_fault{};
+    bool buffer_marker{};
+    bool shader_maximal_reconvergence{};
+    bool shader_subgroup_uniform_control_flow{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
 };

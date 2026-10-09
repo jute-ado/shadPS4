@@ -203,7 +203,12 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
+                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
+                          vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR,
+                          vk::PhysicalDevicePipelineRobustnessFeaturesEXT,
+                          vk::PhysicalDeviceFaultFeaturesEXT,
+                          vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR,
+                          vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -221,7 +226,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 41> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -336,6 +341,37 @@ bool Instance::CreateDevice() {
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    diagnostic_checkpoints = add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    pipeline_executable_properties =
+        add_extension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    pipeline_robustness = add_extension(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
+    device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    const auto device_fault_features = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
+    if (device_fault && !device_fault_features.deviceFault) {
+        enabled_extensions.pop_back();
+        device_fault = false;
+    }
+    buffer_marker = add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+    shader_maximal_reconvergence =
+        add_extension(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+    if (shader_maximal_reconvergence) {
+        shader_maximal_reconvergence_features =
+            feature_chain.get<vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR>();
+        if (!shader_maximal_reconvergence_features.shaderMaximalReconvergence) {
+            enabled_extensions.pop_back();
+            shader_maximal_reconvergence = false;
+        }
+    }
+    shader_subgroup_uniform_control_flow =
+        add_extension(VK_KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_EXTENSION_NAME);
+    if (shader_subgroup_uniform_control_flow) {
+        shader_subgroup_uniform_control_flow_features =
+            feature_chain.get<vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
+        if (!shader_subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow) {
+            enabled_extensions.pop_back();
+            shader_subgroup_uniform_control_flow = false;
+        }
+    }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
@@ -387,6 +423,7 @@ bool Instance::CreateDevice() {
                 .dualSrcBlend = features.dualSrcBlend,
                 .logicOp = features.logicOp,
                 .multiDrawIndirect = features.multiDrawIndirect,
+                .drawIndirectFirstInstance = features.drawIndirectFirstInstance,
                 .depthClamp = features.depthClamp,
                 .depthBiasClamp = features.depthBiasClamp,
                 .fillModeNonSolid = features.fillModeNonSolid,
@@ -503,6 +540,24 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
             .minLod = true,
         },
+        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR{
+            .pipelineExecutableInfo = true,
+        },
+        vk::PhysicalDevicePipelineRobustnessFeaturesEXT{
+            .pipelineRobustness = true,
+        },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = device_fault_features.deviceFault,
+            .deviceFaultVendorBinary = device_fault_features.deviceFaultVendorBinary,
+        },
+        vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR{
+            .shaderMaximalReconvergence =
+                shader_maximal_reconvergence_features.shaderMaximalReconvergence,
+        },
+        vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR{
+            .shaderSubgroupUniformControlFlow =
+                shader_subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow,
+        },
     };
 
     if (!custom_border_color) {
@@ -547,6 +602,21 @@ bool Instance::CreateDevice() {
     }
     if (!image_view_min_lod) {
         device_chain.unlink<vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();
+    }
+    if (!pipeline_executable_properties) {
+        device_chain.unlink<vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
+    }
+    if (!pipeline_robustness) {
+        device_chain.unlink<vk::PhysicalDevicePipelineRobustnessFeaturesEXT>();
+    }
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+    }
+    if (!shader_maximal_reconvergence) {
+        device_chain.unlink<vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR>();
+    }
+    if (!shader_subgroup_uniform_control_flow) {
+        device_chain.unlink<vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());

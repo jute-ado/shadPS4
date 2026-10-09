@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/present_frame_transition.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
+#include "core/ipc/ipc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -882,6 +883,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     ASSERT_MSG(reset_result == vk::Result::eSuccess,
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
+    // Advance automation immediately before consuming presentation requests so a screenshot
+    // scheduled for frame N captures frame N, independent of host timing or emulation speed.
+    if (Core::Ipc::AdvancesPresentedFrameAutomationClock(is_reusing_frame)) {
+        IPC::Instance().BeforePresentedFrame();
+    }
+
     ImGuiID dockId = ImGui::Core::NewFrame(is_reusing_frame);
 
     const vk::Image swapchain_image = swapchain.Image();
@@ -1099,11 +1106,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
-    void* const vulkan_instance =
-        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
-    void* const window_handle = window.GetWindowInfo().render_surface;
     const bool is_renderdoc_capture =
-        VideoCore::BeginNextPresentedFrameCapture(vulkan_instance, window_handle);
+        VideoCore::ConsumeCaptureForPresentedFrame(is_reusing_frame);
     scheduler.Flush(info);
 
     // Present to swapchain.
@@ -1114,11 +1118,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         }
     }
     if (is_renderdoc_capture) {
-        VideoCore::EndPresentedFrameCapture(vulkan_instance, window_handle);
+        VideoCore::EndPresentedFrameCapture();
     }
 
     complete_frame(true);
     if (!is_reusing_frame) {
+        IPC::Instance().AfterPresentedFrame();
         const auto presented_frame = DebugState.IncFlipFrameNum();
         RecordPresentedFrameTiming(presented_frame);
     }

@@ -8,6 +8,7 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/sharp_source_traversal.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -205,14 +206,34 @@ private:
 
 } // Anonymous namespace
 
+const IR::Inst* FindFirstSharpSource(const IR::Inst* handle) {
+    boost::container::small_vector<const IR::Inst*, 8> pending{handle};
+    while (!pending.empty()) {
+        const IR::Inst* inst = pending.back();
+        pending.pop_back();
+        if (inst->GetOpcode() == IR::Opcode::GetUserData ||
+            inst->GetOpcode() == IR::Opcode::ReadConst) {
+            return inst;
+        }
+        const auto range = SharpSourceTraversalRange(inst->GetOpcode(), inst->NumArgs());
+        for (size_t arg = range.begin; arg < range.end; ++arg) {
+            const IR::Value value = inst->Arg(arg);
+            if (!value.IsImmediate()) {
+                pending.push_back(value.InstRecursive());
+            }
+        }
+    }
+    return nullptr;
+}
+
 void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& descriptors,
                       const Profile& profile) {
     u32 sharp_idx = 0;
     if (inst.GetOpcode() == IR::Opcode::ReadConstBufferAddr64) {
         const IR::Inst* handle = inst.Arg(0).InstRecursive();
         ASSERT(handle->GetOpcode() == IR::Opcode::CompositeConstructU32x4);
-        const IR::Inst* source = handle->Arg(0).InstRecursive();
-        ASSERT(source->GetOpcode() == IR::Opcode::GetUserData);
+        const IR::Inst* source = FindFirstSharpSource(handle->Arg(0).InstRecursive());
+        ASSERT(source && source->GetOpcode() == IR::Opcode::GetUserData);
         sharp_idx = static_cast<u32>(source->Arg(0).ScalarReg());
     }
     u32 buffer_binding = descriptors.Add(BufferResource{.sharp_idx = sharp_idx,

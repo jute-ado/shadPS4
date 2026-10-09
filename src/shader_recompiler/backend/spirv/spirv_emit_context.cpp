@@ -81,6 +81,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineArithmeticTypes();
     DefineInterfaces();
     DefineSharedMemory();
+    DefineCrossLaneScratch();
     DefineBuffers();
     DefineImagesAndSamplers();
     DefineFunctions();
@@ -308,9 +309,16 @@ void EmitContext::DefineWorkgroupIndex() {
 
 void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
-        subgroup_local_invocation_id = DefineVariable(
-            U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (l_stage == LogicalStage::Compute) {
+            local_invocation_index = DefineVariable(
+                U32[1], spv::BuiltIn::LocalInvocationIndex, spv::StorageClass::Input);
+        } else {
+            subgroup_local_invocation_id = DefineVariable(
+                U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
+            if (l_stage == LogicalStage::Fragment) {
+                Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+            }
+        }
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -928,14 +936,15 @@ spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
         image.GetNumberFmt() == AmdGpu::NumberFormat::Float) {
         return spv::ImageFormat::Rgba32f;
     }
-    UNREACHABLE_MSG("Unknown storage format data_format={}, num_format={}", image.GetDataFmt(),
-                    image.GetNumberFmt());
+    UNREACHABLE_MSG("Unknown storage format data_format={}, num_format={}",
+                    static_cast<u32>(image.GetDataFmt()),
+                    static_cast<u32>(image.GetNumberFmt()));
 }
 
 Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const auto image = desc.GetSharp(ctx.info);
     const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
-    const auto type = image.GetViewType(desc.is_array);
+    const auto type = image.GetShaderViewType(desc.is_array);
     const u32 sampled = desc.is_written ? 2 : 1;
     switch (type) {
     case AmdGpu::ImageType::Color1D:
@@ -985,7 +994,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .id = id,
             .sampled_type = is_storage ? sampled_type : TypeSampledImage(image_type),
             .image_type = image_type,
-            .view_type = sharp.GetViewType(image_desc.is_array),
+            .view_type = sharp.GetShaderViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
             .mip_fallback_mode = mip_fallback_mode,
@@ -1064,6 +1073,24 @@ void EmitContext::DefineSharedMemory() {
         make_type(IR::Type::U32, U32[1], 4u, "shared_mem_u32");
     std::tie(shared_memory_u64, shared_u64, shared_memory_u64_type) =
         make_type(IR::Type::U64, U64, 8u, "shared_mem_u64");
+}
+
+void EmitContext::DefineCrossLaneScratch() {
+    if (!info.uses_read_lane || info.stage != Stage::Compute || profile.subgroup_size == 0) {
+        return;
+    }
+    const auto& workgroup = runtime_info.cs_info.workgroup_size;
+    const u32 workgroup_invocations = workgroup[0] * workgroup[1] * workgroup[2];
+    if (workgroup_invocations <= profile.subgroup_size || workgroup_invocations > 64) {
+        return;
+    }
+
+    const Id array_type = TypeArray(U32[1], ConstU32(workgroup_invocations));
+    const Id variable_ptr = TypePointer(spv::StorageClass::Workgroup, array_type);
+    cross_lane_scratch_u32_ptr = TypePointer(spv::StorageClass::Workgroup, U32[1]);
+    cross_lane_scratch_u32 = AddGlobalVariable(variable_ptr, spv::StorageClass::Workgroup);
+    Name(cross_lane_scratch_u32, "cross_lane_scratch_u32");
+    interfaces.push_back(cross_lane_scratch_u32);
 }
 
 Id EmitContext::DefineFloat32ToUfloatM5(u32 mantissa_bits, const std::string_view name) {

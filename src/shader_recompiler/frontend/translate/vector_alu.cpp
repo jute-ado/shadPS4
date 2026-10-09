@@ -1324,7 +1324,7 @@ void Translator::V_CMP_CLASS_F32(const GcnInst& inst) {
         } else if ((class_mask & IR::FloatClassFunc::Negative) == IR::FloatClassFunc::Negative) {
             value = ir.FPLessThanEqual(src0, ir.Imm32(-0.f));
         } else {
-            UNREACHABLE_MSG("Unsupported float class mask: {:#x}", static_cast<u32>(class_mask));
+            value = ir.FPCmpClass32(src0, src1);
         }
     } else {
         // We don't know the type yet, delay its resolution.

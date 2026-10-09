@@ -364,6 +364,14 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
     }
 }
 
+// Resource tracking can conservatively identify a descriptor along a control-flow path where
+// the guest has not populated it. An invalid resource has no typed conversion to apply.
+constexpr NumberConversion MapResourceNumberConversion(const NumberFormat num_fmt,
+                                                       const DataFormat data_fmt) {
+    return data_fmt == DataFormat::FormatInvalid ? NumberConversion::None
+                                                 : MapNumberConversion(num_fmt, data_fmt);
+}
+
 constexpr NumberClass GetNumberClass(const NumberFormat nfmt) {
     switch (nfmt) {
     case NumberFormat::Sint:

@@ -44,6 +44,7 @@ public:
 
     Id Def(const IR::Value& value);
 
+
     void DefineBufferProperties();
     void DefineAmdPerVertexAttribs();
     void DefineWorkgroupIndex();
@@ -274,6 +275,7 @@ public:
     Id local_invocation_id{};
     Id invocation_id{};
     Id subgroup_local_invocation_id{};
+    Id local_invocation_index{};
     Id image_u32{};
     Id image_f32{};
 
@@ -284,6 +286,9 @@ public:
     Id shared_memory_u16_type{};
     Id shared_memory_u32_type{};
     Id shared_memory_u64_type{};
+
+    Id cross_lane_scratch_u32{};
+    Id cross_lane_scratch_u32_ptr{};
 
     Id bary_coord{};
     Id bary_coord_smooth{};
@@ -396,6 +401,7 @@ private:
     void DefineBuffers();
     void DefineImagesAndSamplers();
     void DefineSharedMemory();
+    void DefineCrossLaneScratch();
     void DefineFunctions();
 
     SpirvAttribute GetAttributeInfo(AmdGpu::NumberFormat fmt, Id id, u32 num_components,

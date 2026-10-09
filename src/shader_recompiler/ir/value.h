@@ -8,8 +8,8 @@
 #include <cstring>
 #include <type_traits>
 #include <utility>
-#include <boost/container/list.hpp>
 #include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
 #include <boost/intrusive/list.hpp>
 
 #include "common/assert.h"
@@ -120,6 +120,66 @@ struct Use {
     Use(const Use&) = default;
     bool operator==(const Use&) const noexcept = default;
 };
+
+// Most IR values have exactly one user. Keep that common case inline while preserving the compact
+// footprint of the previous list handle; allocate contiguous overflow storage only for fan-out.
+class UseList {
+public:
+    using iterator = Use*;
+    using const_iterator = const Use*;
+
+    UseList() = default;
+    UseList(const UseList& rhs) : inline_use{rhs.inline_use} {
+        if (rhs.overflow) {
+            overflow = new boost::container::vector<Use>{*rhs.overflow};
+        }
+    }
+    UseList& operator=(const UseList&) = delete;
+    ~UseList() { delete overflow; }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return overflow ? overflow->size() : inline_use.user != nullptr;
+    }
+    [[nodiscard]] bool empty() const noexcept { return size() == 0; }
+
+    iterator begin() noexcept { return overflow ? overflow->data() : &inline_use; }
+    const_iterator begin() const noexcept { return overflow ? overflow->data() : &inline_use; }
+    iterator end() noexcept { return begin() + size(); }
+    const_iterator end() const noexcept { return begin() + size(); }
+
+    void emplace_back(Inst* user, u32 operand) {
+        const Use value{user, operand};
+        if (overflow) {
+            overflow->push_back(value);
+        } else if (inline_use.user == nullptr) {
+            inline_use = value;
+        } else {
+            overflow = new boost::container::vector<Use>;
+            overflow->reserve(4);
+            overflow->push_back(inline_use);
+            overflow->push_back(value);
+        }
+    }
+
+    void erase(const_iterator position) {
+        if (!overflow) {
+            ASSERT(position == &inline_use);
+            inline_use = {};
+            return;
+        }
+        const auto index = position - overflow->data();
+        overflow->erase(overflow->begin() + index);
+        if (overflow->size() == 1) {
+            inline_use = overflow->front();
+            delete std::exchange(overflow, nullptr);
+        }
+    }
+
+private:
+    Use inline_use{};
+    boost::container::vector<Use>* overflow{};
+};
+static_assert(sizeof(UseList) == 24);
 
 class Inst : public boost::intrusive::list_base_hook<> {
 public:
@@ -248,7 +308,7 @@ private:
         std::array<Value, 6> args;
     };
 
-    boost::container::list<IR::Use> uses;
+    IR::UseList uses;
 };
 static_assert(sizeof(Inst) <= 160, "Inst size unintentionally increased");
 

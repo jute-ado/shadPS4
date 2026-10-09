@@ -10,17 +10,25 @@ namespace VideoCore {
 class RenderDocCaptureState {
     enum class State {
         Idle,
-        Triggered,
+        AwaitingFirstPresent,
+        AwaitingSecondPresent,
     };
 
 public:
-    [[nodiscard]] bool Trigger() {
+    [[nodiscard]] bool TryBeginCapture() {
         auto expected = State::Idle;
-        return state.compare_exchange_strong(expected, State::Triggered);
+        return state.compare_exchange_strong(expected, State::AwaitingFirstPresent);
     }
 
-    [[nodiscard]] bool ConsumePresentedFrameTrigger() {
-        auto expected = State::Triggered;
+    [[nodiscard]] bool ConsumeCaptureForPresentedFrame(const bool is_reusing_frame) {
+        if (is_reusing_frame) {
+            return false;
+        }
+        auto expected = State::AwaitingFirstPresent;
+        if (state.compare_exchange_strong(expected, State::AwaitingSecondPresent)) {
+            return false;
+        }
+        expected = State::AwaitingSecondPresent;
         return state.compare_exchange_strong(expected, State::Idle);
     }
 

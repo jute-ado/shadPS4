@@ -127,6 +127,48 @@ TEST(CpuPageWriteTracker, KeepsTheOriginalPageAcrossRepeatedFaultRecords) {
                       }));
 }
 
+TEST(CpuPageWriteTracker, UploadsAllChangedWordsInBackingBufferWhenOneSharedPageRangeSyncs) {
+    std::array<u8, TRACKER_BYTES_PER_PAGE> before{};
+    auto current = before;
+    current[0x120] = 1;
+    current[0x320] = 2;
+    CpuPageWriteTracker tracker;
+    ASSERT_TRUE(tracker.Capture(0x4000, before, 0x120, 1));
+
+    std::vector<CpuPageUploadRange> ranges;
+    ASSERT_TRUE(tracker.ConsumeBufferPage(0x4000, current, 0x4080, 0x400,
+                                          [&](CpuPageUploadRange range) {
+                                              ranges.push_back(range);
+                                          }));
+    EXPECT_EQ(ranges, (std::vector{
+                          CpuPageUploadRange{.offset = 0x120, .size = 4},
+                          CpuPageUploadRange{.offset = 0x320, .size = 4},
+                      }));
+}
+
+TEST(CpuPageWriteTracker, KeepsChangesForASecondCachedBufferOnTheSamePage) {
+    std::array<u8, TRACKER_BYTES_PER_PAGE> before{};
+    auto current = before;
+    current[0x120] = 1;
+    current[0x920] = 2;
+    CpuPageWriteTracker tracker;
+    ASSERT_TRUE(tracker.Capture(0x4000, before, 0x120, 1));
+
+    std::vector<CpuPageUploadRange> first_ranges;
+    ASSERT_TRUE(tracker.ConsumeBufferPage(0x4000, current, 0x4080, 0x300,
+                                          [&](CpuPageUploadRange range) {
+                                              first_ranges.push_back(range);
+                                          }));
+    EXPECT_EQ(first_ranges, (std::vector{CpuPageUploadRange{.offset = 0x120, .size = 4}}));
+
+    std::vector<CpuPageUploadRange> second_ranges;
+    ASSERT_TRUE(tracker.ConsumeBufferPage(0x4000, current, 0x4880, 0x300,
+                                          [&](CpuPageUploadRange range) {
+                                              second_ranges.push_back(range);
+                                          }));
+    EXPECT_EQ(second_ranges, (std::vector{CpuPageUploadRange{.offset = 0x920, .size = 4}}));
+}
+
 TEST(CpuPageWriteTracker, DiscardsSnapshotsAcrossAnAddressRange) {
     std::array<u8, TRACKER_BYTES_PER_PAGE> page{};
     CpuPageWriteTracker tracker;

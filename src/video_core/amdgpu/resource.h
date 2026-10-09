@@ -75,7 +75,7 @@ struct Buffer {
     }
 
     NumberConversion GetNumberConversion() const noexcept {
-        return MapNumberConversion(NumberFormat(num_format), DataFormat(data_format));
+        return MapResourceNumberConversion(NumberFormat(num_format), DataFormat(data_format));
     }
 
     u32 GetStride() const noexcept {
@@ -222,14 +222,23 @@ struct Image {
     }
 
     [[nodiscard]] u32 NumLayers() const noexcept {
-        // Depth is the number of layers for Array images.
-        u32 slices = depth + 1;
-        if (GetType() == ImageType::Color3D) {
-            // Depth is the actual texture depth for 3D images.
-            slices = 1;
-        } else if (IsCube()) {
+        u32 slices = 1;
+        if (IsCube()) {
             // Depth is the number of full cubes for Cube images.
-            slices *= 6;
+            slices = (depth + 1) * 6;
+        } else {
+            switch (GetType()) {
+            case ImageType::Color1DArray:
+            case ImageType::Color2DArray:
+            case ImageType::Color2DMsaaArray:
+                // Depth is the number of layers only for array images.
+                slices = depth + 1;
+                break;
+            default:
+                // Non-array descriptors may leave depth bits undefined. A 3D image stores its
+                // actual depth in the image extent rather than the layer count.
+                return 1;
+            }
         }
         if (pow2pad) {
             slices = std::bit_ceil(slices);
@@ -268,7 +277,7 @@ struct Image {
     }
 
     NumberConversion GetNumberConversion() const noexcept {
-        return MapNumberConversion(NumberFormat(num_format), DataFormat(data_format));
+        return MapResourceNumberConversion(NumberFormat(num_format), DataFormat(data_format));
     }
 
     TileMode GetTileMode() const {
@@ -323,6 +332,15 @@ struct Image {
             return ImageType::Color2DMsaa;
         }
         return base_type;
+    }
+
+    // Shader translation must always produce a legal SPIR-V image dimension. Guest code may
+    // leave an inactive descriptor null or partially initialized; treating its reserved type
+    // encoding as a dimension makes compilation hit unreachable paths before runtime binding can
+    // replace the descriptor with a null image. Color2D matches Image::Null and the default shader
+    // specialization, while valid descriptors retain their exact array semantics.
+    ImageType GetShaderViewType(const bool is_array) const noexcept {
+        return Valid() ? GetViewType(is_array) : ImageType::Color2D;
     }
 
     [[nodiscard]] u32 NumViewLevels(const bool is_array) const noexcept {

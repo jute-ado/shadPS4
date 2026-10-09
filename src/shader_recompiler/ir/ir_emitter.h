@@ -180,12 +180,21 @@ public:
     [[nodiscard]] U32 LaneId();
     [[nodiscard]] U32 WarpId();
     [[nodiscard]] U32 QuadShuffle(const U32& value, const U32& index);
+    [[nodiscard]] U32 ShuffleXor(const U32& value, const U32& mask);
     [[nodiscard]] U32 ReadFirstLane(const U32& value);
     [[nodiscard]] U32 ReadLane(const U32& value, const U32& lane);
     [[nodiscard]] U32 WriteLane(const U32& value, const U32& write_value, const U32& lane);
     [[nodiscard]] Value Ballot(const U1& bit);
+    [[nodiscard]] U32 MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                                const U32& scalar, u32 word);
     [[nodiscard]] U32 BallotFindLsb(const Value& mask);
     [[nodiscard]] U1 GroupAny(const U1& bit);
+    void Wave64LaneRetirementInit(const U1& active, const U32& invocation,
+                                  const U32& scratch_base);
+    void Wave64LaneRetirementSync(const U1& continues, const U32& invocation,
+                                  const U32& scratch_base);
+    [[nodiscard]] U32 Wave64ReadFirstLane(const U32& value, const U32& invocation,
+                                          const U32& scratch_base);
 
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2);
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2, const Value& e3);

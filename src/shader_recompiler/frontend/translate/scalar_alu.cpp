@@ -520,10 +520,11 @@ void Translator::S_MOV_B64(const GcnInst& inst) {
     // for moving sharps.
     if (inst.dst[0].field == OperandField::ScalarGPR &&
         inst.src[0].field == OperandField::ScalarGPR) {
-        ir.SetScalarReg(IR::ScalarReg(inst.dst[0].code),
-                        ir.GetScalarReg(IR::ScalarReg(inst.src[0].code)));
-        ir.SetScalarReg(IR::ScalarReg(inst.dst[0].code + 1),
-                        ir.GetScalarReg(IR::ScalarReg(inst.src[0].code + 1)));
+        const IR::U32 source_lo{ir.GetScalarReg(IR::ScalarReg(inst.src[0].code))};
+        const IR::U32 source_hi{ir.GetScalarReg(IR::ScalarReg(inst.src[0].code + 1))};
+        ir.SetScalarReg(IR::ScalarReg(inst.dst[0].code), source_lo);
+        ir.SetScalarReg(IR::ScalarReg(inst.dst[0].code + 1), source_hi);
+        return;
     }
     SetDst1(inst.dst[0], GetSrc1(inst.src[0]));
 }
@@ -607,7 +608,8 @@ void Translator::S_SAVEEXEC_B64(NegateMode negate, bool is_or, const GcnInst& in
         result = ir.LogicalNot(result);
     }
     ir.SetExec(result);
-    ir.SetScc(result);
+    // SAVEEXEC's SCC result is scalar and reports whether any lane remains active.
+    ir.SetScc(ir.GroupAny(result));
 }
 
 void Translator::S_ABS_I32(const GcnInst& inst) {

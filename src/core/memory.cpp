@@ -164,6 +164,70 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     }
 }
 
+bool MemoryManager::TryReadBacking(const void* address, void* data, u64 size) {
+    VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    std::shared_lock lk{mutex};
+    if (!IsValidMapping(virtual_addr, size)) {
+        return false;
+    }
+
+    auto vma = FindVMA(virtual_addr);
+    auto* dest = static_cast<u8*>(data);
+    while (size) {
+        if (vma == vma_map.end() || !vma->second.HasReadableBacking()) {
+            return false;
+        }
+        const u64 copy_size =
+            std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
+        std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
+        size -= copy_size;
+        virtual_addr += copy_size;
+        dest += copy_size;
+        ++vma;
+    }
+    return true;
+}
+
+bool MemoryManager::IsReadableMapping(VAddr virtual_addr, u64 size) {
+    std::shared_lock lk{mutex};
+    if (!IsValidMapping(virtual_addr, size)) {
+        return false;
+    }
+
+    auto vma = FindVMA(virtual_addr);
+    while (size) {
+        if (vma == vma_map.end() || !vma->second.HasReadableBacking()) {
+            return false;
+        }
+        const u64 mapped_size =
+            std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
+        size -= mapped_size;
+        virtual_addr += mapped_size;
+        ++vma;
+    }
+    return true;
+}
+
+bool MemoryManager::IsMappedMemory(VAddr virtual_addr, u64 size) {
+    std::shared_lock lk{mutex};
+    if (!IsValidMapping(virtual_addr, size)) {
+        return false;
+    }
+
+    auto vma = FindVMA(virtual_addr);
+    while (size) {
+        if (vma == vma_map.end() || !vma->second.IsMapped()) {
+            return false;
+        }
+        const u64 mapped_size =
+            std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
+        size -= mapped_size;
+        virtual_addr += mapped_size;
+        ++vma;
+    }
+    return true;
+}
+
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     const VAddr virtual_addr = std::bit_cast<VAddr>(address);
     std::shared_lock lk{mutex};

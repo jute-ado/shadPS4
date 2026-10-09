@@ -4,6 +4,7 @@
 #include <boost/container/static_vector.hpp>
 
 #include "shader_recompiler/resource.h"
+#include "video_core/renderer_vulkan/buffer_barrier_merge.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
@@ -25,11 +26,17 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const BufferBarriers&
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
 
-    if (!buffer_barriers.empty()) {
+    BufferBarriers merged_buffer_barriers;
+    for (const auto& barrier : buffer_barriers) {
+        if (!TryMergeBufferBarrier(merged_buffer_barriers, barrier)) {
+            merged_buffer_barriers.emplace_back(barrier);
+        }
+    }
+    if (!merged_buffer_barriers.empty()) {
         const auto dependencies = vk::DependencyInfo{
             .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-            .bufferMemoryBarrierCount = u32(buffer_barriers.size()),
-            .pBufferMemoryBarriers = buffer_barriers.data(),
+            .bufferMemoryBarrierCount = u32(merged_buffer_barriers.size()),
+            .pBufferMemoryBarriers = merged_buffer_barriers.data(),
         };
         scheduler.EndRendering();
         cmdbuf.pipelineBarrier2(dependencies);

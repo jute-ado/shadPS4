@@ -10,6 +10,7 @@
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
 #include "core/windows_exception_policy.h"
+#include "core/windows_exception_stack.h"
 #include "emulator.h"
 
 #ifdef _WIN32
@@ -27,7 +28,7 @@ namespace Core {
 
 #if defined(_WIN32)
 
-static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+extern "C" LONG WINAPI WindowsSignalHandlerBody(EXCEPTION_POINTERS* pExp) noexcept {
     using namespace Libraries::Kernel;
     const auto* signals = Signals::Instance();
     // Windows static guest red-zone protection
@@ -141,12 +142,74 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const bool report_unhandled = WindowsException::ShouldReportUnhandledException(
         code, use_static_windows_guest_red_zone_protection, static_protection_exception);
     if (report_unhandled) { // Windows static guest red-zone protection
+        if (code == EXCEPTION_ACCESS_VIOLATION && pExp != nullptr &&
+            pExp->ExceptionRecord != nullptr && pExp->ContextRecord != nullptr &&
+            pExp->ExceptionRecord->NumberParameters >= 2) {
+            const auto access_kind = pExp->ExceptionRecord->ExceptionInformation[0];
+            const auto access_address = pExp->ExceptionRecord->ExceptionInformation[1];
+            LOG_CRITICAL(Debug,
+                         "TEMP unhandled access violation kind={} address={:#x} rip={:#x} "
+                         "rsp={:#x} rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}",
+                         access_kind, access_address, pExp->ContextRecord->Rip,
+                         pExp->ContextRecord->Rsp, pExp->ContextRecord->Rax,
+                         pExp->ContextRecord->Rbx, pExp->ContextRecord->Rcx,
+                         pExp->ContextRecord->Rdx);
+        }
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
+
+#ifdef ARCH_X86_64
+asm(".att_syntax prefix");
+asm(R"(
+.global WindowsSignalHandler
+WindowsSignalHandler:
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    movq %rcx, %r12
+    movq %rsp, %r13
+    xorl %r14d, %r14d
+
+    subq $32, %rsp
+    call AcquireWindowsExceptionStack
+    addq $32, %rsp
+    testq %rax, %rax
+    jz .Lwindows_signal_use_current_stack
+    movl $1, %r14d
+    movq %rax, %rsp
+
+.Lwindows_signal_use_current_stack:
+    movq %r12, %rcx
+    subq $32, %rsp
+    call WindowsSignalHandlerBody
+    addq $32, %rsp
+    movl %eax, %r12d
+
+    testl %r14d, %r14d
+    jz .Lwindows_signal_restore_stack
+    subq $32, %rsp
+    call ReleaseWindowsExceptionStack
+    addq $32, %rsp
+
+.Lwindows_signal_restore_stack:
+    movq %r13, %rsp
+    movl %r12d, %eax
+    popq %r14
+    popq %r13
+    popq %r12
+    ret
+)");
+
+extern "C" LONG WINAPI WindowsSignalHandler(EXCEPTION_POINTERS* pExp) noexcept;
+#else
+extern "C" LONG WINAPI WindowsSignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+    return WindowsSignalHandlerBody(pExp);
+}
+#endif
 
 #else
 
@@ -314,7 +377,7 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
 
 SignalDispatch::SignalDispatch() {
 #if defined(_WIN32)
-    ASSERT_MSG(handle = AddVectoredExceptionHandler(0, SignalHandler),
+    ASSERT_MSG(handle = AddVectoredExceptionHandler(0, WindowsSignalHandler),
                "Failed to register exception handler.");
 #else
     struct sigaction action{};

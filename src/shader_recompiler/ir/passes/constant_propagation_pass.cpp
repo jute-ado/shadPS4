@@ -263,7 +263,9 @@ void FoldMul(IR::Block& block, IR::Inst& inst) {
 }
 
 void FoldCmpClass(IR::Block& block, IR::Inst& inst) {
-    ASSERT_MSG(inst.Arg(1).IsImmediate(), "Unable to resolve compare operation");
+    if (!inst.Arg(1).IsImmediate()) {
+        return;
+    }
     const auto class_mask = static_cast<IR::FloatClassFunc>(inst.Arg(1).U32());
     if ((class_mask & IR::FloatClassFunc::NaN) == IR::FloatClassFunc::NaN) {
         inst.ReplaceOpcode(IR::Opcode::FPIsNan32);
@@ -275,7 +277,8 @@ void FoldCmpClass(IR::Block& block, IR::Inst& inst) {
         inst.ReplaceUsesWithAndRemove(
             ir.LogicalNot(ir.LogicalOr(ir.FPIsNan(value), ir.FPIsInf(value))));
     } else {
-        UNREACHABLE();
+        // Partial class masks are legal. Leave them for the backend's general classifier.
+        return;
     }
 }
 
@@ -405,6 +408,14 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
         return FoldInverseFunc(inst, IR::Opcode::UnpackUfloat10_11_11);
     case IR::Opcode::UnpackUfloat10_11_11:
         return FoldInverseFunc(inst, IR::Opcode::PackUfloat10_11_11);
+    case IR::Opcode::PackUint10_11_11:
+        return FoldInverseFunc(inst, IR::Opcode::UnpackUint10_11_11);
+    case IR::Opcode::UnpackUint10_11_11:
+        return FoldInverseFunc(inst, IR::Opcode::PackUint10_11_11);
+    case IR::Opcode::PackSint10_11_11:
+        return FoldInverseFunc(inst, IR::Opcode::UnpackSint10_11_11);
+    case IR::Opcode::UnpackSint10_11_11:
+        return FoldInverseFunc(inst, IR::Opcode::PackSint10_11_11);
     // 2_10_10_10
     case IR::Opcode::PackUnorm2_10_10_10:
         return FoldInverseFunc(inst, IR::Opcode::UnpackUnorm2_10_10_10);

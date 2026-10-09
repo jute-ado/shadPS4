@@ -24,8 +24,8 @@ Id EmitCompositeConstructU32x4(EmitContext& ctx, IR::Inst* inst, Id e1, Id e2, I
     return EmitCompositeConstruct(ctx, inst, ctx.U32[4], e1, e2, e3, e4);
 }
 
-Id EmitCompositeConstructU32x2x2(EmitContext& ctx, IR::Inst* inst, Id e1, Id e2) {
-    return EmitCompositeConstruct(ctx, inst, ctx.U32[4], e1, e2);
+Id EmitCompositeConstructU32x2x2(EmitContext& ctx, IR::Inst*, Id e1, Id e2) {
+    return ctx.OpVectorShuffle(ctx.U32[4], e1, e2, 0, 1, 2, 3);
 }
 
 Id EmitCompositeExtractU32x2(EmitContext& ctx, Id composite, u32 index) {
@@ -78,8 +78,8 @@ Id EmitCompositeConstructF32x4(EmitContext& ctx, IR::Inst* inst, Id e1, Id e2, I
     return EmitCompositeConstruct(ctx, inst, ctx.F32[4], e1, e2, e3, e4);
 }
 
-Id EmitCompositeConstructF32x2x2(EmitContext& ctx, IR::Inst* inst, Id e1, Id e2) {
-    return EmitCompositeConstruct(ctx, inst, ctx.F32[4], e1, e2);
+Id EmitCompositeConstructF32x2x2(EmitContext& ctx, IR::Inst*, Id e1, Id e2) {
+    return ctx.OpVectorShuffle(ctx.F32[4], e1, e2, 0, 1, 2, 3);
 }
 
 Id EmitCompositeExtractF32x2(EmitContext& ctx, Id composite, u32 index) {

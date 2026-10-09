@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/async_compilation_queue.h"
 
 namespace Vulkan {
@@ -109,6 +110,73 @@ TEST(AsyncGraphicsPipelineCompilation, HasAStableExperimentalConfigurationKey) {
     ASSERT_FALSE(settings_source.empty());
     EXPECT_NE(settings_header.find("async_graphics_pipeline_compilation"), std::string::npos);
     EXPECT_NE(settings_source.find("asyncGraphicsPipelineCompilation"), std::string::npos);
+}
+
+TEST(ShaderPermutationResources, RetainsTheInfoThatProducedEachCompiledModule) {
+    const auto header = ReadText(SHADPS4_PIPELINE_CACHE_HEADER_PATH);
+    const auto source = ReadText(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+    EXPECT_NE(header.find("std::unique_ptr<Shader::Info> owned_info"), std::string::npos);
+
+    const auto get_program = source.find("PipelineCache::Result PipelineCache::GetProgram");
+    const auto replace_shader = source.find("PipelineCache::ReplaceShader", get_program);
+    ASSERT_NE(get_program, std::string::npos);
+    ASSERT_NE(replace_shader, std::string::npos);
+    const auto body = source.substr(get_program, replace_shader - get_program);
+    EXPECT_NE(body.find("std::make_unique<Shader::Info>"), std::string::npos);
+    EXPECT_NE(body.find("RegisterShaderMeta(*new_info"), std::string::npos);
+    EXPECT_NE(body.find("std::move(new_info)"), std::string::npos);
+    EXPECT_NE(body.find("selected->info"), std::string::npos);
+}
+
+TEST(ShaderPermutationResources, RecompilesWhenACurrentlyBoundImageChangesNumericClass) {
+    Shader::StageSpecialization current{};
+    Shader::StageSpecialization cached{};
+    current.info = reinterpret_cast<const Shader::Info*>(1);
+    cached.info = reinterpret_cast<const Shader::Info*>(1);
+    current.images.emplace_back().is_integer = true;
+    cached.images.emplace_back().is_integer = false;
+
+    current.bitset.set(0);
+    EXPECT_FALSE(current == cached);
+}
+
+TEST(ShaderPermutationResources, AllowsAnUnboundCurrentImageToReuseACompiledPermutation) {
+    Shader::StageSpecialization current{};
+    Shader::StageSpecialization cached{};
+    current.info = reinterpret_cast<const Shader::Info*>(1);
+    cached.info = reinterpret_cast<const Shader::Info*>(1);
+    current.images.emplace_back().is_integer = false;
+    cached.images.emplace_back().is_integer = true;
+
+    cached.bitset.set(0);
+    EXPECT_TRUE(current == cached);
+}
+
+TEST(ShaderPermutationResources, RecompilesWhenACurrentlyBoundBufferChangesStride) {
+    Shader::StageSpecialization current{};
+    Shader::StageSpecialization cached{};
+    current.info = reinterpret_cast<const Shader::Info*>(1);
+    cached.info = reinterpret_cast<const Shader::Info*>(1);
+    current.buffers.emplace_back(Shader::BufferSpecialization{.stride = 16});
+    cached.buffers.emplace_back(Shader::BufferSpecialization{.stride = 32});
+    current.bitset.set(0);
+
+    EXPECT_FALSE(current == cached);
+}
+
+TEST(ShaderPermutationResources, AllowsAnUnboundCurrentBufferToReuseACompiledPermutation) {
+    Shader::StageSpecialization current{};
+    Shader::StageSpecialization cached{};
+    current.info = reinterpret_cast<const Shader::Info*>(1);
+    cached.info = reinterpret_cast<const Shader::Info*>(1);
+    current.buffers.emplace_back(Shader::BufferSpecialization{.stride = 16});
+    cached.buffers.emplace_back(Shader::BufferSpecialization{.stride = 32});
+    cached.bitset.set(0);
+
+    EXPECT_TRUE(current == cached);
 }
 
 } // namespace

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <limits>
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 
@@ -37,6 +38,9 @@ void MasterSemaphore::Refresh() {
         ASSERT_MSG(counter_result == vk::Result::eSuccess,
                    "Failed to get master semaphore value: {}", vk::to_string(counter_result));
         counter = cntr;
+        if (counter == std::numeric_limits<u64>::max()) {
+            LogDiagnosticCheckpoints(instance, this_tick);
+        }
         if (counter < this_tick) {
             return;
         }

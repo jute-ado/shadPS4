@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cerrno>
+#include <cstdlib>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -11,6 +13,7 @@
 #include "common/func_traits.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/loop_iteration_policy.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -142,7 +145,88 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
 }
 
 void Traverse(EmitContext& ctx, const IR::Program& program) {
+    struct LoopGuard {
+        IR::Block* header{};
+        IR::Block* merge{};
+        u32 limit{};
+        Id counter{};
+    };
+
+    const auto parse_diagnostic_mask = [](const char* name) {
+        const char* const value = std::getenv(name);
+        if (value == nullptr || *value == '\0') {
+            return u32{};
+        }
+        errno = 0;
+        char* end{};
+        const unsigned long parsed = std::strtoul(value, &end, 0);
+        return errno == 0 && end != value && *end == '\0' ? static_cast<u32>(parsed) : u32{};
+    };
+    const u32 diagnostic_loop_mask =
+        parse_diagnostic_mask("SHADPS4_DIAGNOSTIC_LOOP_GUARD_MASK");
+    const u32 diagnostic_dont_unroll_mask =
+        parse_diagnostic_mask("SHADPS4_DIAGNOSTIC_LOOP_DONT_UNROLL_MASK");
+    const u32 production_loop_limit = LoopIterationLimit(program.info.pgm_hash);
+    std::vector<LoopGuard> loop_guards;
+    std::vector<IR::Block*> dont_unroll_headers;
+    std::vector<IR::Block*> partial_unroll_headers;
+    struct ActiveLoop {
+        IR::Block* header{};
+        bool materializes_dynamic_scalar_mask{};
+    };
+    std::vector<ActiveLoop> active_loops;
+    IR::Block* scan_current_block{};
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        switch (node.type) {
+        case IR::AbstractSyntaxNode::Type::Block:
+            scan_current_block = node.data.block;
+            if (!active_loops.empty() &&
+                std::ranges::any_of(scan_current_block->Instructions(), [](const IR::Inst& inst) {
+                    return inst.GetOpcode() == IR::Opcode::MaterializeScalarMaskWord;
+                })) {
+                active_loops.back().materializes_dynamic_scalar_mask = true;
+            }
+            break;
+        case IR::AbstractSyntaxNode::Type::Loop:
+            active_loops.push_back({.header = scan_current_block});
+            scan_current_block = nullptr;
+            break;
+        case IR::AbstractSyntaxNode::Type::Repeat:
+            if (!active_loops.empty()) {
+                if (LoopPartialCountForDynamicScalarMask(
+                        active_loops.back().materializes_dynamic_scalar_mask) != 0) {
+                    partial_unroll_headers.push_back(active_loops.back().header);
+                }
+                active_loops.pop_back();
+            }
+            scan_current_block = nullptr;
+            break;
+        default:
+            scan_current_block = nullptr;
+            break;
+        }
+    }
+    u32 loop_index{};
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        if (node.type == IR::AbstractSyntaxNode::Type::Repeat) {
+            const bool diagnostic_guard = ShouldGuardDiagnosticLoop(
+                program.info.pgm_hash, loop_index, diagnostic_loop_mask);
+            if (production_loop_limit != 0 || diagnostic_guard) {
+                loop_guards.push_back({.header = node.data.repeat.loop_header,
+                                       .merge = node.data.repeat.merge,
+                                       .limit = production_loop_limit != 0 ? production_loop_limit
+                                                                           : 32});
+            }
+            if (ShouldDisableDiagnosticLoopUnrolling(program.info.pgm_hash, loop_index,
+                                                     diagnostic_dont_unroll_mask)) {
+                dont_unroll_headers.push_back(node.data.repeat.loop_header);
+            }
+            ++loop_index;
+        }
+    }
+
     IR::Block* current_block{};
+    bool loop_counters_defined = false;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block: {
@@ -152,8 +236,20 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             }
             current_block = node.data.block;
             ctx.AddLabel(label);
+            if (!loop_counters_defined && !loop_guards.empty()) {
+                for (LoopGuard& guard : loop_guards) {
+                    guard.counter = ctx.DefineVar<false>(ctx.U32[1], spv::StorageClass::Function,
+                                                         ctx.ConstU32(0u));
+                }
+                loop_counters_defined = true;
+            }
             for (IR::Inst& inst : node.data.block->Instructions()) {
                 EmitInst(ctx, &inst);
+            }
+            for (const LoopGuard& guard : loop_guards) {
+                if (guard.merge == current_block) {
+                    ctx.OpStore(guard.counter, ctx.ConstU32(0u));
+                }
             }
             ctx.first_to_last_label_map[label.value] = ctx.last_label;
             break;
@@ -170,7 +266,20 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             const Id continue_label{node.data.loop.continue_block->Definition<Id>()};
             const Id endloop_label{node.data.loop.merge->Definition<Id>()};
 
-            ctx.OpLoopMerge(endloop_label, continue_label, spv::LoopControlMask::MaskNone);
+            const bool dont_unroll =
+                std::ranges::find(dont_unroll_headers, current_block) != dont_unroll_headers.end();
+            const bool partial_unroll = !dont_unroll &&
+                std::ranges::find(partial_unroll_headers, current_block) !=
+                    partial_unroll_headers.end();
+            if (partial_unroll) {
+                ctx.OpLoopMerge(endloop_label, continue_label,
+                                spv::LoopControlMask::PartialCount,
+                                Id{LoopPartialCountForDynamicScalarMask(true)});
+            } else {
+                const auto loop_control = dont_unroll ? spv::LoopControlMask::DontUnroll
+                                                      : spv::LoopControlMask::MaskNone;
+                ctx.OpLoopMerge(endloop_label, continue_label, loop_control);
+            }
             ctx.OpBranch(body_label);
             break;
         }
@@ -189,6 +298,19 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             Id cond{ctx.Def(node.data.repeat.cond)};
             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
             const Id merge_label{node.data.repeat.merge->Definition<Id>()};
+            for (const LoopGuard& guard : loop_guards) {
+                if (guard.header != node.data.repeat.loop_header ||
+                    guard.merge != node.data.repeat.merge) {
+                    continue;
+                }
+                const Id count{ctx.OpLoad(ctx.U32[1], guard.counter)};
+                const Id next_count{ctx.OpIAdd(ctx.U32[1], count, ctx.ConstU32(1u))};
+                ctx.OpStore(guard.counter, next_count);
+                const Id within_limit{ctx.OpULessThan(ctx.U1[1], next_count,
+                                                      ctx.ConstU32(guard.limit))};
+                cond = ctx.OpLogicalAnd(ctx.U1[1], cond, within_limit);
+                break;
+            }
             ctx.OpBranchConditional(cond, loop_header_label, merge_label);
             break;
         }
@@ -286,12 +408,16 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     }
     if (info.uses_lane_id) {
         ctx.AddCapability(spv::Capability::GroupNonUniform);
+        ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
     }
     if (info.uses_group_quad) {
         ctx.AddCapability(spv::Capability::GroupNonUniformQuad);
     }
     if (info.uses_group_ballot) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
+    }
+    if (info.uses_group_vote) {
+        ctx.AddCapability(spv::Capability::GroupNonUniformVote);
     }
     const auto stage = info.l_stage;
     if (stage == LogicalStage::Vertex) {
@@ -374,6 +500,11 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
         execution_model = spv::ExecutionModel::GLCompute;
         ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, workgroup_size[0],
                              workgroup_size[1], workgroup_size[2]);
+        if (ctx.profile.supports_subgroup_uniform_control_flow &&
+            (info.uses_lane_id || info.uses_group_ballot || info.uses_group_vote)) {
+            ctx.AddExtension("SPV_KHR_subgroup_uniform_control_flow");
+            ctx.AddExecutionMode(main, spv::ExecutionMode::SubgroupUniformControlFlowKHR);
+        }
         break;
     }
     case LogicalStage::Vertex:

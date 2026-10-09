@@ -11,6 +11,7 @@
 #include "common/shared_first_mutex.h"
 #include "common/singleton.h"
 #include "common/types.h"
+#include "core/gpu_address_policy.h"
 #include "core/address_space.h"
 #include "core/libraries/kernel/memory.h"
 
@@ -200,9 +201,7 @@ public:
     }
 
     bool IsValidGpuMapping(VAddr virtual_addr, u64 size) {
-        // The PS4's GPU can only handle 40 bit addresses.
-        const VAddr max_gpu_address{0x10000000000};
-        return virtual_addr + size < max_gpu_address;
+        return IsGpuAddressRangeValid(virtual_addr, size);
     }
 
     bool IsValidMapping(const VAddr virtual_addr, const u64 size = 0) {
@@ -251,6 +250,12 @@ public:
     void SetPrtArea(u32 id, VAddr address, u64 size);
 
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
+
+    bool TryReadBacking(const void* address, void* data, u64 size);
+
+    bool IsReadableMapping(VAddr virtual_addr, u64 size);
+
+    bool IsMappedMemory(VAddr virtual_addr, u64 size);
 
     bool TryWriteBacking(void* address, const void* data, u64 size);
 

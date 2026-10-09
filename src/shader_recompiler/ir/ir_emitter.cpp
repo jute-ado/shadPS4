@@ -664,6 +664,10 @@ U32 IREmitter::QuadShuffle(const U32& value, const U32& index) {
     return Inst<U32>(Opcode::QuadShuffle, value, index);
 }
 
+U32 IREmitter::ShuffleXor(const U32& value, const U32& mask) {
+    return Inst<U32>(Opcode::ShuffleXor, value, mask);
+}
+
 U32 IREmitter::ReadFirstLane(const U32& value) {
     return Inst<U32>(Opcode::ReadFirstLane, value);
 }
@@ -680,12 +684,32 @@ Value IREmitter::Ballot(const U1& bit) {
     return Inst(Opcode::Ballot, bit);
 }
 
+U32 IREmitter::MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                         const U32& scalar, u32 word) {
+    return Inst<U32>(Opcode::MaterializeScalarMaskWord, is_thread_bit, bit, scalar, Imm32(word));
+}
+
 U32 IREmitter::BallotFindLsb(const Value& mask) {
     return Inst<U32>(Opcode::BallotFindLsb, mask);
 }
 
 U1 IREmitter::GroupAny(const U1& bit) {
     return Inst<U1>(Opcode::GroupAny, bit);
+}
+
+void IREmitter::Wave64LaneRetirementInit(const U1& active, const U32& invocation,
+                                         const U32& scratch_base) {
+    Inst(Opcode::Wave64LaneRetirementInit, active, invocation, scratch_base);
+}
+
+void IREmitter::Wave64LaneRetirementSync(const U1& continues, const U32& invocation,
+                                         const U32& scratch_base) {
+    Inst(Opcode::Wave64LaneRetirementSync, continues, invocation, scratch_base);
+}
+
+U32 IREmitter::Wave64ReadFirstLane(const U32& value, const U32& invocation,
+                                   const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64ReadFirstLane, value, invocation, scratch_base);
 }
 
 F32F64 IREmitter::FPAdd(const F32F64& a, const F32F64& b) {
@@ -994,6 +1018,10 @@ U32 IREmitter::Pack10_11_11(const AmdGpu::NumberFormat number_format, const Valu
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst<U32>(Opcode::PackUfloat10_11_11, vector);
+    case AmdGpu::NumberFormat::Uint:
+        return Inst<U32>(Opcode::PackUint10_11_11, vector);
+    case AmdGpu::NumberFormat::Sint:
+        return Inst<U32>(Opcode::PackSint10_11_11, vector);
     default:
         UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }
@@ -1033,6 +1061,10 @@ Value IREmitter::Unpack10_11_11(const AmdGpu::NumberFormat number_format, const 
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst(Opcode::UnpackUfloat10_11_11, value);
+    case AmdGpu::NumberFormat::Uint:
+        return Inst(Opcode::UnpackUint10_11_11, value);
+    case AmdGpu::NumberFormat::Sint:
+        return Inst(Opcode::UnpackSint10_11_11, value);
     default:
         UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }

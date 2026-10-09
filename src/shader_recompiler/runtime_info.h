@@ -235,6 +235,7 @@ struct RuntimeInfo {
     AmdGpu::FpDenormMode fp_denorm_mode16_64;
     AmdGpu::FpRoundMode fp_round_mode32;
     AmdGpu::FpRoundMode fp_round_mode16_64;
+    bool dx10_clamp;
     union {
         LocalRuntimeInfo ls_info;
         ExportRuntimeInfo es_info;
@@ -255,6 +256,9 @@ struct RuntimeInfo {
     }
 
     bool operator==(const RuntimeInfo& other) const noexcept {
+        if (dx10_clamp != other.dx10_clamp) {
+            return false;
+        }
         switch (stage) {
         case Stage::Fragment:
             return fs_info == other.fs_info;

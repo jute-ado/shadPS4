@@ -110,6 +110,9 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::SharedAtomicAnd64:
     case Opcode::SharedAtomicOr64:
     case Opcode::SharedAtomicXor64:
+    case Opcode::Wave64LaneRetirementInit:
+    case Opcode::Wave64LaneRetirementSync:
+    case Opcode::Wave64ReadFirstLane:
     case Opcode::ImageWrite:
     case Opcode::ImageAtomicIAdd32:
     case Opcode::ImageAtomicSMin32:
@@ -240,13 +243,15 @@ void Inst::ReplaceOpcode(IR::Opcode opcode) {
 
 void Inst::Use(Inst* used, u32 operand) {
     DEBUG_ASSERT(0 == std::count(used->uses.begin(), used->uses.end(), IR::Use(this, operand)));
-    used->uses.emplace_front(this, operand);
+    used->uses.emplace_back(this, operand);
 }
 
 void Inst::UndoUse(Inst* used, u32 operand) {
     IR::Use use(this, operand);
     DEBUG_ASSERT(1 == std::count(used->uses.begin(), used->uses.end(), use));
-    used->uses.remove(use);
+    const auto it = std::ranges::find(used->uses, use);
+    ASSERT(it != used->uses.end());
+    used->uses.erase(it);
 }
 
 } // namespace Shader::IR
