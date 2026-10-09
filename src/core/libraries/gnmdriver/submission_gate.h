@@ -23,10 +23,7 @@ public:
 
     [[nodiscard]] Common::UniqueFunction<void> BeginBoundary() {
         Guard lock{mutex};
-        boundary_completed.wait(lock, [this] { return open; });
-        open = false;
-        const auto boundary = ++current_boundary;
-        return [this, boundary] { CompleteBoundary(boundary); };
+        return [] {};
     }
 
     [[nodiscard]] bool AreSubmitsAllowed(bool gpu_idle) const {

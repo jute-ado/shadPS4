@@ -7,11 +7,10 @@
 
 namespace AmdGpu {
 
-template <typename Completion, typename DeferCompletion, typename SubmitGpuWork>
-void SubmitSubmissionBoundary(Completion&& completion, DeferCompletion&& defer_completion,
-                              SubmitGpuWork&& submit_gpu_work) {
-    std::forward<DeferCompletion>(defer_completion)(std::forward<Completion>(completion));
+template <typename Completion, typename SubmitGpuWork>
+void SubmitSubmissionBoundary(Completion&& completion, SubmitGpuWork&& submit_gpu_work) {
     std::forward<SubmitGpuWork>(submit_gpu_work)();
+    std::forward<Completion>(completion)();
 }
 
 } // namespace AmdGpu
