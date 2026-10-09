@@ -3,6 +3,7 @@
 
 #include "common/div_ceil.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/fault_range.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -158,13 +159,31 @@ void FaultManager::ProcessFaultBuffer() {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
         const u32 fault_count = fault_buf[0];
+        const VAddr address_space_size = caching_num_pages * caching_pagesize;
+        u32 invalid_fault_count = 0;
+        VAddr first_invalid_fault = 0;
         for (u32 i = 1; i <= fault_count; ++i) {
-            fault_ranges.Add(fault_buf[i], caching_pagesize);
-            LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", fault_buf[i]);
+            const VAddr start = fault_buf[i];
+            const VAddr end = start + caching_pagesize;
+            if (!IsCacheableFaultRange(start, end, address_space_size)) {
+                if (invalid_fault_count++ == 0) {
+                    first_invalid_fault = start;
+                }
+                continue;
+            }
+            fault_ranges.Add(start, caching_pagesize);
+            LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", start);
+        }
+        if (invalid_fault_count != 0) {
+            LOG_WARNING(Render_Vulkan, "Ignored {} invalid GPU fault page(s), first at {:#x}",
+                        invalid_fault_count, first_invalid_fault);
         }
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
-            ASSERT_MSG((end - start) <= std::numeric_limits<u32>::max(),
-                       "Buffer size is too large");
+            if (!IsCacheableFaultRange(start, end, address_space_size)) {
+                LOG_WARNING(Render_Vulkan, "Ignoring invalid merged GPU fault range {:#x}-{:#x}",
+                            start, end);
+                return;
+            }
             buffer_cache.FindBuffer(start, static_cast<u32>(end - start));
         });
         fault_areas[area] = 0;
