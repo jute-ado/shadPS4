@@ -43,6 +43,7 @@ public:
     ~EmitContext();
 
     Id Def(const IR::Value& value);
+    Id ValueType(IR::Type type) const;
 
     void DefineBufferProperties();
     void DefineAmdPerVertexAttribs();
@@ -151,8 +152,14 @@ public:
 
         const Id addr = OpFunctionCall(U64, get_bda_pointer, address);
         const Id is_available = OpINotEqual(U1[1], addr, u64_zero_value);
+        // PhysicalStorageBuffer loads must honor their declared alignment. Guest resource
+        // tracking can encounter a scalar pair that is not a dword-aligned pointer; use the
+        // coherent flat-buffer fallback instead of issuing undefined host memory access.
+        const Id low_bits = OpBitwiseAnd(U64, address, Constant(U64, 3ULL));
+        const Id is_aligned = OpIEqual(U1[1], low_bits, u64_zero_value);
+        const Id can_load = OpLogicalAnd(U1[1], is_available, is_aligned);
         OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
-        OpBranchConditional(is_available, available_label, fallback_label);
+        OpBranchConditional(can_load, available_label, fallback_label);
 
         // Available
         AddLabel(available_label);
@@ -197,6 +204,10 @@ public:
     LogicalStage l_stage{};
 
     Id last_label{};
+    IR::Block* current_block{};
+    bool spill_all_values{};
+    std::unordered_map<const IR::Inst*, Id> cross_block_values;
+    std::unordered_map<u64, Id> virtual_registers;
 
     Id void_id{};
     Id U8{};
@@ -274,6 +285,7 @@ public:
     Id local_invocation_id{};
     Id invocation_id{};
     Id subgroup_local_invocation_id{};
+    Id subgroup_id{};
     Id image_u32{};
     Id image_f32{};
 
@@ -302,6 +314,9 @@ public:
         bool is_storage = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
+
+    [[nodiscard]] const TextureDefinition* TryGetImage(u32 handle) const noexcept;
+    [[nodiscard]] const Id* TryGetSampler(u32 handle) const noexcept;
 
     enum class PointerType : u32 {
         U8,

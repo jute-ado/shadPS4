@@ -263,7 +263,36 @@ void FoldMul(IR::Block& block, IR::Inst& inst) {
 }
 
 void FoldCmpClass(IR::Block& block, IR::Inst& inst) {
-    ASSERT_MSG(inst.Arg(1).IsImmediate(), "Unable to resolve compare operation");
+    if (!inst.Arg(1).IsImmediate()) {
+        IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
+        const IR::U32 bits = ir.BitCast<IR::U32>(IR::F32{inst.Arg(0)});
+        const IR::U32 magnitude = ir.BitwiseAnd(bits, ir.Imm32(0x7fffffffU));
+        const IR::U1 negative = ir.INotEqual(ir.BitwiseAnd(bits, ir.Imm32(0x80000000U)),
+                                             ir.Imm32(0U));
+        const IR::U1 nan = ir.IGreaterThan(magnitude, ir.Imm32(0x7f800000U), false);
+        const IR::U1 infinity = ir.IEqual(magnitude, ir.Imm32(0x7f800000U));
+        const IR::U1 zero = ir.IEqual(magnitude, ir.Imm32(0U));
+        const IR::U1 denorm = ir.IEqual(ir.BitwiseAnd(magnitude, ir.Imm32(0x7f800000U)),
+                                        ir.Imm32(0U));
+        const IR::U1 quiet = ir.INotEqual(ir.BitwiseAnd(bits, ir.Imm32(0x00400000U)),
+                                          ir.Imm32(0U));
+        const IR::U32 nan_class{ir.Select(quiet, ir.Imm32(1U << 1), ir.Imm32(1U << 0))};
+        const IR::U32 infinity_class{
+            ir.Select(negative, ir.Imm32(1U << 2), ir.Imm32(1U << 9))};
+        const IR::U32 zero_class{
+            ir.Select(negative, ir.Imm32(1U << 5), ir.Imm32(1U << 6))};
+        const IR::U32 denorm_class{
+            ir.Select(negative, ir.Imm32(1U << 4), ir.Imm32(1U << 7))};
+        const IR::U32 normal_class{
+            ir.Select(negative, ir.Imm32(1U << 3), ir.Imm32(1U << 8))};
+        const IR::U32 finite_class{
+            ir.Select(zero, zero_class, ir.Select(denorm, denorm_class, normal_class))};
+        const IR::U32 class_bit{
+            ir.Select(nan, nan_class, ir.Select(infinity, infinity_class, finite_class))};
+        inst.ReplaceUsesWithAndRemove(ir.INotEqual(
+            ir.BitwiseAnd(class_bit, IR::U32{inst.Arg(1)}), ir.Imm32(0U)));
+        return;
+    }
     const auto class_mask = static_cast<IR::FloatClassFunc>(inst.Arg(1).U32());
     if ((class_mask & IR::FloatClassFunc::NaN) == IR::FloatClassFunc::NaN) {
         inst.ReplaceOpcode(IR::Opcode::FPIsNan32);

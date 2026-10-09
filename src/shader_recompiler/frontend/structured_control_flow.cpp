@@ -89,15 +89,25 @@ struct Statement : ListBaseHook {
     Statement(Return, Statement* up_) : up{up_}, type{StatementType::Return} {}
     Statement(Unreachable, Statement* up_) : up{up_}, type{StatementType::Unreachable} {}
     Statement(FunctionTag) : children{}, type{StatementType::Function} {}
-    Statement(Identity, IR::Condition cond_, Statement* up_)
-        : guest_cond{cond_}, up{up_}, type{StatementType::Identity} {}
-    Statement(Not, Statement* op_, Statement* up_) : op{op_}, up{up_}, type{StatementType::Not} {}
+    Statement(Identity, IR::Condition cond_, bool reduce_guest_wave_mask_, Statement* up_)
+        : guest_cond{cond_}, up{up_}, type{StatementType::Identity},
+          reduce_guest_wave_mask{reduce_guest_wave_mask_},
+          is_guest_wave_uniform{cond_ == IR::Condition::False ||
+                                cond_ == IR::Condition::True ||
+                                cond_ == IR::Condition::Scc0 ||
+                                cond_ == IR::Condition::Scc1 || reduce_guest_wave_mask_} {}
+    Statement(Not, Statement* op_, Statement* up_)
+        : op{op_}, up{up_}, type{StatementType::Not},
+          is_guest_wave_uniform{op_->is_guest_wave_uniform} {}
     Statement(Or, Statement* op_a_, Statement* op_b_, Statement* up_)
-        : op_a{op_a_}, op_b{op_b_}, up{up_}, type{StatementType::Or} {}
+        : op_a{op_a_}, op_b{op_b_}, up{up_}, type{StatementType::Or},
+          is_guest_wave_uniform{op_a_->is_guest_wave_uniform &&
+                                op_b_->is_guest_wave_uniform} {}
     Statement(SetVariable, u32 id_, Statement* op_, Statement* up_)
         : op{op_}, id{id_}, up{up_}, type{StatementType::SetVariable} {}
-    Statement(Variable, u32 id_, Statement* up_)
-        : id{id_}, up{up_}, type{StatementType::Variable} {}
+    Statement(Variable, u32 id_, bool is_guest_wave_uniform_, Statement* up_)
+        : id{id_}, up{up_}, type{StatementType::Variable},
+          is_guest_wave_uniform{is_guest_wave_uniform_} {}
 
     ~Statement() {
         if (HasChildren(type)) {
@@ -122,6 +132,8 @@ struct Statement : ListBaseHook {
     };
     Statement* up{};
     StatementType type;
+    bool reduce_guest_wave_mask{};
+    bool is_guest_wave_uniform{};
 };
 
 std::string DumpExpr(const Statement* stmt) {
@@ -355,7 +367,8 @@ private:
 
     void BuildTree(CFG& cfg, u32& label_id, std::vector<Node>& gotos, Node function_insert_point,
                    std::optional<Node> return_label) {
-        Statement* const false_stmt{pool.Create(Identity{}, IR::Condition::False, &root_stmt)};
+        Statement* const false_stmt{
+            pool.Create(Identity{}, IR::Condition::False, false, &root_stmt)};
         Tree& root{root_stmt.children};
         std::unordered_map<Block*, Node> local_labels;
         local_labels.reserve(cfg.blocks.size());
@@ -382,7 +395,7 @@ private:
             switch (block.end_class) {
             case EndClass::Branch: {
                 Statement* const always_cond{
-                    pool.Create(Identity{}, IR::Condition::True, &root_stmt)};
+                    pool.Create(Identity{}, IR::Condition::True, false, &root_stmt)};
                 if (block.cond == IR::Condition::True) {
                     const Node true_label{local_labels.at(block.branch_true)};
                     gotos.push_back(
@@ -394,7 +407,8 @@ private:
                 } else {
                     const Node true_label{local_labels.at(block.branch_true)};
                     const Node false_label{local_labels.at(block.branch_false)};
-                    Statement* const true_cond{pool.Create(Identity{}, block.cond, &root_stmt)};
+                    Statement* const true_cond{pool.Create(
+                        Identity{}, block.cond, !block.is_exec_mask_branch, &root_stmt)};
                     gotos.push_back(
                         root.insert(ip, *pool.Create(Goto{}, true_cond, true_label, &root_stmt)));
                     gotos.push_back(root.insert(
@@ -461,7 +475,8 @@ private:
 
         Tree if_body;
         if_body.splice(if_body.begin(), body, std::next(goto_stmt), label_nested_stmt);
-        Statement* const variable{pool.Create(Variable{}, label_id, &root_stmt)};
+        Statement* const variable{pool.Create(Variable{}, label_id,
+                                              goto_cond->is_guest_wave_uniform, &root_stmt)};
         Statement* const neg_var{pool.Create(Not{}, variable, &root_stmt)};
         if (!if_body.empty()) {
             Statement* const if_stmt{pool.Create(If{}, neg_var, std::move(if_body), parent)};
@@ -496,7 +511,9 @@ private:
         Tree loop_body;
         loop_body.splice(loop_body.begin(), body, label_nested_stmt, goto_stmt);
         SanitizeNoBreaks(loop_body);
-        Statement* const variable{pool.Create(Variable{}, label_id, &root_stmt)};
+        Statement* const variable{pool.Create(Variable{}, label_id,
+                                              goto_stmt->cond->is_guest_wave_uniform,
+                                              &root_stmt)};
         Statement* const loop_stmt{pool.Create(Loop{}, variable, std::move(loop_body), parent)};
         UpdateTreeUp(loop_stmt);
         body.insert(goto_stmt, *loop_stmt);
@@ -523,7 +540,8 @@ private:
         Tree if_body;
         if_body.splice(if_body.begin(), body, std::next(goto_stmt), body.end());
         if_body.pop_front();
-        Statement* const cond{pool.Create(Variable{}, label_id, &root_stmt)};
+        Statement* const cond{pool.Create(Variable{}, label_id,
+                                          goto_cond->is_guest_wave_uniform, &root_stmt)};
         Statement* const neg_cond{pool.Create(Not{}, cond, &root_stmt)};
         Statement* const if_stmt{pool.Create(If{}, neg_cond, std::move(if_body), &*parent)};
         UpdateTreeUp(if_stmt);
@@ -531,7 +549,8 @@ private:
 
         body.erase(goto_stmt);
 
-        Statement* const new_cond{pool.Create(Variable{}, label_id, &root_stmt)};
+        Statement* const new_cond{pool.Create(Variable{}, label_id,
+                                              goto_cond->is_guest_wave_uniform, &root_stmt)};
         Statement* const new_goto{pool.Create(Goto{}, new_cond, goto_stmt->label, parent->up)};
         Tree& parent_tree{parent->up->children};
         return parent_tree.insert(std::next(parent), *new_goto);
@@ -543,14 +562,17 @@ private:
         const u32 label_id{goto_stmt->label->id};
         Statement* const goto_cond{goto_stmt->cond};
         Statement* const set_goto_var{pool.Create(SetVariable{}, label_id, goto_cond, parent)};
-        Statement* const cond{pool.Create(Variable{}, label_id, &root_stmt)};
+        Statement* const cond{pool.Create(Variable{}, label_id,
+                                          goto_cond->is_guest_wave_uniform, &root_stmt)};
         Statement* const break_stmt{pool.Create(Break{}, cond, parent)};
         body.insert(goto_stmt, *set_goto_var);
         body.insert(goto_stmt, *break_stmt);
         body.erase(goto_stmt);
 
         const Node loop{Tree::s_iterator_to(*goto_stmt->up)};
-        Statement* const new_goto_cond{pool.Create(Variable{}, label_id, &root_stmt)};
+        Statement* const new_goto_cond{pool.Create(Variable{}, label_id,
+                                                   goto_cond->is_guest_wave_uniform,
+                                                   &root_stmt)};
         Statement* const new_goto{pool.Create(Goto{}, new_goto_cond, goto_stmt->label, loop->up)};
         Tree& parent_tree{loop->up->children};
         return parent_tree.insert(std::next(loop), *new_goto);
@@ -575,8 +597,23 @@ private:
 
 [[nodiscard]] IR::U1 VisitExpr(IR::IREmitter& ir, const Statement& stmt) {
     switch (stmt.type) {
-    case StatementType::Identity:
-        return ir.Condition(stmt.guest_cond);
+    case StatementType::Identity: {
+        if (!stmt.reduce_guest_wave_mask) {
+            return ir.Condition(stmt.guest_cond);
+        }
+        switch (stmt.guest_cond) {
+        case IR::Condition::Vccz:
+            return ir.LogicalNot(ir.GuestWaveAny(ir.GetVcc()));
+        case IR::Condition::Vccnz:
+            return ir.GuestWaveAny(ir.GetVcc());
+        case IR::Condition::Execz:
+            return ir.LogicalNot(ir.GuestWaveAny(ir.GetExec()));
+        case IR::Condition::Execnz:
+            return ir.GuestWaveAny(ir.GetExec());
+        default:
+            return ir.Condition(stmt.guest_cond);
+        }
+    }
     case StatementType::Not:
         return ir.LogicalNot(IR::U1{VisitExpr(ir, *stmt.op)});
     case StatementType::Or:
@@ -665,10 +702,13 @@ private:
                 if_node.data.if_node.cond = cond;
                 if_node.data.if_node.body = then_block;
                 if_node.data.if_node.merge = merge_block;
+                if_node.data.if_node.is_guest_wave_uniform = stmt.cond->is_guest_wave_uniform;
 
                 auto& endif_node{syntax_list.emplace_back()};
                 endif_node.type = IR::AbstractSyntaxNode::Type::EndIf;
                 endif_node.data.end_if.merge = merge_block;
+                endif_node.data.end_if.is_guest_wave_uniform =
+                    stmt.cond->is_guest_wave_uniform;
 
                 auto& merge{syntax_list.emplace_back()};
                 merge.type = IR::AbstractSyntaxNode::Type::Block;
@@ -711,6 +751,7 @@ private:
                 loop.data.loop.body = body_block;
                 loop.data.loop.continue_block = continue_block;
                 loop.data.loop.merge = merge_block;
+                loop.data.loop.is_guest_wave_uniform = stmt.cond->is_guest_wave_uniform;
 
                 auto& continue_block_node{syntax_list.emplace_back()};
                 continue_block_node.type = IR::AbstractSyntaxNode::Type::Block;
@@ -721,6 +762,7 @@ private:
                 repeat.data.repeat.cond = cond;
                 repeat.data.repeat.loop_header = loop_header_block;
                 repeat.data.repeat.merge = merge_block;
+                repeat.data.repeat.is_guest_wave_uniform = stmt.cond->is_guest_wave_uniform;
 
                 auto& merge{syntax_list.emplace_back()};
                 merge.type = IR::AbstractSyntaxNode::Type::Block;
@@ -742,6 +784,8 @@ private:
                 break_node.data.break_node.cond = cond;
                 break_node.data.break_node.merge = break_block;
                 break_node.data.break_node.skip = skip_block;
+                break_node.data.break_node.is_guest_wave_uniform =
+                    stmt.cond->is_guest_wave_uniform;
 
                 auto& merge{syntax_list.emplace_back()};
                 merge.type = IR::AbstractSyntaxNode::Type::Block;

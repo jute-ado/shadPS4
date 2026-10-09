@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <source_location>
 #include <span>
 #include "common/assert.h"
 #include "video_core/amdgpu/pixel_format.h"
@@ -61,7 +62,9 @@ struct SurfaceFormatInfo {
 };
 std::span<const SurfaceFormatInfo> SurfaceFormats();
 
-vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
+vk::Format SurfaceFormat(
+    AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format,
+    const std::source_location& source = std::source_location::current());
 
 struct DepthFormatInfo {
     AmdGpu::DepthBuffer::ZFormat z_format;

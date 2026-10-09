@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/resource.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/texture_cache/types.h"
 
 namespace {
@@ -44,6 +45,24 @@ TEST(ImageDescriptorLayers, ArrayAndCubeTypesRetainEncodedLayerCounts) {
     EXPECT_EQ(cube.NumLayers(), 12U);
 }
 
+TEST(ImageDescriptorSwizzle, RejectsReservedSelectorsBeforeVulkanConversion) {
+    AmdGpu::Image image = AmdGpu::Image::Null(false);
+    EXPECT_TRUE(image.HasValidDstSelect());
+
+    image.dst_sel_z = 2;
+    EXPECT_FALSE(image.HasValidDstSelect());
+
+    image.dst_sel_z = 3;
+    EXPECT_FALSE(image.HasValidDstSelect());
+}
+
+TEST(ImageDescriptorFormat, RejectsUnsupportedPackedNumberFormatBeforeImageCreation) {
+    EXPECT_TRUE(AmdGpu::IsSupportedImageFormatPair(AmdGpu::DataFormat::Format10_11_11,
+                                                   AmdGpu::NumberFormat::Float));
+    EXPECT_FALSE(AmdGpu::IsSupportedImageFormatPair(AmdGpu::DataFormat::Format10_11_11,
+                                                    AmdGpu::NumberFormat::Unorm));
+}
+
 TEST(SubresourceExtent, ContainsEqualExtent) {
     constexpr SubresourceExtent available{.levels = 3, .layers = 6};
 
@@ -68,7 +87,7 @@ TEST(SubresourceExtent, RejectsMoreLayersDespiteFewerMipLevels) {
     EXPECT_FALSE(available.CanContain(SubresourceExtent{.levels = 1, .layers = 6}));
 }
 
-TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
+TEST(TextureBindingBookkeeping, InvalidBindingsPreserveDescriptorArrayShape) {
     const auto source = ReadText(SHADPS4_RASTERIZER_SOURCE_PATH);
     const auto function_begin = source.find("void Rasterizer::BindTextures(");
     const auto function_end = source.find("RenderState Rasterizer::BeginRendering(", function_begin);
@@ -81,18 +100,48 @@ TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
     const auto helper_end = body.find("};", helper_begin);
     ASSERT_NE(helper_end, std::string::npos);
     const auto helper = body.substr(helper_begin, helper_end - helper_begin);
+    EXPECT_NE(helper.find("const u32 descriptor_count"), std::string::npos);
+    EXPECT_NE(helper.find("i < descriptor_count"), std::string::npos);
     EXPECT_NE(helper.find("image_bindings.emplace_back"), std::string::npos);
-    EXPECT_NE(helper.find("image_descriptor_array_sizes.push_back(1)"), std::string::npos);
+    EXPECT_NE(helper.find("image_descriptor_array_sizes.push_back(descriptor_count)"),
+              std::string::npos);
     EXPECT_NE(helper.find("image_native_extent_requirements.emplace_back(false, false)"),
               std::string::npos);
 
     size_t call_count = 0;
     size_t call = helper_end;
-    while ((call = body.find("append_invalid_image_binding();", call)) != std::string::npos) {
+    while ((call = body.find("append_invalid_image_binding(image_desc.NumBindings(stage));", call)) !=
+           std::string::npos) {
         ++call_count;
         ++call;
     }
-    EXPECT_EQ(call_count, 2U);
+    EXPECT_EQ(call_count, 4U);
+}
+
+TEST(TextureBindingBookkeeping, UnsupportedFormatPairsAreRejectedBeforeImageConstruction) {
+    const auto source = ReadText(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const auto function_begin = source.find("void Rasterizer::BindTextures(");
+    const auto function_end = source.find("RenderState Rasterizer::BeginRendering(", function_begin);
+    ASSERT_NE(function_begin, std::string::npos);
+    ASSERT_NE(function_end, std::string::npos);
+    const auto body = source.substr(function_begin, function_end - function_begin);
+
+    const auto format_check = body.find("AmdGpu::IsSupportedImageFormatPair(data_fmt, num_fmt)");
+    const auto image_construction = body.find("VideoCore::TextureCache::ImageDesc full_desc");
+    ASSERT_NE(format_check, std::string::npos);
+    ASSERT_NE(image_construction, std::string::npos);
+    EXPECT_LT(format_check, image_construction);
 }
 
 } // namespace
+
+TEST(DescriptorBindingCursor, ArraysConsumeOneBindingAndAllDescriptorCapacity) {
+    VideoCore::DescriptorBindingCursor cursor;
+    EXPECT_EQ(cursor.Add(), 0U);
+    EXPECT_EQ(cursor.Add(6), 1U);
+    EXPECT_EQ(cursor.Add(), 2U);
+    EXPECT_EQ(cursor.BindingCount(), 3U);
+    EXPECT_EQ(cursor.DescriptorCount(), 8U);
+    EXPECT_TRUE(cursor.CanUsePushDescriptors(8));
+    EXPECT_FALSE(cursor.CanUsePushDescriptors(7));
+}

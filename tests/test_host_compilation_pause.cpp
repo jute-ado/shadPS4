@@ -107,6 +107,15 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
     EXPECT_NE(module_compile.find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
               std::string::npos);
 
+    const auto compute_compile = source.find("Compiling compute pipeline");
+    const auto compute_register = source.find("RegisterPipelineData", compute_compile);
+    ASSERT_NE(compute_compile, std::string::npos);
+    ASSERT_NE(compute_register, std::string::npos);
+    const auto compute_pipeline =
+        source.substr(compute_compile, compute_register - compute_compile);
+    EXPECT_NE(compute_pipeline.find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
+              std::string::npos);
+
     const auto async_compile = source.find("PipelineCache::CompileGraphicsPipelineAsync");
     const auto async_publish = source.find("PipelineCache::PublishAsyncGraphicsPipeline");
     ASSERT_NE(async_compile, std::string::npos);
@@ -120,7 +129,7 @@ TEST(PersistentShaderCache, BackendSemanticChangesInvalidateStoredSpirv) {
     const auto source = ReadSource(SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH);
 
     ASSERT_FALSE(source.empty());
-    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 4u;"),
+    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 6u;"),
               std::string::npos);
 }
 

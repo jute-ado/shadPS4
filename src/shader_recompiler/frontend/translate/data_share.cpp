@@ -94,7 +94,10 @@ void Translator::V_READFIRSTLANE_B32(const GcnInst& inst) {
 
     if (info.l_stage == LogicalStage::Compute ||
         info.l_stage == LogicalStage::TessellationControl) {
-        SetDst(inst.dst[0], ir.ReadFirstLane(value));
+        // V_READFIRSTLANE selects the lowest lane enabled by the guest EXEC mask. The
+        // instruction itself is scalar-wide, so host invocation activity is not a substitute
+        // for the explicit GCN predicate (especially when wave64 is split into two wave32s).
+        SetDst(inst.dst[0], ir.ReadFirstLane(value, ir.GetExec()));
     } else {
         SetDst(inst.dst[0], value);
     }
@@ -216,33 +219,36 @@ void Translator::DS_WRITE(int bit_size, bool is_signed, bool is_pair, bool strid
             ir.WriteShared(64,
                            ir.PackUint2x32(ir.CompositeConstruct(ir.GetVectorReg(data0),
                                                                  ir.GetVectorReg(data0 + 1))),
-                           addr0, is_gds);
+                           addr0, is_gds, ir.GetExec());
         } else if (bit_size == 32) {
-            ir.WriteShared(32, ir.GetVectorReg(data0), addr0, is_gds);
+            ir.WriteShared(32, ir.GetVectorReg(data0), addr0, is_gds, ir.GetExec());
         } else if (bit_size == 16) {
-            ir.WriteShared(16, ir.UConvert(16, ir.GetVectorReg(data0)), addr0, is_gds);
+            ir.WriteShared(16, ir.UConvert(16, ir.GetVectorReg(data0)), addr0, is_gds,
+                           ir.GetExec());
         }
         const IR::U32 addr1 = ir.IAdd(addr, ir.Imm32(u32(inst.control.ds.offset1 * adj)));
         if (bit_size == 64) {
             ir.WriteShared(64,
                            ir.PackUint2x32(ir.CompositeConstruct(ir.GetVectorReg(data1),
                                                                  ir.GetVectorReg(data1 + 1))),
-                           addr1, is_gds);
+                           addr1, is_gds, ir.GetExec());
         } else if (bit_size == 32) {
-            ir.WriteShared(32, ir.GetVectorReg(data1), addr1, is_gds);
+            ir.WriteShared(32, ir.GetVectorReg(data1), addr1, is_gds, ir.GetExec());
         } else if (bit_size == 16) {
-            ir.WriteShared(16, ir.UConvert(16, ir.GetVectorReg(data1)), addr1, is_gds);
+            ir.WriteShared(16, ir.UConvert(16, ir.GetVectorReg(data1)), addr1, is_gds,
+                           ir.GetExec());
         }
     } else {
         const IR::U32 addr0 = ir.IAdd(addr, ir.Imm32(offset));
         if (bit_size == 64) {
             const IR::Value data =
                 ir.CompositeConstruct(ir.GetVectorReg(data0), ir.GetVectorReg(data0 + 1));
-            ir.WriteShared(bit_size, ir.PackUint2x32(data), addr0, is_gds);
+            ir.WriteShared(bit_size, ir.PackUint2x32(data), addr0, is_gds, ir.GetExec());
         } else if (bit_size == 32) {
-            ir.WriteShared(bit_size, ir.GetVectorReg(data0), addr0, is_gds);
+            ir.WriteShared(bit_size, ir.GetVectorReg(data0), addr0, is_gds, ir.GetExec());
         } else if (bit_size == 16) {
-            ir.WriteShared(bit_size, ir.UConvert(16, ir.GetVectorReg(data0)), addr0, is_gds);
+            ir.WriteShared(bit_size, ir.UConvert(16, ir.GetVectorReg(data0)), addr0, is_gds,
+                           ir.GetExec());
         }
     }
 }
@@ -313,6 +319,10 @@ void Translator::DS_SWIZZLE_B32(const GcnInst& inst) {
         const u8 and_mask = (offset0 & 0x1f) | (~u8{0} << 5);
         const u8 or_mask = (offset0 >> 5) | ((offset1 & 0x3) << 3);
         const u8 xor_mask = offset1 >> 2;
+        if (and_mask == 0xff && or_mask == 0) {
+            SetDst(inst.dst[0], ir.ShuffleXor(src, ir.Imm32(xor_mask)));
+            return;
+        }
         const IR::U32 index = ir.BitwiseXor(
             ir.BitwiseOr(ir.BitwiseAnd(lane_id, ir.Imm32(and_mask)), ir.Imm32(or_mask)),
             ir.Imm32(xor_mask));

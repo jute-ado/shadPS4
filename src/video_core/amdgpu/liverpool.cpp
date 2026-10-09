@@ -882,7 +882,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS");
+                const VAddr report_address = static_cast<VAddr>(count > 1 ? dcb[2] : 0) << 8;
+                static u32 lod_stats_logs{};
+                if (lod_stats_logs++ < 8) {
+                    LOG_WARNING(
+                        Render_Vulkan,
+                        "Unimplemented IT_GET_LOD_STATS words={} size={:#x} address={:#x} "
+                        "control={:#x}",
+                        count, count > 0 ? dcb[1] : 0, report_address,
+                        count > 2 ? dcb[3] : 0);
+                }
                 break;
             }
             case PM4ItOpcode::CondExec: {

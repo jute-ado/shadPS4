@@ -12,8 +12,8 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 4u;
-static constexpr u32 ShaderMetaVersion = 4u;
+static constexpr u32 ShaderBinaryVersion = 6u;
+static constexpr u32 ShaderMetaVersion = 6u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
@@ -256,6 +256,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     if (!LoadShaderMeta(ar, program->info, fetch_shader, spec, perm_idx)) {
         return false;
     }
+    auto module_info = program->info;
 
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
@@ -293,9 +294,9 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             module = CompileSPV(spv, instance.GetDevice());
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    it_pgm.value()->InsertPermut(module, std::move(spec), std::move(module_info), perm_idx);
 
-    infos[stage] = &it_pgm.value()->info;
+    infos[stage] = &it_pgm.value()->GetPermutInfo(perm_idx);
     modules[stage] = module;
 
     return true;

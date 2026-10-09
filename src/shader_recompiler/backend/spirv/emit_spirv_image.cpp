@@ -77,109 +77,135 @@ Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1,
 
 Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id bias,
                               const IR::Value& offset) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(4);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
     operands.AddOffset(ctx, offset);
     const Id sample = ctx.OpImageSampleImplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+    return texture->is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
 Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod,
                               const IR::Value& offset) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(4);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
     operands.AddOffset(ctx, offset);
     const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+    return texture->is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id bias, const IR::Value& offset) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(1);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(1);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
     operands.AddOffset(ctx, offset);
     const Id sample = ctx.OpImageSampleDrefImplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
-    const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
+    const Id sample_typed = texture->is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value,
                                     ctx.f32_zero_value, ctx.f32_zero_value);
 }
 
 Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id lod, const IR::Value& offset) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(1);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(1);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
     operands.AddOffset(ctx, offset);
     const Id sample = ctx.OpImageSampleDrefExplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
-    const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
+    const Id sample_typed = texture->is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value,
                                     ctx.f32_zero_value, ctx.f32_zero_value);
 }
 
 Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
                    const IR::Value& offset) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(4);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     const u32 comp = inst->Flags<IR::TextureInstInfo>().gather_comp.Value();
     ImageOperands operands;
     operands.AddOffset(ctx, offset, true);
     const Id texels = ctx.OpImageGather(result_type, sampled_image, coords, ctx.ConstU32(comp),
                                         operands.mask, operands.operands);
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
+    return texture->is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
 }
 
 Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
                        const IR::Value& offset, Id dref) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(4);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     ImageOperands operands;
     operands.AddOffset(ctx, offset, true);
     const Id texels = ctx.OpImageDrefGather(result_type, sampled_image, coords, dref, operands.mask,
                                             operands.operands);
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
+    return texture->is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
 }
 
 Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod, bool has_mips) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const auto sharp = ctx.info.images[handle & 0xFFFF].GetSharp(ctx.info);
+    const auto* texture = ctx.TryGetImage(handle);
+    if (!texture) {
+        return ctx.ConstU32(0U, 0U, 0U, 0U);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
     const Id zero = ctx.u32_zero_value;
     const auto mips{[&] { return has_mips ? ctx.OpImageQueryLevels(ctx.U32[1], image) : zero; }};
-    const bool uses_lod{texture.view_type != AmdGpu::ImageType::Color2DMsaa && !texture.is_storage};
+    const bool uses_lod{texture->view_type != AmdGpu::ImageType::Color2DMsaa && !texture->is_storage};
     const auto query{[&](Id type) {
         return uses_lod ? ctx.OpImageQuerySizeLod(type, image, lod)
                         : ctx.OpImageQuerySize(type, image);
     }};
-    switch (texture.view_type) {
+    switch (texture->view_type) {
     case AmdGpu::ImageType::Color1D:
         return ctx.OpCompositeConstruct(ctx.U32[4], query(ctx.U32[1]), zero, zero, mips());
     case AmdGpu::ImageType::Color1DArray:
@@ -195,37 +221,47 @@ Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod
 }
 
 Id EmitImageQueryLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
-    const Id zero{ctx.f32_zero_value};
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     return ctx.OpImageQueryLod(ctx.F32[2], sampled_image, coords);
 }
 
 Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id derivatives_dx,
                      Id derivatives_dy, const IR::Value& offset, const IR::Value& lod_clamp) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(4);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const auto* texture = ctx.TryGetImage(handle);
+    const auto* sampler_id = ctx.TryGetSampler(handle);
+    if (!texture || !sampler_id) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id image = ctx.OpLoad(texture->image_type, texture->id);
+    const Id result_type = texture->data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, *sampler_id);
+    const Id sampled_image = ctx.OpSampledImage(texture->sampled_type, image, sampler);
     ImageOperands operands;
     operands.AddDerivatives(ctx, derivatives_dx, derivatives_dy);
     operands.AddOffset(ctx, offset);
     const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+    return texture->is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
 Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id color_type = texture.data_types->Get(4);
+    const auto* texture = ctx.TryGetImage(handle);
+    if (!texture) {
+        return ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const Id color_type = texture->data_types->Get(4);
     ImageOperands operands;
     Id texel;
-    if (!texture.is_storage) {
-        const Id image = ctx.OpLoad(texture.image_type, texture.id);
-        if (texture.view_type == AmdGpu::ImageType::Color2DMsaa) {
+    if (!texture->is_storage) {
+        const Id image = ctx.OpLoad(texture->image_type, texture->id);
+        if (texture->view_type == AmdGpu::ImageType::Color2DMsaa) {
             // GCN hardware wraps out-of-range MSAA sample indices
             if (Sirit::ValidId(ms)) {
                 const Id sample_count = ctx.OpImageQuerySamples(ctx.U32[1], image);
@@ -241,7 +277,7 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
         }
         texel = ctx.OpImageFetch(color_type, image, coords, operands.mask, operands.operands);
     } else {
-        Id image_ptr = texture.id;
+        Id image_ptr = texture->id;
         if (ctx.profile.supports_image_load_store_lod) {
             operands.Add(spv::ImageOperandsMask::Lod, lod);
         } else if (Sirit::ValidId(lod)) {
@@ -252,37 +288,51 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
             UNREACHABLE_MSG("Unsupported ImageRead with Lod");
 #else
             LOG_WARNING(Render, "Fallback for ImageRead with LOD");
-            ASSERT(texture.mip_fallback_mode == MipStorageFallbackMode::DynamicIndex);
+            ASSERT(texture->mip_fallback_mode == MipStorageFallbackMode::DynamicIndex);
             const Id single_image_ptr_type =
-                ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
+                ctx.TypePointer(spv::StorageClass::UniformConstant, texture->image_type);
             image_ptr = ctx.OpAccessChain(single_image_ptr_type, image_ptr, std::array{lod});
 #endif
         }
-        const Id image = ctx.OpLoad(texture.image_type, image_ptr);
+        const Id image = ctx.OpLoad(texture->image_type, image_ptr);
         texel = ctx.OpImageRead(color_type, image, coords, operands.mask, operands.operands);
     }
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texel) : texel;
+    return texture->is_integer ? ctx.OpBitcast(ctx.F32[4], texel) : texel;
 }
 
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms,
-                    Id color) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    Id image_ptr = texture.id;
-    const Id color_type = texture.data_types->Get(4);
+                    Id color, Id predicate) {
+    const auto* texture = ctx.TryGetImage(handle);
+    if (!texture) {
+        return;
+    }
+    Id image_ptr = texture->id;
+    const Id color_type = texture->data_types->Get(4);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Sample, ms);
     if (ctx.profile.supports_image_load_store_lod) {
         operands.Add(spv::ImageOperandsMask::Lod, lod);
     } else if (Sirit::ValidId(lod)) {
         LOG_WARNING(Render, "Fallback for ImageWrite with LOD");
-        ASSERT(texture.mip_fallback_mode == MipStorageFallbackMode::DynamicIndex);
+        ASSERT(texture->mip_fallback_mode == MipStorageFallbackMode::DynamicIndex);
         const Id single_image_ptr_type =
-            ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
+            ctx.TypePointer(spv::StorageClass::UniformConstant, texture->image_type);
         image_ptr = ctx.OpAccessChain(single_image_ptr_type, image_ptr, std::array{lod});
     }
-    const Id image = ctx.OpLoad(texture.image_type, image_ptr);
-    const Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;
+    const Id image = ctx.OpLoad(texture->image_type, image_ptr);
+    const Id texel = texture->is_integer ? ctx.OpBitcast(color_type, color) : color;
+    if (!ctx.info.emulate_wave64_control_flow) {
+        ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
+        return;
+    }
+    const Id write_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(predicate, write_label, merge_label);
+    ctx.AddLabel(write_label);
     ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(merge_label);
 }
 
 Id EmitCubeFaceIndex(EmitContext& ctx, IR::Inst* inst, Id cube_coords) {

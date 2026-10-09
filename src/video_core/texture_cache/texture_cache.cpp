@@ -784,13 +784,13 @@ void TextureCache::RefreshImage(Image& image) {
         });
     }
 
-    const auto [buffer, offset] =
-        tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
+    auto detiled = tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
     for (auto& copy : image_copies) {
-        copy.bufferOffset += offset;
+        copy.bufferOffset += detiled.offset;
     }
 
-    image.Upload(image_copies, buffer, offset);
+    image.Upload(image_copies, detiled.buffer, detiled.offset);
+    tile_manager.RetireScratch(detiled);
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
@@ -1092,7 +1092,7 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
 
     // Reclaim image and any image views it references.
-    scheduler.DeferOperation([this, image_id] {
+    scheduler.DeferResourceDestruction([this, image_id] {
         Image& image = slot_images[image_id];
         for (auto& backing : image.backing_images) {
             for (const ImageViewId image_view_id : backing.image_view_ids) {

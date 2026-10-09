@@ -12,6 +12,7 @@
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/pipeline_bind_tracker.h"
+#include "video_core/renderer_vulkan/deferred_resource_retirement.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 
@@ -22,6 +23,8 @@ class VkCtxScope;
 namespace Vulkan {
 
 class Instance;
+
+void LogDeviceFaultInfo(const Instance& instance);
 
 struct RenderAttachment {
     vk::ImageView image_view;
@@ -425,6 +428,12 @@ public:
         pending_ops.emplace(std::move(func), CurrentTick());
     }
 
+    /// Defers destruction of an object referenced by the command buffer being recorded.
+    void DeferResourceDestruction(Common::UniqueFunction<void>&& func) {
+        std::unique_lock lk(pending_ops_mutex);
+        resource_retirements.Retain(std::move(func));
+    }
+
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
@@ -457,6 +466,7 @@ private:
         u64 gpu_tick;
     };
     std::queue<PendingOp> pending_ops;
+    SubmissionResourceRetirements resource_retirements;
     std::recursive_mutex pending_ops_mutex;
     std::queue<PendingOp> priority_pending_ops;
     std::mutex priority_pending_ops_mutex;

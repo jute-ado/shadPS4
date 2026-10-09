@@ -91,7 +91,39 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::ReadLane:
     case IR::Opcode::ReadFirstLane:
     case IR::Opcode::WriteLane:
+    case IR::Opcode::MaterializeScalarMaskWord:
+    case IR::Opcode::Ballot:
         info.uses_group_ballot = true;
+        break;
+    case IR::Opcode::GroupAny:
+    case IR::Opcode::GuestWaveAny:
+        info.uses_group_vote = true;
+        break;
+    case IR::Opcode::Wave64GroupAny:
+        info.shared_types |= IR::Type::U32;
+        // The backend uses BroadcastFirst to nominate one publisher in each host subgroup.
+        // SPIR-V requires GroupNonUniformBallot for BroadcastFirst even though the guest
+        // operation itself is a vote.
+        info.uses_group_ballot = true;
+        info.uses_group_vote = true;
+        break;
+    case IR::Opcode::Wave64LockstepMaterializeScalarMaskWord:
+    case IR::Opcode::Wave64CaptureScalarMaskWord:
+        info.shared_types |= IR::Type::U32;
+        info.uses_group_ballot = true;
+        info.uses_group_vote = true;
+        break;
+    case IR::Opcode::Wave64LaneRetirementInit:
+    case IR::Opcode::Wave64LaneRetirementSync:
+    case IR::Opcode::Wave64ReadFirstLane:
+    case IR::Opcode::Wave64ReadFirstActiveLane:
+    case IR::Opcode::Wave64MaterializeScalarMaskWord:
+        info.shared_types |= IR::Type::U32;
+        info.uses_group_ballot = true;
+        info.uses_group_vote = true;
+        break;
+    case IR::Opcode::ShuffleXor:
+        info.uses_group_shuffle = true;
         break;
     case IR::Opcode::Discard:
     case IR::Opcode::DiscardCond:
@@ -176,7 +208,10 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
             .used_types = IR::Type::U64,
             .inline_cbuf = AmdGpu::Buffer::Placeholder(VideoCore::BufferCache::BDA_PAGETABLE_SIZE),
             .buffer_type = BufferType::BdaPagetable,
-            .is_written = true,
+            // The emulator uploads this table; guest shaders only read it. Marking it writable
+            // both drops NonWritable and requests shader-write rather than shader-read visibility
+            // from the buffer cache after a transfer update.
+            .is_written = false,
         });
         info.buffers.push_back({
             .used_types = IR::Type::U32,

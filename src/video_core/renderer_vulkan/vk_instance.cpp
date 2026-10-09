@@ -203,7 +203,9 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
+                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
+                          vk::PhysicalDeviceFaultFeaturesEXT,
+                          vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -257,6 +259,22 @@ bool Instance::CreateDevice() {
                "Required Vulkan feature unavailable: nullDescriptor");
 
     // Optional
+    diagnostic_checkpoints = add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    if (device_fault && !feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault) {
+        enabled_extensions.pop_back();
+        device_fault = false;
+    }
+    shader_subgroup_uniform_control_flow =
+        add_extension(VK_KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_EXTENSION_NAME);
+    if (shader_subgroup_uniform_control_flow) {
+        shader_subgroup_uniform_control_flow_features =
+            feature_chain.get<vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
+        if (!shader_subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow) {
+            enabled_extensions.pop_back();
+            shader_subgroup_uniform_control_flow = false;
+        }
+    }
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
@@ -504,6 +522,14 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
             .minLod = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
+            .deviceFaultVendorBinary = false,
+        },
+        vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR{
+            .shaderSubgroupUniformControlFlow =
+                shader_subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow,
+        },
     };
 
     if (!custom_border_color) {
@@ -548,6 +574,12 @@ bool Instance::CreateDevice() {
     }
     if (!image_view_min_lod) {
         device_chain.unlink<vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();
+    }
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+    }
+    if (!shader_subgroup_uniform_control_flow) {
+        device_chain.unlink<vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());

@@ -32,6 +32,11 @@ namespace Shader {
 struct Info;
 }
 
+namespace VideoCore {
+class BufferCache;
+class PageManager;
+} // namespace VideoCore
+
 namespace Vulkan {
 
 class Instance;
@@ -41,7 +46,19 @@ class ShaderCache;
 struct Program {
     struct Module {
         vk::ShaderModule module;
+        std::unique_ptr<Shader::Info> info;
         Shader::StageSpecialization spec;
+
+        Module() = default;
+        Module(vk::ShaderModule module_, Shader::StageSpecialization&& spec_,
+               Shader::Info&& info_)
+            : module{module_}, info{std::make_unique<Shader::Info>(std::move(info_))},
+              spec{std::move(spec_)} {
+            spec.info = info.get();
+        }
+
+        Module(Module&&) noexcept = default;
+        Module& operator=(Module&&) noexcept = default;
     };
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
@@ -53,14 +70,24 @@ struct Program {
     Program(Shader::Stage stage, Shader::LogicalStage l_stage, Shader::ShaderParams params)
         : info{stage, l_stage, params} {}
 
-    void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec) {
-        modules.emplace_back(module, std::move(spec));
+    void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec,
+                   Shader::Info&& info) {
+        modules.emplace_back(module, std::move(spec), std::move(info));
     }
 
     void InsertPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec,
-                      size_t perm_idx) {
+                      Shader::Info&& info, size_t perm_idx) {
         modules.resize(std::max(modules.size(), perm_idx + 1)); // <-- beware of realloc
-        modules[perm_idx] = {module, std::move(spec)};
+        modules[perm_idx] = Module{module, std::move(spec), std::move(info)};
+    }
+
+    const Shader::Info& GetPermutInfo(size_t perm_idx) const {
+        ASSERT(perm_idx < modules.size() && modules[perm_idx].info);
+        return *modules[perm_idx].info;
+    }
+
+    Shader::Info& GetPermutInfo(size_t perm_idx) {
+        return const_cast<Shader::Info&>(std::as_const(*this).GetPermutInfo(perm_idx));
     }
 };
 
@@ -88,7 +115,8 @@ struct AsyncGraphicsPipelineResult {
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
-                           AmdGpu::Liverpool* liverpool);
+                           AmdGpu::Liverpool* liverpool, VideoCore::PageManager& page_manager,
+                           VideoCore::BufferCache& buffer_cache);
     ~PipelineCache();
 
     void WarmUp();
@@ -137,7 +165,9 @@ private:
                                                    std::string_view ext);
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
-                                   Shader::Backend::Bindings& binding);
+                                   Shader::Backend::Bindings& binding,
+                                   const Shader::CompileResourceSnapshot* compile_resources = nullptr,
+                                   const Shader::Gcn::FetchShaderData* compile_fetch_shader = nullptr);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::Stage stage, Shader::LogicalStage l_stage);
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
@@ -148,6 +178,8 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     AmdGpu::Liverpool* liverpool;
+    VideoCore::PageManager& page_manager;
+    VideoCore::BufferCache& buffer_cache;
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;

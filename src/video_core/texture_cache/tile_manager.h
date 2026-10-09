@@ -18,7 +18,11 @@ class TileManager {
 
 public:
     using ScratchBuffer = std::pair<vk::Buffer, VmaAllocation>;
-    using Result = std::pair<vk::Buffer, u32>;
+    struct Result {
+        vk::Buffer buffer;
+        u32 offset;
+        VmaAllocation allocation{};
+    };
 
     explicit TileManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
                          StreamBuffer& stream_buffer);
@@ -28,6 +32,9 @@ public:
                    vk::Buffer out_buffer, u32 out_offset, u32 copy_size);
 
     Result DetileImage(vk::Buffer in_buffer, u32 in_offset, const ImageInfo& info);
+
+    /// Retains an owned detile scratch buffer until its final recorded use has completed.
+    void RetireScratch(Result result);
 
 private:
     vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);

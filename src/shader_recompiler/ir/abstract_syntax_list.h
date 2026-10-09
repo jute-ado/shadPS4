@@ -28,24 +28,29 @@ struct AbstractSyntaxNode {
             U1 cond;
             Block* body;
             Block* merge;
+            bool is_guest_wave_uniform;
         } if_node;
         struct {
             Block* merge;
+            bool is_guest_wave_uniform;
         } end_if;
         struct {
             Block* body;
             Block* continue_block;
             Block* merge;
+            bool is_guest_wave_uniform;
         } loop;
         struct {
             U1 cond;
             Block* loop_header;
             Block* merge;
+            bool is_guest_wave_uniform;
         } repeat;
         struct {
             U1 cond;
             Block* merge;
             Block* skip;
+            bool is_guest_wave_uniform;
         } break_node;
     };
 

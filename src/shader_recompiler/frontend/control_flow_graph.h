@@ -43,6 +43,9 @@ struct Block : Hook {
     Block* branch_true{};
     Block* branch_false{};
     bool is_dummy{};
+    // Compiler-created host control used only to predicate vector runs by the guest EXEC mask.
+    // Unlike a real GCN scalar branch, this condition must remain lane-local.
+    bool is_exec_mask_branch{};
 };
 
 class CFG {

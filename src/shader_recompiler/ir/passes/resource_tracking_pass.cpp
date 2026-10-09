@@ -8,6 +8,7 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/sharp_source_traversal.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -395,10 +396,11 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
             continue;
         }
         found_read_const_buffer |= inst->GetOpcode() == IR::Opcode::ReadConstBuffer;
-        if (inst->GetOpcode() != IR::Opcode::Phi) {
+        const auto range = SharpSourceTraversalRange(inst->GetOpcode(), inst->NumArgs());
+        if (range.begin == range.end) {
             continue;
         }
-        for (size_t arg = inst->NumArgs(); arg--;) {
+        for (size_t arg = range.end; arg-- > range.begin;) {
             const IR::Value arg_value = inst->Arg(arg);
             if (arg_value.IsImmediate()) {
                 continue;
@@ -411,10 +413,16 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
         }
     }
     if (sources.empty()) {
+        std::string traversed;
+        for (const IR::Inst* visited_inst : visited) {
+            traversed += fmt::format("{} ", visited_inst->GetOpcode());
+        }
         if (found_read_const_buffer) {
-            UNREACHABLE_MSG("Bindless sharp access detected pc={:#x}", pc);
+            UNREACHABLE_MSG("Bindless sharp access detected pc={:#x}; root={} traversed={}", pc,
+                            handle->GetOpcode(), traversed);
         } else {
-            UNREACHABLE_MSG("Unable to find sharp sources pc={:#x}", pc);
+            UNREACHABLE_MSG("Unable to find sharp sources pc={:#x}; root={} traversed={}", pc,
+                            handle->GetOpcode(), traversed);
         }
     }
     return sources;
@@ -775,7 +783,7 @@ void PatchGlobalDataShareAccess(IR::Block& block, IR::Inst& inst, Info& info,
     }
 }
 
-IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
+IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst,
                                const AmdGpu::Buffer& buffer, u32 stride) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
@@ -807,8 +815,8 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         index = ir.IAdd(index, vgpr_index);
     }
     if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.l_stage == LogicalStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
+        // ADD_TID addresses with the lane's thread ID, which exists for every GCN shader stage.
+        // Rejecting graphics stages turns a valid descriptor permutation into a host assertion.
         const IR::U32 thread_id{ir.LaneId()};
         index = ir.IAdd(index, thread_id);
     }
@@ -864,7 +872,7 @@ void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     inst.SetArg(IR::LoadBufferArgs::Address,
-                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
+            CalculateBufferAddress(ir, inst, buffer, buffer.stride));
 }
 
 IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR::Value& x,

@@ -7,6 +7,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/descriptor_binding_cursor.h"
 
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -88,9 +89,35 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
 
 EmitContext::~EmitContext() = default;
 
+const EmitContext::TextureDefinition* EmitContext::TryGetImage(u32 handle) const noexcept {
+    const u32 index = handle & 0xFFFF;
+    if (index >= images.size()) {
+        return nullptr;
+    }
+    return &images[index];
+}
+
+const Id* EmitContext::TryGetSampler(u32 handle) const noexcept {
+    const u32 index = handle >> 16;
+    if (index >= samplers.size()) {
+        return nullptr;
+    }
+    return &samplers[index];
+}
+
 Id EmitContext::Def(const IR::Value& value) {
     if (!value.IsImmediate()) {
-        return value.InstRecursive()->Definition<Id>();
+        IR::Inst* const inst = value.InstRecursive();
+        if (spill_all_values && inst->GetOpcode() == IR::Opcode::GetVirtualRegister) {
+            const IR::VirtualReg reg = inst->Arg(0).VirtualReg();
+            return OpLoad(ValueType(reg.type), virtual_registers.at(reg.Key()));
+        }
+        if (const auto spill = cross_block_values.find(inst);
+            spill != cross_block_values.end() &&
+            (spill_all_values || (current_block && inst->GetParent() != current_block))) {
+            return OpLoad(ValueType(inst->Type()), spill->second);
+        }
+        return inst->Definition<Id>();
     }
     switch (value.Type()) {
     case IR::Type::Void:
@@ -109,6 +136,32 @@ Id EmitContext::Def(const IR::Value& value) {
         return String(value.StringLiteral());
     default:
         UNREACHABLE_MSG("Immediate type {}", value.Type());
+    }
+}
+
+Id EmitContext::ValueType(IR::Type type) const {
+    switch (type) {
+    case IR::Type::U1: return U1[1];
+    case IR::Type::U8: return U8;
+    case IR::Type::U16: return U16;
+    case IR::Type::U32: return U32[1];
+    case IR::Type::U64: return U64;
+    case IR::Type::F16: return F16[1];
+    case IR::Type::F32: return F32[1];
+    case IR::Type::F64: return F64[1];
+    case IR::Type::U32x2: return U32[2];
+    case IR::Type::U32x3: return U32[3];
+    case IR::Type::U32x4: return U32[4];
+    case IR::Type::F16x2: return F16[2];
+    case IR::Type::F16x3: return F16[3];
+    case IR::Type::F16x4: return F16[4];
+    case IR::Type::F32x2: return F32[2];
+    case IR::Type::F32x3: return F32[3];
+    case IR::Type::F32x4: return F32[4];
+    case IR::Type::F64x2: return F64[2];
+    case IR::Type::F64x3: return F64[3];
+    case IR::Type::F64x4: return F64[4];
+    default: UNREACHABLE_MSG("Unsupported function value type {}", type);
     }
 }
 
@@ -310,7 +363,15 @@ void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (info.stage == Stage::Fragment) {
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
+    }
+    if (info.emulate_wave64) {
+        // SubgroupId is core SPIR-V built-in 40. The generated enum bundled with the current
+        // Sirit version omits the scoped spelling while retaining the core numeric value.
+        subgroup_id = DefineVariable(U32[1], static_cast<spv::BuiltIn>(40),
+                                     spv::StorageClass::Input);
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -975,8 +1036,8 @@ void EmitContext::DefineImagesAndSamplers() {
 
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
-        Decorate(id, spv::Decoration::Binding, binding.unified);
-        binding.unified += num_bindings;
+        Decorate(id, spv::Decoration::Binding,
+                 VideoCore::ConsumeDescriptorBinding(binding.unified));
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         // TODO better naming for resources (flattened sharp_idx is not informative)
         Name(id, fmt::format("{}_{}{}", stage, "img", image_desc.sharp_idx));
@@ -1169,12 +1230,22 @@ Id EmitContext::DefineGetBdaPointer() {
     Name(func, "get_bda_pointer");
     AddLabel();
 
+    const auto valid_page_label{OpLabel()};
+    const auto invalid_page_label{OpLabel()};
     const auto fault_label{OpLabel()};
     const auto available_label{OpLabel()};
+    const auto lookup_merge_label{OpLabel()};
     const auto merge_label{OpLabel()};
 
-    // Get page BDA
+    // Keep the page index at guest-address width until it has been proven to fit the table.
     const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
+    const auto page_limit{Constant(U64, VideoCore::BufferCache::CACHING_NUMPAGES)};
+    const auto is_valid_page{OpULessThan(U1[1], page, page_limit)};
+    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(is_valid_page, valid_page_label, invalid_page_label);
+
+    // Get the page BDA only after validating the descriptor index.
+    AddLabel(valid_page_label);
     const auto page32{OpUConvert(U32[1], page)};
     const auto& bda_buffer{buffers[bda_pagetable_index]};
     const auto [bda_buffer_id, bda_pointer_type] = bda_buffer.Alias(PointerType::U64);
@@ -1183,7 +1254,7 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Check if page is GPU cached
     const auto is_fault{OpIEqual(U1[1], bda, u64_zero_value)};
-    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpSelectionMerge(lookup_merge_label, spv::SelectionControlMask::MaskNone);
     OpBranchConditional(is_fault, fault_label, available_label);
 
     // First time acces, mark as fault
@@ -1195,23 +1266,31 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
     const auto fault_ptr{
         OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, page_div32)};
-    const auto fault_value{OpLoad(U32[1], fault_ptr)};
-    const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
-    OpStore(fault_ptr, fault_value_masked);
+    const auto fault_scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
+    OpAtomicOr(U32[1], fault_ptr, fault_scope, u32_zero_value, page_mask);
 
     // Return null pointer
     const auto fallback_result{u64_zero_value};
-    OpBranch(merge_label);
+    OpBranch(lookup_merge_label);
 
     // Value is available, compute address
     AddLabel(available_label);
     const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
     const auto addr{OpIAdd(U64, bda, offset_in_bda)};
+    OpBranch(lookup_merge_label);
+
+    AddLabel(lookup_merge_label);
+    const auto valid_result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    OpBranch(merge_label);
+
+    // Addresses outside the 40-bit guest space have neither a page-table entry nor a fault bit.
+    AddLabel(invalid_page_label);
     OpBranch(merge_label);
 
     // Merge
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    const auto result{
+        OpPhi(U64, valid_result, lookup_merge_label, u64_zero_value, invalid_page_label)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;
