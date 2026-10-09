@@ -4,6 +4,8 @@
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_result_retry.h"
 
 #include "common/assert.h"
 
@@ -62,8 +64,10 @@ void MasterSemaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
-    }
+    const auto result = RetryOnTimeout([&] {
+        return instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT);
+    });
+    Check<"wait for master semaphore">(result);
     Refresh();
 }
 
