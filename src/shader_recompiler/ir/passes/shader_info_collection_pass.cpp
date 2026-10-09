@@ -10,6 +10,21 @@ namespace Shader::Optimization {
 
 void Visit(Info& info, const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
+    case IR::Opcode::LaneId:
+    case IR::Opcode::QuadShuffle:
+    case IR::Opcode::ReadLane:
+    case IR::Opcode::ReadFirstLane:
+    case IR::Opcode::WriteLane:
+    case IR::Opcode::Ballot:
+    case IR::Opcode::BallotFindLsb:
+    case IR::Opcode::GroupAny:
+        info.uses_subgroup_ops = true;
+        break;
+    default:
+        break;
+    }
+
+    switch (inst.GetOpcode()) {
     case IR::Opcode::GetAttribute:
     case IR::Opcode::GetAttributeU32:
         info.loads.Set(inst.Arg(0).Attribute(), inst.Arg(1).U32());
