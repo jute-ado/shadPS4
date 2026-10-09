@@ -593,7 +593,7 @@ void Translator::IMAGE_ATOMIC(AtomicOp op, const GcnInst& inst) {
     const IR::Value prev = [&] {
         switch (op) {
         case AtomicOp::Swap:
-            return ir.ImageAtomicExchange(handle, body, value, {});
+            return ir.ImageAtomicExchange(handle, body, value, info);
         case AtomicOp::CmpSwap: {
             const IR::Value cmp_val = ir.GetVectorReg(val_reg + 1);
             return ir.ImageAtomicCmpSwap(handle, body, value, cmp_val, info);
