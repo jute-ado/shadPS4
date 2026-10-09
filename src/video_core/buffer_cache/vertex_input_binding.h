@@ -7,6 +7,15 @@
 
 namespace VideoCore {
 
+template <typename BindVertexBuffers, typename BindIndexBuffer>
+[[nodiscard]] bool TryBindDrawBuffers(BindVertexBuffers&& bind_vertex_buffers,
+                                       BindIndexBuffer&& bind_index_buffer) {
+    if (!std::forward<BindVertexBuffers>(bind_vertex_buffers)()) {
+        return false;
+    }
+    return std::forward<BindIndexBuffer>(bind_index_buffer)();
+}
+
 template <typename BindPipeline, typename CommitDynamicState, typename Draw>
 void IssueDrawWithVertexInputState(bool uses_dynamic_state, BindPipeline&& bind_pipeline,
                                    CommitDynamicState&& commit_dynamic_state, Draw&& draw) {

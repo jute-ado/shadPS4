@@ -72,3 +72,58 @@ TEST(VertexInputBinding, StaticDrawSkipsDynamicState) {
 
     EXPECT_EQ(operations, (std::vector<std::string_view>{"pipeline", "draw"}));
 }
+
+TEST(VertexInputBinding, RejectedVertexBindingDoesNotAcquireIndexOrIssueDraw) {
+    std::vector<std::string_view> operations;
+
+    const bool admitted = VideoCore::TryBindDrawBuffers(
+        [&] {
+            operations.emplace_back("vertex");
+            return false;
+        },
+        [&] {
+            operations.emplace_back("index");
+            return true;
+        });
+
+    EXPECT_FALSE(admitted);
+    EXPECT_EQ(operations, (std::vector<std::string_view>{"vertex"}));
+}
+
+TEST(VertexInputBinding, RejectedIndexBindingDoesNotIssueDraw) {
+    std::vector<std::string_view> operations;
+
+    const bool admitted = VideoCore::TryBindDrawBuffers(
+        [&] {
+            operations.emplace_back("vertex");
+            return true;
+        },
+        [&] {
+            operations.emplace_back("index");
+            return false;
+        });
+
+    EXPECT_FALSE(admitted);
+    EXPECT_EQ(operations, (std::vector<std::string_view>{"vertex", "index"}));
+}
+
+TEST(VertexInputBinding, AcceptedBindingsAllowDraw) {
+    std::vector<std::string_view> operations;
+
+    const bool admitted = VideoCore::TryBindDrawBuffers(
+        [&] {
+            operations.emplace_back("vertex");
+            return true;
+        },
+        [&] {
+            operations.emplace_back("index");
+            return true;
+        });
+
+    if (admitted) {
+        operations.emplace_back("draw");
+    }
+
+    EXPECT_TRUE(admitted);
+    EXPECT_EQ(operations, (std::vector<std::string_view>{"vertex", "index", "draw"}));
+}
