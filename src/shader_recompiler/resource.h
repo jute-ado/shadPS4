@@ -156,6 +156,10 @@ struct PushData {
     static constexpr u32 UdRegsIndex = 4;
     static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
     static constexpr u32 HostInvScaleIndex = BufOffsetIndex + 3;
+    // Compute shaders do not consume host_inv_scale, so its word can carry the low half of the
+    // invalid-storage-image mask without increasing the Vulkan-guaranteed 128-byte push range.
+    static constexpr u32 InvalidImagesIndex = HostInvScaleIndex;
+    static constexpr u32 InvalidImagesHighIndex = InvalidImagesIndex + 1;
 
     float xoffset;
     float yoffset;
@@ -163,11 +167,32 @@ struct PushData {
     float yscale;
     std::array<u32, NUM_USER_DATA_REGS> ud_regs;
     std::array<u8, NUM_BUFFERS> buf_offsets;
-    float host_inv_scale{1.0f};
+    union {
+        float host_inv_scale{1.0f};
+        u32 invalid_images_low;
+    };
+    u32 invalid_images_high{};
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
+    }
+
+    void ClearInvalidImages() {
+        invalid_images_low = 0;
+        invalid_images_high = 0;
+    }
+
+    void MarkInvalidImage(u32 index) {
+        ASSERT(index < NUM_IMAGES);
+        auto& word = index < 32 ? invalid_images_low : invalid_images_high;
+        word |= 1U << (index & 31U);
+    }
+
+    bool IsImageInvalid(u32 index) const {
+        ASSERT(index < NUM_IMAGES);
+        const auto word = index < 32 ? invalid_images_low : invalid_images_high;
+        return (word & (1U << (index & 31U))) != 0;
     }
 };
 static_assert(sizeof(PushData) <= 128,

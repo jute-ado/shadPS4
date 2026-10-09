@@ -73,7 +73,7 @@ TEST(AsyncCompilationQueue, ShutdownRejectsNewWorkAndJoinsTheWorker) {
     EXPECT_FALSE(queue.TryTake().has_value());
 }
 
-TEST(AsyncGraphicsPipelineCompilation, IsExplicitlyGatedAndPublishesOnTheOwnerThread) {
+TEST(AsyncGraphicsPipelineCompilation, CacheMissQueuesWithoutBlockingTheOwnerThread) {
     const auto header = ReadText(SHADPS4_PIPELINE_CACHE_HEADER_PATH);
     const auto source = ReadText(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
 
@@ -89,7 +89,13 @@ TEST(AsyncGraphicsPipelineCompilation, IsExplicitlyGatedAndPublishesOnTheOwnerTh
     EXPECT_NE(source.find("graphics_key", submit), std::string::npos);
     EXPECT_NE(source.find("PublishAsyncGraphicsPipelines()"), std::string::npos);
     EXPECT_NE(source.find("async_graphics_compiler->TryTake()"), std::string::npos);
-    EXPECT_NE(source.find("WaitForAsyncGraphicsPipeline(graphics_key)"), std::string::npos);
+    EXPECT_EQ(source.find("WaitForAsyncGraphicsPipeline(graphics_key)"), std::string::npos);
+    const auto async_branch = source.find("if (async_graphics_compiler)");
+    const auto sync_branch = source.find("const auto [it, is_new]", async_branch);
+    ASSERT_NE(async_branch, std::string::npos);
+    ASSERT_NE(sync_branch, std::string::npos);
+    EXPECT_NE(source.substr(async_branch, sync_branch - async_branch).find("return nullptr;"),
+              std::string::npos);
     EXPECT_NE(source.find("result.pipeline->RebindStages(result.retained_infos)"),
               std::string::npos);
 

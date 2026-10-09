@@ -7,6 +7,47 @@
 
 namespace Shader::Backend::SPIRV {
 
+Id IsInvalidComputeImage(EmitContext& ctx, u32 image_index) {
+    if (ctx.l_stage != LogicalStage::Compute) {
+        return ctx.false_value;
+    }
+    const bool high_word = image_index >= 32;
+    const u32 member_index =
+        high_word ? PushData::InvalidImagesHighIndex : PushData::InvalidImagesIndex;
+    const Id member_type = high_word ? ctx.U32[1] : ctx.F32[1];
+    const Id member_ptr = ctx.OpAccessChain(
+        ctx.TypePointer(spv::StorageClass::PushConstant, member_type), ctx.push_data_block,
+        ctx.ConstU32(member_index));
+    Id invalid_images = ctx.OpLoad(member_type, member_ptr);
+    if (!high_word) {
+        invalid_images = ctx.OpBitcast(ctx.U32[1], invalid_images);
+    }
+    const Id invalid_mask = ctx.OpBitwiseAnd(
+        ctx.U32[1], invalid_images, ctx.ConstU32(1U << (image_index & 31U)));
+    return ctx.OpINotEqual(ctx.U1[1], invalid_mask, ctx.u32_zero_value);
+}
+
+template <typename EmitAccess>
+Id EmitComputeImageAccessIfValid(EmitContext& ctx, u32 image_index, Id result_type, Id fallback,
+                                 EmitAccess&& emit_access) {
+    if (ctx.l_stage != LogicalStage::Compute) {
+        return emit_access();
+    }
+    const Id is_invalid = IsInvalidComputeImage(ctx, image_index);
+    const Id valid_label = ctx.OpLabel();
+    const Id invalid_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(is_invalid, invalid_label, valid_label);
+    ctx.AddLabel(invalid_label);
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(valid_label);
+    const Id result = emit_access();
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(merge_label);
+    return ctx.OpPhi(result_type, fallback, invalid_label, result, valid_label);
+}
+
 struct ImageOperands {
     void Add(spv::ImageOperandsMask new_mask, Id value) {
         if (!Sirit::ValidId(value)) {
@@ -92,17 +133,21 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
 
 Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod,
                               const IR::Value& offset) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
-    const Id result_type = texture.data_types->Get(4);
-    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
-    ImageOperands operands;
-    operands.Add(spv::ImageOperandsMask::Lod, lod);
-    operands.AddOffset(ctx, offset);
-    const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
-                                                   operands.mask, operands.operands);
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+    const u32 image_index = handle & 0xFFFF;
+    return EmitComputeImageAccessIfValid(
+        ctx, image_index, ctx.F32[4], ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f), [&] {
+            const auto& texture = ctx.images[image_index];
+            const Id image = ctx.OpLoad(texture.image_type, texture.id);
+            const Id result_type = texture.data_types->Get(4);
+            const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
+            const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+            ImageOperands operands;
+            operands.Add(spv::ImageOperandsMask::Lod, lod);
+            operands.AddOffset(ctx, offset);
+            const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
+                                                           operands.mask, operands.operands);
+            return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+        });
 }
 
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
@@ -219,32 +264,35 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id
 }
 
 Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms) {
-    const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id color_type = texture.data_types->Get(4);
-    ImageOperands operands;
-    Id texel;
-    if (!texture.is_storage) {
-        const Id image = ctx.OpLoad(texture.image_type, texture.id);
-        if (texture.view_type == AmdGpu::ImageType::Color2DMsaa) {
+    const u32 image_index = handle & 0xFFFF;
+    return EmitComputeImageAccessIfValid(
+        ctx, image_index, ctx.F32[4], ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f), [&] {
+        const auto& texture = ctx.images[image_index];
+        const Id color_type = texture.data_types->Get(4);
+        ImageOperands operands;
+        Id texel;
+        if (!texture.is_storage) {
+            const Id image = ctx.OpLoad(texture.image_type, texture.id);
+            if (texture.view_type == AmdGpu::ImageType::Color2DMsaa) {
             // GCN hardware wraps out-of-range MSAA sample indices
             if (Sirit::ValidId(ms)) {
                 const Id sample_count = ctx.OpImageQuerySamples(ctx.U32[1], image);
                 const Id wrapped_ms = ctx.OpUMod(ctx.U32[1], ms, sample_count);
                 operands.Add(spv::ImageOperandsMask::Sample, wrapped_ms);
             }
-        } else {
+            } else {
             if (Sirit::ValidId(ms)) {
                 LOG_ERROR(Render_Recompiler, "image is not MS but ms operand is provided");
             }
             operands.Add(spv::ImageOperandsMask::Lod, lod);
             operands.Add(spv::ImageOperandsMask::Sample, ms);
-        }
-        texel = ctx.OpImageFetch(color_type, image, coords, operands.mask, operands.operands);
-    } else {
-        Id image_ptr = texture.id;
-        if (ctx.profile.supports_image_load_store_lod) {
+            }
+            texel = ctx.OpImageFetch(color_type, image, coords, operands.mask, operands.operands);
+        } else {
+            Id image_ptr = texture.id;
+            if (ctx.profile.supports_image_load_store_lod) {
             operands.Add(spv::ImageOperandsMask::Lod, lod);
-        } else if (Sirit::ValidId(lod)) {
+            } else if (Sirit::ValidId(lod)) {
 #if 1
             // It's confusing what interactions will cause this code path so leave it as
             // unreachable until a case is found.
@@ -257,11 +305,12 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
                 ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
             image_ptr = ctx.OpAccessChain(single_image_ptr_type, image_ptr, std::array{lod});
 #endif
+            }
+            const Id image = ctx.OpLoad(texture.image_type, image_ptr);
+            texel = ctx.OpImageRead(color_type, image, coords, operands.mask, operands.operands);
         }
-        const Id image = ctx.OpLoad(texture.image_type, image_ptr);
-        texel = ctx.OpImageRead(color_type, image, coords, operands.mask, operands.operands);
-    }
-    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texel) : texel;
+        return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texel) : texel;
+    });
 }
 
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms,
@@ -279,6 +328,21 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id 
         const Id single_image_ptr_type =
             ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
         image_ptr = ctx.OpAccessChain(single_image_ptr_type, image_ptr, std::array{lod});
+    }
+    if (ctx.l_stage == LogicalStage::Compute) {
+        const u32 image_index = handle & 0xFFFF;
+        const Id is_invalid = IsInvalidComputeImage(ctx, image_index);
+        const Id write_label = ctx.OpLabel();
+        const Id merge_label = ctx.OpLabel();
+        ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+        ctx.OpBranchConditional(is_invalid, merge_label, write_label);
+        ctx.AddLabel(write_label);
+        const Id image = ctx.OpLoad(texture.image_type, image_ptr);
+        const Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;
+        ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
+        ctx.OpBranch(merge_label);
+        ctx.AddLabel(merge_label);
+        return;
     }
     const Id image = ctx.OpLoad(texture.image_type, image_ptr);
     const Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;

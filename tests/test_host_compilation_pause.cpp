@@ -74,7 +74,7 @@ TEST(HostCompilationPause, PreservesAnExistingGuestPause) {
     EXPECT_EQ(controller.resume_calls, 0u);
 }
 
-TEST(HostCompilationPause, AsyncShaderCompilationDoesNotPauseGuestThreads) {
+TEST(HostCompilationPause, DisabledScopeDoesNotPauseGuestThreads) {
     FakeGuestPauseController controller;
     {
         ScopedHostCompilationGuestPause pause{controller, false};
@@ -85,7 +85,7 @@ TEST(HostCompilationPause, AsyncShaderCompilationDoesNotPauseGuestThreads) {
     EXPECT_EQ(controller.resume_calls, 0u);
 }
 
-TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) {
+TEST(HostCompilationPause, SynchronousShaderTranslationAppliesGpuSubmissionBackpressure) {
     const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
 
     ASSERT_FALSE(source.empty());
@@ -96,15 +96,16 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
     EXPECT_TRUE(ContainsBetween(source, "Compiling compute pipeline", "RegisterPipelineData",
                                 "ScopedHostCompilationGuestPause"));
     EXPECT_TRUE(ContainsBetween(source, "vk::ShaderModule PipelineCache::CompileModule",
-                                "RegisterShaderBinary", "ScopedHostCompilationGuestPause"));
+                                "RegisterShaderBinary", "BeginHostSubmissionBarrier"));
 
     const auto compile_module = source.find("vk::ShaderModule PipelineCache::CompileModule");
     const auto register_shader = source.find("RegisterShaderBinary", compile_module);
     ASSERT_NE(compile_module, std::string::npos);
     ASSERT_NE(register_shader, std::string::npos);
     const auto module_compile = source.substr(compile_module, register_shader - compile_module);
-    EXPECT_NE(module_compile.find("IsAsyncGraphicsPipelineCompilation"), std::string::npos);
-    EXPECT_NE(module_compile.find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
+    EXPECT_EQ(module_compile.find("ScopedHostCompilationGuestPause"), std::string::npos);
+    EXPECT_EQ(module_compile.find("IsAsyncGraphicsPipelineCompilation"), std::string::npos);
+    EXPECT_EQ(module_compile.find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
               std::string::npos);
 
     const auto async_compile = source.find("PipelineCache::CompileGraphicsPipelineAsync");

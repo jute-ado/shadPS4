@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/depth_stencil_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -397,7 +398,18 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        cmdbuf.setCheckpointNV(RecordCommandCheckpoint(
+            CommandCheckpointType::Dispatch, cs.pgm_hash, {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0}));
+    }
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        cmdbuf.setCheckpointNV(RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchComplete, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0}));
+    }
     DebugState.IncDispatch();
 
     ResetBindings();
@@ -430,7 +442,19 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+        cmdbuf.setCheckpointNV(RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchIndirect, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0}, {address + offset, size, 0, 0, 0, 0}));
+    }
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+        cmdbuf.setCheckpointNV(RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchIndirectComplete, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0}, {address + offset, size, 0, 0, 0, 0}));
+    }
     DebugState.IncDispatch();
 
     ResetBindings();
@@ -495,6 +519,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
+        }
+        if (stage->l_stage == Shader::LogicalStage::Compute) {
+            push_data.ClearInvalidImages();
         }
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
@@ -814,13 +841,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
     boost::container::small_vector<std::pair<bool, bool>, 8> image_native_extent_requirements;
-    const auto append_invalid_image_binding = [&] {
-        image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+    const auto append_invalid_image_binding = [&](bool is_storage) {
+        auto& [_, desc] =
+            image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+        desc.type = is_storage ? VideoCore::TextureCache::BindingType::Storage
+                               : VideoCore::TextureCache::BindingType::Texture;
         image_descriptor_array_sizes.push_back(1);
         image_native_extent_requirements.emplace_back(false, false);
     };
 
-    for (const auto& image_desc : stage.images) {
+    for (u32 image_index = 0; image_index < stage.images.size(); ++image_index) {
+        const auto& image_desc = stage.images[image_index];
         const auto tsharp = image_desc.GetSharp(stage);
         if (texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
@@ -829,7 +860,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            append_invalid_image_binding();
+            if (stage.l_stage == Shader::LogicalStage::Compute) {
+                LOG_WARNING(Render_Vulkan,
+                            "Invalid compute image: shader={:#x}, index={}, written={}, "
+                            "address={:#x}, data_format={}",
+                            stage.pgm_hash, image_index, image_desc.is_written, tsharp.Address(),
+                            static_cast<u32>(data_fmt));
+            }
+            if (stage.l_stage == Shader::LogicalStage::Compute) {
+                push_data.MarkInvalidImage(image_index);
+            }
+            append_invalid_image_binding(image_desc.is_written);
             continue;
         }
 
@@ -840,7 +881,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         "data_format={}, num_format={}",
                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                         static_cast<u32>(num_fmt));
-            append_invalid_image_binding();
+            if (stage.l_stage == Shader::LogicalStage::Compute) {
+                push_data.MarkInvalidImage(image_index);
+            }
+            append_invalid_image_binding(image_desc.is_written);
             continue;
         }
 

@@ -8,6 +8,7 @@
 #include "common/path_util.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/gnmdriver/gnmdriver.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
@@ -418,26 +419,6 @@ void PipelineCache::PublishAsyncGraphicsPipelines() {
     }
 }
 
-const GraphicsPipeline* PipelineCache::WaitForAsyncGraphicsPipeline(
-    const GraphicsPipelineKey& key) {
-    for (;;) {
-        PublishAsyncGraphicsPipelines();
-        if (const auto it = graphics_pipelines.find(key); it != graphics_pipelines.end()) {
-            return it->second.get();
-        }
-
-        auto completion = async_graphics_compiler->WaitTake();
-        if (!completion) {
-            return nullptr;
-        }
-        const bool requested_pipeline_failed = completion->key == key && !completion->result;
-        PublishAsyncGraphicsPipeline(std::move(*completion));
-        if (requested_pipeline_failed) {
-            return nullptr;
-        }
-    }
-}
-
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     PublishAsyncGraphicsPipelines();
     if (!RefreshGraphicsKey()) {
@@ -454,7 +435,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
                      pipeline_hash);
         }
         fetch_shader.reset();
-        return WaitForAsyncGraphicsPipeline(graphics_key);
+        return nullptr;
     }
 
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
@@ -737,8 +718,7 @@ bool PipelineCache::RefreshComputeKey() {
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
                                               Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{
-        DebugState, !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
+    auto submission_barrier = Libraries::GnmDriver::BeginHostSubmissionBarrier();
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");

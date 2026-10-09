@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/libraries/gnmdriver/submission_gate.h"
 #include "core/libraries/kernel/equeue.h"
 
 namespace Core::Loader {
@@ -15,6 +16,7 @@ namespace Libraries::GnmDriver {
 using namespace Kernel;
 
 void WaitForSubmissionBoundary();
+SubmissionGate::ScopedBoundary BeginHostSubmissionBarrier();
 
 s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata);
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed();
