@@ -1243,4 +1243,12 @@ void Liverpool::SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
     submit_cv.notify_one();
 }
 
+void Liverpool::WaitGpuCompletion() {
+    SendCommand<true>([this] {
+        if (rasterizer) {
+            rasterizer->Finish();
+        }
+    });
+}
+
 } // namespace AmdGpu
