@@ -105,55 +105,49 @@ s32 PS4_SYSV_ABI sceKernelError(s32 posix_error) {
     return posix_error + ORBIS_KERNEL_ERROR_UNKNOWN;
 }
 
-s32 NativeToPosixErrno(s32 const e) {
+void SetPosixErrno(s32 e) {
     // Some error numbers are different between supported OSes
     switch (e) {
-    case 0:
-        return 0;
     case EPERM:
-        return POSIX_EPERM;
+        g_posix_errno = POSIX_EPERM;
         break;
     case ENOENT:
-        return POSIX_ENOENT;
+        g_posix_errno = POSIX_ENOENT;
         break;
     case EINTR:
-        return POSIX_EINTR;
+        g_posix_errno = POSIX_EINTR;
         break;
     case EDEADLK:
-        return POSIX_EDEADLK;
+        g_posix_errno = POSIX_EDEADLK;
         break;
     case ENOMEM:
-        return POSIX_ENOMEM;
+        g_posix_errno = POSIX_ENOMEM;
         break;
     case EACCES:
-        return POSIX_EACCES;
+        g_posix_errno = POSIX_EACCES;
         break;
     case EFAULT:
-        return POSIX_EFAULT;
+        g_posix_errno = POSIX_EFAULT;
         break;
     case EINVAL:
-        return POSIX_EINVAL;
+        g_posix_errno = POSIX_EINVAL;
         break;
     case ENOSPC:
-        return POSIX_ENOSPC;
+        g_posix_errno = POSIX_ENOSPC;
         break;
     case ERANGE:
-        return POSIX_ERANGE;
+        g_posix_errno = POSIX_ERANGE;
         break;
     case EAGAIN:
-        return POSIX_EAGAIN;
+        g_posix_errno = POSIX_EAGAIN;
         break;
     case ETIMEDOUT:
-        return POSIX_ETIMEDOUT;
+        g_posix_errno = POSIX_ETIMEDOUT;
         break;
     default:
         LOG_WARNING(Kernel, "Unhandled errno {}", e);
-        return e;
+        g_posix_errno = e;
     }
-}
-
-void SetPosixErrno(s32 e) {
-    g_posix_errno = NativeToPosixErrno(e);
 }
 
 struct OrbisKernelUuid {
