@@ -78,6 +78,19 @@ void WaitForSubmissionBoundary() {
     submission_gate.WaitForBoundary();
 }
 
+Common::UniqueFunction<void> AcquireGpuSubmissionBoundary() {
+    // Keep new guest submissions out after the last published boundary has reached the command
+    // processor. The synchronous GPU-thread command then submits and waits for every command that
+    // could still reference the old guest mapping before the caller changes its backing.
+    auto admission = submission_gate.WaitForBoundaryAndEnter();
+    if (liverpool) {
+        liverpool->WaitGpuCompletion();
+    }
+    // The returned token owns submission admission. Its destruction releases the gate only after
+    // the caller has completed the GPU-visible address-space change.
+    return [admission = std::move(admission)] {};
+}
+
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
