@@ -143,7 +143,8 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
 
 void Traverse(EmitContext& ctx, const IR::Program& program) {
     IR::Block* current_block{};
-    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+    for (size_t node_index = 0; node_index < program.syntax_list.size(); ++node_index) {
+        const IR::AbstractSyntaxNode& node = program.syntax_list[node_index];
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block: {
             const Id label{node.data.block->Definition<Id>()};
@@ -169,6 +170,30 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             const Id body_label{node.data.loop.body->Definition<Id>()};
             const Id continue_label{node.data.loop.continue_block->Definition<Id>()};
             const Id endloop_label{node.data.loop.merge->Definition<Id>()};
+
+            const bool has_pre_test =
+                node_index + 2 < program.syntax_list.size() &&
+                program.syntax_list[node_index + 1].type ==
+                    IR::AbstractSyntaxNode::Type::Block &&
+                program.syntax_list[node_index + 1].data.block == node.data.loop.body &&
+                program.syntax_list[node_index + 2].type ==
+                    IR::AbstractSyntaxNode::Type::Break &&
+                program.syntax_list[node_index + 2].data.break_node.merge ==
+                    node.data.loop.merge;
+            if (has_pre_test) {
+                for (IR::Inst& inst : node.data.loop.body->Instructions()) {
+                    EmitInst(ctx, &inst);
+                }
+                ctx.first_to_last_label_map[body_label.value] = ctx.last_label;
+
+                const auto& break_node = program.syntax_list[node_index + 2].data.break_node;
+                ctx.OpLoopMerge(endloop_label, continue_label,
+                                spv::LoopControlMask::MaskNone);
+                ctx.OpBranchConditional(ctx.Def(break_node.cond), endloop_label,
+                                        break_node.skip->Definition<Id>());
+                node_index += 2;
+                break;
+            }
 
             ctx.OpLoopMerge(endloop_label, continue_label, spv::LoopControlMask::MaskNone);
             ctx.OpBranch(body_label);
