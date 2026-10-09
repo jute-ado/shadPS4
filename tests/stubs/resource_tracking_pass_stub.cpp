@@ -205,8 +205,8 @@ private:
 
 } // Anonymous namespace
 
-void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& descriptors,
-                      const Profile& profile) {
+void PatchBufferSharpStub(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& descriptors,
+                          const Profile& profile) {
     u32 sharp_idx = 0;
     if (inst.GetOpcode() == IR::Opcode::ReadConstBufferAddr64) {
         const IR::Inst* handle = inst.Arg(0).InstRecursive();
@@ -228,8 +228,8 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
     inst.SetArg(0, ir.Imm32(buffer_binding));
 }
 
-IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
-                               const AmdGpu::Buffer& buffer, u32 stride) {
+IR::U32 CalculateBufferAddressStub(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
+                                   const AmdGpu::Buffer& buffer, u32 stride) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
     const auto is_inst_typed = inst_info.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
@@ -307,7 +307,7 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
     return buffer_offset;
 }
 
-void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
+void PatchBufferArgsStub(IR::Block& block, IR::Inst& inst, Info& info) {
     const auto handle = inst.Arg(0);
     const auto buffer_res = info.buffers[handle.U32()];
     const auto buffer = AmdGpu::Buffer::Null();
@@ -320,7 +320,7 @@ void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     inst.SetArg(IR::LoadBufferArgs::Address,
-                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
+                CalculateBufferAddressStub(ir, inst, info, buffer, buffer.stride));
 }
 
 void ResourceTrackingPassStub(IR::Program& program, const Profile& profile) {
@@ -332,7 +332,7 @@ void ResourceTrackingPassStub(IR::Program& program, const Profile& profile) {
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (IsBufferInstruction(inst)) {
-                PatchBufferSharp(*block, inst, info, descriptors, profile);
+                PatchBufferSharpStub(*block, inst, info, descriptors, profile);
             }
         }
     }
@@ -341,7 +341,7 @@ void ResourceTrackingPassStub(IR::Program& program, const Profile& profile) {
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (IsBufferInstruction(inst)) {
-                PatchBufferArgs(*block, inst, info);
+                PatchBufferArgsStub(*block, inst, info);
             }
         }
     }

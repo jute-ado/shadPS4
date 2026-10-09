@@ -75,6 +75,8 @@ public:
 
     void SubmitDone(Common::UniqueFunction<void>&& completion) noexcept;
 
+    void WaitGpuCompletion();
+
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
         submit_cv.wait(lk, [this] { return num_submits == 0; });
