@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "video_core/amdgpu/resource.h"
 #include "video_core/texture_cache/types.h"
 
 namespace {
@@ -18,6 +19,29 @@ std::string ReadText(const char* path) {
     std::ostringstream contents;
     contents << input.rdbuf();
     return contents.str();
+}
+
+TEST(ImageDescriptorLayers, NonArrayTypesIgnoreUnusedDepthBits) {
+    for (const auto type : {AmdGpu::ImageType::Color1D, AmdGpu::ImageType::Color2D,
+                            AmdGpu::ImageType::Color2DMsaa}) {
+        AmdGpu::Image image{};
+        image.type = static_cast<u64>(type);
+        image.depth = 3277;
+        image.pow2pad = 1;
+        EXPECT_EQ(image.NumLayers(), 1U) << AmdGpu::NameOf(type);
+    }
+}
+
+TEST(ImageDescriptorLayers, ArrayAndCubeTypesRetainEncodedLayerCounts) {
+    AmdGpu::Image array{};
+    array.type = static_cast<u64>(AmdGpu::ImageType::Color2DArray);
+    array.depth = 4;
+    EXPECT_EQ(array.NumLayers(), 5U);
+
+    AmdGpu::Image cube{};
+    cube.type = static_cast<u64>(AmdGpu::ImageType::Cube);
+    cube.depth = 1;
+    EXPECT_EQ(cube.NumLayers(), 12U);
 }
 
 TEST(SubresourceExtent, ContainsEqualExtent) {

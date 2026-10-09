@@ -174,26 +174,18 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
     }
 }
 
-void BufferCache::BindVertexBuffers(
+BufferCache::PreparedVertexBuffers BufferCache::PrepareVertexBuffers(
     const Vulkan::GraphicsPipeline& pipeline,
     boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
-    Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
-    Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
+    PreparedVertexBuffers prepared;
     Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
     Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
-    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+    pipeline.GetVertexInputs(prepared.attributes, prepared.bindings, divisors, guest_buffers,
                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
-    if (instance.IsVertexInputDynamicState()) {
-        // Update current vertex inputs.
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.setVertexInputEXT(bindings, attributes);
-    }
-
-    if (bindings.empty()) {
-        // If there are no bindings, there is nothing further to do.
-        return;
+    if (prepared.bindings.empty()) {
+        return prepared;
     }
 
     struct BufferRange {
@@ -247,11 +239,7 @@ void BufferCache::BindVertexBuffers(
         }
     }
 
-    // Bind vertex buffers
-    Vulkan::VertexInputs<vk::Buffer> host_buffers;
-    Vulkan::VertexInputs<vk::DeviceSize> host_offsets;
-    Vulkan::VertexInputs<vk::DeviceSize> host_sizes;
-    Vulkan::VertexInputs<vk::DeviceSize> host_strides;
+    // Assemble the host vertex buffers for publication after all draw acquisitions finish.
     for (const auto& buffer : guest_buffers) {
         if (buffer.base_address != 0 && buffer.GetSize() > 0) {
             const auto host_buffer_info =
@@ -260,28 +248,37 @@ void BufferCache::BindVertexBuffers(
                            buffer.base_address < range.end_address;
                 });
             ASSERT(host_buffer_info != ranges_merged.cend());
-            host_buffers.emplace_back(host_buffer_info->vk_buffer);
-            host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
-                                   host_buffer_info->base_address);
+            prepared.host_buffers.emplace_back(host_buffer_info->vk_buffer);
+            prepared.host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
+                                            host_buffer_info->base_address);
         } else {
-            host_buffers.emplace_back(VK_NULL_HANDLE);
-            host_offsets.push_back(0);
+            prepared.host_buffers.emplace_back(VK_NULL_HANDLE);
+            prepared.host_offsets.push_back(0);
         }
-        host_sizes.push_back(buffer.GetSize());
-        host_strides.push_back(buffer.GetStride());
+        prepared.host_sizes.push_back(buffer.GetSize());
+        prepared.host_strides.push_back(buffer.GetStride());
     }
 
+    return prepared;
+}
+
+void BufferCache::BindVertexBuffers(const PreparedVertexBuffers& prepared) {
     const auto cmdbuf = scheduler.CommandBuffer();
-    const auto num_buffers = guest_buffers.size();
+    const auto num_buffers = prepared.host_buffers.size();
     if (instance.IsVertexInputDynamicState()) {
-        cmdbuf.bindVertexBuffers(0, num_buffers, host_buffers.data(), host_offsets.data());
-    } else {
-        cmdbuf.bindVertexBuffers2(0, num_buffers, host_buffers.data(), host_offsets.data(),
-                                  host_sizes.data(), host_strides.data());
+        if (num_buffers != 0) {
+            cmdbuf.bindVertexBuffers(0, num_buffers, prepared.host_buffers.data(),
+                                     prepared.host_offsets.data());
+        }
+        cmdbuf.setVertexInputEXT(prepared.bindings, prepared.attributes);
+    } else if (num_buffers != 0) {
+        cmdbuf.bindVertexBuffers2(0, num_buffers, prepared.host_buffers.data(),
+                                  prepared.host_offsets.data(), prepared.host_sizes.data(),
+                                  prepared.host_strides.data());
     }
 }
 
-void BufferCache::BindIndexBuffer(
+BufferCache::PreparedIndexBuffer BufferCache::PrepareIndexBuffer(
     u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
 
@@ -292,7 +289,8 @@ void BufferCache::BindIndexBuffer(
     const VAddr index_address =
         regs.index_base_address.Address<VAddr>() + index_offset * index_size;
 
-    // Bind index buffer.
+    // Acquire the index buffer. Binding is deferred until all potentially waiting acquisitions
+    // for the draw have completed.
     const u32 index_buffer_size = regs.num_indices * index_size;
     const auto [vk_buffer, offset] = ObtainBuffer(index_address, index_buffer_size, false);
     if (IsRegionGpuModified(index_address, index_buffer_size)) {
@@ -301,8 +299,16 @@ void BufferCache::BindIndexBuffer(
             barriers.emplace_back(*barrier);
         }
     }
+    return PreparedIndexBuffer{
+        .buffer = vk_buffer->Handle(),
+        .offset = offset,
+        .type = index_type,
+    };
+}
+
+void BufferCache::BindIndexBuffer(const PreparedIndexBuffer& prepared) {
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
+    cmdbuf.bindIndexBuffer(prepared.buffer, prepared.offset, prepared.type);
 }
 
 void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
