@@ -49,7 +49,7 @@
 #include "core/libraries/np/np_signaling/np_signaling.h"
 #include "core/libraries/np/np_sns_facebook_dialog.h"
 #include "core/libraries/np/np_trophy.h"
-#include "core/libraries/np/np_tus.h"
+#include "core/libraries/np/np_tus/np_tus.h"
 #include "core/libraries/np/np_web_api/np_web_api.h"
 #include "core/libraries/np/np_web_api2/np_web_api2.h"
 #include "core/libraries/pad/pad.h"
@@ -108,6 +108,7 @@ void InitHLELibs(Core::Loader::SymbolsResolver* sym) {
             {"libSceVideoOut.sprx", Libraries::VideoOut::RegisterLib},
             {"libSceUserService.sprx", Libraries::UserService::RegisterLib},
             {"libSceSystemService.sprx", Libraries::SystemService::RegisterLib},
+            {"libScePad.sprx", Libraries::Pad::RegisterLib},
             {"libSceCommonDialog.sprx", Libraries::CommonDialog::RegisterLib},
             {"libSceMsgDialog.sprx", Libraries::MsgDialog::RegisterLib},
             {"libSceAudioOut.sprx", Libraries::AudioOut::RegisterLib},
@@ -143,11 +144,9 @@ void InitHLELibs(Core::Loader::SymbolsResolver* sym) {
             {"libScePlayGoDialog.sprx", Libraries::PlayGo::Dialog::RegisterLib},
             {"libSceRandom.sprx", Libraries::Random::RegisterLib},
             {"libSceUsbd.sprx", Libraries::Usbd::RegisterLib},
-            {"libScePad.sprx", Libraries::Pad::RegisterLib},
             {"libSceAjm.sprx", Libraries::Ajm::RegisterLib},
             {"libSceErrorDialog.sprx", Libraries::ErrorDialog::RegisterLib},
             {"libSceImeDialog.sprx", Libraries::ImeDialog::RegisterLib},
-            {"libSceAvPlayer.sprx", Libraries::AvPlayer::RegisterLib},
             {"libSceVideodec.sprx", Libraries::Videodec::RegisterLib},
             {"libSceVideodec2.sprx", Libraries::Videodec2::RegisterLib},
             {"libSceIme.sprx", Libraries::Ime::RegisterLib},
