@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstring>
+#include <limits>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -122,6 +125,10 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    // Exact vertex descriptors selected through the same coherent reader as shader translation.
+    // This is transient draw state: it is copied into asynchronous jobs, but is intentionally
+    // excluded from shader serialization and permutation identity.
+    boost::container::static_vector<AmdGpu::Buffer, IR::NumParams> captured_vertex_buffers;
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -142,6 +149,9 @@ struct Info : InfoPersistent {
     bool uses_group_quad{};
     bool uses_group_ballot{};
     IR::Type shared_types{};
+    // Host-generated workgroup scratch appended after the guest-visible LDS range. This is
+    // compile-call-local code-generation state and is deliberately not serialized.
+    u32 workgroup_scratch_memory_size{};
     bool uses_fp16{};
     bool uses_fp64{};
     bool uses_pack_10_11_11{};
@@ -165,15 +175,42 @@ struct Info : InfoPersistent {
     }
 
     template <typename T>
-    T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
-        T data;
-        const u32* base = user_data.data();
-        if (ptr_index != IR::NumScalarRegs) {
-            std::memcpy(&base, &user_data[ptr_index], sizeof(base));
-            base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+    T ReadUdReg(u32 ptr_index, u32 dword_offset, SrtMemoryReader reader = {}) const noexcept {
+        T data{};
+        const u64 byte_offset = u64{dword_offset} * sizeof(u32);
+        if (ptr_index == IR::NumScalarRegs) {
+            if (byte_offset > user_data.size_bytes() ||
+                sizeof(T) > user_data.size_bytes() - byte_offset) {
+                return data;
+            }
+            std::memcpy(&data, reinterpret_cast<const u8*>(user_data.data()) + byte_offset,
+                        sizeof(T));
+            return data;
         }
-        std::memcpy(&data, base + dword_offset, sizeof(T));
+        if (ptr_index + 1U >= user_data.size()) {
+            return data;
+        }
+        u64 raw_pointer{};
+        std::memcpy(&raw_pointer, &user_data[ptr_index], sizeof(raw_pointer));
+        const VAddr base_address = raw_pointer & 0xFFFFFFFFFFFFULL;
+        if (base_address == 0 || base_address > std::numeric_limits<VAddr>::max() - byte_offset ||
+            !ReadGuestMemory(reader, base_address + byte_offset, &data, sizeof(T))) {
+            return T{};
+        }
         return data;
+    }
+
+    [[nodiscard]] bool ReadGuestMemory(SrtMemoryReader reader, VAddr address, void* output,
+                                       u64 size) const noexcept {
+        if (output == nullptr || address == 0 || size == 0 ||
+            address > std::numeric_limits<VAddr>::max() - size) {
+            return false;
+        }
+        if (reader.callback) {
+            return reader.callback(reader.context, address, output, size);
+        }
+        std::memcpy(output, reinterpret_cast<const void*>(address), size);
+        return true;
     }
 
     void PushUd(Backend::Bindings& bnd, PushData& push) const {
@@ -187,28 +224,88 @@ struct Info : InfoPersistent {
     }
 
     void AddBindings(Backend::Bindings& bnd) const {
-        bnd.buffer += buffers.size();
-        bnd.unified += buffers.size() + images.size() + samplers.size();
+        for (const auto& buffer : buffers) {
+            ASSERT(bnd.TryAddBufferBinding().has_value());
+        }
+        for (const auto& image : images) {
+            ASSERT(bnd.TryAddImageBinding(image.NumBindings(*this)).has_value());
+        }
+        for (const auto& sampler : samplers) {
+            ASSERT(bnd.TryAddSamplerBinding().has_value());
+        }
         bnd.user_data += ud_mask.NumRegs();
     }
 
-    void RefreshFlatBuf() {
-        flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+    [[nodiscard]] bool RefreshFlatBuf(SrtMemoryReader reader = {}) {
+        if (!srt_info.ValidateRangeReservations() ||
+            srt_info.flattened_bufsize_dw < user_data.size()) {
+            flattened_ud_buf.clear();
+            return false;
+        }
+        flattened_ud_buf.assign(srt_info.flattened_bufsize_dw, 0);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+            srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), reader.callback,
+                                 reader.context);
         }
+        const auto clear_reservations = [&] {
+            for (const auto& reservation : srt_info.range_reservations) {
+                if (reservation.destination_flat_offset_dw <= flattened_ud_buf.size() &&
+                    reservation.span_dw <=
+                        flattened_ud_buf.size() - reservation.destination_flat_offset_dw) {
+                    std::fill_n(flattened_ud_buf.begin() +
+                                    reservation.destination_flat_offset_dw,
+                                reservation.span_dw, 0U);
+                }
+            }
+        };
+        if (!reader.Valid()) {
+            clear_reservations();
+            return false;
+        }
+        if (srt_info.range_reservations.empty()) {
+            return true;
+        }
+        if (!reader.callback) {
+            clear_reservations();
+            return false;
+        }
+        for (const auto& reservation : srt_info.range_reservations) {
+            if (reservation.pointer_lo_flat_index + 1U >= flattened_ud_buf.size()) {
+                clear_reservations();
+                return false;
+            }
+            u64 raw_pointer{};
+            std::memcpy(&raw_pointer,
+                        flattened_ud_buf.data() + reservation.pointer_lo_flat_index,
+                        sizeof(raw_pointer));
+            const VAddr base_address = raw_pointer & 0xFFFFFFFFFFFFULL;
+            const u64 source_offset = u64{reservation.source_offset_dw} * sizeof(u32);
+            const u64 byte_size = u64{reservation.span_dw} * sizeof(u32);
+            if (base_address == 0 ||
+                base_address > std::numeric_limits<VAddr>::max() - source_offset ||
+                base_address + source_offset > std::numeric_limits<VAddr>::max() - byte_size ||
+                !ReadGuestMemory(reader, base_address + source_offset,
+                                 flattened_ud_buf.data() +
+                                     reservation.destination_flat_offset_dw,
+                                 byte_size) ||
+                !reader.Valid()) {
+                clear_reservations();
+                return false;
+            }
+        }
+        return true;
     }
 
-    void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
+    void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants,
+                                SrtMemoryReader reader = {}) const {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
-                                             static_cast<u32>(tess_consts_dword_offset));
-        VAddr tess_constants_addr = buf.base_address;
-        memcpy(&tess_constants,
-               reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
-               sizeof(tess_constants));
+                                             static_cast<u32>(tess_consts_dword_offset), reader);
+        if (!ReadGuestMemory(reader, buf.base_address, &tess_constants, sizeof(tess_constants))) {
+            tess_constants = {};
+        }
     }
 
     void Serialize(Serialization::Archive& ar) const;
