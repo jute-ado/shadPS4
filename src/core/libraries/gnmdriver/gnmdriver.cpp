@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
+
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -146,7 +149,24 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
 
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed() {
     LOG_TRACE(Lib_GnmDriver, "called");
-    return submission_gate.AreSubmitsAllowed();
+    const bool allowed = submission_gate.AreSubmitsAllowed();
+    if (!allowed) {
+        static std::atomic<u64> denial_count{};
+        static std::atomic<s64> next_log_time_ns{};
+        const auto denial = denial_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        auto next_ns = next_log_time_ns.load(std::memory_order_relaxed);
+        if (now_ns >= next_ns &&
+            next_log_time_ns.compare_exchange_strong(next_ns, now_ns + 1'000'000'000,
+                                                     std::memory_order_relaxed)) {
+            LOG_WARNING(Lib_GnmDriver,
+                        "Submission eligibility denied by pending boundary, denial={}, gpu_idle={}",
+                        denial, liverpool->IsGpuIdle());
+        }
+    }
+    return allowed;
 }
 
 int PS4_SYSV_ABI sceGnmBeginWorkload(u32 workload_stream, u64* workload) {
