@@ -28,11 +28,12 @@ using Shader::Output;
 using Shader::Stage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
+constexpr static u32 DescriptorHeapSampledImages = 8192U;
 
 constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 8192},
-    vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, 8192},
+    vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, DescriptorHeapSampledImages},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 1024},
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
@@ -267,6 +268,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
         .max_shared_memory_size = instance.MaxComputeSharedMemorySize(),
+        .max_sampled_images_per_stage = instance.MaxPerStageDescriptorSampledImages(),
+        .max_sampled_images_per_set = instance.MaxDescriptorSetSampledImages(),
+        .max_resources_per_stage = instance.MaxPerStageResources(),
+        .max_sampled_images_per_descriptor_heap_set =
+            DescriptorHeapSampledImages / DescriptorHeap::DescriptorSetBatch,
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
         .support_int8 = instance.IsShaderInt8Supported(),
@@ -294,6 +300,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_fp64_signed_zero_inf_nan_preserve =
             bool(vk12_props.shaderSignedZeroInfNanPreserveFloat64),
         .supports_image_load_store_lod = instance_.IsImageLoadStoreLodSupported(),
+        .supports_sampled_image_array_nonuniform_indexing =
+            instance_.IsSampledImageArrayNonUniformIndexingSupported(),
         .supports_native_cube_calc = instance_.IsAmdGcnShaderSupported(),
         .supports_trinary_minmax = instance_.IsAmdShaderTrinaryMinMaxSupported(),
         .supports_buffer_fp32_atomic_min_max =

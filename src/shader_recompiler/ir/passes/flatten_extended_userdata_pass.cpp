@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <limits>
+#include <tuple>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <xbyak/xbyak.h>
@@ -16,6 +19,8 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/opcodes.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_matcher.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_policy.h"
 #include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reg.h"
@@ -137,6 +142,8 @@ struct PassInfo {
     // Bumped during codegen to assign offsets to readconsts
     u32 dst_off_dw;
 
+    boost::container::small_vector<Optimization::DynamicImageTableMatch, 2> dynamic_image_tables;
+
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
         if (it != pointer_uses.end()) {
@@ -251,6 +258,13 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
          r_it++) {
         IR::Block* block = *r_it;
         for (IR::Inst& inst : *block) {
+            if (const auto match = MatchDynamicImageTable(inst)) {
+                // This pass has no device profile. Reserve only a policy-safe host window here;
+                // ResourceTrackingPass separately gates stage, feature, and Vulkan capacities.
+                if (PlanDynamicImageTable(match->Pattern(0U, NUM_IMAGES, true, true))) {
+                    pass_info.dynamic_image_tables.push_back(*match);
+                }
+            }
             if (inst.GetOpcode() == IR::Opcode::ReadConst) {
                 if (!inst.Arg(1).IsImmediate()) {
                     LOG_WARNING(Render_Recompiler, "ReadConst has non-immediate offset");
@@ -305,6 +319,45 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
         IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
         readconst->SetFlags<u32>(original->Flags<u32>());
+    }
+
+    const auto flat_pointer_location = [](IR::Inst* pointer_dword) -> std::optional<u32> {
+        switch (pointer_dword->GetOpcode()) {
+        case IR::Opcode::GetUserData:
+            return static_cast<u32>(pointer_dword->Arg(0).ScalarReg());
+        case IR::Opcode::ReadConst: {
+            const u32 location = pointer_dword->Flags<u32>();
+            return location >= NUM_USER_DATA_REGS ? std::optional{location} : std::nullopt;
+        }
+        default:
+            return std::nullopt;
+        }
+    };
+
+    struct ReservationRequest {
+        DynamicImageTablePlan plan{};
+    };
+    boost::container::small_vector<ReservationRequest, 2> requests;
+    for (auto& match : pass_info.dynamic_image_tables) {
+        const auto pointer_lo = flat_pointer_location(match.pointer_lo);
+        const auto pointer_hi = flat_pointer_location(match.pointer_hi);
+        if (!pointer_lo || !pointer_hi || *pointer_lo == std::numeric_limits<u32>::max() ||
+            *pointer_hi != *pointer_lo + 1U) {
+            continue;
+        }
+        const auto plan = PlanDynamicImageTable(match.Pattern(*pointer_lo, NUM_IMAGES, true, true));
+        if (plan) {
+            requests.push_back({.plan = *plan});
+        }
+    }
+    std::ranges::sort(requests, {}, [](const ReservationRequest& request) {
+        return std::tuple{request.plan.base_pointer_location, request.plan.offset_dw,
+                          request.plan.snapshot_span_dw};
+    });
+    for (auto& request : requests) {
+        [[maybe_unused]] const auto destination =
+            info.srt_info.TryReserveRange(request.plan.base_pointer_location,
+                                          request.plan.offset_dw, request.plan.snapshot_span_dw);
     }
 
     info.RefreshFlatBuf();

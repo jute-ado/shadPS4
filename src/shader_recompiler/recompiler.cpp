@@ -80,7 +80,10 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::RingAccessElimination(program, runtime_info);
     Shader::Optimization::ReadLaneEliminationPass(program);
     Shader::Optimization::FlattenExtendedUserdataPass(program);
-    Shader::Optimization::ResourceTrackingPass(program, profile);
+    // Dynamic reserved ranges stay dormant until the coherent SRT refresh supplies proof that
+    // every reserved dword was filled through its reader session.
+    Shader::Optimization::ResourceTrackingPass(program, profile, false);
+    Shader::Optimization::LowerLaneIdToLocalInvocationIndexPass(program, runtime_info, profile);
     Shader::Optimization::LowerBufferFormatToRaw(program);
     Shader::Optimization::SharedMemorySimplifyPass(program, profile);
     Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);

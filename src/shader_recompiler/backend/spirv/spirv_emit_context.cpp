@@ -310,7 +310,9 @@ void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (l_stage == LogicalStage::Fragment) {
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -762,7 +764,8 @@ void EmitContext::DefinePushDataBlock() {
 }
 
 EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_written, u32 elem_shift,
-                                                 BufferType buffer_type, Id data_type) {
+                                                 BufferType buffer_type, Id data_type,
+                                                 u32 descriptor_binding) {
     // Define array type.
     const Id max_num_items = ConstU32(u32(profile.max_ubo_size) >> elem_shift);
     const Id record_array_type{is_storage ? TypeRuntimeArray(data_type)
@@ -783,7 +786,7 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_writte
     const Id struct_pointer_type{TypePointer(storage_class, struct_type)};
     const Id pointer_type = TypePointer(storage_class, data_type);
     const Id id{AddGlobalVariable(struct_pointer_type, storage_class)};
-    Decorate(id, spv::Decoration::Binding, binding.unified);
+    Decorate(id, spv::Decoration::Binding, descriptor_binding);
     Decorate(id, spv::Decoration::DescriptorSet, 0U);
     if (is_storage && !is_written) {
         Decorate(id, spv::Decoration::NonWritable);
@@ -830,28 +833,30 @@ void EmitContext::DefineBuffers() {
         }
 
         // Define aliases depending on the shader usage.
-        auto& spv_buffer = buffers.emplace_back(binding.buffer++, desc.buffer_type);
+        const u32 buffer_index = binding.buffer;
+        const auto descriptor_binding = binding.TryAddBufferBinding();
+        ASSERT_MSG(descriptor_binding.has_value(), "Descriptor binding index overflow");
+        auto& spv_buffer = buffers.emplace_back(buffer_index, desc.buffer_type);
         if (True(desc.used_types & IR::Type::U64)) {
-            spv_buffer.Alias(PointerType::U64) =
-                DefineBuffer(is_storage, desc.is_written, 3, desc.buffer_type, U64);
+            spv_buffer.Alias(PointerType::U64) = DefineBuffer(
+                is_storage, desc.is_written, 3, desc.buffer_type, U64, *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::U32)) {
-            spv_buffer.Alias(PointerType::U32) =
-                DefineBuffer(is_storage, desc.is_written, 2, desc.buffer_type, U32[1]);
+            spv_buffer.Alias(PointerType::U32) = DefineBuffer(
+                is_storage, desc.is_written, 2, desc.buffer_type, U32[1], *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::F32)) {
-            spv_buffer.Alias(PointerType::F32) =
-                DefineBuffer(is_storage, desc.is_written, 2, desc.buffer_type, F32[1]);
+            spv_buffer.Alias(PointerType::F32) = DefineBuffer(
+                is_storage, desc.is_written, 2, desc.buffer_type, F32[1], *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::U16)) {
-            spv_buffer.Alias(PointerType::U16) =
-                DefineBuffer(is_storage, desc.is_written, 1, desc.buffer_type, U16);
+            spv_buffer.Alias(PointerType::U16) = DefineBuffer(
+                is_storage, desc.is_written, 1, desc.buffer_type, U16, *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::U8)) {
-            spv_buffer.Alias(PointerType::U8) =
-                DefineBuffer(is_storage, desc.is_written, 0, desc.buffer_type, U8);
+            spv_buffer.Alias(PointerType::U8) = DefineBuffer(
+                is_storage, desc.is_written, 0, desc.buffer_type, U8, *descriptor_binding);
         }
-        ++binding.unified;
     }
 }
 
@@ -957,6 +962,12 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
 }
 
 void EmitContext::DefineImagesAndSamplers() {
+    if (std::ranges::any_of(info.images, [](const ImageResource& image) {
+            return image.dynamic_descriptor_count != 0;
+        })) {
+        AddCapability(spv::Capability::ShaderNonUniform);
+        AddCapability(spv::Capability::SampledImageArrayNonUniformIndexing);
+    }
     for (const auto& image_desc : info.images) {
         const auto sharp = image_desc.GetSharp(info);
         const auto nfmt = sharp.GetNumberFmt();
@@ -968,15 +979,26 @@ void EmitContext::DefineImagesAndSamplers() {
         const Id image_type{ImageType(*this, image_desc, sampled_type)};
 
         const u32 num_bindings = image_desc.NumBindings(info);
+        const bool is_dynamic_descriptor_table = image_desc.dynamic_descriptor_count != 0;
+        ASSERT_MSG(!is_dynamic_descriptor_table ||
+                       (profile.supports_sampled_image_array_nonuniform_indexing &&
+                        image_desc.HasValidDynamicRange(info) && !image_desc.is_depth &&
+                        !image_desc.is_atomic && !is_storage &&
+                        mip_fallback_mode == MipStorageFallbackMode::None),
+                   "Malformed dynamic sampled-image table reached the SPIR-V backend");
         Id pointee_type = image_type;
-        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
+        if (is_dynamic_descriptor_table ||
+            mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
             pointee_type = TypeArray(pointee_type, ConstU32(num_bindings));
         }
 
+        const Id element_pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
-        Decorate(id, spv::Decoration::Binding, binding.unified);
-        binding.unified += num_bindings;
+        const auto descriptor_binding = binding.TryAddImageBinding(num_bindings);
+        ASSERT_MSG(descriptor_binding.has_value(),
+                   "Invalid descriptor count or binding index overflow");
+        Decorate(id, spv::Decoration::Binding, *descriptor_binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         // TODO better naming for resources (flattened sharp_idx is not informative)
         Name(id, fmt::format("{}_{}{}", stage, "img", image_desc.sharp_idx));
@@ -985,9 +1007,12 @@ void EmitContext::DefineImagesAndSamplers() {
             .id = id,
             .sampled_type = is_storage ? sampled_type : TypeSampledImage(image_type),
             .image_type = image_type,
+            .element_pointer_type = element_pointer_type,
             .view_type = sharp.GetViewType(image_desc.is_array),
+            .descriptor_count = num_bindings,
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .is_dynamic_descriptor_table = is_dynamic_descriptor_table,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
@@ -1003,7 +1028,9 @@ void EmitContext::DefineImagesAndSamplers() {
     sampler_pointer_type = TypePointer(spv::StorageClass::UniformConstant, sampler_type);
     for (const auto& samp_desc : info.samplers) {
         const Id id{AddGlobalVariable(sampler_pointer_type, spv::StorageClass::UniformConstant)};
-        Decorate(id, spv::Decoration::Binding, binding.unified++);
+        const auto descriptor_binding = binding.TryAddSamplerBinding();
+        ASSERT_MSG(descriptor_binding.has_value(), "Descriptor binding index overflow");
+        Decorate(id, spv::Decoration::Binding, *descriptor_binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         const auto sharp_desc =
             samp_desc.is_inline_sampler
@@ -1022,7 +1049,8 @@ void EmitContext::DefineSharedMemory() {
         return;
     }
     ASSERT(info.stage == Stage::Compute);
-    const u32 shared_memory_size = runtime_info.cs_info.shared_memory_size;
+    const u32 shared_memory_size =
+        runtime_info.cs_info.shared_memory_size + info.workgroup_scratch_memory_size;
 
     const auto make_type = [&](IR::Type type, Id element_type, u32 element_size,
                                std::string_view name) {

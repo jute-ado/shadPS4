@@ -142,6 +142,9 @@ struct Info : InfoPersistent {
     bool uses_group_quad{};
     bool uses_group_ballot{};
     IR::Type shared_types{};
+    // Host-generated workgroup scratch appended after the guest-visible LDS range. This is
+    // compile-call-local code-generation state and is deliberately not serialized.
+    u32 workgroup_scratch_memory_size{};
     bool uses_fp16{};
     bool uses_fp64{};
     bool uses_pack_10_11_11{};
@@ -187,8 +190,15 @@ struct Info : InfoPersistent {
     }
 
     void AddBindings(Backend::Bindings& bnd) const {
-        bnd.buffer += buffers.size();
-        bnd.unified += buffers.size() + images.size() + samplers.size();
+        for (const auto& buffer : buffers) {
+            ASSERT(bnd.TryAddBufferBinding().has_value());
+        }
+        for (const auto& image : images) {
+            ASSERT(bnd.TryAddImageBinding(image.NumBindings(*this)).has_value());
+        }
+        for (const auto& sampler : samplers) {
+            ASSERT(bnd.TryAddSamplerBinding().has_value());
+        }
         bnd.user_data += ud_mask.NumRegs();
     }
 

@@ -12,8 +12,8 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 4u;
-static constexpr u32 ShaderMetaVersion = 4u;
+static constexpr u32 ShaderBinaryVersion = 5u;
+static constexpr u32 ShaderMetaVersion = 5u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
@@ -426,7 +426,18 @@ bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
 void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer srt{ar};
 
-    srt.Write(this, sizeof(*this));
+    ASSERT(ValidateRangeReservations());
+    ASSERT(walker_func || walker_func_size == 0);
+    srt.Write(walker_func_size);
+    srt.Write(flattened_bufsize_dw);
+    const u32 reservation_count = static_cast<u32>(range_reservations.size());
+    srt.Write(reservation_count);
+    for (const auto& reservation : range_reservations) {
+        srt.Write(reservation.pointer_lo_flat_index);
+        srt.Write(reservation.source_offset_dw);
+        srt.Write(reservation.destination_flat_offset_dw);
+        srt.Write(reservation.span_dw);
+    }
     if (walker_func_size) {
         srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
     }
@@ -435,11 +446,35 @@ void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
 bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader srt{ar};
 
-    srt.Read(this, sizeof(*this));
+    walker_func = nullptr;
+    walker_func_size = 0;
+    range_reservations.clear();
 
-    if (walker_func_size) {
-        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
-        ar.Advance(walker_func_size);
+    size_t serialized_walker_size{};
+    u32 reservation_count{};
+    srt.Read(serialized_walker_size);
+    srt.Read(flattened_bufsize_dw);
+    srt.Read(reservation_count);
+    if (reservation_count > MaxRangeReservations) {
+        return false;
+    }
+    range_reservations.reserve(reservation_count);
+    for (u32 i = 0; i < reservation_count; ++i) {
+        auto& reservation = range_reservations.emplace_back();
+        srt.Read(reservation.pointer_lo_flat_index);
+        srt.Read(reservation.source_offset_dw);
+        srt.Read(reservation.destination_flat_offset_dw);
+        srt.Read(reservation.span_dw);
+    }
+    if (!ValidateRangeReservations()) {
+        range_reservations.clear();
+        return false;
+    }
+
+    walker_func_size = serialized_walker_size;
+    if (serialized_walker_size) {
+        walker_func = RegisterWalkerCode(ar.CurrPtr(), serialized_walker_size);
+        ar.Advance(serialized_walker_size);
     }
 
     return true;
