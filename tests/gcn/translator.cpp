@@ -140,7 +140,7 @@ TranslationResult TranslateToSpirvWithInfoImpl(std::span<const u64> raw_gcn_inst
 
     Shader::Optimization::SsaRewritePass(program);
     Shader::Optimization::IdentityRemovalPass(program.blocks);
-    Shader::Optimization::FlattenExtendedUserdataPass(program);
+    static_cast<void>(Shader::Optimization::FlattenExtendedUserdataPass(program));
     Shader::Optimization::ResourceTrackingPassStub(program, profile);
     Shader::Optimization::ConstantPropagationPass(program.blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);

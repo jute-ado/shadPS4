@@ -4,6 +4,7 @@
 #include "ajm_result.h"
 #include "common/assert.h"
 #include "core/libraries/ajm/ajm_at9.h"
+#include "core/libraries/audio/atrac9_codec_lock.h"
 #include "error_codes.h"
 
 extern "C" {
@@ -64,7 +65,7 @@ AjmAt9Decoder::~AjmAt9Decoder() {
 void AjmAt9Decoder::Reset() {
     Atrac9ReleaseHandle(m_handle);
     m_handle = Atrac9GetHandle();
-    Atrac9InitDecoder(m_handle, m_config_data);
+    Audio::Atrac9InitDecoderLocked(m_handle, m_config_data);
     Atrac9GetCodecInfo(m_handle, &m_codec_info);
 
     m_num_frames = 0;
@@ -156,19 +157,20 @@ DecoderResult AjmAt9Decoder::ProcessData(std::span<u8>& in_buf, SparseOutputBuff
     int bytes_used = 0;
     switch (m_format) {
     case AjmFormatEncoding::S16:
-        ret = Atrac9Decode(m_handle, in_buf.data(), static_cast<int>(in_buf.size()),
-                           reinterpret_cast<s16*>(m_pcm_buffer.data()), &bytes_used,
-                           True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
+        ret = Audio::Atrac9DecodeLocked(m_handle, in_buf.data(), static_cast<int>(in_buf.size()),
+                                        reinterpret_cast<s16*>(m_pcm_buffer.data()), &bytes_used,
+                                        True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
         break;
     case AjmFormatEncoding::S32:
-        ret = Atrac9DecodeS32(m_handle, in_buf.data(), static_cast<int>(in_buf.size()),
-                              reinterpret_cast<s32*>(m_pcm_buffer.data()), &bytes_used,
-                              True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
+        ret = Audio::Atrac9DecodeS32Locked(m_handle, in_buf.data(), static_cast<int>(in_buf.size()),
+                                           reinterpret_cast<s32*>(m_pcm_buffer.data()), &bytes_used,
+                                           True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
         break;
     case AjmFormatEncoding::Float:
-        ret = Atrac9DecodeF32(m_handle, in_buf.data(), static_cast<int>(in_buf.size()),
-                              reinterpret_cast<float*>(m_pcm_buffer.data()), &bytes_used,
-                              True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
+        ret =
+            Audio::Atrac9DecodeF32Locked(m_handle, in_buf.data(), static_cast<int>(in_buf.size()),
+                                         reinterpret_cast<float*>(m_pcm_buffer.data()), &bytes_used,
+                                         True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
         break;
     default:
         UNREACHABLE();
@@ -227,8 +229,9 @@ DecoderResult AjmAt9Decoder::ProcessData(std::span<u8>& in_buf, SparseOutputBuff
         // Drain the remaining superframe
         std::vector<s16> buf(m_codec_info.frameSamples * m_codec_info.channels, 0);
         while ((m_num_frames % m_codec_info.framesInSuperframe) != 0) {
-            ret = Atrac9Decode(m_handle, in_buf.data(), static_cast<int>(in_buf.size()), buf.data(),
-                               &bytes_used, True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
+            ret = Audio::Atrac9DecodeLocked(
+                m_handle, in_buf.data(), static_cast<int>(in_buf.size()), buf.data(), &bytes_used,
+                True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput));
             in_buf = in_buf.subspan(bytes_used);
             m_superframe_bytes_remain -= bytes_used;
             result.frames_decoded += 1;
