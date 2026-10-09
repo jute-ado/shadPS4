@@ -19,6 +19,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/present_frame_ownership.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -880,12 +881,14 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame) {
-    // Free the frame for reuse
-    const auto free_frame = [&] {
-        if (!is_reusing_frame) {
-            last_submit_frame = frame;
-            std::scoped_lock fl{free_mutex};
-            free_queue.push(frame);
+    const auto complete_frame = [&](const bool was_presented) {
+        bool released_frame{};
+        {
+            std::scoped_lock lock{free_mutex};
+            released_frame = CompletePresentFrameOwnership(
+                free_queue, last_submit_frame, frame, is_reusing_frame, was_presented);
+        }
+        if (released_frame) {
             free_cv.notify_one();
         }
     };
@@ -900,7 +903,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
-            free_frame();
+            complete_frame(false);
             return;
         }
     }
@@ -1138,7 +1141,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         VideoCore::EndPresentedFrameCapture(vulkan_instance, window_handle);
     }
 
-    free_frame();
+    complete_frame(true);
     if (!is_reusing_frame) {
         const auto presented_frame = DebugState.IncFlipFrameNum();
         RecordPresentedFrameTiming(presented_frame);

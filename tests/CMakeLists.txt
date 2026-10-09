@@ -82,6 +82,16 @@ target_compile_features(shadps4_screenshot_request_queue_test PRIVATE cxx_std_23
 target_link_libraries(shadps4_screenshot_request_queue_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_screenshot_request_queue_test)
 
+add_executable(shadps4_present_frame_ownership_test
+    test_present_frame_ownership.cpp
+)
+target_include_directories(shadps4_present_frame_ownership_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_present_frame_ownership_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_present_frame_ownership_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_present_frame_ownership_test)
+
 add_executable(shadps4_fault_range_test
     test_fault_range.cpp
 )
