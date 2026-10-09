@@ -290,7 +290,9 @@ set(AJM_LIB src/core/libraries/ajm/ajm.cpp
             src/core/libraries/ajm/ajm_mp3.h
 )
 
-set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
+set(AUDIO_LIB src/core/libraries/audio/atrac9_codec_lock.cpp
+              src/core/libraries/audio/atrac9_codec_lock.h
+              src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioin.h
               src/core/libraries/audio/audioin_backend.h
               src/core/libraries/audio/audioin_error.h
@@ -301,6 +303,8 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioout.h
               src/core/libraries/audio/audioout_backend.h
               src/core/libraries/audio/audioout_error.h
+              src/core/libraries/audio/audio_pipeline_metadata_trace.cpp
+              src/core/libraries/audio/audio_pipeline_metadata_trace.h
               src/core/libraries/audio/test_lab_audio_capture.cpp
               src/core/libraries/audio/test_lab_audio_capture.h
               src/core/libraries/audio/sdl_audio_out.cpp
@@ -465,6 +469,12 @@ set(SYSTEM_LIBS src/core/libraries/system/commondialog.cpp
                 src/core/libraries/disc_map/disc_map_codes.h
                 src/core/libraries/ngs2/ngs2.cpp
                 src/core/libraries/ngs2/ngs2.h
+                src/core/libraries/ngs2/ngs2_atrac9.cpp
+                src/core/libraries/ngs2/ngs2_atrac9.h
+                src/core/libraries/ngs2/ngs2_decode.cpp
+                src/core/libraries/ngs2/ngs2_decode.h
+                src/core/libraries/ngs2/ngs2_render.cpp
+                src/core/libraries/ngs2/ngs2_render.h
                 src/core/libraries/ngs2/ngs2_error.h
                 src/core/libraries/ngs2/ngs2_impl.cpp
                 src/core/libraries/ngs2/ngs2_impl.h

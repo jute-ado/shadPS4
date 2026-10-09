@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <algorithm>
+#include <limits>
 #include <map>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include "common/enum.h"
@@ -138,6 +141,10 @@ struct VirtualMemoryArea {
         return IsMapped() && True(prot & (MemoryProt::CpuRead | MemoryProt::GpuRead));
     }
 
+    bool HasWritableBacking() const noexcept {
+        return IsMapped() && True(prot & (MemoryProt::CpuWrite | MemoryProt::GpuWrite));
+    }
+
     bool CanMergeWith(VirtualMemoryArea& next) {
         if (disallow_merge || next.disallow_merge) {
             return false;
@@ -163,6 +170,92 @@ struct VirtualMemoryArea {
         return true;
     }
 };
+
+struct GuestMemoryRange {
+    VAddr address;
+    u64 size;
+};
+
+struct GuestMemoryWrite {
+    VAddr address;
+    const void* data;
+    u64 size;
+};
+
+namespace Detail {
+
+template <typename VmaMap, typename HasBacking>
+bool IsCompleteBackingRange(const VmaMap& vma_map, VAddr virtual_addr, u64 size,
+                            HasBacking&& has_backing) {
+    if (size == 0) {
+        return true;
+    }
+    if (vma_map.empty() || size > std::numeric_limits<VAddr>::max() - virtual_addr) {
+        return false;
+    }
+
+    auto vma = vma_map.upper_bound(virtual_addr);
+    if (vma == vma_map.begin()) {
+        return false;
+    }
+    --vma;
+
+    VAddr current_addr = virtual_addr;
+    u64 remaining_size = size;
+    while (remaining_size != 0) {
+        const auto& area = vma->second;
+        if (!has_backing(area) || current_addr < area.base) {
+            return false;
+        }
+
+        const u64 offset = current_addr - area.base;
+        if (offset >= area.size) {
+            return false;
+        }
+        const u64 backed_size = std::min(area.size - offset, remaining_size);
+        current_addr += backed_size;
+        remaining_size -= backed_size;
+
+        if (remaining_size != 0) {
+            ++vma;
+            if (vma == vma_map.end() || vma->second.base != current_addr) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template <typename VmaMap>
+bool IsCompleteReadableBackingRange(const VmaMap& vma_map, VAddr virtual_addr, u64 size) {
+    return IsCompleteBackingRange(vma_map, virtual_addr, size,
+                                  [](const VirtualMemoryArea& area) {
+                                      return area.HasReadableBacking();
+                                  });
+}
+
+template <typename VmaMap, typename Range>
+bool AreCompleteWritableBackingRanges(const VmaMap& vma_map, const Range& ranges) {
+    return std::ranges::all_of(ranges, [&](const GuestMemoryRange& range) {
+        return IsCompleteBackingRange(vma_map, range.address, range.size,
+                                      [](const VirtualMemoryArea& area) {
+                                          return area.HasWritableBacking();
+                                      });
+    });
+}
+
+template <typename VmaMap, typename Range>
+bool AreCompleteWritableGuestWrites(const VmaMap& vma_map, const Range& writes) {
+    return std::ranges::all_of(writes, [&](const GuestMemoryWrite& write) {
+        return (write.size == 0 || write.data != nullptr) &&
+               IsCompleteBackingRange(vma_map, write.address, write.size,
+                                      [](const VirtualMemoryArea& area) {
+                                          return area.HasWritableBacking();
+                                      });
+    });
+}
+
+} // namespace Detail
 
 class MemoryManager {
     using PhysMap = std::map<PAddr, PhysicalMemoryArea>;
@@ -251,6 +344,14 @@ public:
     void SetPrtArea(u32 id, VAddr address, u64 size);
 
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
+
+    bool TryReadBacking(const void* address, void* data, u64 size);
+
+    bool CanWriteBacking(std::span<const GuestMemoryRange> ranges);
+
+    bool TryClearBacking(std::span<const GuestMemoryRange> ranges);
+
+    bool TryWriteGuest(std::span<const GuestMemoryWrite> writes);
 
     bool TryWriteBacking(void* address, const void* data, u64 size);
 
