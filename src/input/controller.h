@@ -88,6 +88,7 @@ public:
     GameController();
     virtual ~GameController() = default;
     void ConnectController(SDL_Gamepad* pad);
+    void ConnectVirtualController();
     void DisconnectController();
 
     State ReadState();
