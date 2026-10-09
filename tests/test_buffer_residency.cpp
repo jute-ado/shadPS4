@@ -64,16 +64,19 @@ TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThrea
     ASSERT_NE(function_end, std::string::npos);
     const auto body = source.substr(function_begin, function_end - function_begin);
 
+    const auto snapshot_unmap = body.find("page_manager.PrepareForGpuUnmap(addr, size)");
     const auto buffer_unmap = body.find("buffer_cache.InvalidateMemory(addr, size)");
     const auto queued = body.find("liverpool->SendCommand<false>([this, addr, size]");
     const auto texture_unmap = body.find("texture_cache.UnmapMemory(addr, size)", queued);
     const auto queued_end = body.find("});", queued);
     const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size)");
+    ASSERT_NE(snapshot_unmap, std::string::npos);
     ASSERT_NE(queued, std::string::npos);
     ASSERT_NE(buffer_unmap, std::string::npos);
     ASSERT_NE(texture_unmap, std::string::npos);
     ASSERT_NE(queued_end, std::string::npos);
     ASSERT_NE(page_unmap, std::string::npos);
+    EXPECT_LT(snapshot_unmap, buffer_unmap);
     EXPECT_LT(buffer_unmap, queued);
     EXPECT_LT(queued, texture_unmap);
     EXPECT_LT(texture_unmap, queued_end);
@@ -109,6 +112,66 @@ TEST(DescriptorBindingStorage, ReservesBackingBeforeWritesCaptureElementPointers
     EXPECT_LT(image_clear, image_reserve);
     EXPECT_LT(buffer_reserve, bind_loop);
     EXPECT_LT(image_reserve, bind_loop);
+}
+
+TEST(ComputeBufferBindingGuard, RasterizerSelectsMappingsBeforeLookupAndRevalidatesAtDispatch) {
+    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    const auto bind_begin = source.find("bool Rasterizer::BindBuffers(");
+    const auto bind_end = source.find("void Rasterizer::BindTextures(", bind_begin);
+    ASSERT_NE(bind_begin, std::string::npos);
+    ASSERT_NE(bind_end, std::string::npos);
+    const auto bind_body = source.substr(bind_begin, bind_end - bind_begin);
+    const auto clamp = bind_body.find("ClampComputeBufferBindingRange(");
+    const auto select = bind_body.find("SelectComputeBufferBinding(");
+    const auto lookup = bind_body.find("buffer_cache.FindBuffer(");
+    ASSERT_NE(clamp, std::string::npos);
+    ASSERT_NE(select, std::string::npos);
+    ASSERT_NE(lookup, std::string::npos);
+    EXPECT_LT(clamp, select);
+    EXPECT_LT(select, lookup);
+    const auto select_end = bind_body.find(");", select);
+    ASSERT_NE(select_end, std::string::npos);
+    const auto select_call = bind_body.substr(select, select_end - select);
+    EXPECT_NE(select_call.find("binding_range"), std::string::npos);
+    EXPECT_EQ(select_call.find("binding_size"), std::string::npos);
+    const auto lookup_end = bind_body.find(");", lookup);
+    ASSERT_NE(lookup_end, std::string::npos);
+    const auto lookup_call = bind_body.substr(lookup, lookup_end - lookup);
+    EXPECT_NE(lookup_call.find("binding_range.address"), std::string::npos);
+    EXPECT_NE(lookup_call.find("binding_range.size"), std::string::npos);
+    EXPECT_EQ(lookup_call.find("binding_size"), std::string::npos);
+    const auto admission_condition_begin = bind_body.rfind("if (", select);
+    const auto admission_condition_end = bind_body.find(") {", admission_condition_begin);
+    ASSERT_NE(admission_condition_begin, std::string::npos);
+    ASSERT_NE(admission_condition_end, std::string::npos);
+    const auto admission_condition = bind_body.substr(
+        admission_condition_begin, admission_condition_end - admission_condition_begin);
+    EXPECT_NE(admission_condition.find("stage.stage == Shader::Stage::Compute"),
+              std::string::npos);
+    EXPECT_EQ(admission_condition.find("IsStorage"), std::string::npos);
+
+    for (const std::string_view function_name : {"void Rasterizer::DispatchDirect()",
+                                                 "void Rasterizer::DispatchIndirect("}) {
+        const auto dispatch_begin = source.find(function_name);
+        const auto dispatch_end = source.find("\n}\n", dispatch_begin);
+        ASSERT_NE(dispatch_begin, std::string::npos);
+        ASSERT_NE(dispatch_end, std::string::npos);
+        const auto dispatch_body = source.substr(dispatch_begin, dispatch_end - dispatch_begin);
+        const auto bind = dispatch_body.find("BindResources(pipeline)");
+        const auto validate = dispatch_body.find("AreComputeBufferBindingsCurrent(");
+        const auto command = dispatch_body.find(function_name.ends_with("Direct()")
+                                                    ? "cmdbuf.dispatch("
+                                                    : "cmdbuf.dispatchIndirect(");
+        ASSERT_NE(bind, std::string::npos);
+        ASSERT_NE(validate, std::string::npos);
+        ASSERT_NE(command, std::string::npos);
+        EXPECT_LT(bind, validate);
+        EXPECT_LT(validate, command);
+    }
 }
 
 TEST(BufferResidency, PublishesExpandedDmaMappingOnlyAfterFullSpanIsResident) {

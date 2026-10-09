@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <memory>
+#include <utility>
 #include <glslang/Include/ResourceLimits.h>
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
@@ -255,15 +256,19 @@ vk::ShaderModule Compile(std::string_view code, vk::ShaderStageFlagBits stage, v
 }
 
 vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
+    return CompileSPVUnique(code, device).release();
+}
+
+vk::UniqueShaderModule CompileSPVUnique(std::span<const u32> code, vk::Device device) {
     const vk::ShaderModuleCreateInfo shader_info = {
         .codeSize = code.size() * sizeof(u32),
         .pCode = code.data(),
     };
 
-    auto [module_result, module] = device.createShaderModule(shader_info);
+    auto [module_result, module] = device.createShaderModuleUnique(shader_info);
     ASSERT_MSG(module_result == vk::Result::eSuccess, "Failed to compile SPIR-V shader: {}",
                vk::to_string(module_result));
-    return module;
+    return std::move(module);
 }
 
 } // namespace Vulkan

@@ -3,6 +3,10 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
@@ -91,6 +95,41 @@ TEST(FaultRange, MakesDmaFaultRangeResidentBeforeDirectAccess) {
     EXPECT_EQ(cache.calls[1].operation, FaultRangeCacheCall::Synchronize);
     EXPECT_EQ(cache.calls[1].address, 0x101E600000);
     EXPECT_EQ(cache.calls[1].size, 0x4000);
+}
+
+TEST(FaultRange, BoundsReportedFaultCountToStoredAddressCapacity) {
+    constexpr u64 AreaSize = 1024U * sizeof(u64);
+    static_assert(VideoCore::StoredDmaFaultAddressCapacity(AreaSize) == 1023U);
+
+    EXPECT_EQ(VideoCore::BoundDmaFaultCount(0U, AreaSize), 0U);
+    EXPECT_EQ(VideoCore::BoundDmaFaultCount(1023U, AreaSize), 1023U);
+    EXPECT_EQ(VideoCore::BoundDmaFaultCount(1024U, AreaSize), 1023U);
+    EXPECT_EQ(VideoCore::BoundDmaFaultCount(std::numeric_limits<u64>::max(), AreaSize), 1023U);
+    EXPECT_EQ(VideoCore::BoundDmaFaultCount(1U, sizeof(u64)), 0U);
+}
+
+TEST(FaultBufferConsumerSource, BoundsReportedCountToTheStoredAddressCapacity) {
+    std::ifstream input{SHADPS4_FAULT_MANAGER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    EXPECT_NE(source.find("BoundDmaFaultCount(reported_fault_count, PageFaultAreaSize)"),
+              std::string::npos);
+}
+
+TEST(FaultBufferShaderSource, SaturatesTheCounterBeforeTheAddressArrayEnds) {
+    std::ifstream input{SHADPS4_FAULT_SHADER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    EXPECT_NE(source.find("uint reserveFaultSlot()"), std::string::npos);
+    EXPECT_NE(source.find("while (observed < MAX_PAGE_FAULTS - 1u)"), std::string::npos);
+    EXPECT_NE(source.find("atomicCompSwap(download_buffer32[0]"), std::string::npos);
+    EXPECT_NE(source.find("return observed + 1u"), std::string::npos);
+    EXPECT_NE(source.find("if (store_index == 0u)"), std::string::npos);
+    EXPECT_EQ(source.find("atomicAdd(download_buffer32[0]"), std::string::npos);
 }
 
 TEST(DmaDirtyRanges, CleanFramesProduceNoSynchronizationWork) {

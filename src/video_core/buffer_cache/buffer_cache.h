@@ -14,6 +14,7 @@
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/shader_capture_provenance.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -127,6 +128,26 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
+    /// Flushes exactly the requested GPU-modified range from an existing containing buffer.
+    [[nodiscard]] bool ReadMemoryExact(VAddr device_addr, u64 size);
+
+    /// Reads authoritative bytes into caller-owned memory without publishing them into mutable
+    /// guest memory or changing GPU/CPU ownership tracking.
+    [[nodiscard]] bool ReadMemorySnapshot(VAddr device_addr, void* output, u64 size,
+                                          SnapshotReadProvenance* provenance = nullptr);
+
+    void RecordPotentialShaderWrite(bool enabled, u64 program_hash, u32 stage,
+                                    u32 descriptor_index, u64 mapping_token, VAddr address,
+                                    u64 size) noexcept {
+        potential_shader_writes.Record(enabled, program_hash, stage, descriptor_index,
+                                       mapping_token, address, size);
+    }
+
+    [[nodiscard]] std::optional<PotentialShaderWriteProvenance> LatestPotentialShaderWrite(
+        VAddr address, u64 size, u64 mapping_token) const noexcept {
+        return potential_shader_writes.LatestOverlap(address, size, mapping_token);
+    }
+
     /// Acquires host vertex buffers without recording command-buffer-local state.
     [[nodiscard]] PreparedVertexBuffers PrepareVertexBuffers(
         const Vulkan::GraphicsPipeline& pipeline,
@@ -166,6 +187,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// Return true when the exact byte range has been written by the GPU.
+    [[nodiscard]] bool IsRegionGpuModifiedExact(VAddr addr, size_t size) const;
+
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
 
@@ -195,8 +219,11 @@ private:
         return !buffer_id || slot_buffers[buffer_id].is_deleted;
     }
 
-    template <bool async>
+    template <bool async, bool exact = false>
     void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
+
+    [[nodiscard]] bool DownloadBufferMemorySnapshot(Buffer& buffer, VAddr device_addr, void* output,
+                                                    u64 size);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 
@@ -240,6 +267,7 @@ private:
     Buffer bda_pagetable_buffer;
     CpuPageWriteTracker cpu_page_write_tracker;
     DmaDirtyRangeTracker dma_dirty_ranges;
+    PotentialShaderWriteTracker potential_shader_writes;
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
     u64 trigger_gc_memory = 0;

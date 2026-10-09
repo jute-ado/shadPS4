@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
+#ifdef _WIN32
+#include <process.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include "common/object_pool.h"
@@ -15,11 +23,11 @@ namespace {
 
 using namespace Shader;
 
-std::vector<u32> EmitNonAmdBarycentricShader(IR::Attribute attribute) {
+std::vector<u32> EmitFragmentAttributeShader(IR::Attribute attribute, u32 component = 0) {
     Info info{};
     info.stage = Stage::Fragment;
     info.l_stage = LogicalStage::Fragment;
-    info.loads.Set(attribute, 0);
+    info.loads.Set(attribute, component);
 
     IR::Program program{info};
     Pools pools{};
@@ -34,7 +42,7 @@ std::vector<u32> EmitNonAmdBarycentricShader(IR::Attribute attribute) {
 
     IR::IREmitter ir{*block};
     ir.Prologue();
-    ir.Reference(ir.GetAttribute(attribute));
+    ir.Reference(ir.GetAttribute(attribute, component));
     ir.Epilogue();
 
     Profile profile{};
@@ -48,6 +56,55 @@ std::vector<u32> EmitNonAmdBarycentricShader(IR::Attribute attribute) {
     Backend::Bindings bindings{};
     return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 }
+
+bool HasPushConstantAccessChainWithPushConstantPointer(const std::vector<u32>& spirv) {
+    const u32 id_bound = spirv.at(3);
+    std::vector<u32> pointer_storage(id_bound, spv::StorageClassMax);
+    u32 push_constant_variable = 0;
+
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        const auto opcode = static_cast<spv::Op>(word & 0xffff);
+        if (opcode == spv::OpTypePointer && words >= 4) {
+            pointer_storage.at(spirv[offset + 1]) = spirv[offset + 2];
+        } else if (opcode == spv::OpVariable && words >= 4 &&
+                   spirv[offset + 3] == spv::StorageClassPushConstant) {
+            push_constant_variable = spirv[offset + 2];
+        }
+        EXPECT_GT(words, 0u);
+        offset += words;
+    }
+
+    if (push_constant_variable == 0) {
+        return false;
+    }
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        const auto opcode = static_cast<spv::Op>(word & 0xffff);
+        if (opcode == spv::OpAccessChain && words >= 4 &&
+            spirv[offset + 3] == push_constant_variable) {
+            return pointer_storage.at(spirv[offset + 1]) == spv::StorageClassPushConstant;
+        }
+        offset += words;
+    }
+    return false;
+}
+
+#ifdef SHADPS4_SPIRV_VAL_PATH
+int RunSpirvValidator(const std::filesystem::path& module) {
+#ifdef _WIN32
+    const std::string module_path = module.string();
+    return static_cast<int>(_spawnl(_P_WAIT, SHADPS4_SPIRV_VAL_PATH, SHADPS4_SPIRV_VAL_PATH,
+                                    "--target-env", "vulkan1.3", module_path.c_str(), nullptr));
+#else
+    const std::string command = std::string{"\""} + SHADPS4_SPIRV_VAL_PATH +
+                                "\" --target-env vulkan1.3 \"" + module.string() + "\"";
+    return std::system(command.c_str());
+#endif
+}
+#endif
 
 size_t CountOpcode(const std::vector<u32>& spirv, spv::Op opcode) {
     size_t count = 0;
@@ -105,7 +162,7 @@ bool HasBuiltIn(const std::vector<u32>& spirv, spv::BuiltIn builtin) {
 }
 
 TEST(BarycentricSpirv, NonAmdSmoothUsesKhrInputDirectly) {
-    const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::BaryCoordSmooth);
+    const auto spirv = EmitFragmentAttributeShader(IR::Attribute::BaryCoordSmooth);
 
     EXPECT_TRUE(HasCapability(spirv, spv::CapabilityFragmentBarycentricKHR));
     EXPECT_TRUE(HasCapability(spirv, spv::CapabilityInterpolationFunction));
@@ -115,7 +172,7 @@ TEST(BarycentricSpirv, NonAmdSmoothUsesKhrInputDirectly) {
 }
 
 TEST(BarycentricSpirv, NonAmdCentroidUsesInterpolationFunction) {
-    const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::BaryCoordSmoothCentroid);
+    const auto spirv = EmitFragmentAttributeShader(IR::Attribute::BaryCoordSmoothCentroid);
 
     EXPECT_TRUE(HasCapability(spirv, spv::CapabilityInterpolationFunction));
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInBaryCoordKHR));
@@ -123,13 +180,34 @@ TEST(BarycentricSpirv, NonAmdCentroidUsesInterpolationFunction) {
 }
 
 TEST(BarycentricSpirv, NonAmdSampleUsesSampleIdAndSampleRateShading) {
-    const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::BaryCoordSmoothSample);
+    const auto spirv = EmitFragmentAttributeShader(IR::Attribute::BaryCoordSmoothSample);
 
     EXPECT_TRUE(HasCapability(spirv, spv::CapabilityInterpolationFunction));
     EXPECT_TRUE(HasCapability(spirv, spv::CapabilitySampleRateShading));
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInBaryCoordKHR));
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSampleId));
     EXPECT_EQ(CountGlslExtInst(spirv, GLSLstd450InterpolateAtSample), 1u);
+}
+
+TEST(FragmentInputSpirv, FragCoordHostScaleUsesPushConstantPointer) {
+    const auto spirv = EmitFragmentAttributeShader(IR::Attribute::FragCoord);
+
+    ASSERT_GE(spirv.size(), 5u);
+    EXPECT_TRUE(HasPushConstantAccessChainWithPushConstantPointer(spirv));
+
+#ifdef SHADPS4_SPIRV_VAL_PATH
+    const auto output =
+        std::filesystem::temp_directory_path() / "shadps4-fragcoord-push-constant-test.spv";
+    {
+        std::ofstream file{output, std::ios::binary | std::ios::trunc};
+        ASSERT_TRUE(file.good());
+        file.write(reinterpret_cast<const char*>(spirv.data()),
+                   static_cast<std::streamsize>(spirv.size() * sizeof(u32)));
+    }
+    EXPECT_EQ(RunSpirvValidator(output), 0);
+    std::error_code remove_error;
+    std::filesystem::remove(output, remove_error);
+#endif
 }
 
 } // namespace

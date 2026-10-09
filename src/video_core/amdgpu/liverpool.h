@@ -3,13 +3,16 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <semaphore>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <queue>
 
@@ -106,14 +109,14 @@ public:
                     sem.release();
                 });
                 ++num_commands;
-                submit_cv.notify_one();
+                NotifyConcurrentWorkAvailable();
             }
             sem.acquire();
         } else {
             std::scoped_lock lk{submit_mutex};
             command_queue.emplace(std::move(func));
             ++num_commands;
-            submit_cv.notify_one();
+            NotifyConcurrentWorkAvailable();
         }
     }
 
@@ -162,7 +165,33 @@ private:
         };
 
         using Handle = std::coroutine_handle<promise_type>;
-        Handle handle;
+        Handle handle{};
+
+        Task() = default;
+        Task(const Task&) = delete;
+        Task& operator=(const Task&) = delete;
+
+        Task(Task&& other) noexcept : handle{std::exchange(other.handle, {})} {}
+
+        Task& operator=(Task&& other) noexcept {
+            if (this != &other) {
+                if (handle) {
+                    handle.destroy();
+                }
+                handle = std::exchange(other.handle, {});
+            }
+            return *this;
+        }
+
+        ~Task() {
+            if (handle) {
+                handle.destroy();
+            }
+        }
+
+        [[nodiscard]] Handle Release() noexcept {
+            return std::exchange(handle, {});
+        }
     };
 
     using CmdBufferOwner = std::shared_ptr<const OwnedCommandBuffers>;
@@ -175,6 +204,8 @@ private:
                         SubmissionCompletionQueue::Sequence submission_sequence);
 
     void ProcessCommands();
+    void NotifyConcurrentWorkAvailable() noexcept;
+    [[nodiscard]] bool HasOnlyGraphicsSubmissions();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -188,7 +219,7 @@ private:
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
-    u32 num_mapped_queues{1u}; // GFX is always available
+    std::atomic<u32> num_mapped_queues{1u}; // GFX is always available
 
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
@@ -217,6 +248,7 @@ private:
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
     std::atomic<u32> num_commands{};
+    std::atomic<u64> concurrent_work_generation{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};

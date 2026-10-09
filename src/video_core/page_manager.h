@@ -26,8 +26,42 @@ class PageManager {
     static constexpr size_t PAGES_PER_LOCK = NUM_PAGES_PER_REGION;
 
 public:
+    class SnapshotEpoch {
+    public:
+        SnapshotEpoch() = default;
+        SnapshotEpoch(const SnapshotEpoch&) = delete;
+        SnapshotEpoch& operator=(const SnapshotEpoch&) = delete;
+        SnapshotEpoch(SnapshotEpoch&& other) noexcept;
+        SnapshotEpoch& operator=(SnapshotEpoch&& other) noexcept;
+        ~SnapshotEpoch();
+
+        [[nodiscard]] bool BeginPageCopy(VAddr address, u64 size);
+        [[nodiscard]] bool EndPageCopy(VAddr address, u64 size, bool copied);
+        void Invalidate();
+        [[nodiscard]] bool Valid() const;
+        [[nodiscard]] bool Seal();
+
+    private:
+        friend class PageManager;
+        SnapshotEpoch(PageManager* manager_, u64 id_) : manager{manager_}, id{id_} {}
+
+        PageManager* manager{};
+        u64 id{};
+        bool result{};
+    };
+
     explicit PageManager(Vulkan::Rasterizer* rasterizer);
     ~PageManager();
+
+    /// Starts one short-lived coherent guest-memory capture on the GPU command processor thread.
+    [[nodiscard]] SnapshotEpoch BeginSnapshotEpoch();
+
+    /// Invalidates an overlapping active capture before ordinary CPU cache invalidation proceeds.
+    void NotifyCpuWrite(VAddr address, u64 size);
+
+    /// Invalidates and waits out an overlapping active capture before GPU unmap invalidation starts.
+    /// This does not unregister the GPU mapping or any ordinary PageManager tracking.
+    void PrepareForGpuUnmap(VAddr address, u64 size);
 
     /// Register a range of mapped gpu memory.
     void OnGpuMap(VAddr address, size_t size);
@@ -37,6 +71,9 @@ public:
 
     /// Returns whether the entire range is mapped for GPU access.
     [[nodiscard]] bool IsGpuMapped(VAddr address, size_t size) const;
+
+    /// Returns a stable token for the mapped range, or zero if it is unmapped or spans mappings.
+    [[nodiscard]] u64 GetGpuMappingToken(VAddr address, size_t size) const;
 
     /// Updates watches in the pages touching the specified region.
     template <bool track>
@@ -57,6 +94,12 @@ public:
     }
 
 private:
+    [[nodiscard]] bool BeginSnapshotPage(u64 id, VAddr address, u64 size);
+    [[nodiscard]] bool EndSnapshotPage(u64 id, VAddr address, u64 size, bool copied);
+    void InvalidateSnapshotEpoch(u64 id);
+    [[nodiscard]] bool IsSnapshotEpochValid(u64 id) const;
+    [[nodiscard]] bool SealSnapshotEpoch(u64 id);
+
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

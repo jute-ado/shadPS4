@@ -837,7 +837,12 @@ s32 PS4_SYSV_ABI sceKernelMunmap(void* addr, u64 len) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
     auto* memory = Core::Memory::Instance();
-    return memory->UnmapMemory(std::bit_cast<VAddr>(addr), len);
+    const VAddr virtual_addr = std::bit_cast<VAddr>(addr);
+    const bool requires_submission_boundary =
+        memory->RequiresSubmissionBoundaryBeforeUnmapping(virtual_addr, len);
+    return Core::UnmapAfterSubmissionBoundary(
+        requires_submission_boundary, GnmDriver::WaitForSubmissionBoundary,
+        [&] { return memory->UnmapMemory(virtual_addr, len); });
 }
 
 s32 PS4_SYSV_ABI posix_munmap(void* addr, u64 len) {

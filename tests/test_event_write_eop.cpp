@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -12,6 +14,11 @@
 #include "video_core/amdgpu/eop_flip_tracker.h"
 
 namespace {
+
+std::string ReadLiverpoolSource() {
+    std::ifstream stream{SHADPS4_LIVERPOOL_SOURCE_PATH, std::ios::binary};
+    return {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+}
 
 struct TestEopPacket {
     u32 data;
@@ -77,6 +84,31 @@ TEST(EventWriteEop, EopFlipWaitsForTheNextVblankIteration) {
     EXPECT_FALSE(IsFlipPresentationEligible(true, 41, 41));
     EXPECT_TRUE(IsFlipPresentationEligible(true, 41, 42));
     EXPECT_TRUE(IsFlipPresentationEligible(false, 41, 41));
+}
+
+TEST(EventWriteEop, ExternalFenceWritesNotifySnapshotsBeforeBypassingVirtualProtection) {
+    const auto source = ReadLiverpoolSource();
+    ASSERT_FALSE(source.empty());
+
+    const auto writer_begin = source.find("const auto write_guest_backing");
+    const auto writer_end = source.find("const auto base_addr", writer_begin);
+    ASSERT_NE(writer_begin, std::string::npos);
+    ASSERT_NE(writer_end, std::string::npos);
+    const auto writer = source.substr(writer_begin, writer_end - writer_begin);
+
+    const auto notify = writer.find("rasterizer->NotifyGuestBackingWrite(");
+    const auto backing_write = writer.find("memory->TryWriteBacking(");
+    const auto fallback_write = writer.find("memcpy(", backing_write);
+    ASSERT_NE(notify, std::string::npos);
+    ASSERT_NE(backing_write, std::string::npos);
+    ASSERT_NE(fallback_write, std::string::npos);
+    EXPECT_LT(notify, backing_write);
+    EXPECT_LT(backing_write, fallback_write);
+
+    const auto eos = source.find("event_eos->SignalFence(write_guest_backing)");
+    const auto eop = source.find("*event_eop, write_guest_backing");
+    EXPECT_NE(eos, std::string::npos);
+    EXPECT_NE(eop, std::string::npos);
 }
 
 } // namespace

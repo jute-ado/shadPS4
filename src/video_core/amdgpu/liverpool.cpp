@@ -21,6 +21,10 @@
 
 namespace AmdGpu {
 
+// A notification is the fast path, but the guest label may be written by a path that cannot
+// reliably signal this host condition variable. Keep the fallback bounded without busy-spinning.
+constexpr auto VoLabelWaitFallbackInterval = std::chrono::milliseconds{2};
+
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
 
@@ -34,7 +38,7 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
-    co_yield {};                                                                                   \
+    co_yield Task::promise_type::empty{};                                                         \
     FIBER_ENTER(name);
 
 #define YIELD_CE() YIELD(ccb_task_name)
@@ -74,6 +78,15 @@ Liverpool::Liverpool() {
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+    for (auto& queue : mapped_queues) {
+        std::scoped_lock lock{queue.m_access};
+        while (!queue.submits.empty()) {
+            if (const auto handle = queue.submits.front().handle) {
+                handle.destroy();
+            }
+            queue.submits.pop();
+        }
+    }
 }
 
 void Liverpool::ProcessCommands() {
@@ -90,6 +103,22 @@ void Liverpool::ProcessCommands() {
     }
 }
 
+void Liverpool::NotifyConcurrentWorkAvailable() noexcept {
+    concurrent_work_generation.fetch_add(1, std::memory_order_release);
+    submit_cv.notify_one();
+    if (vo_port) {
+        vo_port->InterruptVoWait();
+    }
+}
+
+bool Liverpool::HasOnlyGraphicsSubmissions() {
+    std::scoped_lock admission_lock{submit_mutex};
+    auto& queue = mapped_queues[GfxQueueId];
+    std::scoped_lock queue_lock{queue.m_access};
+    return num_commands.load(std::memory_order_relaxed) == 0 &&
+           num_submits.load(std::memory_order_relaxed) == queue.submits.size();
+}
+
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
@@ -98,7 +127,7 @@ void Liverpool::Process(std::stop_token stoken) {
         {
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(submit_cv, lk, stoken, [this] {
-                return num_commands || num_submits || submission_completions.HasPendingBoundaries();
+                return num_commands || num_submits || submission_completions.HasReadyBoundaries();
             });
         }
         if (stoken.stop_requested()) {
@@ -108,10 +137,11 @@ void Liverpool::Process(std::stop_token stoken) {
         curr_qid = -1;
         submission_completions.DrainReadyBoundaries();
 
-        while (num_submits || num_commands) {
+        while (!stoken.stop_requested() && (num_submits || num_commands)) {
             ProcessCommands();
 
-            curr_qid = (curr_qid + 1) % num_mapped_queues;
+            curr_qid =
+                (curr_qid + 1) % num_mapped_queues.load(std::memory_order_acquire);
 
             auto& queue = mapped_queues[curr_qid];
 
@@ -144,7 +174,9 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
-        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        if (num_submits == 0) {
+            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        }
     }
 }
 
@@ -234,6 +266,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }
     const bool host_markers_enabled = rasterizer && EmulatorSettings.IsVkHostMarkersEnabled();
     const bool guest_markers_enabled = rasterizer && EmulatorSettings.IsVkGuestMarkersEnabled();
+    const auto write_guest_backing = [this](void* address, u64 data, u32 num_bytes) {
+        if (rasterizer) {
+            rasterizer->NotifyGuestBackingWrite(reinterpret_cast<VAddr>(address), num_bytes);
+        }
+        auto* memory = Core::Memory::Instance();
+        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+            memcpy(address, &data, num_bytes);
+        }
+    };
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
@@ -590,20 +631,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
                             fmt::format("gfx:{}:DrawIndexIndirectCountMulti", cmd_address));
-                        rasterizer->DrawIndirect(true, indirect_args_addr, offset,
-                                                 draw_index_indirect->stride,
-                                                 draw_index_indirect->count,
-                                                 draw_index_indirect->count_indirect_enable.Value()
-                                                     ? draw_index_indirect->count_addr
-                                                     : 0);
+                        rasterizer->DrawIndirect(
+                            true, indirect_args_addr, offset, draw_index_indirect->stride,
+                            draw_index_indirect->count,
+                            draw_index_indirect->count_indirect_enable.Value()
+                                ? draw_index_indirect->count_addr
+                                : 0);
                         rasterizer->ScopeMarkerEnd();
                     } else {
-                        rasterizer->DrawIndirect(true, indirect_args_addr, offset,
-                                                 draw_index_indirect->stride,
-                                                 draw_index_indirect->count,
-                                                 draw_index_indirect->count_indirect_enable.Value()
-                                                     ? draw_index_indirect->count_addr
-                                                     : 0);
+                        rasterizer->DrawIndirect(
+                            true, indirect_args_addr, offset, draw_index_indirect->stride,
+                            draw_index_indirect->count,
+                            draw_index_indirect->count_indirect_enable.Value()
+                                ? draw_index_indirect->count_addr
+                                : 0);
                     }
                 }
                 break;
@@ -704,12 +745,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
-                event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
-                    auto* memory = Core::Memory::Instance();
-                    if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                        memcpy(address, &data, num_bytes);
-                    }
-                });
+                event_eos->SignalFence(write_guest_backing);
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
                     if (rasterizer) {
@@ -727,13 +763,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 PublishEop(
-                    *event_eop,
-                    [](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                            memcpy(address, &data, num_bytes);
-                        }
-                    },
+                    *event_eop, write_guest_backing,
                     [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
                     [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
                         complete_eop_flip();
@@ -832,13 +862,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // there are no other submits to yield to we can sleep the thread
                 // instead and allow other tasks to run.
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
-                    YIELD_GFX();
+                    const u64 observed_work_generation =
+                        concurrent_work_generation.load(std::memory_order_acquire);
+                    if (vo_port->IsVoLabel(wait_addr) && HasOnlyGraphicsSubmissions()) {
+                        (void)vo_port->WaitVoLabelFor(
+                            [&] { return wait_reg_mem->Test(regs.reg_array); },
+                            [this, observed_work_generation] {
+                                return concurrent_work_generation.load(std::memory_order_acquire) !=
+                                       observed_work_generation;
+                            },
+                            VoLabelWaitFallbackInterval);
+                    } else {
+                        YIELD_GFX();
+                    }
                 }
                 break;
             }
@@ -911,7 +948,6 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         while (!ce_task.handle.done()) {
             RESUME_GFX(ce_task);
         }
-        ce_task.handle.destroy();
     }
 
     FIBER_EXIT;
@@ -1201,12 +1237,12 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     const auto sequence = submission_completions.IssueSubmission();
     auto task =
         ProcessGraphics(submission.dcb, submission.ccb, sequence, std::move(submission.owner));
+    std::scoped_lock admission_lock{submit_mutex};
     {
-        std::scoped_lock lock{queue.m_access};
+        std::scoped_lock queue_lock{queue.m_access};
         queue.submits.push({task.handle, sequence});
+        (void)task.Release();
     }
-
-    std::scoped_lock lk{submit_mutex};
     ++num_submits;
     submit_cv.notify_one();
 }
@@ -1217,16 +1253,18 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
 
     const auto vqid = gnm_vqid - 1;
     const auto sequence = submission_completions.IssueSubmission();
-    const auto& task = ProcessCompute(acb, vqid, sequence);
+    auto task = ProcessCompute(acb, vqid, sequence);
+    std::scoped_lock admission_lock{submit_mutex};
     {
-        std::scoped_lock lock{queue.m_access};
+        std::scoped_lock queue_lock{queue.m_access};
         queue.submits.push({task.handle, sequence});
+        (void)task.Release();
     }
-
-    std::scoped_lock lk{submit_mutex};
-    num_mapped_queues = std::max(num_mapped_queues, gnm_vqid + 1);
+    num_mapped_queues.store(
+        std::max(num_mapped_queues.load(std::memory_order_relaxed), gnm_vqid + 1),
+        std::memory_order_release);
     ++num_submits;
-    submit_cv.notify_one();
+    NotifyConcurrentWorkAvailable();
 }
 
 void Liverpool::SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
