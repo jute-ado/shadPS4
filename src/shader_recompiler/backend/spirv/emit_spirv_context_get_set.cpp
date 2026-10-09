@@ -58,16 +58,16 @@ Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     const u32 flatbuf_off_dw = inst->Flags<u32>();
+    // A zero flag means FlattenExtendedUserdataPass could not publish a CPU-side snapshot.
+    // There is no faithful flat-buffer fallback for the shader-runtime address or offset.
+    if (flatbuf_off_dw == 0) {
+        return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
+    }
     if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }
-    // We can only provide a fallback for immediate offsets.
-    if (flatbuf_off_dw == 0) {
-        return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
-    } else {
-        return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const, addr, offset,
-                                  ctx.ConstU32(flatbuf_off_dw));
-    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const, addr, offset,
+                              ctx.ConstU32(flatbuf_off_dw));
 }
 
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
@@ -156,8 +156,10 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
             ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.frag_coord, ctx.ConstU32(comp)));
         if (comp < 2) {
             const Id host_inv_scale = ctx.OpLoad(
-                ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.push_data_block,
-                                              ctx.ConstU32(PushData::HostInvScaleIndex)));
+                ctx.F32[1],
+                ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]),
+                                  ctx.push_data_block,
+                                  ctx.ConstU32(PushData::HostInvScaleIndex)));
             return ctx.OpFMul(ctx.F32[1], coordinate, host_inv_scale);
         }
         return coordinate;

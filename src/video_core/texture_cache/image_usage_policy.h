@@ -15,6 +15,23 @@ struct SupportedImageUsage {
     bool dropped_optional_storage{};
 };
 
+[[nodiscard]] constexpr vk::FormatFeatureFlags2 RequiredImageBindingFormatFeatures(
+    const bool is_storage) {
+    return is_storage ? vk::FormatFeatureFlagBits2::eStorageImage |
+                            vk::FormatFeatureFlagBits2::eStorageReadWithoutFormat |
+                            vk::FormatFeatureFlagBits2::eStorageWriteWithoutFormat
+                      : vk::FormatFeatureFlagBits2::eSampledImage;
+}
+
+[[nodiscard]] constexpr bool IsImageBindingFormatUsable(
+    const bool is_storage, const vk::FormatFeatureFlags2 format_features) {
+    if (!is_storage) {
+        return true;
+    }
+    const auto required = RequiredImageBindingFormatFeatures(true);
+    return (format_features & required) == required;
+}
+
 template <typename SupportsUsage>
 [[nodiscard]] std::optional<SupportedImageUsage> SelectSupportedImageUsage(
     const bool is_block_encoded, const vk::ImageUsageFlags preferred_usage,

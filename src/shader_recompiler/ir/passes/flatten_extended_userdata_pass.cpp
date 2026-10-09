@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <xbyak/xbyak.h>
@@ -27,14 +30,32 @@
 using namespace Xbyak::util;
 
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
-static const u8* g_srt_codegen_start = nullptr;
+static std::atomic<size_t> g_srt_codegen_published_size{};
+static std::mutex g_srt_codegen_mutex;
+static std::once_flag g_srt_handler_once;
+
+namespace {
+static bool SrtWalkerSignalHandler(void* context, void* fault_address);
+
+static void EnsureSrtHandlerRegistered() {
+    std::call_once(g_srt_handler_once, [] {
+        // Decoder construction may allocate and is not safe inside a POSIX/VEH fault path.
+        static_cast<void>(Common::Decoder::Instance());
+        constexpr u32 priority = 1;
+        Core::Signals::Instance()->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
+    });
+}
+} // namespace
 
 namespace Shader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+    std::scoped_lock lock{g_srt_codegen_mutex};
+    EnsureSrtHandlerRegistered();
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
+    g_srt_codegen_published_size.store(g_srt_codegen.getSize(), std::memory_order_release);
     return func_addr;
 }
 
@@ -68,54 +89,40 @@ static void DumpSrtProgram(const Shader::Info& info, const u8* code, size_t code
 }
 
 static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
-    // Only handle if the fault address is within the SRT code range
-    const u8* code_start = g_srt_codegen_start;
-    const u8* code_end = code_start + g_srt_codegen.getSize();
-    const void* code = Common::GetRip(context);
-    if (code < code_start || code >= code_end) {
-        return false; // Not in SRT code range
-    }
-
-    // Patch instruction to zero register
-    ZydisDecodedInstruction instruction;
-    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    ZyanStatus status = Common::Decoder::Instance()->decodeInstruction(instruction, operands,
-                                                                       const_cast<void*>(code), 15);
-
-    ASSERT(ZYAN_SUCCESS(status) && instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-           operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-           operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY);
-
-    size_t len = instruction.length;
-    const size_t patch_size = 3;
-    u8* code_patch = const_cast<u8*>(reinterpret_cast<const u8*>(code));
-
-    // We can only encounter rdi or r10d as the first operand in a
-    // fault memory access for SRT walker.
-    switch (operands[0].reg.value) {
-    case ZYDIS_REGISTER_RDI:
-        // mov rdi, [rdi + (off_dw << 2)] -> xor rdi, rdi
-        code_patch[0] = 0x48;
-        code_patch[1] = 0x31;
-        code_patch[2] = 0xFF;
-        break;
-    case ZYDIS_REGISTER_R10D:
-        // mov r10d, [rdi + (off_dw << 2)] -> xor r10d, r10d
-        code_patch[0] = 0x45;
-        code_patch[1] = 0x31;
-        code_patch[2] = 0xD2;
-        break;
-    default:
-        UNREACHABLE_MSG("Unsupported register for SRT walker patch");
+    if (Common::IsWriteError(context)) {
         return false;
     }
 
-    // Fill nops
-    memset(code_patch + patch_size, 0x90, len - patch_size);
+    const auto code_start = reinterpret_cast<uintptr_t>(g_srt_codegen.getCode());
+    const auto code_size = g_srt_codegen_published_size.load(std::memory_order_acquire);
+    const auto code = reinterpret_cast<uintptr_t>(Common::GetRip(context));
+    if (code < code_start || code - code_start >= code_size) {
+        return false;
+    }
 
-    LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}", code,
-                fault_address);
+    ZydisDecodedInstruction instruction;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+    const ZyanStatus status = Common::Decoder::Instance()->decodeInstruction(
+        instruction, operands, reinterpret_cast<void*>(code), 15);
+    if (!ZYAN_SUCCESS(status) || instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+        operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+        operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+        operands[1].mem.base != ZYDIS_REGISTER_RDI) {
+        return false;
+    }
 
+    switch (operands[0].reg.value) {
+    case ZYDIS_REGISTER_RDI:
+        Common::SetRdi(context, 0);
+        break;
+    case ZYDIS_REGISTER_R10D:
+        Common::SetR10(context, 0);
+        break;
+    default:
+        return false;
+    }
+
+    Common::IncrementRip(context, instruction.length);
     return true;
 }
 
@@ -160,71 +167,169 @@ namespace Shader::Optimization {
 namespace {
 
 static inline void PushPtr(Xbyak::CodeGenerator& c, u32 off_dw) {
-    c.push(rdi);
+    // Keep the stack aligned for the optional range-sync callback at every tree depth.
+    c.sub(rsp, 16);
+    c.mov(ptr[rsp], rdi);
     c.mov(rdi, ptr[rdi + (off_dw << 2)]);
     c.mov(r10, 0xFFFFFFFFFFFFULL);
     c.and_(rdi, r10);
 }
 
 static inline void PopPtr(Xbyak::CodeGenerator& c) {
-    c.pop(rdi);
+    c.mov(rdi, ptr[rsp]);
+    c.add(rsp, 16);
 };
 
-static void VisitPointer(u32 off_dw, IR::Inst* subtree, PassInfo& pass_info,
-                         Xbyak::CodeGenerator& c) {
-    PushPtr(c, off_dw);
+struct SrtSourceRange {
+    u64 begin_dw;
+    u64 end_dw;
+};
+
+static boost::container::small_vector<SrtSourceRange, 4> GetSourceRanges(
+    PassInfo::PtrUserList& use_list, PassInfo& pass_info) {
+    boost::container::small_vector<SrtSourceRange, 4> ranges;
+    for (const auto [src_off_dw, use] : use_list) {
+        const u64 begin_dw = src_off_dw;
+        // A ReadConst used as another SRT pointer consumes both address dwords. Synchronizing
+        // the entire pointer prevents a torn low/high load across tracking-page boundaries.
+        const u64 end_dw = begin_dw + (pass_info.GetUsesAsPointer(use) ? 2U : 1U);
+        if (!ranges.empty() && begin_dw <= ranges.back().end_dw) {
+            ranges.back().end_dw = std::max(ranges.back().end_dw, end_dw);
+        } else {
+            ranges.push_back({begin_dw, end_dw});
+        }
+    }
+    return ranges;
+}
+
+static void EmitRangeSync(Xbyak::CodeGenerator& c, const SrtSourceRange& range) {
+    Xbyak::Label skip;
+    c.mov(eax, 1);
+    c.test(r14, r14);
+    c.jz(skip);
+
+    // The callback follows the PS4 SysV ABI: context, guest address, byte size. Preserve the
+    // current tree pointer in a 16-byte slot so nested walkers retain call-site alignment.
+    c.sub(rsp, 16);
+    c.mov(ptr[rsp], rdi);
+    c.lea(rsi, ptr[rdi + range.begin_dw * sizeof(u32)]);
+    c.mov(rdx, (range.end_dw - range.begin_dw) * sizeof(u32));
+    c.mov(rdi, r15);
+    c.call(r14);
+    c.mov(rdi, ptr[rsp]);
+    c.add(rsp, 16);
+    c.mov(rsi, r13);
+
+    c.L(skip);
+}
+
+static void VisitNode(IR::Inst* subtree, PassInfo& pass_info, Xbyak::CodeGenerator& c) {
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
     ASSERT(use_list);
 
-    // First copy all the src data from this tree level
-    // That way, all data that was contiguous in the guest SRT is also contiguous in the
-    // flattened buffer.
-    // TODO src and dst are contiguous. Optimize with wider loads/stores
-    // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
-    for (auto [src_off_dw, use] : *use_list) {
-        c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
-        c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
+    struct SrtCopy {
+        u32 src_off_dw;
+        u32 dst_off_dw;
+    };
+    boost::container::small_vector<SrtCopy, 8> copies;
+    for (const auto [src_off_dw, use] : *use_list) {
+        const u32 dst_off_dw = pass_info.dst_off_dw++;
+        use->SetFlags<u32>(dst_off_dw);
+        copies.push_back({src_off_dw, dst_off_dw});
+    }
 
-        use->SetFlags<u32>(pass_info.dst_off_dw);
-        pass_info.dst_off_dw++;
+    // A synchronizer refusal means the guest range is not safe to dereference. Publish zeros for
+    // this invocation and keep the generated walker immutable so later valid invocations can
+    // recover. Contiguous guest words remain contiguous in the flattened buffer.
+    for (const auto& range : GetSourceRanges(*use_list, pass_info)) {
+        Xbyak::Label readable;
+        Xbyak::Label finished;
+        EmitRangeSync(c, range);
+        c.test(al, al);
+        c.jnz(readable, Xbyak::CodeGenerator::T_NEAR);
+        for (const auto [src_off_dw, dst_off_dw] : copies) {
+            if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                c.mov(dword[rsi + (dst_off_dw << 2)], 0);
+            }
+        }
+        c.jmp(finished, Xbyak::CodeGenerator::T_NEAR);
+        c.L(readable);
+        for (const auto [src_off_dw, dst_off_dw] : copies) {
+            if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
+                c.mov(ptr[rsi + (dst_off_dw << 2)], r10d);
+            }
+        }
+        c.L(finished);
     }
 
     // Then visit any children used as pointers
     for (const auto [src_off_dw, use] : *use_list) {
         if (pass_info.GetUsesAsPointer(use)) {
-            VisitPointer(src_off_dw, use, pass_info, c);
+            // Follow the just-validated flattened pointer. If its source range was refused, this
+            // is zero and the child synchronizer will reject its derived ranges without a raw
+            // guest-memory access.
+            c.sub(rsp, 16);
+            c.mov(ptr[rsp], rdi);
+            c.mov(rdi, ptr[r13 + (use->Flags<u32>() << 2)]);
+            c.mov(r10, 0xFFFFFFFFFFFFULL);
+            c.and_(rdi, r10);
+
+            VisitNode(use, pass_info, c);
+
+            c.mov(rdi, ptr[rsp]);
+            c.add(rsp, 16);
         }
     }
+}
 
+static void VisitPointer(u32 off_dw, IR::Inst* subtree, PassInfo& pass_info,
+                         Xbyak::CodeGenerator& c) {
+    PushPtr(c, off_dw);
+    VisitNode(subtree, pass_info, c);
     PopPtr(c);
 }
 
 static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
+    std::scoped_lock lock{g_srt_codegen_mutex};
     Xbyak::CodeGenerator& c = g_srt_codegen;
 
     if (pass_info.srt_roots.empty()) {
         return;
     }
 
-    // Register the signal handler for SRT walker, if not already registered
-    if (g_srt_codegen_start == nullptr) {
-        g_srt_codegen_start = c.getCurr();
-        auto* signals = Core::Signals::Instance();
-        // Call after the memory invalidation handler
-        constexpr u32 priority = 1;
-        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
-    }
+    EnsureSrtHandlerRegistered();
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
 
+    // PS4_SYSV_ABI arguments arrive in rdi/rsi/rdx/rcx. The generated walker makes optional
+    // callbacks, so retain all four values in callee-saved registers and align the stack once.
+    c.push(r12);
+    c.push(r13);
+    c.push(r14);
+    c.push(r15);
+    c.sub(rsp, 8);
+    c.mov(r12, rdi);
+    c.mov(r13, rsi);
+    c.mov(r14, rdx);
+    c.mov(r15, rcx);
+
     for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
+        c.mov(rdi, r12);
+        c.mov(rsi, r13);
         VisitPointer(static_cast<u32>(sgpr_base), root, pass_info, c);
     }
 
+    c.add(rsp, 8);
+    c.pop(r15);
+    c.pop(r14);
+    c.pop(r13);
+    c.pop(r12);
     c.ret();
     c.ready();
+    g_srt_codegen_published_size.store(c.getSize(), std::memory_order_release);
 
     info.srt_info.walker_func_size =
         c.getCurr() - reinterpret_cast<const u8*>(info.srt_info.walker_func);
@@ -239,7 +344,7 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
 }; // namespace
 
-void FlattenExtendedUserdataPass(IR::Program& program) {
+void FlattenExtendedUserdataPass(IR::Program& program, SrtMemorySynchronizer synchronizer) {
     Shader::Info& info = program.info;
     PassInfo pass_info;
 
@@ -307,7 +412,7 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         readconst->SetFlags<u32>(original->Flags<u32>());
     }
 
-    info.RefreshFlatBuf();
+    info.RefreshFlatBuf(synchronizer);
 }
 
 } // namespace Shader::Optimization
@@ -322,7 +427,7 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
 
 namespace Optimization {
 
-void FlattenExtendedUserdataPass(IR::Program& program) {
+void FlattenExtendedUserdataPass(IR::Program& program, SrtMemorySynchronizer) {
     UNREACHABLE_MSG("FlattenExtendedUserdataPass unimplemented for target architecture.");
 }
 

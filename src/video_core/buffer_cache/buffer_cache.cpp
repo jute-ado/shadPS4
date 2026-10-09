@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <limits>
 #include <magic_enum/magic_enum.hpp>
 #include "common/alignment.h"
 #include "common/debug.h"
@@ -10,6 +11,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/buffer_residency.h"
+#include "video_core/buffer_cache/download_readback_policy.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -105,12 +107,40 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
     });
 }
 
-template <bool async>
+bool BufferCache::ReadMemoryExact(VAddr device_addr, u64 size) {
+    ASSERT_MSG(size <= std::numeric_limits<u32>::max(), "Exact readback range is too large: {}",
+               size);
+    bool readback_completed = false;
+    liverpool->SendCommand<true>([this, device_addr, size, &readback_completed] {
+        const BufferId buffer_id = page_table[device_addr >> CACHING_PAGEBITS].buffer_id;
+        if (IsBufferInvalid(buffer_id)) {
+            return;
+        }
+        Buffer& buffer = slot_buffers[buffer_id];
+        if (!buffer.IsInBounds(device_addr, size)) {
+            return;
+        }
+        DownloadBufferMemory<false, true>(buffer, device_addr, size);
+        readback_completed = true;
+    });
+    return readback_completed;
+}
+
+template <bool async, bool exact>
 void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     memory_tracker->ForEachDownloadRange<false>(
         device_addr, size, [&](u64 device_addr_out, u64 range_size) {
+            if constexpr (exact) {
+                const auto clipped =
+                    ClipDownloadRange(device_addr_out, range_size, device_addr, size);
+                if (!clipped) {
+                    return;
+                }
+                device_addr_out = clipped->address;
+                range_size = clipped->size;
+            }
             const VAddr buffer_addr = buffer.CpuAddr();
             const auto add_download = [&](VAddr start, VAddr end) {
                 const u64 new_offset = start - buffer_addr;
@@ -155,11 +185,26 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         .pBufferMemoryBarriers = &pre_barrier,
     });
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
-    const auto write_data = [&]() {
+    const vk::BufferMemoryBarrier2 host_barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        .buffer = download_buffer.Handle(),
+        .offset = offset,
+        .size = total_size_bytes,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &host_barrier,
+    });
+
+    const auto write_data = [this, device_addr, size, copies, offset, download,
+                             buffer_cpu_addr = buffer.CpuAddr()]() {
         auto* memory = Core::Memory::Instance();
         cpu_page_write_tracker.Discard(device_addr, size);
         for (const auto& copy : copies) {
-            const VAddr copy_device_addr = buffer.CpuAddr() + copy.srcOffset;
+            const VAddr copy_device_addr = buffer_cpu_addr + copy.srcOffset;
             const u64 dst_offset = copy.dstOffset - offset;
             memory->TryWriteBacking(std::bit_cast<u8*>(copy_device_addr), download + dst_offset,
                                     copy.size);
@@ -167,10 +212,22 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
     };
     if constexpr (async) {
-        scheduler.DeferOperation(write_data);
+        scheduler.DeferOperation(
+            [this, write_data, offset, total_size_bytes] {
+                ASSERT_MSG(download_buffer.InvalidateMappedRange(offset, total_size_bytes),
+                           "Failed to invalidate asynchronous download range {:#x}:{:#x}", offset,
+                           total_size_bytes);
+                write_data();
+            });
     } else {
-        scheduler.Finish();
-        write_data();
+        const bool completed = CompleteDownloadReadback(
+            [this] { scheduler.Finish(); },
+            [this, offset, total_size_bytes] {
+                return download_buffer.InvalidateMappedRange(offset, total_size_bytes);
+            },
+            write_data);
+        ASSERT_MSG(completed, "Failed to invalidate download range {:#x}:{:#x}", offset,
+                   total_size_bytes);
     }
 }
 

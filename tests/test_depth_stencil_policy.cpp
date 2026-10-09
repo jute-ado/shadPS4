@@ -8,7 +8,10 @@
 namespace {
 
 using AmdGpu::StencilFunc;
+using VideoCore::DepthStencilPolicy::NeedsStencilWriteAccess;
 using VideoCore::DepthStencilPolicy::SelectStencilReference;
+using VideoCore::DepthStencilPolicy::SelectTargetLayout;
+using VideoCore::DepthStencilPolicy::TargetLayout;
 using VideoCore::DepthStencilPolicy::ShouldClearDepth;
 using VideoCore::DepthStencilPolicy::UsesStencilOpValue;
 
@@ -41,6 +44,41 @@ TEST(DepthStencilPolicy, ReplaceSelectsOperationReferenceAndOtherOpsUseTestRefer
 
     EXPECT_EQ(SelectStencilReference(true, op_value, test_value), op_value);
     EXPECT_EQ(SelectStencilReference(false, op_value, test_value), test_value);
+}
+
+TEST(DepthStencilPolicy, KeepOnlyStencilTestDoesNotRequireWritableLayout) {
+    AmdGpu::StencilControl operations{};
+    AmdGpu::StencilRefMask front{.stencil_write_mask = 0xff};
+    AmdGpu::StencilRefMask back{.stencil_write_mask = 0xff};
+
+    EXPECT_FALSE(NeedsStencilWriteAccess(true, false, true, operations, front, back));
+}
+
+TEST(DepthStencilPolicy, WritableOperationRequiresEnabledFaceAndNonzeroMask) {
+    AmdGpu::StencilControl operations{};
+    operations.stencil_zpass_front = StencilFunc::ReplaceOp;
+    operations.stencil_zpass_back = StencilFunc::Zero;
+    AmdGpu::StencilRefMask front{.stencil_write_mask = 0xff};
+    AmdGpu::StencilRefMask back{.stencil_write_mask = 0xff};
+
+    EXPECT_TRUE(NeedsStencilWriteAccess(true, false, false, operations, front, back));
+
+    front.stencil_write_mask = 0;
+    EXPECT_FALSE(NeedsStencilWriteAccess(true, false, false, operations, front, back));
+    EXPECT_TRUE(NeedsStencilWriteAccess(true, false, true, operations, front, back));
+    EXPECT_FALSE(NeedsStencilWriteAccess(false, false, true, operations, front, back));
+}
+
+TEST(DepthStencilPolicy, StencilClearAlwaysRequiresWritableLayout) {
+    EXPECT_TRUE(NeedsStencilWriteAccess(false, true, false, {}, {}, {}));
+}
+
+TEST(DepthStencilPolicy, SelectsLayoutsForIndependentDepthAndStencilAccess) {
+    EXPECT_EQ(SelectTargetLayout(true, false, false), TargetLayout::DepthAttachment);
+    EXPECT_EQ(SelectTargetLayout(true, true, false), TargetLayout::DepthStencilAttachment);
+    EXPECT_EQ(SelectTargetLayout(false, true, true), TargetLayout::DepthReadStencilAttachment);
+    EXPECT_EQ(SelectTargetLayout(false, true, false), TargetLayout::DepthStencilReadOnly);
+    EXPECT_EQ(SelectTargetLayout(false, false, false), TargetLayout::DepthReadOnly);
 }
 
 } // namespace

@@ -32,6 +32,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     };
 
     u32 binding{};
+    u32 descriptor_count{};
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     for (const auto& buffer : info->buffers) {
         // During deserialization, we don't have access to the UD to fetch sharp data. To address
@@ -46,6 +47,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });
+        descriptor_count++;
     }
     for (const auto& image : info->images) {
         const u32 num_bindings = image.NumBindings(*info);
@@ -56,7 +58,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             .descriptorCount = num_bindings,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });
-        binding += num_bindings;
+        descriptor_count += num_bindings;
+        binding++;
     }
     for (const auto& sampler : info->samplers) {
         bindings.push_back({
@@ -65,6 +68,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });
+        descriptor_count++;
     }
 
     const vk::PushConstantRange push_constants = {
@@ -73,7 +77,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .size = sizeof(Shader::PushData),
     };
 
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors =
+        descriptor_count <= instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};

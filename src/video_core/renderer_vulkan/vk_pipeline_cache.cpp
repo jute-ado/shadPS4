@@ -3,23 +3,33 @@
 
 #include <ranges>
 
+#include <magic_enum/magic_enum.hpp>
+
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_binding_policy.h"
+#include "video_core/buffer_cache/srt_memory_sync.h"
 #include "video_core/cache_storage.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/texture_cache/image_binding_policy.h"
+#include "video_core/texture_cache/image_descriptor_policy.h"
+#include "video_core/texture_cache/image_usage_policy.h"
 
 namespace Vulkan {
 
@@ -255,8 +265,11 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
-                             AmdGpu::Liverpool* liverpool_)
+                             AmdGpu::Liverpool* liverpool_,
+                             VideoCore::BufferCache& buffer_cache_,
+                             VideoCore::PageManager& page_manager_)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
+      buffer_cache{buffer_cache_}, page_manager{page_manager_},
       desc_heap{instance, scheduler.GetMasterSemaphore(), DescriptorHeapSizes} {
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -294,6 +307,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_fp64_signed_zero_inf_nan_preserve =
             bool(vk12_props.shaderSignedZeroInfNanPreserveFloat64),
         .supports_image_load_store_lod = instance_.IsImageLoadStoreLodSupported(),
+        .supports_sampled_image_array_nonuniform_indexing =
+            instance_.IsSampledImageArrayNonuniformIndexingSupported(),
         .supports_native_cube_calc = instance_.IsAmdGcnShaderSupported(),
         .supports_trinary_minmax = instance_.IsAmdShaderTrinaryMinMaxSupported(),
         .supports_buffer_fp32_atomic_min_max =
@@ -743,7 +758,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile,
+                                                     GetSrtMemorySynchronizer());
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
@@ -773,6 +789,52 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(stage, l_stage);
+    const VideoCore::ImageBindingLimits image_limits{
+        .max_dimension_1d = instance.GetMaxImageDimension1D(),
+        .max_dimension_2d = instance.GetMaxImageDimension2D(),
+        .max_dimension_3d = instance.GetMaxImageDimension3D(),
+        .max_dimension_cube = instance.GetMaxImageDimensionCube(),
+        .max_array_layers = instance.GetMaxImageArrayLayers(),
+        .max_guest_resource_size = 8ULL * 1024 * 1024 * 1024,
+    };
+    const auto canonicalize_guest_resources = [&](Shader::StageSpecialization& spec,
+                                                  const Shader::Info& info) {
+        spec.CanonicalizeUnusableGuestBuffers([&, this](u32, const auto& desc) {
+            const auto sharp = desc.GetSharp(info);
+            if (!sharp) {
+                return false;
+            }
+            return VideoCore::IsGuestBufferBindingUsable(
+                sharp.base_address, desc.GetBindingSize(sharp), [this](VAddr address, u64 size) {
+                    return page_manager.IsGpuMapped(address, size);
+                });
+        });
+        spec.CanonicalizeUnusableGuestImages([&, this](u32, const auto& desc) {
+            const auto sharp = desc.GetSharp(info);
+            const auto data_fmt = sharp.GetDataFmt();
+            const auto num_fmt = sharp.GetNumberFmt();
+            const auto kind = VideoCore::ClassifyImageBinding(sharp);
+            if (sharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid ||
+                !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
+                !kind) {
+                return false;
+            }
+            if (!VideoCore::IsImageBindingFormatKnown(sharp, desc.is_written)) {
+                return false;
+            }
+            const auto binding_format = VideoCore::DescribeImageBindingFormat(
+                sharp, desc.is_depth, desc.is_written);
+            return instance.IsFormatSupported(
+                       binding_format,
+                       VideoCore::RequiredImageBindingFormatFeatures(desc.is_written)) &&
+                   VideoCore::IsGuestImageSpecializationUsable(
+                       sharp.Address(), sharp.pitch, sharp.width, *kind,
+                       VideoCore::DescribeImageBinding(sharp), image_limits,
+                       [](VAddr address, u64 size) {
+                           return Core::Memory::Instance()->IsValidGpuMapping(address, size);
+                       });
+        });
+    };
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
         it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
@@ -780,6 +842,7 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         auto start = binding;
         const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        canonicalize_guest_resources(spec, program->info);
         const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
@@ -789,32 +852,50 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
     }
 
     auto& program = it_pgm.value();
-    auto& info = program->info;
-    info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
-    info.user_data = params.user_data;
-    info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    const auto synchronizer = GetSrtMemorySynchronizer();
+    for (size_t perm_idx = 0; perm_idx < program->modules.size(); ++perm_idx) {
+        auto& module = program->modules[perm_idx];
+        if (!module.module) {
+            continue;
+        }
+        auto& module_info = module.GetInfo(program->info);
+        module_info.pgm_base = params.Base();
+        module_info.user_data = params.user_data;
+        module_info.RefreshFlatBuf(synchronizer);
 
-    size_t perm_idx = program->modules.size();
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
-
-    vk::ShaderModule module{};
-
-    const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
-    if (it == program->modules.end()) {
-        auto new_info = Shader::Info(stage, l_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
-
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
-    } else {
-        info.AddBindings(binding);
-        module = it->module;
-        perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
+        auto spec = Shader::StageSpecialization(module_info, runtime_info, profile, binding);
+        canonicalize_guest_resources(spec, module_info);
+        if (spec == module.spec) {
+            module_info.AddBindings(binding);
+            const auto perm_hash = HashCombine(params.hash, perm_idx);
+            return std::make_tuple(&module_info, module.module, module.spec.fetch_shader_data,
+                                   perm_hash);
+        }
     }
-    return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+
+    const size_t perm_idx = program->modules.size();
+    const u64 perm_hash = HashCombine(params.hash, perm_idx);
+    auto owned_info = std::make_unique<Shader::Info>(stage, l_stage, params);
+    auto* module_info = owned_info.get();
+    const auto start = binding;
+    const auto module = CompileModule(*module_info, runtime_info, params.code, perm_idx, binding);
+    auto spec = Shader::StageSpecialization(*module_info, runtime_info, profile, start);
+    canonicalize_guest_resources(spec, *module_info);
+
+    RegisterShaderMeta(*module_info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+    auto& stored = program->AddPermut(module, std::move(spec), std::move(owned_info));
+    module_info = &stored.GetInfo(program->info);
+    return std::make_tuple(module_info, module, stored.spec.fetch_shader_data, perm_hash);
+}
+
+Shader::SrtMemorySynchronizer PipelineCache::GetSrtMemorySynchronizer() {
+    return {};
+}
+
+bool PS4_SYSV_ABI PipelineCache::SynchronizeSrtRange(void* context, VAddr address, u64 size) {
+    auto& cache = *static_cast<PipelineCache*>(context);
+    return VideoCore::SynchronizeSrtMemoryRange(cache.page_manager, cache.buffer_cache, address,
+                                                size);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

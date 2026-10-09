@@ -60,6 +60,7 @@ public:
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size);
+    bool ReadMappedMemory(VAddr addr, void* destination, u64 size);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
@@ -133,9 +134,9 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
-    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
-    boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+    std::vector<vk::DescriptorImageInfo> image_infos;
+    std::vector<vk::DescriptorBufferInfo> buffer_infos;
+    std::vector<VideoCore::ImageId> bound_images;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
@@ -145,7 +146,7 @@ private:
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
-    boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+    std::vector<ImageBindingInfo> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
     u32 prepared_host_scale{1};

@@ -82,6 +82,14 @@ struct Buffer {
         return stride;
     }
 
+    u32 GetStride(bool is_mubuf_instruction, bool is_format_instruction) const noexcept {
+        // GCN3 Table 8.6 repurposes DFMT as STRIDE[17:14] only for non-format MUBUF
+        // instructions with ADD_TID enabled.
+        const bool uses_extended_stride =
+            add_tid_enable && is_mubuf_instruction && !is_format_instruction;
+        return stride | (uses_extended_stride ? data_format << 14 : 0);
+    }
+
     u32 NumDwords() const noexcept {
         return Common::AlignUp(GetSize(), sizeof(u32)) >> 2;
     }
@@ -222,14 +230,22 @@ struct Image {
     }
 
     [[nodiscard]] u32 NumLayers() const noexcept {
-        // Depth is the number of layers for Array images.
-        u32 slices = depth + 1;
-        if (GetType() == ImageType::Color3D) {
-            // Depth is the actual texture depth for 3D images.
-            slices = 1;
-        } else if (IsCube()) {
+        // The depth field is only a layer count for array and cube descriptors. Its bits are
+        // unused for ordinary 1D/2D/MSAA images and games need not clear them.
+        u32 slices = 1;
+        if (IsCube()) {
             // Depth is the number of full cubes for Cube images.
-            slices *= 6;
+            slices = (depth + 1) * 6;
+        } else {
+            switch (GetType()) {
+            case ImageType::Color1DArray:
+            case ImageType::Color2DArray:
+            case ImageType::Color2DMsaaArray:
+                slices = depth + 1;
+                break;
+            default:
+                return 1;
+            }
         }
         if (pow2pad) {
             slices = std::bit_ceil(slices);
@@ -457,7 +473,10 @@ struct Sampler {
     }
 
     bool Valid() const {
-        return true;
+        return static_cast<u64>(max_aniso.Value()) <= static_cast<u64>(AnisoRatio::Sixteen) &&
+               static_cast<u64>(filter_mode.Value()) <= static_cast<u64>(FilterMode::Max) &&
+               static_cast<u64>(mip_filter.Value()) <= static_cast<u64>(MipFilter::Linear) &&
+               min_lod.Value() <= max_lod.Value();
     }
 
     bool operator==(const Sampler& other) const noexcept {

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <unordered_set>
+#include <optional>
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/ir/passes/shared_memory_barrier_policy.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
 
@@ -23,30 +25,21 @@ static bool IsWriteShared(const IR::Inst& inst) {
 
 // Inserts barriers when a shared memory write and read occur in the same basic block.
 static void EmitBarrierInBlock(IR::Block* block) {
-    enum class BarrierAction : u32 {
-        None,
-        BarrierOnWrite,
-        BarrierOnRead,
-    };
-    BarrierAction action{};
+    std::optional<SharedMemoryAccess> previous_access;
     for (IR::Inst& inst : block->Instructions()) {
-        if (IsLoadShared(inst)) {
-            if (action == BarrierAction::BarrierOnRead) {
-                IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
-                ir.Barrier();
-            }
-            action = BarrierAction::BarrierOnWrite;
+        const auto current_access = IsLoadShared(inst)   ? std::optional{SharedMemoryAccess::Load}
+                                    : IsWriteShared(inst) ? std::optional{SharedMemoryAccess::Write}
+                                                          : std::nullopt;
+        if (!current_access) {
             continue;
         }
-        if (IsWriteShared(inst)) {
-            if (action == BarrierAction::BarrierOnWrite) {
-                IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
-                ir.Barrier();
-            }
-            action = BarrierAction::BarrierOnRead;
+        if (previous_access && NeedsSharedMemoryBarrier(*previous_access, *current_access)) {
+            IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+            ir.Barrier();
         }
+        previous_access = current_access;
     }
-    if (action != BarrierAction::None) {
+    if (previous_access) {
         IR::IREmitter ir{*block, --block->end()};
         ir.Barrier();
     }
@@ -79,8 +72,6 @@ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
     }
 }
 
-static constexpr u32 GcnSubgroupSize = 64;
-
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile) {
     if (program.info.stage != Stage::Compute) {
@@ -90,10 +81,12 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     const u32 shared_memory_size = cs_info.shared_memory_size;
     const u32 threadgroup_size =
         cs_info.workgroup_size[0] * cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
-    // The compiler can only omit barriers when the local workgroup size is the same as the HW
-    // subgroup.
-    if (shared_memory_size == 0 || threadgroup_size != GcnSubgroupSize ||
-        !profile.needs_lds_barriers) {
+    // Guest wave64 regions execute in lockstep on PS4 even when they are part of a larger
+    // workgroup. Explicitly preserve their LDS ordering on narrower host subgroups. Barriers are
+    // inserted only in converged blocks, so a workgroup-wide host barrier is a safe stronger
+    // ordering for multi-wave workgroups as well.
+    if (shared_memory_size == 0 ||
+        !NeedsSharedMemoryBarrierEmulation(threadgroup_size, profile.needs_lds_barriers)) {
         return;
     }
     using Type = IR::AbstractSyntaxNode::Type;

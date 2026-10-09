@@ -272,6 +272,7 @@ public:
     Id num_workgroups_id{};
     Id workgroup_index_id{};
     Id local_invocation_id{};
+    Id local_invocation_index{};
     Id invocation_id{};
     Id subgroup_local_invocation_id{};
     Id image_u32{};
@@ -300,6 +301,7 @@ public:
         AmdGpu::ImageType view_type;
         bool is_integer = false;
         bool is_storage = false;
+        bool is_dynamic_table = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
 

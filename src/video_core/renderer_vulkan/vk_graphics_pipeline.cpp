@@ -449,6 +449,7 @@ template void GraphicsPipeline::GetVertexInputs(
 void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     u32 binding{};
+    u32 descriptor_count{};
 
     for (const auto* stage : stages) {
         if (!stage) {
@@ -466,6 +467,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
+            descriptor_count++;
         }
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);
@@ -476,7 +478,8 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 .descriptorCount = num_bindings,
                 .stageFlags = stage_bit,
             });
-            binding += num_bindings;
+            descriptor_count += num_bindings;
+            binding++;
         }
         for (const auto& sampler : stage->samplers) {
             bindings.push_back({
@@ -485,9 +488,11 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
+            descriptor_count++;
         }
     }
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors =
+        descriptor_count <= instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};

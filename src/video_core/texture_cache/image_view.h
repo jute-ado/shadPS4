@@ -37,7 +37,7 @@ struct ImageViewInfo {
     u32 min_lod = 0;
     bool is_storage = false;
 
-    auto operator<=>(const ImageViewInfo&) const = default;
+    bool operator==(const ImageViewInfo&) const = default;
 };
 
 struct Image;

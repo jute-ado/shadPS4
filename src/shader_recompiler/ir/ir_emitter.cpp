@@ -2103,6 +2103,13 @@ Value IREmitter::ImageSampleExplicitLod(const Value& handle, const Value& coords
     return Inst(Opcode::ImageSampleExplicitLod, Flags{info}, handle, coords, lod, offset);
 }
 
+Value IREmitter::ImageSampleExplicitLodDynamic(const Value& handle, const U32& descriptor_index,
+                                               const Value& coords, const F32& lod,
+                                               const Value& offset, TextureInstInfo info) {
+    return Inst(Opcode::ImageSampleExplicitLodDynamic, Flags{info}, handle, descriptor_index,
+                coords, lod, offset);
+}
+
 Value IREmitter::ImageSampleDrefImplicitLod(const Value& handle, const Value& coords,
                                             const F32& dref, const F32& bias, const Value& offset,
                                             TextureInstInfo info) {

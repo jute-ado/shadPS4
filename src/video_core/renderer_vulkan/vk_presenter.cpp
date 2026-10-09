@@ -746,6 +746,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_semaphore = draw_scheduler.GetMasterSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
+    void* const vulkan_instance =
+        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
+    void* const window_handle = window.GetWindowInfo().render_surface;
+    frame->renderdoc_capture =
+        VideoCore::BeginNextPresentedFrameCapture(vulkan_instance, window_handle);
     draw_scheduler.Flush(info);
     return frame;
 }
@@ -824,6 +829,17 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+    const auto end_renderdoc_capture = [&] {
+        if (!frame->renderdoc_capture) {
+            return;
+        }
+        void* const vulkan_instance =
+            reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
+        void* const window_handle = window.GetWindowInfo().render_surface;
+        VideoCore::EndPresentedFrameCapture(vulkan_instance, window_handle);
+        frame->renderdoc_capture = false;
+    };
+
     const auto complete_frame = [&](const bool was_presented) {
         bool released_frame{};
         {
@@ -846,6 +862,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            end_renderdoc_capture();
             complete_frame(false);
             return;
         }
@@ -1081,11 +1098,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
-    void* const vulkan_instance =
-        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
-    void* const window_handle = window.GetWindowInfo().render_surface;
-    const bool is_renderdoc_capture =
-        VideoCore::BeginNextPresentedFrameCapture(vulkan_instance, window_handle);
     scheduler.Flush(info);
 
     // Present to swapchain.
@@ -1095,9 +1107,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
-    if (is_renderdoc_capture) {
-        VideoCore::EndPresentedFrameCapture(vulkan_instance, window_handle);
-    }
+    end_renderdoc_capture();
 
     complete_frame(true);
     if (!is_reusing_frame) {

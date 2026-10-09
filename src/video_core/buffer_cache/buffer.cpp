@@ -4,6 +4,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/download_readback_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -160,6 +161,17 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
     });
 }
 
+bool Buffer::InvalidateMappedRange(u64 offset, u64 size) const {
+    ASSERT_MSG(offset <= size_bytes && size <= size_bytes - offset,
+               "Mapped invalidation range {:#x}:{:#x} exceeds buffer size {:#x}", offset, size,
+               size_bytes);
+    if (is_coherent) {
+        return true;
+    }
+    return vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset, size) ==
+           VK_SUCCESS;
+}
+
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x1000;
 
@@ -174,7 +186,12 @@ StreamBuffer::StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& 
 }
 
 std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) {
-    if (!is_coherent && usage == MemoryUsage::Stream) {
+    if (usage == MemoryUsage::Download) {
+        const auto reservation =
+            PlanDownloadReservation(size, alignment, instance->NonCoherentAtomSize(), is_coherent);
+        size = reservation.size;
+        alignment = reservation.alignment;
+    } else if (!is_coherent && usage == MemoryUsage::Stream) {
         size = Common::AlignUp(size, instance->NonCoherentAtomSize());
     }
 
@@ -210,10 +227,7 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
 
 void StreamBuffer::Commit() {
     if (!is_coherent) {
-        if (usage == MemoryUsage::Download) {
-            vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset,
-                                    mapped_size);
-        } else {
+        if (usage != MemoryUsage::Download) {
             vmaFlushAllocation(instance->GetAllocator(), buffer.allocation, offset, mapped_size);
         }
     }

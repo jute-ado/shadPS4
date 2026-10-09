@@ -206,7 +206,7 @@ void ImageInfo::UpdateSize() {
             mip_info.pitch = std::max(mip_info.pitch * 4, 32u);
             mip_info.height = std::max(mip_info.height * 4, 32u);
         }
-        mip_info.size *= mip_d * resources.layers;
+        mip_info.size *= static_cast<u64>(mip_d) * resources.layers;
         mip_info.offset = guest_size;
         guest_size += mip_info.size;
     }
