@@ -133,6 +133,24 @@ TEST(PipelineBindHistory, ReturnsUniquePipelinesNewestFirst) {
     EXPECT_EQ(recent[1], compute);
 }
 
+TEST(PipelineBindHistory, ReturnsRecentSequenceNewestFirstWithoutDeduplicating) {
+    PipelineBindHistory history;
+    constexpr std::array program_hashes{0x11ull};
+    history.Record(Vulkan::MakePipelineBindRecord(PipelineBindType::Compute, 0x55,
+                                                  program_hashes));
+    history.Record(Vulkan::MakePipelineBindRecord(PipelineBindType::Compute, 0x66,
+                                                  program_hashes));
+    history.Record(Vulkan::MakePipelineBindRecord(PipelineBindType::Compute, 0x55,
+                                                  program_hashes));
+
+    const auto recent = history.Recent();
+
+    ASSERT_EQ(recent.size(), 3);
+    EXPECT_EQ(recent[0].pipeline_hash, 0x55);
+    EXPECT_EQ(recent[1].pipeline_hash, 0x66);
+    EXPECT_EQ(recent[2].pipeline_hash, 0x55);
+}
+
 TEST(PipelineBindHistory, RetainsOnlyTheNewestFixedCapacityWindow) {
     PipelineBindHistory history;
     for (u64 hash = 1; hash <= PipelineBindHistory::Capacity + 3; ++hash) {
