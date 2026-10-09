@@ -4,6 +4,7 @@
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/decoder.h"
+#include "common/logging/compilation_timing.h"
 #include "common/signal_context.h"
 #include "core/cpu_patches.h" // Windows static guest red-zone protection
 #include "core/libraries/kernel/kernel.h"
@@ -39,10 +40,23 @@ static std::intptr_t SignalHandlerBody(void* opaque) noexcept {
         WindowsGuestRedZoneProtection::IsStaticPatchingEnabled();
     DWORD code = 0;
     PVOID address = nullptr;
+    PVOID fault_address = nullptr;
+    void* instruction_pointer = nullptr;
+    bool write_fault = false;
 
     if (pExp != nullptr && pExp->ExceptionRecord != nullptr) {
         code = pExp->ExceptionRecord->ExceptionCode;
         address = pExp->ExceptionRecord->ExceptionAddress;
+        if (code == EXCEPTION_ACCESS_VIOLATION &&
+            pExp->ExceptionRecord->NumberParameters >= 2) {
+            fault_address = reinterpret_cast<PVOID>(
+                pExp->ExceptionRecord->ExceptionInformation[1]);
+            write_fault = pExp->ExceptionRecord->ExceptionInformation[0] != 0;
+        }
+    }
+
+    if (pExp != nullptr && pExp->ContextRecord != nullptr) {
+        instruction_pointer = Common::GetRip(pExp);
     }
 
     Ucontext guest_context{pExp->ContextRecord};
@@ -145,7 +159,10 @@ static std::intptr_t SignalHandlerBody(void* opaque) noexcept {
     const bool report_unhandled = WindowsException::ShouldReportUnhandledException(
         code, use_static_windows_guest_red_zone_protection, static_protection_exception);
     if (report_unhandled) { // Windows static guest red-zone protection
-        LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        Common::Log::ReportCompilationTraceTerminal(code);
+        LOG_CRITICAL(Debug,
+                     "Unhandled Exception code {:#x} at {} (rip={}, fault_address={}, write={})",
+                     code, address, instruction_pointer, fault_address, write_fault);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 

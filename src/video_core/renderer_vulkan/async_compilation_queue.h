@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -70,6 +71,13 @@ public:
         return completion;
     }
 
+    // Wait until no job is queued or running. Completed results remain available to the owner;
+    // this is intentionally a quiescence barrier, not a drain or cancellation operation.
+    void WaitIdle() {
+        std::unique_lock lock{mutex};
+        idle_ready.wait(lock, [this] { return jobs.empty() && active_jobs == 0; });
+    }
+
     void Shutdown() {
         {
             std::scoped_lock lock{mutex};
@@ -81,6 +89,7 @@ public:
         }
         work_ready.notify_all();
         completion_ready.notify_all();
+        idle_ready.notify_all();
         if (worker.joinable()) {
             worker.join();
         }
@@ -98,6 +107,7 @@ private:
                 }
                 work = std::move(jobs.front());
                 jobs.pop_front();
+                ++active_jobs;
             }
 
             std::optional<Result> result;
@@ -110,9 +120,11 @@ private:
 
             {
                 std::scoped_lock lock{mutex};
+                --active_jobs;
                 completed.push_back({std::move(work.first), std::move(result)});
             }
             completion_ready.notify_one();
+            idle_ready.notify_all();
         }
     }
 
@@ -120,9 +132,11 @@ private:
     std::mutex mutex;
     std::condition_variable work_ready;
     std::condition_variable completion_ready;
+    std::condition_variable idle_ready;
     std::deque<std::pair<Key, Job>> jobs;
     std::deque<Completion> completed;
     std::unordered_set<Key, Hash> in_flight;
+    size_t active_jobs{};
     bool stopped{};
     std::thread worker;
 };

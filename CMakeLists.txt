@@ -290,7 +290,9 @@ set(AJM_LIB src/core/libraries/ajm/ajm.cpp
             src/core/libraries/ajm/ajm_mp3.h
 )
 
-set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
+set(AUDIO_LIB src/core/libraries/audio/atrac9_codec_lock.cpp
+              src/core/libraries/audio/atrac9_codec_lock.h
+              src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioin.h
               src/core/libraries/audio/audioin_backend.h
               src/core/libraries/audio/audioin_error.h
@@ -301,6 +303,8 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioout.h
               src/core/libraries/audio/audioout_backend.h
               src/core/libraries/audio/audioout_error.h
+              src/core/libraries/audio/audio_pipeline_metadata_trace.cpp
+              src/core/libraries/audio/audio_pipeline_metadata_trace.h
               src/core/libraries/audio/test_lab_audio_capture.cpp
               src/core/libraries/audio/test_lab_audio_capture.h
               src/core/libraries/audio/sdl_audio_out.cpp
@@ -466,6 +470,13 @@ set(SYSTEM_LIBS src/core/libraries/system/commondialog.cpp
                 src/core/libraries/ngs2/ngs2.cpp
                 src/core/libraries/ngs2/ngs2.h
                 src/core/libraries/ngs2/ngs2_error.h
+                src/core/libraries/ngs2/ngs2_atrac9.cpp
+                src/core/libraries/ngs2/ngs2_atrac9.h
+                src/core/libraries/ngs2/ngs2_decode.cpp
+                src/core/libraries/ngs2/ngs2_decode.h
+                src/core/libraries/ngs2/ngs2_guest_io.h
+                src/core/libraries/ngs2/ngs2_render.cpp
+                src/core/libraries/ngs2/ngs2_render.h
                 src/core/libraries/ngs2/ngs2_impl.cpp
                 src/core/libraries/ngs2/ngs2_impl.h
                 src/core/libraries/ngs2/ngs2_custom.cpp
@@ -984,6 +995,10 @@ set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
                       src/shader_recompiler/params.h
                       src/shader_recompiler/runtime_info.h
                       src/shader_recompiler/specialization.h
+                      src/shader_recompiler/specialization_identity.cpp
+                      src/shader_recompiler/specialization_identity.h
+                      src/shader_recompiler/specialization_serialization.cpp
+                      src/shader_recompiler/specialization_serialization.h
                       src/shader_recompiler/backend/bindings.h
                       src/shader_recompiler/backend/spirv/emit_spirv.cpp
                       src/shader_recompiler/backend/spirv/emit_spirv.h
@@ -1042,6 +1057,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
                       src/shader_recompiler/ir/passes/inject_clip_distance_attributes.cpp
                       src/shader_recompiler/ir/passes/ir_passes.h
                       src/shader_recompiler/ir/passes/lower_buffer_format_to_raw.cpp
+                      src/shader_recompiler/ir/passes/lower_lane_id_to_local_invocation_index_pass.cpp
                       src/shader_recompiler/ir/passes/lower_fp64_to_fp32.cpp
                       src/shader_recompiler/ir/passes/lower_user_clip_planes.cpp
                       src/shader_recompiler/ir/passes/readlane_elimination_pass.cpp
@@ -1101,15 +1117,20 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/amdgpu/tiling.cpp
                src/video_core/amdgpu/tiling.h
                src/video_core/buffer_cache/buffer.cpp
+               src/video_core/buffer_cache/unique_buffer.cpp
                src/video_core/buffer_cache/buffer.h
                src/video_core/buffer_cache/buffer_cache.cpp
                src/video_core/buffer_cache/buffer_cache.h
+               src/video_core/buffer_cache/srt_failure_flat_diagnostics.h
+               src/video_core/buffer_cache/srt_failure_flat_snapshot.h
+               src/video_core/buffer_cache/srt_snapshot_composition_receipt.h
                src/video_core/buffer_cache/fault_manager.cpp
                src/video_core/buffer_cache/fault_manager.h
                src/video_core/buffer_cache/memory_tracker.h
                src/video_core/buffer_cache/range_set.h
                src/video_core/buffer_cache/region_definitions.h
                src/video_core/buffer_cache/region_manager.h
+               src/video_core/buffer_cache/srt_failure_flat_provenance.h
                src/video_core/renderer_vulkan/liverpool_to_vk.cpp
                src/video_core/renderer_vulkan/liverpool_to_vk.h
                src/video_core/renderer_vulkan/vk_common.cpp
@@ -1120,10 +1141,13 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_graphics_pipeline.h
                src/video_core/renderer_vulkan/vk_instance.cpp
                src/video_core/renderer_vulkan/vk_instance.h
+               src/video_core/renderer_vulkan/vk_memory_diagnostics.h
                src/video_core/renderer_vulkan/vk_master_semaphore.cpp
                src/video_core/renderer_vulkan/vk_master_semaphore.h
                src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
                src/video_core/renderer_vulkan/vk_pipeline_cache.h
+               src/video_core/renderer_vulkan/vk_pipeline_cache_serialization.cpp
+               src/video_core/renderer_vulkan/vk_pipeline_cache_serialization.h
                src/video_core/renderer_vulkan/vk_pipeline_common.cpp
                src/video_core/renderer_vulkan/vk_pipeline_common.h
                src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
@@ -1137,6 +1161,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_rasterizer.h
                src/video_core/renderer_vulkan/vk_resource_pool.cpp
                src/video_core/renderer_vulkan/vk_resource_pool.h
+               src/video_core/renderer_vulkan/vk_result_retry.h
                src/video_core/renderer_vulkan/vk_scheduler.cpp
                src/video_core/renderer_vulkan/vk_scheduler.h
                src/video_core/renderer_vulkan/vk_shader_hle.cpp
@@ -1155,6 +1180,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/texture_cache/host_compatibility.h
                src/video_core/texture_cache/image.cpp
                src/video_core/texture_cache/image.h
+               src/video_core/texture_cache/image_buffer_transfer_policy.h
                src/video_core/texture_cache/image_info.cpp
                src/video_core/texture_cache/image_info.h
                src/video_core/texture_cache/image_view.cpp
@@ -1170,6 +1196,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/cache_storage.h
                src/video_core/page_manager.cpp
                src/video_core/page_manager.h
+               src/video_core/mapped_page_protection.h
                src/video_core/multi_level_page_table.h
                src/video_core/renderdoc.cpp
                src/video_core/renderdoc.h
