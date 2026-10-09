@@ -8,6 +8,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_gc.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -850,17 +851,14 @@ void BufferCache::RunGarbageCollector() {
     }
     const bool aggressive = total_used_memory >= critical_gc_memory;
     const u64 ticks_to_destroy = std::min<u64>(aggressive ? 80 : 160, gc_tick);
-    int max_deletions = aggressive ? 64 : 32;
     const auto clean_up = [&](BufferId buffer_id) {
-        if (max_deletions == 0) {
-            return;
-        }
-        --max_deletions;
         Buffer& buffer = slot_buffers[buffer_id];
         // InvalidateMemory(buffer.CpuAddr(), buffer.SizeBytes());
         DownloadBufferMemory<true>(buffer, buffer.CpuAddr(), buffer.SizeBytes(), true);
         DeleteBuffer(buffer_id);
     };
+    const std::size_t max_deletions = aggressive ? 64 : 32;
+    CollectLruGarbage(lru_cache, gc_tick - ticks_to_destroy, max_deletions, clean_up);
 }
 
 void BufferCache::TouchBuffer(const Buffer& buffer) {
