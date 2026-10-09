@@ -50,9 +50,19 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         return std::nullopt;
     }
 
+    if (info.fetch_shader_sgpr_base >= info.user_data.size()) {
+        return std::nullopt;
+    }
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+    if (!code) {
+        return std::nullopt;
+    }
     FetchShaderData data{};
-    GcnCodeSlice code_slice(code, code + std::numeric_limits<u32>::max());
+    // Fetch shaders are embedded in guest memory and have no explicit length in
+    // Shader::Info. Keep the decoder bounded to a conservative page-sized
+    // window; a valid fetch shader terminates at S_SETPC_B64.
+    constexpr u32 MaxFetchShaderWords = 0x1000;
+    GcnCodeSlice code_slice(code, code + MaxFetchShaderWords);
     GcnDecodeContext decoder;
 
     struct VsharpLoad {
@@ -71,6 +81,11 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         }
 
         if (inst.inst_class == InstClass::ScalarMemRd) {
+            // The decoder consumes untrusted guest code.  Keep malformed register
+            // operands from indexing the fixed V# table.
+            if (inst.dst[0].code >= loads.size() || inst.src[0].code >= loads.size()) {
+                return std::nullopt;
+            }
             loads[inst.dst[0].code] = VsharpLoad{inst.control.smrd.offset, inst.src[0].code * 2};
             continue;
         }
@@ -93,6 +108,9 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         if (inst.inst_class == InstClass::VectorMemBufFmt) {
             // SRSRC is in units of 4 SPGRs while SBASE is in pairs of SGPRs
             const u32 base_sgpr = inst.src[2].code * 4;
+            if (base_sgpr >= loads.size()) {
+                return std::nullopt;
+            }
             auto& attrib = data.attributes.emplace_back();
             attrib.semantic = semantic_index++;
             attrib.dest_vgpr = inst.src[1].code;
@@ -106,6 +124,10 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
                 attrib.num_format = inst.control.mtbuf.nfmt;
             }
         }
+    }
+
+    if (code_slice.atEnd()) {
+        return std::nullopt;
     }
 
     return data;
