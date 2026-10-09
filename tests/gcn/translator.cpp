@@ -43,7 +43,8 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
 }
 
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
-                                  std::array<u32, 3> workgroup_size) {
+                                  std::array<u32, 3> workgroup_size,
+                                  bool supports_maximal_reconvergence) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -85,6 +86,7 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
     profile.max_shared_memory_size = 64 * 1024;
     profile.supported_spirv = 0x00010600;
     profile.subgroup_size = 32;
+    profile.supports_maximal_reconvergence = supports_maximal_reconvergence;
     profile.needs_lds_barriers = true;
 
     RuntimeInfo runtime_info{};

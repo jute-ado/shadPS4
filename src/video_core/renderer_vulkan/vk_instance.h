@@ -233,6 +233,12 @@ public:
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
     }
 
+    /// Returns true when shaders can request maximal reconvergence semantics.
+    bool IsShaderMaximalReconvergenceSupported() const {
+        return shader_maximal_reconvergence &&
+               maximal_reconvergence_features.shaderMaximalReconvergence;
+    }
+
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
     bool IsWorkgroupMemoryExplicitLayoutSupported() const {
         return workgroup_memory_explicit_layout &&
@@ -481,6 +487,7 @@ private:
     vk::PhysicalDeviceVulkan13Features vk13_features;
     vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT dynamic_state_3_features;
     vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT shader_atomic_float2_features;
+    vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence_features;
     vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
         workgroup_memory_explicit_layout_features;
     vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT image_2d_view_of_3d_features;
@@ -514,6 +521,7 @@ private:
     bool amd_mixed_attachment_samples{};
     bool shader_atomic_float{};
     bool shader_atomic_float2{};
+    bool shader_maximal_reconvergence{};
     bool workgroup_memory_explicit_layout{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};

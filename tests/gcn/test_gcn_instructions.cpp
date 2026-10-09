@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <span>
+#include <string_view>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
@@ -52,6 +53,46 @@ size_t CountSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
 
 bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
     return CountSpirvOpcode(spirv, opcode) != 0;
+}
+
+bool ContainsSpirvExecutionMode(std::span<const u32> spirv, spv::ExecutionMode mode) {
+    constexpr size_t SpirvHeaderWords = 5;
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const size_t word_count = instruction >> 16;
+        if (word_count == 0 || word_count > spirv.size() - offset) {
+            return false;
+        }
+        if ((instruction & 0xffffU) == static_cast<u32>(spv::Op::OpExecutionMode) &&
+            word_count >= 3 && spirv[offset + 2] == static_cast<u32>(mode)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+bool ContainsSpirvExtension(std::span<const u32> spirv, std::string_view extension) {
+    constexpr size_t SpirvHeaderWords = 5;
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const size_t word_count = instruction >> 16;
+        if (word_count == 0 || word_count > spirv.size() - offset) {
+            return false;
+        }
+        if ((instruction & 0xffffU) == static_cast<u32>(spv::Op::OpExtension) &&
+            word_count >= 2) {
+            const std::string_view encoded{
+                reinterpret_cast<const char*>(spirv.data() + offset + 1),
+                (word_count - 1) * sizeof(u32),
+            };
+            if (encoded.substr(0, encoded.find('\0')) == extension) {
+                return true;
+            }
+        }
+        offset += word_count;
+    }
+    return false;
 }
 
 constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
@@ -314,6 +355,23 @@ TEST_F(GcnTest, adjacent_fixed_wave64_readlanes_share_one_barrier_pair) {
     const auto result = runner->run<u32>(spirv);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, 32U);
+}
+
+TEST_F(GcnTest, subgroup_wave_ops_request_maximal_reconvergence_when_supported) {
+    const std::array<u64, 2> instructions{
+        VOP1(OpcodeVOP1::V_READFIRSTLANE_B32, VOperand8::V0, SOperand9::V0).Get(),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S0).Get(),
+    };
+
+    const auto unsupported = TranslateToSpirv(instructions, {64, 1, 1}, false);
+    EXPECT_FALSE(ContainsSpirvExtension(unsupported, "SPV_KHR_maximal_reconvergence"));
+    EXPECT_FALSE(ContainsSpirvExecutionMode(
+        unsupported, spv::ExecutionMode::MaximallyReconvergesKHR));
+
+    const auto supported = TranslateToSpirv(instructions, {64, 1, 1}, true);
+    EXPECT_TRUE(ContainsSpirvExtension(supported, "SPV_KHR_maximal_reconvergence"));
+    EXPECT_TRUE(ContainsSpirvExecutionMode(
+        supported, spv::ExecutionMode::MaximallyReconvergesKHR));
 }
 
 TEST_F(GcnTest, ds_swizzle_uses_nonuniform_subgroup_shuffle) {

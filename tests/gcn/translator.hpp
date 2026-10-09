@@ -12,5 +12,6 @@
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst);
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts);
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
-                                  std::array<u32, 3> workgroup_size);
+                                  std::array<u32, 3> workgroup_size,
+                                  bool supports_maximal_reconvergence = false);
 std::vector<u32> TranslateToSpirvWithDma(std::span<const u64> raw_gcn_insts);
