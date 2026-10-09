@@ -4,10 +4,15 @@
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/texture_rejection_diagnostics.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
+#include "video_core/texture_cache/depth_copy_policy.h"
 #include "video_core/texture_cache/image.h"
+#include "video_core/texture_cache/image_buffer_transfer_policy.h"
+#include "video_core/texture_cache/image_copy_layer_policy.h"
+#include "video_core/texture_cache/image_subresource_layout.h"
 #include "video_core/texture_cache/image_usage_policy.h"
 
 #include <vk_mem_alloc.h>
@@ -18,8 +23,8 @@ using namespace Vulkan;
 
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
 
-static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
-                                           const ImageInfo& info) {
+static std::optional<vk::ImageUsageFlags> ImageUsageFlags(const Vulkan::Instance* instance,
+                                                          const ImageInfo& info) {
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferSrc |
                                 vk::ImageUsageFlagBits::eTransferDst |
                                 vk::ImageUsageFlagBits::eSampled;
@@ -31,9 +36,9 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
             if (instance->IsAttachmentFeedbackLoopLayoutSupported()) {
                 usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
             }
-            // Always create images with storage flag to avoid needing re-creation in case of e.g
-            // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
-            // flag is also used.
+            // Prefer creating images with storage usage to avoid needing re-creation in case of
+            // e.g. compute clears. The sample-count policy below removes this optional usage when
+            // multisampled storage is unavailable. ExtendedUsage is also used.
             usage |= vk::ImageUsageFlagBits::eStorage;
         }
     } else {
@@ -43,7 +48,13 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
         usage |= vk::ImageUsageFlagBits::eStorage;
     }
 
-    return usage;
+    const auto selected_usage = SelectImageUsageForSamples(
+        usage, info.num_samples, info.storage_required,
+        instance->IsShaderStorageImageMultisampleSupported());
+    if (!selected_usage) {
+        return std::nullopt;
+    }
+    return selected_usage->usage;
 }
 
 static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
@@ -53,6 +64,7 @@ static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
         return vk::ImageType::e1D;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
+    case AmdGpu::ImageType::Color2DMsaaArray:
     case AmdGpu::ImageType::Color2DArray:
         return vk::ImageType::e2D;
     case AmdGpu::ImageType::Color3D:
@@ -79,8 +91,8 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
     if (usage_flags & vk::ImageUsageFlagBits::eDepthStencilAttachment) {
         feature_flags |= vk::FormatFeatureFlagBits2::eDepthStencilAttachment;
     }
-    // Note: StorageImage is intentionally ignored for now since it is always set, and can mess up
-    // compatibility checks.
+    // Note: StorageImage is intentionally ignored for now since it is an optional broad usage and
+    // can mess up compatibility checks.
     return feature_flags;
 }
 
@@ -98,9 +110,11 @@ void UniqueImage::Destroy() {
     }
 }
 
-void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
+vk::Result UniqueImage::TryCreate(const vk::ImageCreateInfo& image_ci,
+                                   const Vulkan::Instance* diagnostic_instance) {
     this->image_ci = image_ci;
     ASSERT(!image);
+    allocation = {};
     const VmaAllocationCreateInfo alloc_info = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
@@ -114,9 +128,47 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VkImage unsafe_image{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_info, &unsafe_image,
                                      &allocation, nullptr);
-    ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
-               vk::to_string(vk::Result{result}));
+    if (result != VK_SUCCESS && diagnostic_instance != nullptr) {
+        diagnostic_instance->LogDeviceMemoryBudget("image_allocation", vk::Result{result});
+    }
+    if (result != VK_SUCCESS && TextureRejectionDiagnosticsEnabled()) {
+        // The failed allocation has no valid image handle to query for memory requirements.
+        LOG_ERROR(Render_Vulkan,
+                  "Image allocation diagnostic result={} extent={}x{}x{} mips={} layers={} "
+                  "format={} type={} tiling={} samples={} usage={:#x} flags={:#x}; "
+                  "host_allocation_bytes=unavailable",
+                  vk::to_string(vk::Result{result}), image_ci.extent.width,
+                  image_ci.extent.height, image_ci.extent.depth, image_ci.mipLevels,
+                  image_ci.arrayLayers, vk::to_string(image_ci.format),
+                  vk::to_string(image_ci.imageType), vk::to_string(image_ci.tiling),
+                  static_cast<u32>(image_ci.samples), static_cast<VkImageUsageFlags>(image_ci.usage),
+                  static_cast<VkImageCreateFlags>(image_ci.flags));
+        if (const auto* context = ScopedTextureDiagnosticContext::Current()) {
+            const auto& words = context->words;
+            LOG_ERROR(Render_Vulkan,
+                      "Image allocation T# context stage={} logical_stage={} shader={:#x} "
+                      "sharp={} entry={} count={} stride_dw={} r128={} reasons={:#x} "
+                      "base_byte_logical_gpu_mapped={} raw=[{:08x} {:08x} {:08x} {:08x} "
+                      "{:08x} {:08x} {:08x} {:08x}]",
+                      context->stage, context->logical_stage, context->shader_hash,
+                      context->sharp_index, context->array_index, context->descriptor_count,
+                      context->descriptor_stride_dw, context->is_r128, context->reasons,
+                      context->base_byte_logical_gpu_mapped, words[0], words[1], words[2], words[3],
+                      words[4], words[5], words[6], words[7]);
+        }
+    }
+    if (result != VK_SUCCESS) {
+        return vk::Result{result};
+    }
     image = vk::Image{unsafe_image};
+    return vk::Result::eSuccess;
+}
+
+void UniqueImage::Create(const vk::ImageCreateInfo& image_ci,
+                         const Vulkan::Instance* diagnostic_instance) {
+    const auto result = TryCreate(image_ci, diagnostic_instance);
+    ASSERT_MSG(result == vk::Result::eSuccess, "Failed allocating image with error {}",
+               vk::to_string(result));
 }
 
 Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -144,7 +196,16 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     }
 
     const auto preferred_usage = ImageUsageFlags(instance, info);
-    format_features = FormatFeatureFlags(preferred_usage);
+    if (!preferred_usage) {
+        LOG_ERROR(Render_Vulkan,
+                  "Rejecting image requiring unsupported multisampled storage usage: format={} "
+                  "type={:#x} samples={}",
+                  vk::to_string(info.pixel_format), static_cast<u32>(info.type), info.num_samples);
+        usage_flags = {};
+        supported_samples = {};
+        return;
+    }
+    format_features = FormatFeatureFlags(*preferred_usage);
     if (info.props.is_depth) {
         aspect_mask = vk::ImageAspectFlagBits::eDepth;
         if (info.props.has_stencil) {
@@ -158,12 +219,13 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
         .format = supported_format,
         .type = ConvertImageType(info.type),
         .tiling = tiling,
-        .usage = preferred_usage,
+        .usage = *preferred_usage,
         .flags = flags,
     };
     vk::ImageFormatProperties2 supported_properties{};
     const auto selected_usage = SelectSupportedImageUsage(
-        info.props.is_block, preferred_usage, [&](const vk::ImageUsageFlags candidate_usage) {
+        info.props.is_block && !info.storage_required, *preferred_usage,
+        [&](const vk::ImageUsageFlags candidate_usage) {
             format_info.usage = candidate_usage;
             const auto properties =
                 instance->GetPhysicalDevice().getImageFormatProperties2(format_info);
@@ -176,9 +238,14 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     if (!selected_usage) {
         LOG_ERROR(Render_Vulkan, "image format {} type {} is not supported (flags {}, usage {})",
                   vk::to_string(supported_format), vk::to_string(format_info.type),
-                  vk::to_string(format_info.flags), vk::to_string(preferred_usage));
-        usage_flags = preferred_usage;
-        supported_samples = vk::SampleCountFlagBits::e1;
+                  vk::to_string(format_info.flags), vk::to_string(*preferred_usage));
+        // Do not pass an unsupported format/usage combination to vkCreateImage.  A failed
+        // capability query is a guest-descriptor admission failure, not permission to construct
+        // an image with the rejected usage.  TextureCache removes this backing-less candidate and
+        // callers bind a null descriptor or drop the command at their boundary.
+        usage_flags = {};
+        supported_samples = {};
+        return;
     } else {
         usage_flags = selected_usage->usage;
         supported_samples = supported_properties.imageFormatProperties.sampleCounts;
@@ -188,6 +255,37 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                         "compressed image compatibility path",
                         vk::to_string(supported_format));
         }
+    }
+
+    const u32 max_array_layers =
+        supported_properties.imageFormatProperties.maxArrayLayers;
+    if (!IsHostImageArrayLayerCountSupported(info.resources.layers, max_array_layers)) {
+        LOG_ERROR(Render_Vulkan,
+                  "image format {} cannot represent {} array layers (host maximum {}); "
+                  "discarding guest image before creation",
+                  vk::to_string(supported_format), info.resources.layers, max_array_layers);
+        usage_flags = {};
+        supported_samples = {};
+        return;
+    }
+
+    const auto& host_limits = supported_properties.imageFormatProperties;
+    const Extent3D max_extent{
+        .width = host_limits.maxExtent.width,
+        .height = host_limits.maxExtent.height,
+        .depth = host_limits.maxExtent.depth,
+    };
+    if (!IsHostImageGeometrySupported(info.size, info.resources.levels, max_extent,
+                                      host_limits.maxMipLevels)) {
+        LOG_ERROR(Render_Vulkan,
+                  "image format {} cannot represent extent {}x{}x{} with {} mips (host maximum "
+                  "{}x{}x{}, {} mips); discarding guest image before creation",
+                  vk::to_string(supported_format), info.size.width, info.size.height,
+                  info.size.depth, info.resources.levels, max_extent.width, max_extent.height,
+                  max_extent.depth, host_limits.maxMipLevels);
+        usage_flags = {};
+        supported_samples = {};
+        return;
     }
 
     const vk::ImageCreateInfo image_ci = {
@@ -210,7 +308,13 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     backing = &backing_images.emplace_back();
     backing->num_samples = info.num_samples;
     backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
-    backing->image.Create(image_ci);
+    if (backing->image.TryCreate(image_ci, instance) != vk::Result::eSuccess) {
+        backing_images.pop_back();
+        backing = nullptr;
+        usage_flags = {};
+        supported_samples = {};
+        return;
+    }
 
     Vulkan::SetObjectName(instance->GetDevice(), GetImage(),
                           "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width,
@@ -223,6 +327,9 @@ Image::~Image() = default;
 
 bool Image::CanHostScale(const u32 scale_percent, const u32 display_width,
                          const u32 display_height) const {
+    if (!IsValid()) {
+        return false;
+    }
     const bool supports_blit = instance->IsFormatSupported(
         backing->image.image_ci.format,
         vk::FormatFeatureFlagBits2::eBlitSrc | vk::FormatFeatureFlagBits2::eBlitDst);
@@ -246,6 +353,9 @@ bool Image::CanHostScale(const u32 scale_percent, const u32 display_width,
 
 bool Image::SetHostScale(const u32 scale_percent, const u32 display_width,
                          const u32 display_height) {
+    if (!IsValid()) {
+        return false;
+    }
     const bool supports_blit = instance->IsFormatSupported(
         backing->image.image_ci.format,
         vk::FormatFeatureFlagBits2::eBlitSrc | vk::FormatFeatureFlagBits2::eBlitDst);
@@ -290,7 +400,10 @@ bool Image::SetHostScale(const u32 scale_percent, const u32 display_width,
         new_backing = &backing_images.emplace_back();
         new_backing->num_samples = old_backing->num_samples;
         new_backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
-        new_backing->image.Create(new_image_ci);
+        if (new_backing->image.TryCreate(new_image_ci, instance) != vk::Result::eSuccess) {
+            backing_images.pop_back();
+            return false;
+        }
     }
 
     const auto old_extent = old_backing->image.image_ci.extent;
@@ -384,6 +497,17 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
 Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                                    vk::PipelineStageFlags2 dst_stage,
                                    std::optional<SubresourceRange> subres_range) {
+    if (!IsValid()) {
+        return {};
+    }
+    if (subres_range && !IsValidSubresourceRange(*subres_range, info.resources)) {
+        LOG_ERROR(Render_Vulkan,
+                  "Rejecting out-of-range image barrier: base={}+{} extent={}x{} available={}x{}",
+                  subres_range->base.level, subres_range->base.layer,
+                  subres_range->extent.levels, subres_range->extent.layers,
+                  info.resources.levels, info.resources.layers);
+        return {};
+    }
     auto& last_state = backing->state;
     auto& subresource_states = backing->subresource_states;
 
@@ -490,6 +614,15 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
     return barriers;
 }
 
+std::optional<vk::ImageLayout> Image::GetSubresourceLayout(const SubresourceRange& range) const {
+    if (!IsValid()) {
+        return std::nullopt;
+    }
+    return ResolveSubresourceLayout(backing->state.layout,
+                                    std::span<const State>{backing->subresource_states},
+                                    info.resources, range);
+}
+
 void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                     std::optional<SubresourceRange> range, vk::CommandBuffer cmdbuf /*= {}*/) {
     // Adjust pipeline stage
@@ -517,8 +650,32 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
 
 void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffer buffer,
                    u64 offset) {
+    if (!SupportsImageBufferTransfer(info.num_samples)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer upload for multisampled image ({} samples)",
+                    info.num_samples);
+        return;
+    }
+    if (!IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image buffer upload for invalid image backing");
+        return;
+    }
+    if (backing->num_samples != info.num_samples && info.props.is_depth) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer upload because the depth backing is multisampled "
+                    "({} samples)",
+                    backing->num_samples);
+        return;
+    }
     ASSERT(SetHostScale(100));
     SetBackingSamples(info.num_samples, false);
+    if (!backing || backing->num_samples != 1) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer upload because the backing remains multisampled "
+                    "({} samples)",
+                    backing ? backing->num_samples : 0);
+        return;
+    }
     scheduler->EndRendering();
 
     const vk::BufferMemoryBarrier2 pre_barrier{
@@ -564,8 +721,33 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
 
 void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::Buffer buffer,
                      u64 offset, u64 download_size) {
+    if (!SupportsImageBufferTransfer(info.num_samples)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer download for multisampled image ({} samples)",
+                    info.num_samples);
+        return;
+    }
+    if (!IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image buffer download for invalid image backing");
+        return;
+    }
+    if (backing->num_samples != info.num_samples &&
+        (info.props.is_depth || info.resources.levels != 1 || info.resources.layers != 1)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer download because the backing cannot be resolved for "
+                    "buffer transfer (samples={}, levels={}, layers={})",
+                    backing->num_samples, info.resources.levels, info.resources.layers);
+        return;
+    }
     ASSERT(SetHostScale(100));
     SetBackingSamples(info.num_samples);
+    if (!backing || backing->num_samples != 1) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer download because the backing remains multisampled "
+                    "({} samples)",
+                    backing ? backing->num_samples : 0);
+        return;
+    }
     scheduler->EndRendering();
 
     const vk::BufferMemoryBarrier2 pre_barrier = {
@@ -653,7 +835,81 @@ static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const I
     return std::make_pair(src_layers, dst_layers);
 }
 
+static bool CopyDepthRegionsWithBuffer(Image& destination, Image& source,
+                                       std::span<const vk::ImageCopy> regions) {
+    if (!source.IsValid() || !destination.IsValid() ||
+        !SupportsImageBufferRoundTrip(source.backing->num_samples,
+                                      destination.backing->num_samples)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping depth image buffer round trip because an image is invalid or "
+                    "multisampled");
+        return false;
+    }
+    const auto plan = BuildDepthCopyBufferPlan(source.backing->image.image_ci.format,
+                                               destination.backing->image.image_ci.format, regions);
+    if (!plan) {
+        LOG_ERROR(Render_Vulkan, "Rejecting invalid depth-plane buffer copy geometry");
+        return false;
+    }
+
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = plan->byte_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    };
+    const VmaAllocationCreateInfo allocation_ci{
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+    const auto allocator = destination.instance->GetAllocator();
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    const auto result =
+        vmaCreateBuffer(allocator, &buffer_ci, &allocation_ci, &buffer, &allocation, nullptr);
+    if (result != VK_SUCCESS) {
+        destination.instance->LogDeviceMemoryBudget("depth_copy_allocation", vk::Result{result});
+        LOG_ERROR(Render_Vulkan, "Failed to allocate depth-plane copy buffer: {}",
+                  vk::to_string(vk::Result{result}));
+        return false;
+    }
+
+    auto& scheduler = *destination.scheduler;
+    scheduler.EndRendering();
+    source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
+    destination.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
+                        {});
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.copyImageToBuffer(source.GetImage(), vk::ImageLayout::eTransferSrcOptimal, buffer,
+                             plan->sources);
+    const vk::BufferMemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = buffer,
+        .offset = 0,
+        .size = plan->byte_size,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &barrier,
+    });
+    cmdbuf.copyBufferToImage(buffer, destination.GetImage(), vk::ImageLayout::eTransferDstOptimal,
+                             plan->destinations);
+    destination.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderRead, {});
+    // The copy buffer is GPU-owned until the command buffer's submission has completed.
+    // Capture the allocator directly: image eviction must not invalidate a deferred `this`.
+    scheduler.DeferOperation(
+        [allocator, buffer, allocation] { vmaDestroyBuffer(allocator, buffer, allocation); });
+    return true;
+}
+
 void Image::CopyImage(Image& src_image) {
+    if (!IsValid() || !src_image.IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image copy for invalid image backing");
+        return;
+    }
     if (GetHostScale() != src_image.GetHostScale()) {
         ASSERT(SetHostScale(100));
         ASSERT(src_image.SetHostScale(100));
@@ -743,6 +999,22 @@ void Image::CopyImage(Image& src_image) {
         regions.push_back(region);
     }
 
+    const auto depth_copy = SelectDepthCopyMode(
+        src_image.backing->image.image_ci.format, backing->image.image_ci.format,
+        src_image.backing->num_samples, backing->num_samples);
+    if (depth_copy != DepthCopyMode::Direct) {
+        if (depth_copy == DepthCopyMode::Buffer) {
+            CopyDepthRegionsWithBuffer(*this, src_image, regions);
+        } else {
+            LOG_ERROR(Render_Vulkan,
+                      "Unsupported depth image copy: {} ({} samples) to {} ({} samples)",
+                      vk::to_string(src_image.backing->image.image_ci.format),
+                      src_image.backing->num_samples, vk::to_string(backing->image.image_ci.format),
+                      backing->num_samples);
+        }
+        return;
+    }
+
     scheduler->EndRendering();
 
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
@@ -759,16 +1031,45 @@ void Image::CopyImage(Image& src_image) {
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
 }
-void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
+void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset,
+                                u64 buffer_size) {
+    const auto& src_info = src_image.info;
+    if (!SupportsImageBufferRoundTrip(src_info.num_samples, info.num_samples)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer round trip for multisampled images ({} -> {} samples)",
+                    src_info.num_samples, info.num_samples);
+        return;
+    }
+    if (!IsValid() || !src_image.IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image buffer round trip for invalid image backing");
+        return;
+    }
+    if ((backing->num_samples != info.num_samples && info.props.is_depth) ||
+        (src_image.backing->num_samples != src_info.num_samples &&
+         (src_info.props.is_depth || src_info.resources.levels != 1 ||
+          src_info.resources.layers != 1))) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer round trip because a backing cannot be resolved for "
+                    "buffer transfer");
+        return;
+    }
     ASSERT(SetHostScale(100));
     ASSERT(src_image.SetHostScale(100));
-    const auto& src_info = src_image.info;
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
     const u32 num_layers = std::min(src_info.resources.layers, info.resources.layers);
     ASSERT(src_info.resources.layers == info.resources.layers || num_mips == 1);
 
     SetBackingSamples(info.num_samples, false);
     src_image.SetBackingSamples(src_info.num_samples);
+    if (!backing || !src_image.backing || backing->num_samples != 1 ||
+        src_image.backing->num_samples != 1) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image buffer round trip because a backing remains multisampled "
+                    "({} -> {} samples)",
+                    src_image.backing ? src_image.backing->num_samples : 0,
+                    backing ? backing->num_samples : 0);
+        return;
+    }
 
     boost::container::small_vector<vk::BufferImageCopy, 8> buffer_copies;
     for (u32 mip = 0; mip < num_mips; ++mip) {
@@ -789,6 +1090,31 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
             .imageOffset = {0, 0, 0},
             .imageExtent = {mip_w, mip_h, mip_d},
         });
+    }
+
+    // The intermediate device-local stream buffer has a fixed capacity.  A malformed image can
+    // otherwise produce a valid-looking vk::BufferImageCopy whose region extends beyond that
+    // allocation; Vulkan reports this as pRegions-00171 and a later device-loss can obscure the
+    // actual admission failure.  Validate each region before any transition or command recording.
+    for (const auto& copy : buffer_copies) {
+        u64 row_length = copy.bufferRowLength ? copy.bufferRowLength : copy.imageExtent.width;
+        u64 image_height = copy.bufferImageHeight ? copy.bufferImageHeight : copy.imageExtent.height;
+        if (src_info.props.is_block) {
+            row_length = (row_length + 3) / 4;
+            image_height = (image_height + 3) / 4;
+        }
+        const auto transfer_size = CheckedImageBufferTransferSize(
+            row_length, image_height, copy.imageExtent.depth,
+            copy.imageSubresource.layerCount, src_info.num_bits);
+        if (!transfer_size || !IsImageBufferTransferRangeWithinBuffer(
+                                  copy.bufferOffset, *transfer_size, buffer_size)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Skipping image buffer copy whose region exceeds the utility buffer: "
+                        "offset={} size={} capacity={} mip={} layers={}",
+                        copy.bufferOffset, transfer_size.value_or(0), buffer_size,
+                        copy.imageSubresource.mipLevel, copy.imageSubresource.layerCount);
+            return;
+        }
     }
 
     const vk::BufferMemoryBarrier2 pre_copy_barrier = {
@@ -842,6 +1168,10 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
 }
 
 void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
+    if (!IsValid() || !src_image.IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image mip copy for invalid image backing");
+        return;
+    }
     ASSERT(SetHostScale(100));
     ASSERT(src_image.SetHostScale(100));
     const auto& src_info = src_image.info;
@@ -856,7 +1186,25 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     ASSERT(mip_block_h == (src_info.size.height >> src_dim));
     ASSERT(mip_block_p == (src_info.pitch >> src_dim));
 
-    const auto [src_layers, dst_layers] = SanitizeCopyLayers(src_info, info, src_info.size.depth);
+    auto [src_layers, dst_layers] = SanitizeCopyLayers(src_info, info, src_info.size.depth);
+
+    // CopyMip writes the destination at a non-zero base slice when a smaller guest image is
+    // merged into a larger backing image.  The layer counts from SanitizeCopyLayers describe the
+    // complete resources, so bound them by the remaining destination range before publishing a
+    // Vulkan copy region.  A malformed slice is not recoverable by coercing a layer count; skip
+    // the copy before any transitions or command-buffer recording instead.
+    const u32 destination_range_layers =
+        slice < info.resources.layers ? info.resources.layers - slice : 0;
+    const auto bounded_layers = ClampEqualImageCopyLayersToRanges(
+        {src_layers, dst_layers}, src_info.resources.layers, destination_range_layers);
+    src_layers = bounded_layers.source;
+    dst_layers = bounded_layers.destination;
+    if (dst_layers == 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping mip copy with out-of-range destination slice {} ({} layers)",
+                    slice, info.resources.layers);
+        return;
+    }
 
     const vk::ImageCopy image_copy{
         .srcSubresource{
@@ -877,6 +1225,22 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     SetBackingSamples(info.num_samples);
     src_image.SetBackingSamples(src_info.num_samples);
 
+    const auto depth_copy = SelectDepthCopyMode(
+        src_image.backing->image.image_ci.format, backing->image.image_ci.format,
+        src_image.backing->num_samples, backing->num_samples);
+    if (depth_copy != DepthCopyMode::Direct) {
+        if (depth_copy == DepthCopyMode::Buffer) {
+            CopyDepthRegionsWithBuffer(*this, src_image, std::span{&image_copy, 1});
+        } else {
+            LOG_ERROR(Render_Vulkan,
+                      "Unsupported depth mip copy: {} ({} samples) to {} ({} samples)",
+                      vk::to_string(src_image.backing->image.image_ci.format),
+                      src_image.backing->num_samples, vk::to_string(backing->image.image_ci.format),
+                      backing->num_samples);
+        }
+        return;
+    }
+
     scheduler->EndRendering();
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {});
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
@@ -890,6 +1254,16 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
 
 void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
                     const VideoCore::SubresourceRange& mrt1_range) {
+    if (!IsValid() || !src_image.IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image resolve for invalid image backing");
+        return;
+    }
+    if (!IsValidSubresourceRange(mrt0_range, src_image.info.resources) ||
+        !IsValidSubresourceRange(mrt1_range, info.resources)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping resolve with out-of-range source or destination subresource");
+        return;
+    }
     if (GetHostScale() != src_image.GetHostScale()) {
         ASSERT(SetHostScale(100));
         ASSERT(src_image.SetHostScale(100));
@@ -901,7 +1275,13 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                       mrt0_range);
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, mrt1_range);
 
-    const auto [src_layers, dst_layers] = SanitizeCopyLayers(src_image.info, info, 1);
+    auto [src_layers, dst_layers] = SanitizeCopyLayers(src_image.info, info, 1);
+    if (ConvertImageType(src_image.info.type) == ConvertImageType(info.type)) {
+        const auto bounded_layers = ClampEqualImageCopyLayersToRanges(
+            {src_layers, dst_layers}, mrt0_range.extent.layers, mrt1_range.extent.layers);
+        src_layers = bounded_layers.source;
+        dst_layers = bounded_layers.destination;
+    }
     if (src_image.backing->num_samples == 1) {
         const vk::ImageCopy region = {
             .srcSubresource{
@@ -951,6 +1331,14 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
 }
 
 void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range) {
+    if (!IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping image clear for invalid image backing");
+        return;
+    }
+    if (!IsValidSubresourceRange(range, info.resources)) {
+        LOG_WARNING(Render_Vulkan, "Skipping clear with out-of-range subresource");
+        return;
+    }
     const vk::ImageSubresourceRange vk_range = {
         .aspectMask = vk::ImageAspectFlagBits::eColor,
         .baseMipLevel = range.base.level,
@@ -966,7 +1354,7 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
 }
 
 void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
-    if (!backing || backing->num_samples == num_samples) {
+    if (!IsValid() || backing->num_samples == num_samples) {
         return;
     }
     ASSERT_MSG(!info.props.is_depth, "Swapping samples is only valid for color images");
@@ -979,11 +1367,25 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     if (it == backing_images.end()) {
         auto new_image_ci = backing->image.image_ci;
         new_image_ci.samples = LiverpoolToVK::NumSamples(num_samples, supported_samples);
+        const auto selected_usage = SelectImageUsageForSamples(
+            new_image_ci.usage, num_samples, info.storage_required,
+            instance->IsShaderStorageImageMultisampleSupported());
+        if (!selected_usage) {
+            LOG_ERROR(Render_Vulkan,
+                      "Cannot switch image backing to {} samples: required storage usage is "
+                      "unsupported",
+                      num_samples);
+            return;
+        }
+        new_image_ci.usage = selected_usage->usage;
 
         new_backing = &backing_images.emplace_back();
         new_backing->num_samples = num_samples;
         new_backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
-        new_backing->image.Create(new_image_ci);
+        if (new_backing->image.TryCreate(new_image_ci, instance) != vk::Result::eSuccess) {
+            backing_images.pop_back();
+            return;
+        }
 
         Vulkan::SetObjectName(instance->GetDevice(), new_backing->image.image,
                               "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{} (backing)",

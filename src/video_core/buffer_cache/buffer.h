@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/buffer_access_state.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -47,19 +48,27 @@ struct UniqueBuffer {
     UniqueBuffer(const UniqueBuffer&) = delete;
     UniqueBuffer& operator=(const UniqueBuffer&) = delete;
 
-    UniqueBuffer(UniqueBuffer&& other)
-        : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+    UniqueBuffer(UniqueBuffer&& other) noexcept
+        : device{std::exchange(other.device, vk::Device{})},
+          allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
-          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)} {}
-    UniqueBuffer& operator=(UniqueBuffer&& other) {
+          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)},
+          bda_addr{std::exchange(other.bda_addr, 0)} {}
+    UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        Reset();
+        device = std::exchange(other.device, vk::Device{});
         buffer = std::exchange(other.buffer, VK_NULL_HANDLE);
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+        bda_addr = std::exchange(other.bda_addr, 0);
         return *this;
     }
 
     void Create(const vk::BufferCreateInfo& image_ci, MemoryUsage usage,
-                VmaAllocationInfo* out_alloc_info);
+                VmaAllocationInfo* out_alloc_info, const Vulkan::Instance* diagnostic_instance = nullptr);
 
     operator vk::Buffer() const {
         return buffer;
@@ -67,9 +76,12 @@ struct UniqueBuffer {
 
     vk::Device device;
     VmaAllocator allocator;
-    VmaAllocation allocation;
+    VmaAllocation allocation{};
     vk::Buffer buffer{};
     vk::DeviceAddress bda_addr = 0;
+
+private:
+    void Reset() noexcept;
 };
 
 class Buffer {
@@ -126,29 +138,19 @@ public:
     }
 
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
-                                                       vk::PipelineStageFlagBits2 dst_stage,
-                                                       u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
-            return {};
-        }
-
-        DEBUG_ASSERT(offset < size_bytes);
-
-        const auto barrier = vk::BufferMemoryBarrier2{
-            .srcStageMask = stage,
-            .srcAccessMask = access_mask,
-            .dstStageMask = dst_stage,
-            .dstAccessMask = dst_acess_mask,
-            .buffer = buffer.buffer,
-            .offset = offset,
-            .size = size_bytes - offset,
-        };
-        access_mask = dst_acess_mask;
-        stage = dst_stage;
+                                                     vk::PipelineStageFlags2 dst_stage,
+                                                     u32 offset = 0) {
+        BufferAccessState state{access_mask, stage};
+        auto barrier = state.GetBarrier(buffer.buffer, size_bytes, dst_acess_mask, dst_stage, offset);
+        access_mask = state.access_mask;
+        stage = state.stage;
         return barrier;
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
+
+    /// Makes device writes to a mapped range visible to the host.
+    [[nodiscard]] bool InvalidateMappedRange(u64 offset, u64 size) const;
 
 public:
     VAddr cpu_addr = 0;
@@ -166,7 +168,7 @@ public:
     vk::Flags<vk::AccessFlagBits2> access_mask{
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
         vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
-    vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    vk::PipelineStageFlags2 stage{vk::PipelineStageFlagBits2::eAllCommands};
 };
 
 class StreamBuffer : public Buffer {
@@ -179,6 +181,15 @@ public:
 
     /// Ensures that reserved bytes of memory are available to the GPU.
     void Commit();
+
+    /// Returns the generation of the current ring-buffer reservation epoch.
+    ///
+    /// The generation advances whenever Map wraps and starts reusing the beginning of the
+    /// allocation. Callers retaining a host buffer endpoint must validate this value before
+    /// publishing that endpoint after another wait-capable reservation.
+    [[nodiscard]] u64 ReservationGeneration() const noexcept {
+        return reservation_generation;
+    }
 
     /// Maps and commits a memory region with user provided data
     u64 Copy(auto src, size_t size, size_t alignment = 0) {
@@ -215,6 +226,7 @@ private:
     std::vector<Watch> previous_watches;
     std::size_t wait_cursor{};
     u64 wait_bound{};
+    u64 reservation_generation{};
 };
 
 } // namespace VideoCore

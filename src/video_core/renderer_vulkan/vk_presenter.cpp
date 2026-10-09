@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_result_retry.h"
 #include "video_core/texture_cache/image.h"
 
 #include <algorithm>
@@ -433,6 +434,29 @@ static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readba
             continue;
         }
 
+        const u64 byte_size = static_cast<u64>(readback.width) *
+                              static_cast<u64>(readback.height) * 4;
+        if (byte_size > readback.buffer.size_bytes ||
+            byte_size > readback.buffer.mapped_data.size()) {
+            LOG_ERROR(Render_Vulkan,
+                      "Screenshot readback storage mismatch before CPU consumption (buffer={}, "
+                      "mapped={}, need={})",
+                      readback.buffer.size_bytes, readback.buffer.mapped_data.size(), byte_size);
+            continue;
+        }
+
+        // Download allocations are allowed to be non-coherent. Make device writes visible to
+        // the CPU before converting the mapped bytes, and drop the screenshot if the visibility
+        // operation fails. Coherent allocations take the no-op fast path in Buffer itself, but
+        // keep the branch explicit so this consumer cannot accidentally bypass the contract.
+        if (!readback.buffer.is_coherent &&
+            !readback.buffer.InvalidateMappedRange(0, byte_size)) {
+            LOG_ERROR(Render_Vulkan,
+                      "Failed to invalidate screenshot readback range {:#x}:{:#x}", 0,
+                      byte_size);
+            continue;
+        }
+
         std::vector<u8> rgba;
         if (!ConvertReadbackToRgba8(readback, rgba)) {
             continue;
@@ -585,6 +609,7 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     VkResult result = vmaCreateImage(instance.GetAllocator(), &unsafe_image_info, &alloc_info,
                                      &unsafe_image, &frame->allocation, nullptr);
     if (result != VK_SUCCESS) [[unlikely]] {
+        instance.LogDeviceMemoryBudget("present_image_allocation", vk::Result{result});
         LOG_CRITICAL(Render_Vulkan, "Failed allocating texture with error {}",
                      vk::to_string(vk::Result{result}));
         UNREACHABLE();
@@ -620,18 +645,11 @@ Frame* Presenter::PrepareLastFrame() {
 
     Frame* frame = last_submit_frame;
 
-    while (true) {
-        vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
-                                                               std::numeric_limits<u64>::max());
-        if (result == vk::Result::eSuccess) {
-            break;
-        }
-        if (result == vk::Result::eTimeout) {
-            continue;
-        }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
-    }
+    const auto result = RetryOnTimeout([&] {
+        return instance.GetDevice().waitForFences(frame->present_done, false,
+                                                  std::numeric_limits<u64>::max());
+    });
+    Check<"wait for present frame">(result);
 
     return frame;
 }
@@ -657,6 +675,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                                VAddr cpu_address) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
+    if (!image_id) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping video-out frame with an invalid image at address={:#x}",
+                    cpu_address);
+        return PrepareBlankFrame(false);
+    }
     texture_cache.UpdateImage(image_id);
 
     Frame* frame = GetRenderFrame();
@@ -1081,11 +1105,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
-    void* const vulkan_instance =
-        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
-    void* const window_handle = window.GetWindowInfo().render_surface;
-    const bool is_renderdoc_capture =
-        VideoCore::BeginNextPresentedFrameCapture(vulkan_instance, window_handle);
     scheduler.Flush(info);
 
     // Present to swapchain.
@@ -1095,10 +1114,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
-    if (is_renderdoc_capture) {
-        VideoCore::EndPresentedFrameCapture(vulkan_instance, window_handle);
-    }
-
     complete_frame(true);
     if (!is_reusing_frame) {
         const auto presented_frame = DebugState.IncFlipFrameNum();
@@ -1123,22 +1138,14 @@ Frame* Presenter::GetRenderFrame() {
     }
 
     const vk::Device device = instance.GetDevice();
-    vk::Result result{};
 
-    const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
-        return result;
-    };
-
-    // Wait for the presentation to be finished so all frame resources are free
-    while (wait() != vk::Result::eSuccess) {
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
-        // Retry if the waiting times out
-        if (result == vk::Result::eTimeout) {
-            continue;
-        }
-    }
+    // Wait for the presentation to be finished so all frame resources are free. Only a timeout
+    // means that the wait is still pending; terminal results must reach the normal Vulkan error
+    // boundary instead of retrying forever or allowing frame state to advance.
+    const auto result = RetryOnTimeout([&] {
+        return device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
+    });
+    Check<"wait for present frame">(result);
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
         frame->is_hdr != swapchain.GetHDR()) {

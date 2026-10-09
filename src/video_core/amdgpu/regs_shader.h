@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "common/assert.h"
 #include "common/types.h"
 #include "shader_recompiler/params.h"
@@ -209,32 +211,47 @@ struct ComputeProgram {
     }
 };
 
-static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
+[[nodiscard]] static constexpr std::optional<const BinaryInfo*> SearchBinaryInfo(
+    const u32* code) {
+    if (code == nullptr) {
+        return std::nullopt;
+    }
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
-    if (code[0] == token_mov_vcchi) {
-        const auto* info = std::bit_cast<const BinaryInfo*>(code + (code[1] + 1) * 2);
-        if (info->Valid()) {
-            return *info;
-        }
-    }
-    constexpr u32 signature_size = sizeof(BinaryInfo::signature_ref) / sizeof(u8);
     constexpr u32 search_limit = 0x4000;
-    const u32* end = code + search_limit;
-    for (const u32* it = code; it < end; ++it) {
-        if (const BinaryInfo* info = std::bit_cast<const BinaryInfo*>(it); info->Valid()) {
-            return *info;
+    constexpr u32 binary_info_words =
+        (sizeof(BinaryInfo) + sizeof(u32) - 1) / sizeof(u32);
+    const auto is_usable = [search_limit](const BinaryInfo* info) {
+        return info->Valid() && info->length >= sizeof(u32) &&
+               info->length % sizeof(u32) == 0 && info->length <= search_limit * sizeof(u32);
+    };
+    if (code[0] == token_mov_vcchi) {
+        const u64 info_offset = (u64{code[1]} + 1) * 2;
+        if (info_offset <= search_limit - binary_info_words) {
+            const auto* info = std::bit_cast<const BinaryInfo*>(code + info_offset);
+            if (is_usable(info)) {
+                return info;
+            }
         }
     }
-    UNREACHABLE_MSG("Shader binary info not found.");
+    const u32* end = code + search_limit;
+    for (const u32* it = code; it + binary_info_words <= end; ++it) {
+        if (const BinaryInfo* info = std::bit_cast<const BinaryInfo*>(it); is_usable(info)) {
+            return info;
+        }
+    }
+    return std::nullopt;
 }
 
-static constexpr Shader::ShaderParams GetParams(const auto& sh) {
+[[nodiscard]] static constexpr std::optional<Shader::ShaderParams> GetParams(const auto& sh) {
     const auto* code = sh.template Address<u32*>();
-    const auto& bininfo = SearchBinaryInfo(code);
-    return {
+    const auto bininfo = SearchBinaryInfo(code);
+    if (!bininfo) {
+        return std::nullopt;
+    }
+    return Shader::ShaderParams{
         .user_data = sh.user_data,
-        .code = std::span{code, bininfo.length / sizeof(u32)},
-        .hash = bininfo.shader_hash,
+        .code = std::span{code, (*bininfo)->length / sizeof(u32)},
+        .hash = (*bininfo)->shader_hash,
     };
 }
 
