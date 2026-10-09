@@ -775,7 +775,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
-                    SubmitEop(
+                    SubmitEopWithEarlyFence(
                         *event_eop,
                         [this](Common::UniqueFunction<void>&& completion) {
                             rasterizer->DeferGpuCompletion(std::move(completion));

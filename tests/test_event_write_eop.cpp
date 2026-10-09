@@ -18,9 +18,17 @@ namespace {
 struct TestEopPacket {
     u32 data;
 
-    void SignalFence(auto&& write_memory, auto&& signal_interrupt) const {
+    void WriteFence(auto&& write_memory) const {
         write_memory(data);
+    }
+
+    void SignalInterrupt(auto&& signal_interrupt) const {
         signal_interrupt();
+    }
+
+    void SignalFence(auto&& write_memory, auto&& signal_interrupt) const {
+        WriteFence(std::forward<decltype(write_memory)>(write_memory));
+        SignalInterrupt(std::forward<decltype(signal_interrupt)>(signal_interrupt));
     }
 };
 
@@ -67,6 +75,47 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(fence, 0x12345678u);
     EXPECT_TRUE(interrupt_signalled);
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
+}
+
+TEST(EventWriteEop, CanPublishFenceAfterSubmissionWhileDeferringInterruptAndFlip) {
+    u32 fence = 0;
+    bool interrupt_signalled = false;
+    bool flip_signalled = false;
+    std::vector<std::string> operations;
+    std::function<void()> gpu_completion;
+
+    AmdGpu::SubmitEopWithEarlyFence(
+        TestEopPacket{.data = 0x12345678},
+        [&](auto&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::forward<decltype(completion)>(completion);
+        },
+        [&] { operations.emplace_back("submit"); },
+        [&](u32 data) {
+            operations.emplace_back("fence");
+            fence = data;
+        },
+        [&] {
+            operations.emplace_back("interrupt");
+            interrupt_signalled = true;
+        },
+        [&] {
+            operations.emplace_back("flip");
+            flip_signalled = true;
+        });
+
+    EXPECT_EQ(fence, 0x12345678u);
+    EXPECT_FALSE(interrupt_signalled);
+    EXPECT_FALSE(flip_signalled);
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence"}));
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+
+    EXPECT_TRUE(interrupt_signalled);
+    EXPECT_TRUE(flip_signalled);
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"defer", "submit", "fence", "interrupt", "flip"}));
 }
 
 TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {

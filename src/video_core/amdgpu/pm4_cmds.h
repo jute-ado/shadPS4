@@ -466,7 +466,7 @@ struct PM4CmdEventWriteEop {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& write_mem, auto&& signal_irq) const {
+    void WriteFence(auto&& write_mem) const {
         u32* address = Address<u32>();
         switch (data_sel.Value()) {
         case DataSelect::None: {
@@ -492,7 +492,9 @@ struct PM4CmdEventWriteEop {
             UNREACHABLE();
         }
         }
+    }
 
+    void SignalInterrupt(auto&& signal_irq) const {
         switch (int_sel.Value()) {
         case InterruptSelect::None: {
             // No interrupt
@@ -509,6 +511,11 @@ struct PM4CmdEventWriteEop {
             UNREACHABLE();
         }
         }
+    }
+
+    void SignalFence(auto&& write_mem, auto&& signal_irq) const {
+        WriteFence(std::forward<decltype(write_mem)>(write_mem));
+        SignalInterrupt(std::forward<decltype(signal_irq)>(signal_irq));
     }
 };
 
