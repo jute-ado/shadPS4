@@ -34,6 +34,7 @@ struct Frame {
     vk::Semaphore ready_semaphore;
     u64 ready_tick;
     bool is_hdr{false};
+    bool renderdoc_capture{false};
     u8 id{};
 
     ImTextureID imgui_texture;
