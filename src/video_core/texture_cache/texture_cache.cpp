@@ -246,6 +246,22 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
                                      new_image.info.pixel_format)) {
                 new_image.CopyImage(cache_image);
             } else {
+                static u32 diagnostic_copy_count{};
+                if (diagnostic_copy_count++ < 32) {
+                    LOG_INFO(Render_Vulkan,
+                             "DepthColorBufferCopy overlap src_addr={:#x} src_format={} "
+                             "src_depth={} dst_addr={:#x} dst_format={} dst_depth={} "
+                             "extent={}x{} mips={} layers={}",
+                             cache_image.info.guest_address,
+                             vk::to_string(cache_image.info.pixel_format),
+                             static_cast<bool>(cache_image.info.props.is_depth),
+                             new_image.info.guest_address,
+                             vk::to_string(new_image.info.pixel_format),
+                             static_cast<bool>(new_image.info.props.is_depth),
+                             new_image.info.size.width,
+                             new_image.info.size.height, new_image.info.resources.levels,
+                             new_image.info.resources.layers);
+                }
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
                 new_image.CopyImageWithBuffer(cache_image, copy_buffer.Handle(), 0);
             }

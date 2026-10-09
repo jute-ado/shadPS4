@@ -530,6 +530,18 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
             dst_image.info.pixel_format)) {
         dst_image.CopyImage(src_image);
     } else {
+        static u32 diagnostic_copy_count{};
+        if (diagnostic_copy_count++ < 32) {
+            LOG_INFO(Render_Vulkan,
+                     "DepthColorBufferCopy compute src_addr={:#x} src_format={} src_depth={} "
+                     "dst_addr={:#x} dst_format={} dst_depth={} extent={}x{} mips={} layers={}",
+                     src_image.info.guest_address, vk::to_string(src_image.info.pixel_format),
+                     static_cast<bool>(src_image.info.props.is_depth),
+                     dst_image.info.guest_address, vk::to_string(dst_image.info.pixel_format),
+                     static_cast<bool>(dst_image.info.props.is_depth),
+                     dst_image.info.size.width, dst_image.info.size.height,
+                     dst_image.info.resources.levels, dst_image.info.resources.layers);
+        }
         const auto& copy_buffer =
             buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::DeviceLocal);
         dst_image.CopyImageWithBuffer(src_image, copy_buffer.Handle(), 0);
@@ -904,6 +916,19 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const bool is_depth_clear = regs.depth_render_control.depth_clear_enable ||
                                     texture_cache.IsMetaCleared(htile_address, slice);
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
+        if (regs.depth_render_control.depth_clear_enable &&
+            (!regs.depth_control.depth_enable || !regs.depth_control.depth_write_enable)) {
+            static u32 diagnostic_depth_clear_count{};
+            if (diagnostic_depth_clear_count++ < 32) {
+                LOG_INFO(Render_Vulkan,
+                         "DepthClearWithoutWrite address={:#x} extent={}x{} depth_enable={} "
+                         "depth_write_enable={} clear_value={} tick={}",
+                         image.info.guest_address, image.info.size.width, image.info.size.height,
+                         static_cast<bool>(regs.depth_control.depth_enable),
+                         static_cast<bool>(regs.depth_control.depth_write_enable), regs.depth_clear,
+                         scheduler.CurrentTick());
+            }
+        }
         texture_cache.TouchMeta(htile_address, slice, false);
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);
 
