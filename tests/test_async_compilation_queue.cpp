@@ -2,20 +2,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
-#include <future>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
+#include <future>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 
 #include <gtest/gtest.h>
 
+#include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/async_compilation_queue.h"
+#include "video_core/renderer_vulkan/compilation_latency_timer.h"
 
 namespace Vulkan {
 namespace {
 
-std::string ReadText(const char* path) {
+std::string ReadText(const std::filesystem::path& path) {
     std::ifstream input{path, std::ios::binary};
     std::ostringstream contents;
     contents << input.rdbuf();
@@ -109,6 +113,153 @@ TEST(AsyncGraphicsPipelineCompilation, HasAStableExperimentalConfigurationKey) {
     ASSERT_FALSE(settings_source.empty());
     EXPECT_NE(settings_header.find("async_graphics_pipeline_compilation"), std::string::npos);
     EXPECT_NE(settings_source.find("asyncGraphicsPipelineCompilation"), std::string::npos);
+}
+
+TEST(AsyncGraphicsPipelineTiming, WorkerDurationIsOptInAndBracketsActualConstruction) {
+    const auto source = ReadText(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+    const auto begin = source.find("PipelineCache::CompileGraphicsPipelineAsync(");
+    const auto end = source.find("void PipelineCache::PublishAsyncGraphicsPipeline(", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    const auto body = source.substr(begin, end - begin);
+    const auto timer = body.find("CompilationLatencyTimer<> timing{IsCompilationTimingEnabled()}");
+    const auto start = body.find("async_pipeline_worker_start key={:#x}");
+    const auto guard = body.find("SCOPE_EXIT");
+    const auto finish = body.find("async_pipeline_worker_finish key={:#x} elapsedMs={:.3f}");
+    const auto compile = body.find("std::make_unique<GraphicsPipeline>(");
+    ASSERT_NE(timer, std::string::npos);
+    ASSERT_NE(start, std::string::npos);
+    ASSERT_NE(guard, std::string::npos);
+    ASSERT_NE(finish, std::string::npos);
+    ASSERT_NE(compile, std::string::npos);
+    EXPECT_LT(timer, start);
+    EXPECT_LT(start, guard);
+    EXPECT_LT(guard, compile);
+    EXPECT_LT(finish, compile); // Scope-exit callback is installed before construction can throw.
+    EXPECT_NE(body.find("timing.ElapsedMilliseconds()"), std::string::npos);
+    EXPECT_NE(body.find("std::hash<GraphicsPipelineKey>{}(job.key)"), std::string::npos);
+    EXPECT_NE(body.find("if (timing.IsEnabled())"), std::string::npos);
+    EXPECT_NE(source.find("should_log(spdlog::level::debug)"), std::string::npos);
+}
+
+TEST(AsyncGraphicsPipelineTiming, OwnerWaitIncludesAllCompletionsAndEveryExitReason) {
+    const auto source = ReadText(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+    const auto begin = source.find("PipelineCache::WaitForAsyncGraphicsPipeline(");
+    const auto end =
+        source.find("const GraphicsPipeline* PipelineCache::GetGraphicsPipeline()", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    const auto body = source.substr(begin, end - begin);
+    const auto timer = body.find("CompilationLatencyTimer<> timing{IsCompilationTimingEnabled()}");
+    const auto start = body.find("async_pipeline_wait_start key={:#x}");
+    const auto finish = body.find("async_pipeline_wait_finish key={:#x} elapsedMs={:.3f}");
+    const auto loop = body.find("for (;;)");
+    const auto wait = body.find("async_graphics_compiler->WaitTake()");
+    ASSERT_NE(timer, std::string::npos);
+    ASSERT_NE(start, std::string::npos);
+    ASSERT_NE(finish, std::string::npos);
+    ASSERT_NE(loop, std::string::npos);
+    ASSERT_NE(wait, std::string::npos);
+    EXPECT_LT(timer, start);
+    EXPECT_LT(start, finish);
+    EXPECT_LT(finish, loop);
+    EXPECT_LT(loop, wait);
+    EXPECT_NE(body.find("SCOPE_EXIT"), std::string::npos);
+    EXPECT_NE(body.find("timing.ElapsedMilliseconds()"), std::string::npos);
+    EXPECT_NE(body.find("std::hash<GraphicsPipelineKey>{}(key)"), std::string::npos);
+    EXPECT_NE(body.find("outcome = \"ready\""), std::string::npos);
+    EXPECT_NE(body.find("outcome = \"stopped\""), std::string::npos);
+    EXPECT_NE(body.find("outcome = \"failed\""), std::string::npos);
+}
+
+TEST(AsyncGraphicsPipelineTiming, DedicatedFilterDoesNotEnableVerboseRendererLogging) {
+    const auto source = ReadText(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+    const auto src_root = std::filesystem::path{SHADPS4_PIPELINE_CACHE_SOURCE_PATH}
+                              .parent_path()
+                              .parent_path()
+                              .parent_path();
+    const auto classes = ReadText(src_root / "common/logging/classes.h");
+    const auto logging = ReadText(src_root / "common/logging/log.cpp");
+    ASSERT_FALSE(classes.empty());
+    ASSERT_FALSE(logging.empty());
+    EXPECT_NE(classes.find("Render_Compilation = \"Render.Compilation\""), std::string::npos);
+    EXPECT_NE(logging.find("{Class::Render_Compilation, nullptr}"), std::string::npos);
+
+    const auto begin = source.find("static bool IsCompilationTimingEnabled()");
+    const auto end =
+        source.find("const GraphicsPipeline* PipelineCache::GetGraphicsPipeline()", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    const auto body = source.substr(begin, end - begin);
+    EXPECT_NE(body.find("ALL_LOGGERS.find(Common::Log::Class::Render_Compilation)"),
+              std::string::npos);
+    for (const auto* marker : {"async_pipeline_worker_start", "async_pipeline_worker_finish",
+                               "async_pipeline_wait_start", "async_pipeline_wait_finish"}) {
+        const auto message = body.find(marker);
+        ASSERT_NE(message, std::string::npos);
+        const auto log = body.rfind("LOG_DEBUG(", message);
+        ASSERT_NE(log, std::string::npos);
+        EXPECT_NE(body.substr(log, message - log).find("LOG_DEBUG(Render_Compilation,"),
+                  std::string::npos);
+    }
+}
+
+struct FakeCompilationClock {
+    using duration = std::chrono::microseconds;
+    using time_point = std::chrono::time_point<FakeCompilationClock, duration>;
+    static constexpr bool is_steady = true;
+    static inline time_point current{};
+    static inline unsigned reads{};
+
+    static time_point now() {
+        ++reads;
+        return current;
+    }
+};
+
+TEST(CompilationLatencyTimer, DisabledDiagnosticsNeverReadTheClock) {
+    FakeCompilationClock::reads = 0;
+    CompilationLatencyTimer<FakeCompilationClock> timer{false};
+    EXPECT_FALSE(timer.IsEnabled());
+    EXPECT_DOUBLE_EQ(timer.ElapsedMilliseconds(), 0.0);
+    EXPECT_EQ(FakeCompilationClock::reads, 0U);
+}
+
+TEST(CompilationLatencyTimer, ReportsFractionalMillisecondsRatherThanTicksOrSeconds) {
+    FakeCompilationClock::current = FakeCompilationClock::time_point{std::chrono::hours{9}};
+    CompilationLatencyTimer<FakeCompilationClock> timer{true};
+    EXPECT_TRUE(timer.IsEnabled());
+    EXPECT_DOUBLE_EQ(timer.ElapsedMilliseconds(), 0.0);
+    FakeCompilationClock::current += std::chrono::microseconds{2'100'250};
+    EXPECT_DOUBLE_EQ(timer.ElapsedMilliseconds(), 2100.25);
+}
+
+TEST(CompilationLatencyTimer, WorkerAndOwnerWaitUseIndependentStartTimes) {
+    FakeCompilationClock::current = {};
+    CompilationLatencyTimer<FakeCompilationClock> owner{true};
+    FakeCompilationClock::current += std::chrono::milliseconds{100};
+    CompilationLatencyTimer<FakeCompilationClock> worker{true};
+    FakeCompilationClock::current += std::chrono::milliseconds{2100};
+    EXPECT_DOUBLE_EQ(worker.ElapsedMilliseconds(), 2100.0);
+    EXPECT_DOUBLE_EQ(owner.ElapsedMilliseconds(), 2200.0);
+}
+
+TEST(CompilationLatencyTimer, ScopeExitRecordsFailureWithoutSwallowingIt) {
+    FakeCompilationClock::current = {};
+    double elapsed_ms = -1;
+    unsigned finished = 0;
+    const auto fails = [&] {
+        CompilationLatencyTimer<FakeCompilationClock> timer{true};
+        SCOPE_EXIT {
+            elapsed_ms = timer.ElapsedMilliseconds();
+            ++finished;
+        };
+        FakeCompilationClock::current += std::chrono::milliseconds{650};
+        throw std::runtime_error{"compiler failure"};
+    };
+    EXPECT_THROW(fails(), std::runtime_error);
+    EXPECT_EQ(finished, 1U);
+    EXPECT_DOUBLE_EQ(elapsed_ms, 650.0);
 }
 
 } // namespace

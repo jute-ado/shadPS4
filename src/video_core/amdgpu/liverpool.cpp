@@ -18,6 +18,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace AmdGpu {
 
@@ -72,6 +73,7 @@ Liverpool::Liverpool() {
 }
 
 Liverpool::~Liverpool() {
+    eop_submission_batch.Cancel();
     process_thread.request_stop();
     process_thread.join();
 }
@@ -88,6 +90,21 @@ void Liverpool::ProcessCommands() {
         }
         callback();
     }
+}
+
+void Liverpool::FlushPendingEops() {
+    eop_submission_batch.Flush(
+        [this] { rasterizer->ProcessDownloadImages(); },
+        [this](Common::UniqueFunction<void, u64>&& on_submitted,
+               Common::UniqueFunction<void>&& wake_owner) {
+            rasterizer->FlushWithGpuCompletion(std::move(on_submitted), std::move(wake_owner));
+        },
+        [this] { SendCommand([this] { DrainCompletedEops(); }); });
+}
+
+void Liverpool::DrainCompletedEops() {
+    eop_submission_batch.DrainCompleted(
+        [this](u64 tick) { return rasterizer->GetScheduler().IsFree(tick); });
 }
 
 void Liverpool::Process(std::stop_token stoken) {
@@ -108,7 +125,7 @@ void Liverpool::Process(std::stop_token stoken) {
         curr_qid = -1;
         submission_completions.DrainReadyBoundaries();
 
-        while (num_submits || num_commands) {
+        while (!stoken.stop_requested() && (num_submits || num_commands)) {
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
@@ -144,7 +161,9 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
-        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        if (!stoken.stop_requested()) {
+            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        }
     }
 }
 
@@ -237,10 +256,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
-        ProcessCommands();
-
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
+        const bool is_eop = type == 3 && header->type3.opcode == PM4ItOpcode::EventWriteEop;
+        const bool continues_eop_batch = is_eop && eop_submission_batch.HasPending();
+        if (!is_eop && rasterizer) {
+            FlushPendingEops();
+        }
+        if (!continues_eop_batch) {
+            ProcessCommands();
+        }
 
         switch (type) {
         default:
@@ -722,22 +747,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                if (rasterizer) {
-                    rasterizer->ProcessDownloadImages();
-                }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
-                PublishEop(
-                    *event_eop,
-                    [](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                            memcpy(address, &data, num_bytes);
-                        }
-                    },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                    [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
-                        complete_eop_flip();
-                    });
+                auto write_memory = [](void* address, u64 data, u32 num_bytes) {
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+                        memcpy(address, &data, num_bytes);
+                    }
+                };
+                auto signal_interrupt = [] {
+                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                };
+                if (rasterizer) {
+                    eop_submission_batch.Add(*event_eop, std::move(write_memory),
+                                             std::move(signal_interrupt),
+                                             std::move(complete_eop_flip));
+                } else {
+                    PublishEop(*event_eop, std::move(write_memory), std::move(signal_interrupt),
+                               std::move(complete_eop_flip));
+                }
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -827,16 +854,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                // Optimization: VO label waits are special because the emulator
-                // will write to the label when presentation is finished. So if
-                // there are no other submits to yield to we can sleep the thread
-                // instead and allow other tasks to run.
-                const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
+                // EOP completion queues flips back to this owner. A VO-label
+                // wait must yield too: sleeping the owner would prevent the
+                // queued flip which eventually releases that label.
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     YIELD_GFX();
                 }
@@ -905,6 +925,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
+    }
+
+    if (rasterizer) {
+        FlushPendingEops();
     }
 
     if (ce_task.handle) {
@@ -1241,6 +1265,17 @@ void Liverpool::SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
     });
     std::scoped_lock lk{submit_mutex};
     submit_cv.notify_one();
+}
+
+void Liverpool::WaitGpuCompletion() {
+    SendCommand<true>([this] {
+        if (rasterizer) {
+            rasterizer->Finish();
+            // Physical retirement alone does not publish deferred host fences.
+            // Destructive memory barriers must not return before those writes.
+            DrainCompletedEops();
+        }
+    });
 }
 
 } // namespace AmdGpu
