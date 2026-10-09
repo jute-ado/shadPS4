@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#include "shader_recompiler/backend/spirv/storage_image_format_policy.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -846,7 +847,7 @@ void EmitContext::DefineBuffers() {
     }
 }
 
-spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
+spv::ImageFormat TryGetFormat(const AmdGpu::Image& image) {
     if (image.GetDataFmt() == AmdGpu::DataFormat::Format32 &&
         image.GetNumberFmt() == AmdGpu::NumberFormat::Uint) {
         return spv::ImageFormat::R32ui;
@@ -919,13 +920,17 @@ spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
         image.GetNumberFmt() == AmdGpu::NumberFormat::Float) {
         return spv::ImageFormat::Rgba32f;
     }
-    UNREACHABLE_MSG("Unknown storage format data_format={}, num_format={}", image.GetDataFmt(),
-                    image.GetNumberFmt());
+    return spv::ImageFormat::Unknown;
 }
 
 Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const auto image = desc.GetSharp(ctx.info);
-    const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
+    const auto format = NeedsStorageImageFormat(desc.is_written, desc.is_atomic)
+                            ? TryGetFormat(image)
+                            : spv::ImageFormat::Unknown;
+    ASSERT_MSG(!desc.is_atomic || format != spv::ImageFormat::Unknown,
+               "Unknown atomic storage format data_format={}, num_format={}", image.GetDataFmt(),
+               image.GetNumberFmt());
     const auto type = image.GetViewType(desc.is_array);
     const u32 sampled = desc.is_written ? 2 : 1;
     switch (type) {
