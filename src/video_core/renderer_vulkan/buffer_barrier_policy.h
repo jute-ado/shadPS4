@@ -7,6 +7,22 @@
 
 namespace Vulkan {
 
+constexpr vk::AccessFlags2 BufferWriteAccess =
+    vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
+    vk::AccessFlagBits2::eHostWrite | vk::AccessFlagBits2::eMemoryWrite;
+
+constexpr bool HasBufferWriteAccess(vk::AccessFlags2 access) {
+    return static_cast<bool>(access & BufferWriteAccess);
+}
+
+constexpr bool NeedsBufferBarrier(vk::AccessFlags2 current_access,
+                                  vk::PipelineStageFlagBits2 current_stage,
+                                  vk::AccessFlags2 destination_access,
+                                  vk::PipelineStageFlagBits2 destination_stage) {
+    return current_access != destination_access || current_stage != destination_stage ||
+           HasBufferWriteAccess(current_access);
+}
+
 constexpr vk::AccessFlags2 ShaderBufferAccess(bool is_written) {
     vk::AccessFlags2 access = vk::AccessFlagBits2::eShaderRead;
     if (is_written) {
