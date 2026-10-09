@@ -36,7 +36,9 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const BufferBarriers&
     }
 
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
-    cmdbuf.pushConstants(*pipeline_layout, stage_flags, 0u, sizeof(push_data), &push_data);
+    const auto push_layout =
+        Shader::PlanPushDataLayout(profile.instrument_pp_upstream_sample_tee);
+    cmdbuf.pushConstants(*pipeline_layout, stage_flags, 0u, push_layout.byte_size, &push_data);
 
     // Bind descriptor set.
     if (set_writes.empty()) {

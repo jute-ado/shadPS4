@@ -39,11 +39,13 @@ GraphicsPipeline::GraphicsPipeline(
     std::ranges::copy(infos, stages.begin());
     BuildDescSetLayout(preloading);
     const auto debug_str = GetDebugString();
+    const auto push_layout =
+        Shader::PlanPushDataLayout(profile.instrument_pp_upstream_sample_tee);
 
     const vk::PushConstantRange push_constants = {
         .stageFlags = AllGraphicsStageBits,
         .offset = 0,
-        .size = sizeof(Shader::PushData),
+        .size = push_layout.byte_size,
     };
 
     const vk::DescriptorSetLayout set_layout = *desc_layout;

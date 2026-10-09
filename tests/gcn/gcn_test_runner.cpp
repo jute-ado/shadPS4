@@ -206,7 +206,7 @@ std::expected<void, ErrorInfo> Runner::initialize() {
                           "no device with compute + shader_object + maintenance6 + "
                           "push_descriptor");
 
-    max_push_constant_size_ = sizeof(Shader::PushData);
+    max_push_constant_size_ = Shader::PlanPushDataLayout(false).byte_size;
     // physical_device_.getProperties().limits.maxPushConstantsSize;
 
     // ---- Device with feature chain ------------------------------------
@@ -336,7 +336,7 @@ std::expected<void, ErrorInfo> Runner::run_raw(std::span<const std::uint32_t> sp
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .offset = 0,
         // .size = static_cast<std::uint32_t>(push_constants.size()),
-        .size = sizeof(Shader::PushData),
+        .size = Shader::PlanPushDataLayout(false).byte_size,
     };
     vk::ShaderCreateInfoEXT sci{
         .stage = vk::ShaderStageFlagBits::eCompute,

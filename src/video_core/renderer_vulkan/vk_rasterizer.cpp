@@ -9,6 +9,8 @@
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_input_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_tee.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_tee_vulkan.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -52,6 +54,15 @@ class PpTerminalScopeContentRuntime {
 public:
     static constexpr u32 MaxTargets = 8;
 
+    struct UpstreamSampleTeePreparation {
+        HostPasses::PpUpstreamSampleTeeCapturePlan capture{};
+        HostPasses::PpUpstreamSampleTeeCommandPlan commands{};
+        HostPasses::PpUpstreamSampleTeeVulkanBarrier reuse_barrier{};
+        HostPasses::PpUpstreamSampleTeeVulkanBarrier fragment_barrier{};
+        HostPasses::PpUpstreamSampleTeeVulkanBarrier host_barrier{};
+        HostPasses::PpUpstreamSampleTeeVulkanPushStages push_stages{};
+    };
+
     PpTerminalScopeContentRuntime(const Instance& instance_, Scheduler& scheduler_,
                                   PpTerminalScopeRuntimeConfig config_)
         : instance{instance_}, scheduler{scheduler_}, config{config_},
@@ -71,6 +82,15 @@ public:
                    0,
                    vk::BufferUsageFlagBits::eTransferDst,
                    slot_stride * FinalGuestSurfaceReadbackSlotPool::MaxSlots} {
+        if (config.content.capture_upstream_sample_tee) {
+            upstream_sample_tee_buffer = std::make_unique<VideoCore::Buffer>(
+                instance, scheduler, VideoCore::MemoryUsage::Download, 0, VideoCore::AllFlags,
+                Shader::PpUpstreamSampleTeeBufferBytes);
+            upstream_sample_tee_reducer =
+                std::make_unique<HostPasses::PpUpstreamSampleTeeCalibratedReducer>(
+                    config.window, HostPasses::PpUpstreamSampleTeeCalibratedReducer::MaxHistory,
+                    config.content.upstream_candidate_index, config.expected_calibrations);
+        }
         LOG_INFO(
             Render,
             "PpTerminalScopeContentConfig enabled=1 frame_start={} frame_count={} "
@@ -78,7 +98,8 @@ public:
             "second={}/{}/{}/{}/{}/{} consumer={}/{}/{}/{}/{}/{} "
             "predecessor={}/{}/{}/{}/{}/{} targets={} slots={} max_bytes={} pre_first={} "
             "capture_predecessor={} input_content={} upstream_inputs={} upstream_pre_post={} "
-            "upstream_input_content={} upstream_sample_routes={} upstream_index={} "
+            "upstream_input_content={} upstream_sample_routes={} upstream_sample_tee={} "
+            "upstream_index={} "
             "upstream_candidate={} upstream_sample_route_input={} "
             "upstream={}/{}/{}/{}/{}/{} final_backing_join={}",
             config.window.frame_start, config.window.frame_count, config.watch_ordinals.count,
@@ -99,13 +120,38 @@ public:
             config.content.capture_pre_first, config.content.capture_predecessor,
             config.content.capture_sampled_input_content, config.content.capture_upstream_inputs,
             config.content.capture_upstream_pre_post, config.content.capture_upstream_input_content,
-            config.content.capture_upstream_sample_routes, config.content.upstream_input_index,
+            config.content.capture_upstream_sample_routes,
+            config.content.capture_upstream_sample_tee, config.content.upstream_input_index,
             config.content.upstream_candidate_index,
             config.content.upstream_sample_route_input_index,
             static_cast<u32>(config.content.upstream.kind), config.content.upstream.indexed,
             config.content.upstream.element_count, config.content.upstream.instance_count,
             config.content.upstream.sampled_images, config.content.upstream.storage_writes,
             config.join_final_backing);
+    }
+
+    [[nodiscard]] VideoCore::Buffer* UpstreamSampleTeeBuffer() noexcept {
+        return upstream_sample_tee_buffer.get();
+    }
+
+    [[nodiscard]] bool CapturesUpstreamSampleTee() const noexcept {
+        return config.content.capture_upstream_sample_tee;
+    }
+
+    void ResetUpstreamSampleTeeBinding() noexcept {
+        upstream_sample_tee_binding = {};
+        upstream_sample_tee_binding_count = 0;
+    }
+
+    [[nodiscard]] bool RetainUpstreamSampleTeeBinding(
+        const HostPasses::PpUpstreamSampleTeeBindingPlan& binding) noexcept {
+        if (upstream_sample_tee_binding_count != 0 || !binding.bind ||
+            binding.status != FinalGuestSurfaceStatus::Complete || binding.loss.Any()) {
+            return false;
+        }
+        upstream_sample_tee_binding = binding;
+        upstream_sample_tee_binding_count = 1;
+        return true;
     }
 
     [[nodiscard]] bool IsPredecessorCandidate(
@@ -222,7 +268,10 @@ public:
         std::span<VideoCore::Image* const> sampled_images,
         std::span<const VideoCore::ImageColorScopePrivateLink> sampled_links,
         std::span<const HostPasses::PpUpstreamInputContentView> upstream_views,
-        std::span<const HostPasses::PpUpstreamSampleRouteObservation> upstream_sample_routes) {
+        std::span<const HostPasses::PpUpstreamSampleRouteObservation> upstream_sample_routes,
+        const Shader::Info* fragment_info,
+        const HostPasses::PpUpstreamSampleTeeOutputPlan& tee_outputs,
+        vk::PipelineLayout pipeline_layout) {
         const PpTerminalScopeDrawSelector observed{
             .kind = draw.kind,
             .indexed = draw.indexed,
@@ -236,7 +285,8 @@ public:
             MatchesPpTerminalScopeDraw(config.content.upstream, observed)) {
             ObserveUpstreamFeedbackPreDraw(link, image, state, attachment_index, rendering_serial,
                                            observed, upstream_views, sampled_images,
-                                           upstream_sample_routes);
+                                           upstream_sample_routes, fragment_info, tee_outputs,
+                                           pipeline_layout);
             static_cast<void>(upstream_registry.Observe(link, observed, sampled_inputs));
         }
         Entry* entry = Find(link);
@@ -360,6 +410,23 @@ public:
         }
     }
 
+    [[nodiscard]] bool ObserveEncodedUpstreamPostDraw(
+        VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
+        u32 attachment_index, u64 rendering_serial,
+        const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+        const PpTerminalScopeDrawSelector observed{
+            .kind = draw.kind,
+            .indexed = draw.indexed,
+            .element_count = draw.element_count,
+            .instance_count = draw.instance_count,
+            .sampled_images = draw.sampled_images,
+            .storage_writes = draw.storage_writes,
+        };
+        const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
+        return ObserveUpstreamFeedbackPostDraw(link, image, state, attachment_index,
+                                               rendering_serial, observed);
+    }
+
     void ObserveDraw(VideoCore::ImageId image_id, VideoCore::Image& image, const RenderState& state,
                      u32 attachment_index, u64 rendering_serial,
                      const VideoCore::ImageColorScopeDrawDescriptor& draw) {
@@ -372,8 +439,6 @@ public:
             .storage_writes = draw.storage_writes,
         };
         const VideoCore::ImageColorScopePrivateLink link{.id = image_id, .uid = image.image_uid};
-        ObserveUpstreamFeedbackPostDraw(link, image, state, attachment_index, rendering_serial,
-                                        observed);
         Entry* entry = Find(link);
         if (!entry) {
             return;
@@ -429,6 +494,14 @@ public:
             upstream_input_plan = {};
             upstream_input_ready = false;
             upstream_sample_routes = {};
+            upstream_sample_tee_candidate = {};
+            upstream_sample_tee_capture = {};
+            upstream_sample_tee_commands = {};
+            upstream_sample_tee_controller = {};
+            upstream_sample_tee_attempted = false;
+            upstream_sample_tee_status = FinalGuestSurfaceStatus::AlreadyConsumed;
+            upstream_sample_tee_loss = {};
+            upstream_sample_tee_copy = false;
         }
         const bool target_valid = mapping.Valid() && IsValidTarget(link, target);
         const u64 target_generation =
@@ -520,6 +593,9 @@ public:
             if (config.content.capture_upstream_pre_post) {
                 upstream_feedback_reducer.ObserveCalibration(calibrated);
             }
+            if (upstream_sample_tee_reducer) {
+                upstream_sample_tee_reducer->ObserveCalibration(calibrated);
+            }
             LogReports();
             LogUpstreamFeedbackReports();
             LogCalibratedCoverage();
@@ -572,6 +648,7 @@ public:
         LogUpstreamFeedbackReports();
         LogCalibratedCoverage(true);
         LogUpstreamFeedbackCalibratedCoverage(true);
+        LogUpstreamSampleTeeCalibratedOutput();
     }
 
 private:
@@ -635,7 +712,7 @@ private:
         HostPasses::PpUpstreamInputContentPlan input_plan{};
         HostPasses::PpUpstreamSampleRouteSet sample_routes{};
         bool input_ready{};
-        FinalGuestSurfaceReadbackSlotPool::Token slot{};
+        HostPasses::PpUpstreamSampleTeeDeferredReadbackDescriptor tee_attempt{};
         u64 slot_offset{};
     };
 
@@ -840,13 +917,36 @@ private:
         });
     }
 
+    void RecordUpstreamSampleTeeFailure(FinalGuestSurfaceStatus status,
+                                        FinalGuestSurfaceLoss loss) noexcept {
+        if (!upstream_sample_tee_attempted) {
+            return;
+        }
+        if (status == FinalGuestSurfaceStatus::Complete || !loss.Any()) {
+            status = FinalGuestSurfaceStatus::InvalidationLoss;
+            loss = {.invalidation = 1};
+        }
+        if (upstream_sample_tee_status == FinalGuestSurfaceStatus::AlreadyConsumed) {
+            upstream_sample_tee_status = status;
+            upstream_sample_tee_loss = loss;
+        }
+        upstream_sample_tee_copy = false;
+        upstream_sample_tee_controller.status = upstream_sample_tee_status;
+        upstream_sample_tee_controller.loss = upstream_sample_tee_loss;
+        upstream_sample_tee_controller.active = false;
+        upstream_sample_tee_controller.ready = false;
+    }
+
     void ObserveUpstreamFeedbackPreDraw(
         VideoCore::ImageColorScopePrivateLink link, VideoCore::Image& image,
         const RenderState& state, u32 attachment_index, u64 rendering_serial,
         const PpTerminalScopeDrawSelector& draw,
         std::span<const HostPasses::PpUpstreamInputContentView> upstream_views,
         std::span<VideoCore::Image* const> sampled_images,
-        std::span<const HostPasses::PpUpstreamSampleRouteObservation> sample_routes) {
+        std::span<const HostPasses::PpUpstreamSampleRouteObservation> sample_routes,
+        const Shader::Info* fragment_info,
+        const HostPasses::PpUpstreamSampleTeeOutputPlan& tee_outputs,
+        vk::PipelineLayout pipeline_layout) {
         if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed ||
             !MatchesPpTerminalScopeDraw(config.content.upstream, draw)) {
             return;
@@ -863,6 +963,25 @@ private:
                                       ? upstream_input_gate.Preview(action.candidate_index)
                                       : HostPasses::PpUpstreamInputCaptureAction{};
         const bool capture_inputs = input_action.capture;
+        const bool tee_attempted = config.content.capture_upstream_sample_tee && capture_inputs;
+        bool tee_active = tee_attempted;
+        upstream_sample_tee_attempted |= tee_attempted;
+        bool input_selection_completed{};
+        const auto complete_input_selection = [&](bool copied) {
+            if (!capture_inputs || input_selection_completed) {
+                return HostPasses::PpUpstreamInputCaptureAction{};
+            }
+            input_selection_completed = true;
+            return upstream_input_gate.Complete(action.candidate_index, copied);
+        };
+        const auto reject_shared = [&](FinalGuestSurfaceStatus status,
+                                       const FinalGuestSurfaceLoss& loss) {
+            if (tee_attempted) {
+                RecordUpstreamSampleTeeFailure(status, loss);
+            }
+            upstream_feedback_frame.Reject(status, loss);
+            static_cast<void>(complete_input_selection(false));
+        };
         if (capture_inputs) {
             upstream_input_plan = HostPasses::PlanPpUpstreamInputContent({
                 .enabled = true,
@@ -879,9 +998,7 @@ private:
             if (!upstream_input_plan.copy ||
                 upstream_input_plan.status != FinalGuestSurfaceStatus::Complete ||
                 upstream_input_plan.loss.Any()) {
-                upstream_feedback_frame.Reject(upstream_input_plan.status,
-                                               upstream_input_plan.loss);
-                static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
+                reject_shared(upstream_input_plan.status, upstream_input_plan.loss);
                 return;
             }
         }
@@ -894,83 +1011,400 @@ private:
             });
             if (upstream_sample_routes.status != FinalGuestSurfaceStatus::Complete ||
                 upstream_sample_routes.loss.Any()) {
-                upstream_feedback_frame.Reject(upstream_sample_routes.status,
-                                               upstream_sample_routes.loss);
-                if (capture_inputs) {
-                    static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
-                }
+                reject_shared(upstream_sample_routes.status, upstream_sample_routes.loss);
                 return;
+            }
+        }
+        HostPasses::PpUpstreamSampleTeeControllerPlan tee_controller{};
+        HostPasses::PpUpstreamSampleTeeCandidateRecord tee_candidate{};
+        HostPasses::PpUpstreamSampleTeeCapturePlan tee_capture{};
+        HostPasses::PpUpstreamSampleTeeCommandPlan tee_commands{};
+        HostPasses::PpUpstreamSampleTeeControllerState tee_lifecycle{};
+        UpstreamSampleTeePreparation tee_preparation{};
+        if (tee_active) {
+            tee_controller = HostPasses::PlanPpUpstreamSampleTeeController({
+                .enabled = true,
+                .candidate_selected = true,
+                .direct_draw = draw.kind == VideoCore::ImageColorScopeDrawKind::Direct,
+                .fragment_stage_present = fragment_info != nullptr,
+                .observed_candidate_index = action.candidate_index,
+                .configured_candidate_index = config.content.upstream_candidate_index,
+                .outputs = tee_outputs,
+            });
+            if (!tee_controller.plan_commands ||
+                tee_controller.status != FinalGuestSurfaceStatus::Complete ||
+                tee_controller.loss.Any()) {
+                RecordUpstreamSampleTeeFailure(tee_controller.status, tee_controller.loss);
+                tee_active = false;
+            }
+        }
+        if (tee_active) {
+            const auto tee_shader = HostPasses::PlanPpUpstreamSampleTeeShader({
+                .enabled = true,
+                .routes = upstream_sample_routes,
+                .eligible_results_per_resource =
+                    std::span<const u32>{fragment_info->pp_upstream_sample_tee_results},
+            });
+            const auto tee_window = HostPasses::PlanPpUpstreamSampleTeeWindow({
+                .enabled = true,
+                .target_width = image.info.size.width,
+                .target_height = image.info.size.height,
+                .logical_width = mapping.logical_width,
+                .logical_height = mapping.logical_height,
+                .logical_ordinal = config.watch_ordinals.ordinals[0],
+            });
+            tee_candidate = HostPasses::RecordPpUpstreamSampleTeeCandidate(
+                upstream_sample_tee_candidate,
+                {
+                    .enabled = true,
+                    .configured_candidate_index = config.content.upstream_candidate_index,
+                    .observed_candidate_index = action.candidate_index,
+                    .shader = tee_shader,
+                    .window = tee_window,
+                });
+            if (!tee_candidate.ready || tee_candidate.status != FinalGuestSurfaceStatus::Complete ||
+                tee_candidate.loss.Any()) {
+                RecordUpstreamSampleTeeFailure(tee_candidate.status, tee_candidate.loss);
+                tee_active = false;
             }
         }
         bool acquired{};
         if (!upstream_feedback_slot) {
             const auto token = slots.TryAcquire();
             if (!token) {
-                upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::BusyLoss, {.busy = 1});
+                reject_shared(FinalGuestSurfaceStatus::BusyLoss, {.busy = 1});
                 return;
             }
             upstream_feedback_slot = *token;
             acquired = true;
         }
-        if (RecordUpstreamFeedbackPlane(
-                image, state, attachment_index, rendering_serial, action.candidate_index, false,
-                acquired, plan, capture_inputs ? &upstream_input_plan : nullptr, sampled_images)) {
-            upstream_feedback_frame.MarkCopied(action.candidate_index, false);
-            if (capture_inputs) {
-                const auto completed = upstream_input_gate.Complete(action.candidate_index, true);
-                upstream_input_ready = completed.publish;
-                if (!upstream_input_ready) {
-                    upstream_feedback_frame.Reject(completed.status, completed.loss);
+        if (tee_active) {
+            tee_capture = HostPasses::PlanPpUpstreamSampleTeeCapture({
+                .enabled = true,
+                .slot_present = static_cast<bool>(upstream_feedback_slot),
+                .slot = upstream_feedback_slot.slot,
+                .generation = upstream_feedback_slot.generation,
+                .candidate_index = action.candidate_index,
+                .shader = tee_candidate.shader,
+                .window = tee_candidate.window,
+            });
+            tee_commands = HostPasses::PlanPpUpstreamSampleTeeCommands({
+                .enabled = true,
+                .binding = upstream_sample_tee_binding,
+                .capture = tee_capture,
+                .non_coherent_atom_size = instance.NonCoherentAtomSize(),
+                .output_candidate_count = tee_controller.output_candidate_count,
+                .direct_draw = draw.kind == VideoCore::ImageColorScopeDrawKind::Direct,
+                .rendering_active = scheduler.IsRendering(),
+                .observed_rendering_serial = scheduler.RenderingSerial(),
+                .expected_rendering_serial = rendering_serial,
+            });
+            tee_preparation = {
+                .capture = tee_capture,
+                .commands = tee_commands,
+                .reuse_barrier =
+                    HostPasses::MapPpUpstreamSampleTeeBarrierToVulkan(tee_commands.reuse_barrier),
+                .fragment_barrier = HostPasses::MapPpUpstreamSampleTeeBarrierToVulkan(
+                    tee_commands.fragment_barrier),
+                .host_barrier =
+                    HostPasses::MapPpUpstreamSampleTeeBarrierToVulkan(tee_commands.host_barrier),
+                .push_stages = HostPasses::MapPpUpstreamSampleTeePushStagesToVulkan(
+                    tee_commands.partial_push_stages),
+            };
+            if (tee_capture.status != FinalGuestSurfaceStatus::Complete || tee_capture.loss.Any() ||
+                tee_commands.status != FinalGuestSurfaceStatus::Complete ||
+                tee_commands.loss.Any() || !tee_preparation.reuse_barrier.valid ||
+                !tee_preparation.fragment_barrier.valid || !tee_preparation.host_barrier.valid ||
+                !tee_preparation.push_stages.valid || !pipeline_layout) {
+                const auto status = tee_commands.status != FinalGuestSurfaceStatus::Complete ||
+                                            tee_commands.loss.Any()
+                                        ? tee_commands.status
+                                        : FinalGuestSurfaceStatus::InvalidationLoss;
+                const auto loss = tee_commands.status != FinalGuestSurfaceStatus::Complete ||
+                                          tee_commands.loss.Any()
+                                      ? tee_commands.loss
+                                      : FinalGuestSurfaceLoss{.invalidation = 1};
+                RecordUpstreamSampleTeeFailure(status, loss);
+                tee_active = false;
+            }
+            if (tee_active) {
+                tee_lifecycle = HostPasses::BeginPpUpstreamSampleTeeControllerLifecycle(
+                    tee_controller, tee_commands);
+                if (!tee_lifecycle.active ||
+                    tee_lifecycle.status != FinalGuestSurfaceStatus::Complete ||
+                    tee_lifecycle.loss.Any()) {
+                    RecordUpstreamSampleTeeFailure(tee_lifecycle.status, tee_lifecycle.loss);
+                    tee_active = false;
                 }
             }
-        } else if (capture_inputs) {
-            static_cast<void>(upstream_input_gate.Complete(action.candidate_index, false));
+        }
+        auto record = RecordUpstreamFeedbackPlane(
+            image, state, attachment_index, rendering_serial, action.candidate_index, false,
+            acquired, plan, capture_inputs ? &upstream_input_plan : nullptr, sampled_images,
+            tee_active ? &tee_preparation : nullptr);
+        auto disposition = HostPasses::PlanPpUpstreamFeedbackPlaneRecordDisposition({
+            .tee_enabled = config.content.capture_upstream_sample_tee,
+            .tee_attempted = tee_active,
+            .input_selection_pending = capture_inputs && !input_selection_completed,
+            .base_state = HostPasses::PpUpstreamSampleTeeBaseCaptureState::Pending,
+            .record = record,
+        });
+        if (disposition.fanout.record_tee_failure) {
+            RecordUpstreamSampleTeeFailure(disposition.fanout.status, disposition.fanout.loss);
+        }
+        if (disposition.retry_without_tee) {
+            tee_active = false;
+            record = RecordUpstreamFeedbackPlane(
+                image, state, attachment_index, rendering_serial, action.candidate_index, false,
+                acquired, plan, capture_inputs ? &upstream_input_plan : nullptr, sampled_images);
+            disposition = HostPasses::PlanPpUpstreamFeedbackPlaneRecordDisposition({
+                .tee_enabled = config.content.capture_upstream_sample_tee,
+                .tee_attempted = false,
+                .input_selection_pending = capture_inputs && !input_selection_completed,
+                .base_state = HostPasses::PpUpstreamSampleTeeBaseCaptureState::Pending,
+                .record = record,
+            });
+            if (disposition.fanout.record_tee_failure) {
+                RecordUpstreamSampleTeeFailure(disposition.fanout.status,
+                                               disposition.fanout.loss);
+            }
+        }
+        if (disposition.fanout.reject_base_capture) {
+            upstream_feedback_frame.Reject(disposition.fanout.status, disposition.fanout.loss);
+        }
+        if (disposition.fanout.complete_input_selection) {
+            static_cast<void>(
+                complete_input_selection(disposition.fanout.input_selection_succeeded));
+        }
+        if (!disposition.mark_copied) {
+            return;
+        }
+        upstream_feedback_frame.MarkCopied(action.candidate_index, false);
+        if (tee_active) {
+            tee_lifecycle = HostPasses::ObservePpUpstreamSampleTeeControllerLifecycle(
+                tee_lifecycle,
+                {.event = HostPasses::PpUpstreamSampleTeeControllerEvent::Initialized,
+                 .observed_candidate_index = action.candidate_index,
+                 .observed_serial = scheduler.RenderingSerial(),
+                 .succeeded = scheduler.IsRendering()});
+            if (!tee_lifecycle.active ||
+                tee_lifecycle.status != FinalGuestSurfaceStatus::Complete ||
+                tee_lifecycle.loss.Any()) {
+                RecordUpstreamSampleTeeFailure(tee_lifecycle.status, tee_lifecycle.loss);
+                tee_active = false;
+            }
+        }
+        if (tee_active) {
+            const std::array<u32, 2> tee_push{tee_capture.control, tee_capture.base_dword};
+            scheduler.CommandBuffer().pushConstants(
+                pipeline_layout, tee_preparation.push_stages.stages,
+                tee_commands.partial_push_offset, tee_commands.partial_push_bytes,
+                tee_push.data());
+            tee_lifecycle = HostPasses::ObservePpUpstreamSampleTeeControllerLifecycle(
+                tee_lifecycle,
+                {.event = HostPasses::PpUpstreamSampleTeeControllerEvent::Armed,
+                 .observed_candidate_index = action.candidate_index,
+                 .observed_serial = scheduler.RenderingSerial(),
+                 .succeeded = true});
+            const auto completion = HostPasses::PlanPpUpstreamSampleTeeControllerCompletion({
+                .controller = tee_controller,
+                .upstream_copy_recorded = true,
+                .slot_initialized = tee_lifecycle.initialized,
+                .rendering_resumed =
+                    scheduler.IsRendering() && scheduler.RenderingSerial() == rendering_serial,
+                .late_fragment_push_recorded = tee_lifecycle.armed,
+            });
+            if (!completion.record_candidate ||
+                completion.status != FinalGuestSurfaceStatus::Complete || completion.loss.Any()) {
+                RecordUpstreamSampleTeeFailure(completion.status, completion.loss);
+                tee_active = false;
+            }
+        }
+        if (capture_inputs) {
+            const auto completed = complete_input_selection(true);
+            upstream_input_ready = completed.publish;
+            if (!upstream_input_ready) {
+                upstream_feedback_frame.Reject(completed.status, completed.loss);
+                if (tee_attempted) {
+                    RecordUpstreamSampleTeeFailure(completed.status, completed.loss);
+                }
+                return;
+            }
+        }
+        if (tee_active) {
+            upstream_sample_tee_candidate = tee_candidate;
+            upstream_sample_tee_capture = tee_capture;
+            upstream_sample_tee_commands = tee_commands;
+            upstream_sample_tee_controller = tee_lifecycle;
         }
     }
 
-    void ObserveUpstreamFeedbackPostDraw(VideoCore::ImageColorScopePrivateLink link,
-                                         VideoCore::Image& image, const RenderState& state,
-                                         u32 attachment_index, u64 rendering_serial,
-                                         const PpTerminalScopeDrawSelector& draw) {
+    [[nodiscard]] bool ObserveUpstreamFeedbackPostDraw(VideoCore::ImageColorScopePrivateLink link,
+                                                       VideoCore::Image& image,
+                                                       const RenderState& state,
+                                                       u32 attachment_index, u64 rendering_serial,
+                                                       const PpTerminalScopeDrawSelector& draw) {
         if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed ||
             !MatchesPpTerminalScopeDraw(config.content.upstream, draw)) {
-            return;
+            return true;
         }
         const auto action = upstream_feedback_frame.Complete(link, draw);
         if (!action.capture) {
-            return;
+            if (upstream_sample_tee_controller.active) {
+                RecordUpstreamSampleTeeFailure(
+                    action.status == FinalGuestSurfaceStatus::AlreadyConsumed
+                        ? FinalGuestSurfaceStatus::GapLoss
+                        : action.status,
+                    action.loss.Any() ? action.loss : FinalGuestSurfaceLoss{.gap = 1});
+            }
+            return true;
         }
         const auto plan = MakeUpstreamFeedbackPlan(image);
-        if (!upstream_feedback_frame.Configure(plan) || !upstream_feedback_slot) {
+        if (!upstream_feedback_frame.Configure(plan)) {
+            if (upstream_sample_tee_controller.active) {
+                RecordUpstreamSampleTeeFailure(FinalGuestSurfaceStatus::InvalidationLoss,
+                                               {.invalidation = 1});
+            }
+            return true;
+        }
+        if (!upstream_feedback_slot) {
             upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::GapLoss, {.gap = 1});
-            return;
+            if (upstream_sample_tee_controller.active) {
+                RecordUpstreamSampleTeeFailure(FinalGuestSurfaceStatus::GapLoss, {.gap = 1});
+            }
+            return true;
         }
-        if (RecordUpstreamFeedbackPlane(image, state, attachment_index, rendering_serial,
-                                        action.candidate_index, true, false, plan)) {
-            upstream_feedback_frame.MarkCopied(action.candidate_index, true);
+        bool tee_active = upstream_sample_tee_controller.active;
+        UpstreamSampleTeePreparation tee_post{};
+        HostPasses::PpUpstreamSampleTeePostDrawPlan tee_post_plan{};
+        if (tee_active) {
+            if (draw.kind != VideoCore::ImageColorScopeDrawKind::Direct ||
+                upstream_sample_tee_controller.candidate_index != action.candidate_index ||
+                upstream_sample_tee_candidate.candidate_index != action.candidate_index ||
+                upstream_sample_tee_capture.header.candidate_index != action.candidate_index ||
+                upstream_sample_tee_capture.header.generation !=
+                    upstream_feedback_slot.generation ||
+                upstream_sample_tee_capture.slot_offset !=
+                    upstream_feedback_slot.slot * Shader::PpUpstreamSampleTeeSlotStrideBytes) {
+                RecordUpstreamSampleTeeFailure(FinalGuestSurfaceStatus::InvalidationLoss,
+                                               {.invalidation = 1});
+                tee_active = false;
+            }
         }
+        if (tee_active) {
+            tee_post_plan = HostPasses::PlanPpUpstreamSampleTeePostDraw({
+                .enabled = true,
+                .controller = upstream_sample_tee_controller,
+                .candidate = upstream_sample_tee_candidate,
+                .capture = upstream_sample_tee_capture,
+                .commands = upstream_sample_tee_commands,
+                .observed_candidate_index = action.candidate_index,
+                .observed_serial = rendering_serial,
+                .direct_draw_executed = true,
+            });
+            tee_post = {
+                .capture = upstream_sample_tee_capture,
+                .commands = upstream_sample_tee_commands,
+                .host_barrier =
+                    HostPasses::MapPpUpstreamSampleTeeBarrierToVulkan(tee_post_plan.host_barrier),
+            };
+            if (tee_post_plan.status != FinalGuestSurfaceStatus::Complete ||
+                tee_post_plan.loss.Any() || !tee_post_plan.issue_host_barrier ||
+                !tee_post_plan.resume_rendering || !tee_post.host_barrier.valid ||
+                tee_post.host_barrier.offset != upstream_sample_tee_capture.slot_offset ||
+                tee_post.host_barrier.bytes != upstream_sample_tee_capture.slot_bytes) {
+                RecordUpstreamSampleTeeFailure(tee_post_plan.status, tee_post_plan.loss);
+                tee_active = false;
+            }
+        }
+        auto record = RecordUpstreamFeedbackPlane(
+            image, state, attachment_index, rendering_serial, action.candidate_index, true, false,
+            plan, nullptr, {}, tee_active ? &tee_post : nullptr);
+        auto disposition = HostPasses::PlanPpUpstreamFeedbackPlaneRecordDisposition({
+            .tee_enabled = config.content.capture_upstream_sample_tee,
+            .tee_attempted = tee_active,
+            .base_state = HostPasses::PpUpstreamSampleTeeBaseCaptureState::Pending,
+            .record = record,
+        });
+        if (disposition.fanout.record_tee_failure) {
+            RecordUpstreamSampleTeeFailure(disposition.fanout.status, disposition.fanout.loss);
+        }
+        if (disposition.retry_without_tee) {
+            tee_active = false;
+            record = RecordUpstreamFeedbackPlane(image, state, attachment_index, rendering_serial,
+                                                 action.candidate_index, true, false, plan);
+            disposition = HostPasses::PlanPpUpstreamFeedbackPlaneRecordDisposition({
+                .tee_enabled = config.content.capture_upstream_sample_tee,
+                .tee_attempted = false,
+                .base_state = HostPasses::PpUpstreamSampleTeeBaseCaptureState::Pending,
+                .record = record,
+            });
+            if (disposition.fanout.record_tee_failure) {
+                RecordUpstreamSampleTeeFailure(disposition.fanout.status,
+                                               disposition.fanout.loss);
+            }
+        }
+        if (disposition.fanout.reject_base_capture) {
+            upstream_feedback_frame.Reject(disposition.fanout.status, disposition.fanout.loss);
+        }
+        if (!disposition.mark_copied) {
+            return true;
+        }
+        upstream_feedback_frame.MarkCopied(action.candidate_index, true);
+        if (tee_active) {
+            const bool resumed =
+                scheduler.IsRendering() && scheduler.RenderingSerial() == rendering_serial;
+            const auto completion = HostPasses::CompletePpUpstreamSampleTeePostDraw({
+                .plan = tee_post_plan,
+                .observed_candidate_index = action.candidate_index,
+                .observed_serial = scheduler.RenderingSerial(),
+                .host_barrier_recorded = true,
+                .rendering_resumed = resumed,
+            });
+            if (!completion.ready || completion.status != FinalGuestSurfaceStatus::Complete ||
+                completion.loss.Any()) {
+                RecordUpstreamSampleTeeFailure(completion.status, completion.loss);
+            } else {
+                upstream_sample_tee_controller = completion.controller;
+                upstream_sample_tee_status = FinalGuestSurfaceStatus::Complete;
+                upstream_sample_tee_loss = {};
+                upstream_sample_tee_copy = true;
+            }
+        }
+        return true;
     }
 
-    [[nodiscard]] bool RecordUpstreamFeedbackPlane(
+    [[nodiscard]] HostPasses::PpUpstreamFeedbackPlaneRecordResult RecordUpstreamFeedbackPlane(
         VideoCore::Image& image, const RenderState& state, u32 attachment_index,
         u64 rendering_serial, u32 candidate_index, bool post, bool first_copy,
         const HostPasses::PpUpstreamFeedbackPrePostPlan& plan,
         const HostPasses::PpUpstreamInputContentPlan* input_plan = nullptr,
-        std::span<VideoCore::Image* const> sampled_images = {}) {
+        std::span<VideoCore::Image* const> sampled_images = {},
+        const UpstreamSampleTeePreparation* tee_preparation = nullptr) {
+        const auto failure = [](HostPasses::PpUpstreamSampleTeeFailureScope scope,
+                                FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss) {
+            if (status == FinalGuestSurfaceStatus::Complete || !loss.Any()) {
+                status = FinalGuestSurfaceStatus::InvalidationLoss;
+                loss = {.invalidation = 1};
+            }
+            return HostPasses::PpUpstreamFeedbackPlaneRecordResult{
+                .failure_scope = scope,
+                .status = status,
+                .loss = loss,
+            };
+        };
         if (!upstream_feedback_slot || attachment_index >= state.num_color_attachments ||
             !scheduler.IsRendering() || !image.backing ||
             image.backing->state.layout == vk::ImageLayout::eUndefined) {
-            upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
-                                           {.invalidation = 1});
-            return false;
+            return failure(HostPasses::PpUpstreamSampleTeeFailureScope::SharedCapture,
+                           FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
         }
         if (input_plan) {
             if (!input_plan->copy || input_plan->status != FinalGuestSurfaceStatus::Complete ||
                 input_plan->loss.Any() || input_plan->total_bytes > slot_stride ||
                 input_plan->input_count > sampled_images.size()) {
-                upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
-                                               {.invalidation = 1});
-                return false;
+                return failure(HostPasses::PpUpstreamSampleTeeFailureScope::SharedCapture,
+                               FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
             }
             for (u32 input_index = 0; input_index < input_plan->input_count; ++input_index) {
                 if ((input_plan->capture_mask & (1u << input_index)) == 0) {
@@ -990,25 +1424,48 @@ private:
                     bytes_per_texel != input.bytes_per_texel || input.mip_count == 0 ||
                     input.base_mip + input.mip_count > sampled->info.resources.levels ||
                     input.base_layer >= sampled->info.resources.layers) {
-                    upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
-                                                   {.invalidation = 1});
-                    return false;
+                    return failure(HostPasses::PpUpstreamSampleTeeFailureScope::SharedCapture,
+                                   FinalGuestSurfaceStatus::InvalidationLoss,
+                                   {.invalidation = 1});
                 }
+            }
+        }
+        VideoCore::Buffer* tee_buffer{};
+        if (tee_preparation) {
+            tee_buffer = upstream_sample_tee_buffer.get();
+            const auto& capture = tee_preparation->capture;
+            const auto& commands = tee_preparation->commands;
+            const auto& selected_barrier =
+                post ? tee_preparation->host_barrier : tee_preparation->fragment_barrier;
+            if (!tee_buffer || !capture.initialize || !capture.arm ||
+                capture.status != FinalGuestSurfaceStatus::Complete || capture.loss.Any() ||
+                commands.status != FinalGuestSurfaceStatus::Complete || commands.loss.Any() ||
+                !commands.initialize || !commands.arm || !commands.issue_draw ||
+                !commands.require_post_barrier || !commands.require_preserved_serial ||
+                !selected_barrier.valid || selected_barrier.offset != capture.slot_offset ||
+                selected_barrier.bytes != capture.slot_bytes ||
+                (!post && (!tee_preparation->reuse_barrier.valid ||
+                           tee_preparation->reuse_barrier.offset != capture.slot_offset ||
+                           tee_preparation->reuse_barrier.bytes != capture.slot_bytes)) ||
+                static_cast<u64>(capture.slot_offset) + capture.slot_bytes >
+                    tee_buffer->SizeBytes()) {
+                return failure(HostPasses::PpUpstreamSampleTeeFailureScope::TeeOnly,
+                               FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
             }
         }
         const auto split = PlanPpTerminalScopeRenderingSplit(
             scheduler.IsRendering(), scheduler.RenderingSerial(), rendering_serial);
         if (split.status != FinalGuestSurfaceStatus::Complete) {
-            upstream_feedback_frame.Reject(split.status, split.loss);
-            return false;
+            return failure(HostPasses::PpUpstreamSampleTeeFailureScope::SharedCapture,
+                           split.status, split.loss);
         }
         std::array<vk::BufferImageCopy, FinalGuestSurfaceWatchOrdinals::MaxOrdinals> copies{};
         for (u32 index = 0; index < plan.region_count; ++index) {
             const auto copy = HostPasses::ResolvePpUpstreamFeedbackPrePostCopy(
                 plan, candidate_index, post, index);
             if (!copy.copy) {
-                upstream_feedback_frame.Reject(copy.status, copy.loss);
-                return false;
+                return failure(HostPasses::PpUpstreamSampleTeeFailureScope::SharedCapture,
+                               copy.status, copy.loss);
             }
             copies[index] = {
                 .bufferOffset = upstream_feedback_slot.slot * slot_stride + copy.buffer_offset,
@@ -1041,10 +1498,30 @@ private:
             .offset = slot_offset,
             .size = slot_stride,
         };
+        std::array<vk::BufferMemoryBarrier2, 2> buffer_pre_barriers{buffer_pre};
+        u32 buffer_pre_count = 1;
+        if (tee_preparation && !post) {
+            const auto& barrier = tee_preparation->reuse_barrier;
+            buffer_pre_barriers[buffer_pre_count++] = {
+                .srcStageMask = barrier.src_stages,
+                .srcAccessMask = barrier.src_access,
+                .dstStageMask = barrier.dst_stages,
+                .dstAccessMask = barrier.dst_access,
+                .buffer = tee_buffer->Handle(),
+                .offset = barrier.offset,
+                .size = barrier.bytes,
+            };
+        }
         cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-            .bufferMemoryBarrierCount = 1,
-            .pBufferMemoryBarriers = &buffer_pre,
+            .bufferMemoryBarrierCount = buffer_pre_count,
+            .pBufferMemoryBarriers = buffer_pre_barriers.data(),
         });
+        if (tee_preparation && !post) {
+            const auto& capture = tee_preparation->capture;
+            cmdbuf.fillBuffer(tee_buffer->Handle(), capture.clear_offset, capture.clear_bytes, 0);
+            cmdbuf.updateBuffer(tee_buffer->Handle(), capture.slot_offset, sizeof(capture.header),
+                                &capture.header);
+        }
         const auto old_state = image.backing->state;
         const VideoCore::SubresourceRange range{{.level = 0, .layer = 0},
                                                 {.levels = 1, .layers = 1}};
@@ -1142,20 +1619,34 @@ private:
             .offset = slot_offset,
             .size = slot_stride,
         };
+        std::array<vk::BufferMemoryBarrier2, 2> buffer_post_barriers{buffer_post};
+        u32 buffer_post_count = 1;
+        if (tee_preparation) {
+            const auto& barrier =
+                post ? tee_preparation->host_barrier : tee_preparation->fragment_barrier;
+            buffer_post_barriers[buffer_post_count++] = {
+                .srcStageMask = barrier.src_stages,
+                .srcAccessMask = barrier.src_access,
+                .dstStageMask = barrier.dst_stages,
+                .dstAccessMask = barrier.dst_access,
+                .buffer = tee_buffer->Handle(),
+                .offset = barrier.offset,
+                .size = barrier.bytes,
+            };
+        }
         const std::array image_barriers{restore};
         cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-            .bufferMemoryBarrierCount = 1,
-            .pBufferMemoryBarriers = &buffer_post,
+            .bufferMemoryBarrierCount = buffer_post_count,
+            .pBufferMemoryBarriers = buffer_post_barriers.data(),
             .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
             .pImageMemoryBarriers = image_barriers.data(),
         });
         image.backing->state = old_state;
         if (!scheduler.ResumeRenderingForDiagnostic(state, rendering_serial)) {
-            upstream_feedback_frame.Reject(FinalGuestSurfaceStatus::InvalidationLoss,
-                                           {.invalidation = 1});
-            return false;
+            return failure(HostPasses::PpUpstreamSampleTeeFailureScope::SharedCapture,
+                           FinalGuestSurfaceStatus::InvalidationLoss, {.invalidation = 1});
         }
-        return true;
+        return {.recorded = true, .status = FinalGuestSurfaceStatus::Complete};
     }
 
     void RecordPlane(Entry& entry, VideoCore::Image& image, const RenderState& state,
@@ -1497,20 +1988,56 @@ private:
         if (!config.content.capture_upstream_pre_post || !upstream_feedback_armed) {
             return;
         }
+        const auto slot = upstream_feedback_slot;
+        upstream_feedback_slot = {};
+        auto take = upstream_feedback_frame.Take(bool{slot});
+        const auto tee_outcome = HostPasses::ResolvePpUpstreamSampleTeeCaptureOutcome(
+            {
+                .status = upstream_sample_tee_status,
+                .loss = upstream_sample_tee_loss,
+                .copy = upstream_sample_tee_copy,
+            },
+            {
+                .status = take.status,
+                .loss = take.loss,
+                .copy = take.copy,
+            });
         PendingUpstreamFeedback pending{
             .sequence = sequence,
             .process_time_us = process_time_us,
-            .take = upstream_feedback_frame.Take(bool{upstream_feedback_slot}),
+            .take = take,
             .input_plan = upstream_input_plan,
             .sample_routes = upstream_sample_routes,
             .input_ready = upstream_input_ready,
-            .slot = upstream_feedback_slot,
-            .slot_offset = upstream_feedback_slot ? upstream_feedback_slot.slot * slot_stride : 0,
+            .tee_attempt = HostPasses::DetachPpUpstreamSampleTeeDeferredReadback({
+                .enabled = config.content.capture_upstream_sample_tee,
+                .attempted = upstream_sample_tee_attempted,
+                .outer_slot = slot,
+                .record = upstream_sample_tee_candidate,
+                .capture = upstream_sample_tee_capture,
+                .commands = upstream_sample_tee_commands,
+                .controller = upstream_sample_tee_controller,
+                .selected_candidate_index = config.content.upstream_candidate_index,
+                .capture_status = tee_outcome.status,
+                .capture_loss = tee_outcome.loss,
+                .capture_has_copy = tee_outcome.copy,
+                .mapped_bytes = upstream_sample_tee_buffer
+                                    ? upstream_sample_tee_buffer->mapped_data.size()
+                                    : 0,
+            }),
+            .slot_offset = slot ? slot.slot * slot_stride : 0,
         };
-        upstream_feedback_slot = {};
         upstream_input_plan = {};
         upstream_input_ready = false;
         upstream_sample_routes = {};
+        upstream_sample_tee_candidate = {};
+        upstream_sample_tee_capture = {};
+        upstream_sample_tee_commands = {};
+        upstream_sample_tee_controller = {};
+        upstream_sample_tee_attempted = false;
+        upstream_sample_tee_status = FinalGuestSurfaceStatus::AlreadyConsumed;
+        upstream_sample_tee_loss = {};
+        upstream_sample_tee_copy = false;
         upstream_feedback_armed = false;
         scheduler.DeferOperation([this, pending = std::move(pending)]() mutable {
             ConsumeUpstreamFeedback(std::move(pending));
@@ -1529,9 +2056,14 @@ private:
         pending.take.status = publication.status;
         pending.take.loss = publication.loss;
         pending.take.copy = publication.copy;
-        if (pending.take.copy && pending.slot) {
-            if (!download.InvalidateMappedRange(pending.slot_offset, slot_stride) ||
-                pending.slot_offset + pending.take.plan.total_bytes > download.mapped_data.size()) {
+        if (pending.take.copy && pending.tee_attempt.outer_slot) {
+            const u64 mapped_bytes = download.mapped_data.size();
+            const bool mapped_range_valid =
+                pending.slot_offset <= mapped_bytes &&
+                slot_stride <= mapped_bytes - pending.slot_offset &&
+                pending.take.plan.total_bytes <= slot_stride;
+            if (!mapped_range_valid ||
+                !download.InvalidateMappedRange(pending.slot_offset, slot_stride)) {
                 pending.take.status = FinalGuestSurfaceStatus::InvalidationLoss;
                 pending.take.loss = {.invalidation = 1};
                 pending.take.copy = false;
@@ -1563,25 +2095,46 @@ private:
                 }
             }
         }
-        const bool had_slot = bool{pending.slot};
-        const bool released = !had_slot || slots.ReleaseAfterCpuConsume(pending.slot);
-        const auto released_publication = HostPasses::ReconcilePpUpstreamInputSlotRelease(
-            had_slot, released, pending.take.status, pending.take.loss, pending.take.copy);
-        pending.take.status = released_publication.status;
-        pending.take.loss = released_publication.loss;
-        pending.take.copy = released_publication.copy;
-        if (!released) {
+        std::span<const std::byte> tee_mapped{};
+        if (upstream_sample_tee_buffer) {
+            tee_mapped = std::as_bytes(upstream_sample_tee_buffer->mapped_data);
+        }
+        auto consumed = HostPasses::ConsumePpUpstreamSampleTeeDeferredReadback(
+            pending.tee_attempt,
+            HostPasses::PpUpstreamInputPublication{
+                .status = pending.take.status,
+                .loss = pending.take.loss,
+                .copy = pending.take.copy,
+            },
+            tee_mapped,
+            [this](u64 offset, u64 bytes) {
+                return upstream_sample_tee_buffer &&
+                       upstream_sample_tee_buffer->InvalidateMappedRange(offset, bytes);
+            },
+            [this](FinalGuestSurfaceReadbackSlotPool::Token token) {
+                return slots.ReleaseAfterCpuConsume(token);
+            });
+        pending.tee_attempt.outer_slot = {};
+        pending.take.status = consumed.base.status;
+        pending.take.loss = consumed.base.loss;
+        pending.take.copy = consumed.base.copy;
+        if (!pending.take.copy) {
             compact_bytes.clear();
             input_compact = {};
+        }
+        if (consumed.release_attempted && !consumed.release_succeeded) {
             LOG_ERROR(Render, "PpUpstreamFeedbackPrePost slot_release_loss=1");
         }
-        pending.slot = {};
         auto layout = MakeUpstreamFeedbackHistoryLayout(pending.take.plan, pending.input_plan,
                                                         input_compact, pending.sample_routes);
         {
             std::scoped_lock lock{reducer_mutex};
             upstream_feedback_reducer.ObserveContent(pending.sequence, layout, compact_bytes,
                                                      pending.take.status, pending.take.loss);
+            if (upstream_sample_tee_reducer && consumed.tee.observe_owned) {
+                upstream_sample_tee_reducer->ObserveOwned(
+                    pending.sequence, consumed.tee.record, std::move(consumed.tee.owned));
+            }
             LogUpstreamFeedbackReports();
             LogUpstreamFeedbackCalibratedCoverage();
         }
@@ -1661,6 +2214,20 @@ private:
                          FinalGuestSurfaceLossMask(report.loss, 0));
             }
         }
+    }
+
+    void LogUpstreamSampleTeeCalibratedOutput() {
+        if (!upstream_sample_tee_reducer || upstream_sample_tee_coverage_logged) {
+            return;
+        }
+        auto output = HostPasses::FinalizePpUpstreamSampleTeeCalibratedOutput(
+            *upstream_sample_tee_reducer);
+        for (const auto& report : output.reports) {
+            LOG_INFO(Render, "{}", HostPasses::FormatPpUpstreamSampleTeeCalibratedReport(report));
+        }
+        LOG_INFO(Render, "{}",
+                 HostPasses::FormatPpUpstreamSampleTeeCalibratedCoverage(output.coverage));
+        upstream_sample_tee_coverage_logged = true;
     }
 
     void LogUpstreamFeedbackCalibratedCoverage(bool force = false) {
@@ -1769,6 +2336,11 @@ private:
     FinalGuestSurfaceReadbackSlotPool slots{};
     u64 slot_stride{};
     VideoCore::Buffer download;
+    std::unique_ptr<VideoCore::Buffer> upstream_sample_tee_buffer;
+    std::unique_ptr<HostPasses::PpUpstreamSampleTeeCalibratedReducer>
+        upstream_sample_tee_reducer;
+    HostPasses::PpUpstreamSampleTeeBindingPlan upstream_sample_tee_binding{};
+    u32 upstream_sample_tee_binding_count{};
     std::array<std::unique_ptr<Entry>, MaxTargets> entries{};
     MappingTemplate mapping{};
     PpTerminalScopeDiscoveryCoverage discovery_coverage{};
@@ -1777,6 +2349,15 @@ private:
     FinalGuestSurfaceReadbackSlotPool::Token upstream_feedback_slot{};
     HostPasses::PpUpstreamInputContentPlan upstream_input_plan{};
     HostPasses::PpUpstreamSampleRouteSet upstream_sample_routes{};
+    HostPasses::PpUpstreamSampleTeeCandidateRecord upstream_sample_tee_candidate{};
+    HostPasses::PpUpstreamSampleTeeCapturePlan upstream_sample_tee_capture{};
+    HostPasses::PpUpstreamSampleTeeCommandPlan upstream_sample_tee_commands{};
+    HostPasses::PpUpstreamSampleTeeControllerState upstream_sample_tee_controller{};
+    bool upstream_sample_tee_attempted{};
+    FinalGuestSurfaceStatus upstream_sample_tee_status{
+        FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss upstream_sample_tee_loss{};
+    bool upstream_sample_tee_copy{};
     bool upstream_input_ready{};
     std::mutex reducer_mutex{};
     u32 selected_frames{};
@@ -1788,6 +2369,7 @@ private:
     u32 upstream_feedback_complete_frames{};
     u32 upstream_feedback_loss_frames{};
     bool calibrated_coverage_logged{};
+    bool upstream_sample_tee_coverage_logged{};
     bool upstream_feedback_armed{};
     bool upstream_feedback_coverage_logged{};
 };
@@ -1805,14 +2387,21 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
                        AmdGpu::Liverpool* liverpool_)
+    : Rasterizer{instance_, scheduler_, liverpool_,
+                 ReadPpTerminalScopeRuntimeConfig().value_or(PpTerminalScopeRuntimeConfig{})} {}
+
+Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
+                       AmdGpu::Liverpool* liverpool_, PpTerminalScopeRuntimeConfig config)
     : instance{instance_}, scheduler{scheduler_}, page_manager{this},
       buffer_cache{instance, scheduler, liverpool_, texture_cache, page_manager},
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
-      pipeline_cache{instance, scheduler, liverpool} {
-    if (const auto config = ReadPpTerminalScopeRuntimeConfig()) {
+      pipeline_cache{instance, scheduler, liverpool,
+                     HostPasses::PlanPpUpstreamSampleTeePipelinePolicy(
+                         config.content.enabled && config.content.capture_upstream_sample_tee)} {
+    if (config.content.enabled) {
         pp_terminal_scope_content =
-            std::make_unique<PpTerminalScopeContentRuntime>(instance, scheduler, *config);
+            std::make_unique<PpTerminalScopeContentRuntime>(instance, scheduler, config);
     }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
@@ -2051,7 +2640,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
         .storage_writes = diagnostic_storage_writes,
     };
-    CapturePpTerminalScopePreDraw(state, diagnostic_draw);
+    if (!CapturePpTerminalScopePreDraw(pipeline, state, diagnostic_draw)) {
+        ResetBindings();
+        return;
+    }
 
     if (is_indexed) {
         cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
@@ -2129,7 +2721,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         .sampled_images = static_cast<u32>(diagnostic_sampled_images.size()),
         .storage_writes = diagnostic_storage_writes,
     };
-    CapturePpTerminalScopePreDraw(state, diagnostic_draw);
+    if (!CapturePpTerminalScopePreDraw(pipeline, state, diagnostic_draw)) {
+        ResetBindings();
+        return;
+    }
 
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
@@ -2254,6 +2849,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    if (pp_terminal_scope_content) {
+        pp_terminal_scope_content->ResetUpstreamSampleTeeBinding();
+    }
     if (VideoCore::IsPpSourceProducerTrackingEnabled()) {
         diagnostic_sampled_images.clear();
         diagnostic_sampled_routes.clear();
@@ -2273,7 +2871,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
         stage->PushUd(binding, push_data);
-        BindBuffers(*stage, binding, push_data);
+        if (!BindBuffers(*stage, binding, push_data)) {
+            return false;
+        }
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
     }
@@ -2446,7 +3046,7 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
-void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
+bool Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
 
@@ -2486,6 +3086,27 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             } else if (desc.buffer_type == Shader::BufferType::FaultBuffer) {
                 const auto* fault_buffer = buffer_cache.GetFaultBuffer();
                 buffer_infos.emplace_back(fault_buffer->Handle(), 0, fault_buffer->SizeBytes());
+            } else if (desc.buffer_type == Shader::BufferType::PpUpstreamSampleTee) {
+                auto* tee_buffer = pp_terminal_scope_content
+                                       ? pp_terminal_scope_content->UpstreamSampleTeeBuffer()
+                                       : nullptr;
+                const auto tee_binding = HostPasses::PlanPpUpstreamSampleTeeBinding({
+                    .enabled = true,
+                    .stage = stage.l_stage,
+                    .buffer_type = desc.buffer_type,
+                    .is_written = desc.is_written,
+                    .descriptor_bytes = vsharp.GetSize(),
+                    .buffer_present = tee_buffer != nullptr,
+                    .buffer_bytes = tee_buffer ? tee_buffer->SizeBytes() : 0,
+                    .mapped_bytes = tee_buffer ? tee_buffer->mapped_data.size() : 0,
+                });
+                if (!tee_binding.bind) {
+                    return false;
+                }
+                if (!pp_terminal_scope_content->RetainUpstreamSampleTeeBinding(tee_binding)) {
+                    return false;
+                }
+                buffer_infos.emplace_back(tee_buffer->Handle(), 0, tee_buffer->SizeBytes());
             } else if (desc.buffer_type == Shader::BufferType::SharedMemory) {
                 auto& lds_buffer = buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Stream);
                 const auto& cs_program = liverpool->GetCsRegs();
@@ -2525,6 +3146,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
     }
+    return true;
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
@@ -2763,12 +3385,33 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 }
 
-void Rasterizer::CapturePpTerminalScopePreDraw(
-    const RenderState& state, const VideoCore::ImageColorScopeDrawDescriptor& draw) {
+bool Rasterizer::CapturePpTerminalScopePreDraw(
+    const GraphicsPipeline* pipeline, const RenderState& state,
+    const VideoCore::ImageColorScopeDrawDescriptor& draw) {
     if (!pp_terminal_scope_content || !VideoCore::IsPpSourceProducerTrackingEnabled()) {
-        return;
+        return true;
     }
     const u64 rendering_serial = scheduler.RenderingSerial();
+    u32 active_attachment_mask{};
+    const u32 attachment_span = std::min<u32>(state.num_color_attachments, 8);
+    for (u32 index = 0; index < attachment_span; ++index) {
+        if (cb_descs[index].first) {
+            active_attachment_mask |= 1u << index;
+        }
+    }
+    const auto tee_outputs = HostPasses::PlanPpUpstreamSampleTeeOutputs({
+        .enabled = pp_terminal_scope_content->CapturesUpstreamSampleTee(),
+        .attachment_span = state.num_color_attachments,
+        .active_attachment_mask = active_attachment_mask,
+    });
+    const Shader::Info* fragment_info{};
+    if (pipeline) {
+        const auto stages = pipeline->GetStages();
+        const u32 fragment_index = static_cast<u32>(Shader::LogicalStage::Fragment);
+        if (fragment_index < stages.size()) {
+            fragment_info = stages[fragment_index];
+        }
+    }
     const bool classify_inputs = pp_terminal_scope_content->ShouldClassifyInputs(draw);
     std::array<PpTerminalScopeSampledInput, PpTerminalScopeSampledInputs::MaxInputs>
         sampled_input_candidates{};
@@ -2880,8 +3523,10 @@ void Rasterizer::CapturePpTerminalScopePreDraw(
             std::span{sampled_input_links.data(), sampled_inputs.count},
             std::span{upstream_input_views.data(), sampled_inputs.count},
             std::span<const HostPasses::PpUpstreamSampleRouteObservation>{
-                diagnostic_sampled_routes.data(), diagnostic_sampled_routes.size()});
+                diagnostic_sampled_routes.data(), diagnostic_sampled_routes.size()},
+            fragment_info, tee_outputs, pipeline ? pipeline->GetLayout() : vk::PipelineLayout{});
     }
+    return scheduler.IsRendering();
 }
 
 void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
@@ -2907,6 +3552,17 @@ void Rasterizer::MarkEncodedImageProducers(const RenderState& state,
             }
             input_alias |= diagnostic_sampled_images.size() == 1 &&
                            diagnostic_sampled_images.front().id == image_id;
+        }
+    }
+    if (pp_terminal_scope_content) {
+        for (u32 index = 0; index < state.num_color_attachments; ++index) {
+            const auto image_id = cb_descs[index].first;
+            if (!image_id) {
+                continue;
+            }
+            auto& image = texture_cache.GetImage(image_id);
+            static_cast<void>(pp_terminal_scope_content->ObserveEncodedUpstreamPostDraw(
+                image_id, image, state, index, rendering_serial, draw));
         }
     }
     if (writes_color_output && diagnostic_sampled_images.size() == 1) {

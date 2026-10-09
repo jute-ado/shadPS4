@@ -10,6 +10,7 @@
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
@@ -899,8 +900,10 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
 }
 
 void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
-                          const ImageResource& image_res, const AmdGpu::Image& image) {
+                          const ImageResource& image_res, const AmdGpu::Image& image,
+                          const Profile& profile) {
     const auto handle = inst.Arg(0);
+    const u32 image_binding_index = handle.U32() & 0xFFFF;
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
 
@@ -1088,10 +1091,19 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
     if (sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
         converted = ApplyForceDegamma(ir, texel);
     }
+    if (!image_res.is_written && ShouldInstrumentPpUpstreamSampleResult(
+                                     profile.instrument_pp_upstream_sample_tee, info.l_stage,
+                                     image_binding_index)) {
+        auto& result_count = info.pp_upstream_sample_tee_results[image_binding_index];
+        if (result_count < 2) {
+            ++result_count;
+        }
+        ir.PpUpstreamSampleTee(converted, image_binding_index);
+    }
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info, const Profile& profile) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -1104,7 +1116,7 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     // Sample instructions must be handled separately using address register data.
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
-        return PatchImageSampleArgs(block, inst, info, image_res, image);
+        return PatchImageSampleArgs(block, inst, info, image_res, image, profile);
     }
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
@@ -1168,6 +1180,15 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
         }
         const auto converted =
             ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
+        if (!is_storage && ShouldInstrumentPpUpstreamSampleResult(
+                               profile.instrument_pp_upstream_sample_tee, info.l_stage,
+                               binding_index)) {
+            auto& result_count = info.pp_upstream_sample_tee_results[binding_index];
+            if (result_count < 2) {
+                ++result_count;
+            }
+            ir.PpUpstreamSampleTee(converted, binding_index);
+        }
         inst.ReplaceUsesWith(converted);
     } else {
         inst.SetArg(1, coords);
@@ -1209,7 +1230,7 @@ void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
             if (IsBufferInstruction(inst)) {
                 PatchBufferArgs(*block, inst, info);
             } else if (IsImageInstruction(inst)) {
-                PatchImageArgs(*block, inst, info);
+                PatchImageArgs(*block, inst, info, profile);
             } else if (IsDataRingInstruction(inst)) {
                 PatchGlobalDataShareAccess(*block, inst, info, descriptors, profile);
             }

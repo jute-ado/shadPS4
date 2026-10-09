@@ -2139,6 +2139,10 @@ Value IREmitter::ImageRead(const Value& handle, const Value& coords, const U32& 
     return Inst(Opcode::ImageRead, Flags{info}, handle, coords, lod, multisampling);
 }
 
+void IREmitter::PpUpstreamSampleTee(const Value& value, u32 resource_index) {
+    Inst(Opcode::PpUpstreamSampleTee, value, Imm32(resource_index));
+}
+
 void IREmitter::ImageWrite(const Value& handle, const Value& coords, const U32& lod,
                            const U32& multisampling, const Value& color, TextureInstInfo info) {
     Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, multisampling, color);

@@ -295,7 +295,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 }
 
 void PipelineCache::WarmUp() {
-    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
+    if (!allow_persistent_artifacts || !EmulatorSettings.IsPipelineCacheEnabled()) {
         return;
     }
 
@@ -371,6 +371,9 @@ void PipelineCache::WarmUp() {
 }
 
 void PipelineCache::Sync() {
+    if (!allow_persistent_artifacts) {
+        return;
+    }
     Storage::DataBase::Instance().Close();
 }
 

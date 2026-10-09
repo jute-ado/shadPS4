@@ -67,10 +67,12 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         });
     }
 
+    const auto push_layout =
+        Shader::PlanPushDataLayout(profile.instrument_pp_upstream_sample_tee);
     const vk::PushConstantRange push_constants = {
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .offset = 0,
-        .size = sizeof(Shader::PushData),
+        .size = push_layout.byte_size,
     };
 
     uses_push_descriptors = binding < instance.MaxPushDescriptors();

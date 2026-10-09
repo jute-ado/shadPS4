@@ -3,6 +3,7 @@
 
 #include "core/emulator_settings.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 #include "shader_recompiler/profile.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 
@@ -169,6 +170,21 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         info.readconst_types = Info::ReadConstType::None;
     }
 
+    const auto tee_plan = PlanPpUpstreamSampleTeeCompilerResource({
+        .enabled = profile.instrument_pp_upstream_sample_tee,
+        .stage = info.l_stage,
+        .result_counts = info.pp_upstream_sample_tee_results,
+        .current_buffer_count = info.buffers.size(),
+        .later_required_buffer_count = info.uses_dma ? 2u : 0u,
+    });
+    if (tee_plan.clear_result_counts) {
+        info.pp_upstream_sample_tee_results.fill(0);
+    }
+    if (tee_plan.require_frag_coord) {
+        info.loads.Set(IR::Attribute::FragCoord, 0);
+        info.loads.Set(IR::Attribute::FragCoord, 1);
+    }
+
     if (info.uses_dma) {
         info.buffers.push_back({
             .used_types = IR::Type::U64,
@@ -180,6 +196,14 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
             .used_types = IR::Type::U32,
             .inline_cbuf = AmdGpu::Buffer::Placeholder(std::numeric_limits<u32>::max()),
             .buffer_type = BufferType::FaultBuffer,
+            .is_written = true,
+        });
+    }
+    if (tee_plan.append_buffer) {
+        info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            .inline_cbuf = AmdGpu::Buffer::Placeholder(PpUpstreamSampleTeeBufferBytes),
+            .buffer_type = BufferType::PpUpstreamSampleTee,
             .is_written = true,
         });
     }

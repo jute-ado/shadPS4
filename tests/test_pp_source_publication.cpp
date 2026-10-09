@@ -3,12 +3,20 @@
 
 #include <gtest/gtest.h>
 
+#include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
+#include "shader_recompiler/profile.h"
+#include "shader_recompiler/resource.h"
+#include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_producer_scope.h"
 #include "video_core/renderer_vulkan/host_passes/pp_source_publication.h"
 #include "video_core/renderer_vulkan/host_passes/pp_terminal_scope_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_input_content.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_route.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_tee.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_tee_vulkan.h"
 #include "video_core/texture_cache/image_color_scope_producer.h"
 #include "video_core/texture_cache/image_producer.h"
 
@@ -2095,6 +2103,7 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_TRUE(config->content.capture_upstream_pre_post);
     EXPECT_TRUE(config->content.capture_upstream_input_content);
     EXPECT_TRUE(config->content.capture_upstream_sample_routes);
+    EXPECT_FALSE(config->content.capture_upstream_sample_tee);
     EXPECT_EQ(config->content.upstream_candidate_index, 0u);
     EXPECT_EQ(config->content.upstream_input_index, 1u);
     EXPECT_EQ(config->content.upstream_sample_route_input_index, 2u);
@@ -2109,6 +2118,62 @@ TEST(PpTerminalScopeContent, ExternalRuntimeConfigRequiresGenericDrawSelectors) 
     EXPECT_EQ(config->content.consumer,
               (PpTerminalScopeDrawSelector{VideoCore::ImageColorScopeDrawKind::Direct, true, 4, 1,
                                            1, 0}));
+}
+
+TEST(PpTerminalScopeContent, DirectSampleTeeRequiresOneExplicitGenericWindowAndRoute) {
+    std::map<std::string_view, std::string_view> values{
+        {"SHADPS4_FINAL_GUEST_SURFACE_CONTENT", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_STAGE", "pp_source_publication_reconstruction"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_CALIBRATED_TRIPLETS", "1"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_EXPECTED_CALIBRATIONS", "300"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_START", "4000"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_FRAME_COUNT", "800"},
+        {"SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS", "1299"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_PREDECESSOR", "direct,indexed,4,1,3,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM", "direct,indexed,4,1,6,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_INDEX", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_PRE_POST", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_INPUT_CONTENT", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE", "0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_ROUTE_INPUT", "2"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_TEE", "1"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_FIRST", "direct,indexed,696,1,1,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_SECOND", "direct,indexed,24,1,2,0"},
+        {"SHADPS4_PP_TERMINAL_SCOPE_CONSUMER", "direct,indexed,4,1,1,0"},
+    };
+    const auto parse = [&] {
+        return ResolvePpTerminalScopeRuntimeConfig([&](const char* name) {
+            const auto found = values.find(name);
+            return found == values.end() ? std::optional<std::string_view>{}
+                                         : std::optional<std::string_view>{found->second};
+        });
+    };
+    const auto config = parse();
+    ASSERT_TRUE(config);
+    EXPECT_TRUE(config->content.capture_upstream_sample_tee);
+    EXPECT_EQ(config->watch_ordinals.count, 1u);
+    EXPECT_EQ(config->watch_ordinals.ordinals[0], 1299u);
+
+    const auto tee_pipeline = PlanPpUpstreamSampleTeePipelinePolicy(
+        config->content.enabled && config->content.capture_upstream_sample_tee);
+    EXPECT_TRUE(tee_pipeline.instrument_profile);
+    EXPECT_FALSE(tee_pipeline.allow_persistent_artifacts);
+    EXPECT_FALSE(tee_pipeline.allow_shader_patches);
+
+    const auto ordinary_pipeline = PlanPpUpstreamSampleTeePipelinePolicy(false);
+    EXPECT_FALSE(ordinary_pipeline.instrument_profile);
+    EXPECT_TRUE(ordinary_pipeline.allow_persistent_artifacts);
+    EXPECT_TRUE(ordinary_pipeline.allow_shader_patches);
+
+    values["SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_TEE"] = "yes";
+    EXPECT_FALSE(parse());
+    values["SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_TEE"] = "1";
+    values["SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS"] = "1298,1299";
+    EXPECT_FALSE(parse());
+    values["SHADPS4_FINAL_GUEST_SURFACE_WATCH_ORDINALS"] = "1299";
+    values.erase("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_ROUTE_INPUT");
+    EXPECT_FALSE(parse());
 }
 
 TEST(PpTerminalScopeContent, FinalBackingObservationReusesTheExistingPackedFootprint) {
@@ -3917,6 +3982,3782 @@ TEST(PpUpstreamSampleRoute, CalibratedHistoryPublishesOnlyBoundedRouteShape) {
     ASSERT_EQ(changed_reports.size(), 1u);
     EXPECT_EQ(changed_reports[0].status, FinalGuestSurfaceStatus::InvalidationLoss);
     EXPECT_EQ(changed_reports[0].loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, ArmsOneExistingFragmentResultWithoutAnotherImageOperation) {
+    const PpUpstreamSampleRouteSet routes{
+        .routes = {{{.logical_stage = PpUpstreamSampleTeeShaderPlan::FragmentLogicalStage,
+                     .image_resource_index = 2,
+                     .array_element = 0}}},
+        .selected_input_index = 2,
+        .route_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const std::array eligible_results{0u, 0u, 1u};
+    const auto plan = PlanPpUpstreamSampleTeeShader({
+        .enabled = true,
+        .routes = routes,
+        .eligible_results_per_resource = eligible_results,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(plan.arm);
+    EXPECT_EQ(plan.resource_index, 2u);
+    EXPECT_EQ(plan.eligible_result_count, 1u);
+    EXPECT_EQ(plan.additional_image_operations, 0u);
+    EXPECT_EQ(plan.tee_storage_operations, 1u);
+    EXPECT_FALSE(plan.retains_private_route);
+
+    const auto emission = PlanPpUpstreamSampleTeeEmission({
+        .armed = true,
+        .resource_matches = true,
+        .existing_value_id = 42,
+        .image_operations_before = 1,
+    });
+    EXPECT_EQ(emission.returned_value_id, 42u);
+    EXPECT_EQ(emission.image_operations_after, 1u);
+    EXPECT_EQ(emission.storage_operations, 1u);
+}
+
+TEST(PpUpstreamSampleTee, FailsClosedOnAmbiguousStageRouteArrayOrResult) {
+    PpUpstreamSampleRouteSet routes{
+        .routes = {{{.logical_stage = PpUpstreamSampleTeeShaderPlan::FragmentLogicalStage,
+                     .image_resource_index = 2,
+                     .array_element = 0}}},
+        .selected_input_index = 2,
+        .route_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const std::array one_result{0u, 0u, 1u};
+    const auto disabled = PlanPpUpstreamSampleTeeShader({
+        .routes = routes,
+        .eligible_results_per_resource = one_result,
+    });
+    EXPECT_FALSE(disabled.arm);
+    EXPECT_EQ(disabled.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    auto wrong_stage = routes;
+    wrong_stage.routes[0].logical_stage--;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeShader({
+                  .enabled = true,
+                  .routes = wrong_stage,
+                  .eligible_results_per_resource = one_result,
+              }).status,
+              FinalGuestSurfaceStatus::Unsupported);
+
+    auto array_route = routes;
+    array_route.routes[0].array_element = 1;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeShader({
+                  .enabled = true,
+                  .routes = array_route,
+                  .eligible_results_per_resource = one_result,
+              }).status,
+              FinalGuestSurfaceStatus::Unsupported);
+
+    auto many_routes = routes;
+    many_routes.route_count = 2;
+    many_routes.routes[1] = many_routes.routes[0];
+    EXPECT_EQ(PlanPpUpstreamSampleTeeShader({
+                  .enabled = true,
+                  .routes = many_routes,
+                  .eligible_results_per_resource = one_result,
+              }).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+
+    const std::array two_results{0u, 0u, 2u};
+    const auto ambiguous_result = PlanPpUpstreamSampleTeeShader({
+        .enabled = true,
+        .routes = routes,
+        .eligible_results_per_resource = two_results,
+    });
+    EXPECT_FALSE(ambiguous_result.arm);
+    EXPECT_EQ(ambiguous_result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(ambiguous_result.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, MapsOneGenericLogicalWindowIntoTheProducerTarget) {
+    const auto plan = PlanPpUpstreamSampleTeeWindow({
+        .enabled = true,
+        .target_width = 1920,
+        .target_height = 1080,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .logical_ordinal = 1299,
+        .max_width = 64,
+        .max_height = 64,
+        .max_bytes = 128u << 10,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(plan.capture);
+    EXPECT_EQ(plan.logical_ordinal, 1299u);
+    EXPECT_EQ(plan.x, 816u);
+    EXPECT_EQ(plan.y, 384u);
+    EXPECT_EQ(plan.width, 48u);
+    EXPECT_EQ(plan.height, 48u);
+    EXPECT_EQ(plan.pixel_count, 48u * 48u);
+    EXPECT_EQ(plan.image_copy_operations, 0u);
+    EXPECT_EQ(plan.texture_operations, 0u);
+    EXPECT_FALSE(plan.logs_coordinates);
+    EXPECT_FALSE(plan.logs_values);
+}
+
+TEST(PpUpstreamSampleTee, WindowPlanningIsTransactionalAndBounded) {
+    const auto too_large = PlanPpUpstreamSampleTeeWindow({
+        .enabled = true,
+        .target_width = 3840,
+        .target_height = 2160,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .logical_ordinal = 1299,
+        .max_width = 64,
+        .max_height = 64,
+        .max_bytes = 128u << 10,
+    });
+    EXPECT_FALSE(too_large.capture);
+    EXPECT_EQ(too_large.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(too_large.loss.tile_capacity, 1u);
+    EXPECT_EQ(too_large.total_bytes, 0u);
+
+    const auto invalid = PlanPpUpstreamSampleTeeWindow({
+        .enabled = true,
+        .target_width = 1920,
+        .target_height = 1080,
+        .logical_width = 1280,
+        .logical_height = 720,
+        .logical_ordinal = 0,
+    });
+    EXPECT_FALSE(invalid.capture);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, ReducesOnlySingleWriterCoveredPixels) {
+    using Record = PpUpstreamSampleTeePixelRecord;
+    const std::array baseline{
+        Record{.value = {1, 2, 3, 4}, .writers = 1},
+        Record{.value = {5, 6, 7, 8}, .writers = 1},
+        Record{.value = {9, 10, 11, 12}, .writers = 1},
+    };
+    auto departure = baseline;
+    departure[0].value[0] = 99;
+    departure[2].value[0] = 88;
+    auto returned = baseline;
+    returned[2].value[0] = 77;
+
+    const auto reduced = ReducePpUpstreamSampleTee(baseline, departure, returned);
+    ASSERT_EQ(reduced.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(reduced.covered_pixels, 3u);
+    EXPECT_EQ(reduced.aba_pixels, 1u);
+    EXPECT_EQ(reduced.stable_pixels, 1u);
+    EXPECT_EQ(reduced.ambiguous_pixels, 1u);
+    EXPECT_EQ(reduced.writer_conflicts, 0u);
+    EXPECT_TRUE(reduced.departed);
+    EXPECT_FALSE(reduced.retains_values);
+
+    auto conflicted = returned;
+    conflicted[1].writers = 2;
+    const auto rejected = ReducePpUpstreamSampleTee(baseline, departure, conflicted);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.loss.invalidation, 1u);
+    EXPECT_EQ(rejected.writer_conflicts, 1u);
+    EXPECT_EQ(rejected.covered_pixels, 0u);
+}
+
+TEST(PpUpstreamSampleTee, MissingCoverageAndShapeMismatchFailClosed) {
+    using Record = PpUpstreamSampleTeePixelRecord;
+    const std::array baseline{Record{.value = {1, 2, 3, 4}, .writers = 1}};
+    const std::array missing{Record{.value = {1, 2, 3, 4}, .writers = 0}};
+    const auto uncovered = ReducePpUpstreamSampleTee(baseline, baseline, missing);
+    EXPECT_EQ(uncovered.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(uncovered.loss.gap, 1u);
+    EXPECT_EQ(uncovered.missing_pixels, 1u);
+
+    const std::array<Record, 2> longer{};
+    const auto mismatch = ReducePpUpstreamSampleTee(baseline, baseline, longer);
+    EXPECT_EQ(mismatch.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(mismatch.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, SelectedCandidateRecordCannotBeOverwrittenByLaterCandidates) {
+    PpUpstreamSampleTeeCandidateRecord record{};
+    const PpUpstreamSampleTeeShaderPlan selected_shader{
+        .resource_index = 2,
+        .eligible_result_count = 1,
+        .tee_storage_operations = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .arm = true,
+    };
+    const PpUpstreamSampleTeeWindowPlan selected_window{
+        .logical_ordinal = 1299,
+        .width = 48,
+        .height = 48,
+        .pixel_count = 48 * 48,
+        .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+        .status = FinalGuestSurfaceStatus::Complete,
+        .capture = true,
+    };
+    record = RecordPpUpstreamSampleTeeCandidate(record, {.enabled = true,
+                                                         .configured_candidate_index = 0,
+                                                         .observed_candidate_index = 0,
+                                                         .shader = selected_shader,
+                                                         .window = selected_window});
+    ASSERT_TRUE(record.ready);
+    EXPECT_EQ(record.candidate_index, 0u);
+    EXPECT_EQ(record.shader.resource_index, 2u);
+
+    auto later_shader = selected_shader;
+    later_shader.resource_index = 5;
+    record = RecordPpUpstreamSampleTeeCandidate(record, {.enabled = true,
+                                                         .configured_candidate_index = 0,
+                                                         .observed_candidate_index = 1,
+                                                         .shader = later_shader,
+                                                         .window = selected_window});
+    EXPECT_TRUE(record.ready);
+    EXPECT_EQ(record.candidate_index, 0u);
+    EXPECT_EQ(record.shader.resource_index, 2u);
+
+    const auto publication = ReconcilePpUpstreamSampleTeeCandidate({
+        .enabled = true,
+        .record = record,
+        .selected_candidate_index = 0,
+    });
+    ASSERT_EQ(publication.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(publication.publish);
+    EXPECT_EQ(publication.shader.resource_index, 2u);
+    EXPECT_EQ(publication.window.logical_ordinal, 1299u);
+}
+
+TEST(PpUpstreamSampleTee, DuplicateSelectedCandidateObservationFailsClosed) {
+    const PpUpstreamSampleTeeShaderPlan shader{
+        .resource_index = 2,
+        .eligible_result_count = 1,
+        .tee_storage_operations = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .arm = true,
+    };
+    const PpUpstreamSampleTeeWindowPlan window{
+        .logical_ordinal = 1299,
+        .x = 816,
+        .y = 384,
+        .width = 48,
+        .height = 48,
+        .pixel_count = 48 * 48,
+        .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+        .status = FinalGuestSurfaceStatus::Complete,
+        .capture = true,
+    };
+    auto record = RecordPpUpstreamSampleTeeCandidate({}, {.enabled = true,
+                                                          .configured_candidate_index = 0,
+                                                          .observed_candidate_index = 0,
+                                                          .shader = shader,
+                                                          .window = window});
+    ASSERT_TRUE(record.ready);
+
+    auto changed_window = window;
+    changed_window.x += 1;
+    record = RecordPpUpstreamSampleTeeCandidate(record, {.enabled = true,
+                                                         .configured_candidate_index = 0,
+                                                         .observed_candidate_index = 0,
+                                                         .shader = shader,
+                                                         .window = changed_window});
+    EXPECT_FALSE(record.ready);
+    EXPECT_EQ(record.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(record.loss.invalidation, 1u);
+
+    const auto publication = ReconcilePpUpstreamSampleTeeCandidate({
+        .enabled = true,
+        .record = record,
+        .selected_candidate_index = 0,
+    });
+    EXPECT_FALSE(publication.publish);
+    EXPECT_EQ(publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(publication.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, MissingStaleOrDifferentCandidateNeverPublishes) {
+    const auto missing = ReconcilePpUpstreamSampleTeeCandidate({
+        .enabled = true,
+        .selected_candidate_index = 0,
+    });
+    EXPECT_FALSE(missing.publish);
+    EXPECT_EQ(missing.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(missing.loss.gap, 1u);
+
+    const PpUpstreamSampleTeeCandidateRecord recorded{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48,
+                   .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const auto wrong_candidate = ReconcilePpUpstreamSampleTeeCandidate({
+        .enabled = true,
+        .record = recorded,
+        .selected_candidate_index = 1,
+    });
+    EXPECT_FALSE(wrong_candidate.publish);
+    EXPECT_EQ(wrong_candidate.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(wrong_candidate.loss.invalidation, 1u);
+
+    auto stale = recorded;
+    stale.shader.arm = false;
+    const auto invalid = ReconcilePpUpstreamSampleTeeCandidate({
+        .enabled = true,
+        .record = stale,
+        .selected_candidate_index = 0,
+    });
+    EXPECT_FALSE(invalid.publish);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, DeferredAttemptOwnsTheOnlyTokenAndNoMappedState) {
+    const FinalGuestSurfaceReadbackSlotPool::Token token{.slot = 2, .generation = 7};
+    const PpUpstreamSampleTeeDeferredDetachDescriptor complete{
+        .enabled = true,
+        .attempted = true,
+        .outer_slot = token,
+        .record = {.candidate_index = 2},
+        .capture = {.header = {.generation = 7}},
+        .commands = {.serial = 73},
+        .controller = {.candidate_index = 2, .serial = 73},
+        .selected_candidate_index = 2,
+        .capture_status = FinalGuestSurfaceStatus::Complete,
+        .capture_has_copy = true,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    };
+    auto detached = DetachPpUpstreamSampleTeeDeferredReadback(complete);
+    EXPECT_EQ(detached.outer_slot, token);
+    EXPECT_EQ(detached.record, complete.record);
+    EXPECT_EQ(detached.capture, complete.capture);
+    EXPECT_EQ(detached.commands, complete.commands);
+    EXPECT_EQ(detached.controller, complete.controller);
+    EXPECT_EQ(detached.selected_candidate_index, 2u);
+    EXPECT_EQ(detached.capture_status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(detached.capture_has_copy);
+    EXPECT_EQ(detached.mapped_bytes, Shader::PpUpstreamSampleTeeBufferBytes);
+
+    auto failed = complete;
+    failed.capture_status = FinalGuestSurfaceStatus::BusyLoss;
+    failed.capture_loss = {.busy = 1};
+    failed.capture_has_copy = false;
+    detached = DetachPpUpstreamSampleTeeDeferredReadback(failed);
+    EXPECT_EQ(detached.outer_slot, token);
+    EXPECT_EQ(detached.capture_status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(detached.capture_loss.busy, 1u);
+    EXPECT_FALSE(detached.capture_has_copy);
+
+    failed.outer_slot = {};
+    detached = DetachPpUpstreamSampleTeeDeferredReadback(failed);
+    EXPECT_TRUE(detached.enabled);
+    EXPECT_FALSE(detached.outer_slot);
+    EXPECT_EQ(detached.record, PpUpstreamSampleTeeCandidateRecord{});
+    EXPECT_EQ(detached.capture, PpUpstreamSampleTeeCapturePlan{});
+    EXPECT_EQ(detached.commands, PpUpstreamSampleTeeCommandPlan{});
+    EXPECT_EQ(detached.controller, PpUpstreamSampleTeeControllerState{});
+    EXPECT_EQ(detached.selected_candidate_index, 0u);
+    EXPECT_EQ(detached.mapped_bytes, 0u);
+    EXPECT_EQ(detached.capture_status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(detached.capture_loss.busy, 1u);
+
+    detached = DetachPpUpstreamSampleTeeDeferredReadback({.outer_slot = token});
+    EXPECT_FALSE(detached.enabled);
+    EXPECT_EQ(detached.outer_slot, token);
+    EXPECT_EQ(detached.record, PpUpstreamSampleTeeCandidateRecord{});
+    EXPECT_EQ(detached.mapped_bytes, 0u);
+}
+
+TEST(PpUpstreamSampleTee, DetachedOutcomePreservesFirstTerminalTeeFailure) {
+    const PpUpstreamSampleTeeCaptureOutcome base_gap{
+        .status = FinalGuestSurfaceStatus::GapLoss,
+        .loss = {.gap = 1},
+    };
+    const auto tee_busy = ResolvePpUpstreamSampleTeeCaptureOutcome(
+        {
+            .status = FinalGuestSurfaceStatus::BusyLoss,
+            .loss = {.busy = 1},
+        },
+        base_gap);
+    EXPECT_EQ(tee_busy.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(tee_busy.loss.busy, 1u);
+    EXPECT_EQ(tee_busy.loss.gap, 0u);
+    EXPECT_FALSE(tee_busy.copy);
+
+    const auto tee_complete = ResolvePpUpstreamSampleTeeCaptureOutcome(
+        {
+            .status = FinalGuestSurfaceStatus::Complete,
+            .copy = true,
+        },
+        base_gap);
+    EXPECT_EQ(tee_complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(tee_complete.loss.Any());
+    EXPECT_TRUE(tee_complete.copy);
+
+    const auto inherited = ResolvePpUpstreamSampleTeeCaptureOutcome({}, base_gap);
+    EXPECT_EQ(inherited.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(inherited.loss.gap, 1u);
+    EXPECT_FALSE(inherited.copy);
+
+    const auto still_unset = ResolvePpUpstreamSampleTeeCaptureOutcome(
+        {},
+        {
+            .status = FinalGuestSurfaceStatus::Complete,
+            .copy = true,
+        });
+    EXPECT_EQ(still_unset.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_FALSE(still_unset.loss.Any());
+    EXPECT_FALSE(still_unset.copy);
+}
+
+TEST(PpUpstreamSampleTee, DeferredReadbackPlansExactBorrowedSlotLayout) {
+    const PpUpstreamSampleTeeCandidateRecord record{
+        .candidate_index = 2,
+        .shader = {.resource_index = 3,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 10,
+                   .y = 20,
+                   .width = 2,
+                   .height = 2,
+                   .pixel_count = 4,
+                   .total_bytes = 4 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const PpUpstreamSampleTeeCapturePlan capture{
+        .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                   .generation = 7,
+                   .candidate_index = 2,
+                   .x = 10,
+                   .y = 20,
+                   .width = 2,
+                   .height = 2,
+                   .pixel_count = 4},
+        .slot_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .slot_bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .clear_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes +
+                        sizeof(PpUpstreamSampleTeeReadbackHeader),
+        .clear_bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes -
+                       sizeof(PpUpstreamSampleTeeReadbackHeader),
+        .base_dword = 2 * Shader::PpUpstreamSampleTeeSlotStrideDwords,
+        .control = Shader::PpUpstreamSampleTeeArmMask | 3u |
+                   (2u << Shader::PpUpstreamSampleTeeCandidateShift),
+        .push_offset = static_cast<u32>(offsetof(Shader::PushData,
+                                                 pp_upstream_sample_tee_control)),
+        .push_bytes = sizeof(u32) * 2,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialize = true,
+        .arm = true,
+        .require_post_barrier = true,
+    };
+    const auto commands = PlanPpUpstreamSampleTeeCommands({
+        .enabled = true,
+        .binding = {.status = FinalGuestSurfaceStatus::Complete, .bind = true},
+        .capture = capture,
+        .non_coherent_atom_size = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .output_candidate_count = 1,
+        .direct_draw = true,
+        .rendering_active = true,
+        .observed_rendering_serial = 73,
+        .expected_rendering_serial = 73,
+    });
+    ASSERT_EQ(commands.status, FinalGuestSurfaceStatus::Complete);
+    const PpUpstreamSampleTeeControllerState controller{
+        .candidate_index = 2,
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialized = true,
+        .armed = true,
+        .draw_executed = true,
+        .post_barrier_complete = true,
+        .ready = true,
+    };
+    PpUpstreamSampleTeeDeferredReadbackDescriptor descriptor{
+        .enabled = true,
+        .outer_slot = {2, 7},
+        .record = record,
+        .capture = capture,
+        .commands = commands,
+        .controller = controller,
+        .selected_candidate_index = 2,
+        .capture_status = FinalGuestSurfaceStatus::Complete,
+        .capture_has_copy = true,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    };
+    const auto plan = PlanPpUpstreamSampleTeeDeferredReadback(descriptor);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(plan.copy);
+    EXPECT_TRUE(plan.borrows_outer_slot);
+    EXPECT_EQ(plan.outer_slot_release_attempts, 1u);
+    EXPECT_FALSE(plan.retains_mapped_span);
+    EXPECT_EQ(plan.invalidate_offset, 2u * Shader::PpUpstreamSampleTeeSlotStrideBytes);
+    EXPECT_EQ(plan.invalidate_bytes, Shader::PpUpstreamSampleTeeSlotStrideBytes);
+    EXPECT_EQ(plan.header_offset, plan.invalidate_offset);
+    EXPECT_EQ(plan.header_bytes, sizeof(PpUpstreamSampleTeeReadbackHeader));
+    EXPECT_EQ(plan.records_offset,
+              plan.header_offset + sizeof(PpUpstreamSampleTeeReadbackHeader));
+    EXPECT_EQ(plan.records_bytes, 4u * sizeof(PpUpstreamSampleTeePixelRecord));
+    EXPECT_EQ(plan.record_count, 4u);
+    EXPECT_EQ(plan.expected_generation, 7u);
+
+    auto rejected = descriptor;
+    rejected.outer_slot = {};
+    auto invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_FALSE(invalid.copy);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 0u);
+    rejected = descriptor;
+    rejected.outer_slot.slot = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(invalid.copy);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.outer_slot.generation = 8;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    rejected = descriptor;
+    rejected.selected_candidate_index = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    rejected = descriptor;
+    rejected.capture.clear_offset++;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.mapped_bytes--;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.pixel_count = 1;
+    rejected.record.window.total_bytes = sizeof(PpUpstreamSampleTeePixelRecord);
+    rejected.capture.header.pixel_count = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.logs_coordinates = true;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.logs_values = true;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.image_copy_operations = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.texture_operations = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.logical_ordinal = 0;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.window.width = Shader::PpUpstreamSampleTeeMaxDimension + 1;
+    rejected.record.window.height = 1;
+    rejected.record.window.pixel_count = rejected.record.window.width;
+    rejected.record.window.total_bytes =
+        rejected.record.window.pixel_count * sizeof(PpUpstreamSampleTeePixelRecord);
+    rejected.capture.header.width = rejected.record.window.width;
+    rejected.capture.header.height = 1;
+    rejected.capture.header.pixel_count = rejected.record.window.pixel_count;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.shader.retains_private_route = true;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.record.shader.additional_image_operations = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.commands.issue_draw = false;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.commands.host_barrier = {};
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.commands.status = FinalGuestSurfaceStatus::BusyLoss;
+    rejected.commands.loss.busy = 1;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(invalid.loss.busy, 1u);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+    rejected = descriptor;
+    rejected.capture_status = FinalGuestSurfaceStatus::BusyLoss;
+    rejected.capture_loss.busy = 1;
+    rejected.capture_has_copy = false;
+    invalid = PlanPpUpstreamSampleTeeDeferredReadback(rejected);
+    EXPECT_EQ(invalid.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(invalid.loss.busy, 1u);
+    EXPECT_EQ(invalid.outer_slot_release_attempts, 1u);
+}
+
+TEST(PpUpstreamSampleTee, DeferredReadbackCopiesOnlyOwnedBoundedRecords) {
+    const PpUpstreamSampleTeeReadbackHeader header{
+        .magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+        .generation = 7,
+        .candidate_index = 2,
+        .x = 10,
+        .y = 20,
+        .width = 2,
+        .height = 2,
+        .pixel_count = 4,
+    };
+    const PpUpstreamSampleTeeDeferredReadbackPlan plan{
+        .expected_header = header,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .invalidate_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .invalidate_bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .header_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .header_bytes = sizeof(header),
+        .records_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes + sizeof(header),
+        .records_bytes = 4 * sizeof(PpUpstreamSampleTeePixelRecord),
+        .record_count = 4,
+        .expected_generation = 7,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .copy = true,
+        .borrows_outer_slot = true,
+        .outer_slot_release_attempts = 1,
+    };
+    const std::array<PpUpstreamSampleTeePixelRecord, 4> expected{
+        PpUpstreamSampleTeePixelRecord{.value = {1, 2, 3, 4}, .writers = 1},
+        PpUpstreamSampleTeePixelRecord{.value = {5, 6, 7, 8}, .writers = 1},
+        PpUpstreamSampleTeePixelRecord{.value = {9, 10, 11, 12}, .writers = 1},
+        PpUpstreamSampleTeePixelRecord{.value = {13, 14, 15, 16}, .writers = 1},
+    };
+    std::vector<std::byte> mapped(Shader::PpUpstreamSampleTeeBufferBytes, std::byte{0x5a});
+    std::memcpy(mapped.data() + plan.header_offset, &header, sizeof(header));
+    std::memcpy(mapped.data() + plan.records_offset, expected.data(), sizeof(expected));
+    auto owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    ASSERT_EQ(owned.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(owned.mapped_invalidation_succeeded);
+    EXPECT_TRUE(owned.bounded_record_copy_succeeded);
+    EXPECT_FALSE(owned.retains_mapped_span);
+    ASSERT_EQ(owned.records.size(), expected.size());
+    EXPECT_EQ(owned.records[3].value, expected[3].value);
+
+    auto forged = plan;
+    forged.invalidate_offset += sizeof(u32);
+    auto rejected = CopyPpUpstreamSampleTeeDeferredReadback(forged, true, mapped);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.bounded_record_copy_succeeded);
+    forged = plan;
+    forged.record_count = Shader::PpUpstreamSampleTeeMaxDimension *
+                              Shader::PpUpstreamSampleTeeMaxDimension +
+                          1;
+    forged.records_bytes =
+        static_cast<u64>(forged.record_count) * sizeof(PpUpstreamSampleTeePixelRecord);
+    rejected = CopyPpUpstreamSampleTeeDeferredReadback(forged, true, mapped);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.bounded_record_copy_succeeded);
+    forged = plan;
+    forged.expected_generation++;
+    rejected = CopyPpUpstreamSampleTeeDeferredReadback(forged, true, mapped);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.bounded_record_copy_succeeded);
+    forged = plan;
+    forged.records_offset++;
+    rejected = CopyPpUpstreamSampleTeeDeferredReadback(forged, true, mapped);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.bounded_record_copy_succeeded);
+    forged = plan;
+    forged.invalidate_bytes--;
+    rejected = CopyPpUpstreamSampleTeeDeferredReadback(forged, true, mapped);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.bounded_record_copy_succeeded);
+    forged = plan;
+    forged.mapped_bytes--;
+    rejected = CopyPpUpstreamSampleTeeDeferredReadback(
+        forged, true, std::span<const std::byte>{mapped}.first(forged.mapped_bytes));
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.bounded_record_copy_succeeded);
+
+    std::fill(mapped.begin(), mapped.end(), std::byte{0});
+    EXPECT_EQ(owned.header, header);
+    EXPECT_EQ(owned.records[0].value, expected[0].value);
+
+    owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, false, mapped);
+    EXPECT_EQ(owned.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(owned.bounded_record_copy_succeeded);
+    EXPECT_TRUE(owned.records.empty());
+    std::memcpy(mapped.data() + plan.header_offset, &header, sizeof(header));
+    auto stale = header;
+    stale.generation++;
+    std::memcpy(mapped.data() + plan.header_offset, &stale, sizeof(stale));
+    owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    EXPECT_EQ(owned.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(owned.bounded_record_copy_succeeded);
+    EXPECT_TRUE(owned.records.empty());
+    owned = CopyPpUpstreamSampleTeeDeferredReadback(
+        plan, true, std::span<const std::byte>{mapped}.first(mapped.size() - 1));
+    EXPECT_EQ(owned.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(owned.bounded_record_copy_succeeded);
+
+    auto capture_loss = plan;
+    capture_loss.status = FinalGuestSurfaceStatus::BusyLoss;
+    capture_loss.loss.busy = 1;
+    capture_loss.copy = false;
+    owned = CopyPpUpstreamSampleTeeDeferredReadback(capture_loss, false, mapped);
+    EXPECT_EQ(owned.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(owned.loss.busy, 1u);
+    EXPECT_FALSE(owned.bounded_record_copy_succeeded);
+}
+
+TEST(PpUpstreamSampleTee, RuntimePublicationRequiresBoundedCopyBeforeExactlyOneOuterSlotRelease) {
+    const PpUpstreamSampleTeeCandidateRecord record{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 816,
+                   .y = 384,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48,
+                   .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const PpUpstreamSampleTeeRuntimeReconciliation complete{
+        .enabled = true,
+        .record = record,
+        .selected_candidate_index = 0,
+        .capture_status = FinalGuestSurfaceStatus::Complete,
+        .capture_has_copy = true,
+        .initialized = true,
+        .armed = true,
+        .draw_executed = true,
+        .post_barrier_complete = true,
+        .slot_present = true,
+        .mapped_invalidation_succeeded = true,
+        .bounded_record_copy_succeeded = true,
+        .rendering_serial = 73,
+        .expected_generation = 7,
+        .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                   .generation = 7,
+                   .candidate_index = 0,
+                   .x = 816,
+                   .y = 384,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48},
+        .observed_outer_slot_release_attempts = 1,
+        .bounded_copy_completed_before_outer_slot_release = true,
+        .slot_release_succeeded = true,
+    };
+    const auto published = ReconcilePpUpstreamSampleTeeRuntime(complete);
+    EXPECT_TRUE(published.publish);
+    EXPECT_EQ(published.status, FinalGuestSurfaceStatus::Complete);
+
+    auto rejected = complete;
+    rejected.slot_present = false;
+    auto result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(result.loss.busy, 1u);
+
+    rejected = complete;
+    rejected.mapped_invalidation_succeeded = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(result.loss.invalidation, 1u);
+
+    rejected = complete;
+    rejected.bounded_record_copy_succeeded = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(result.loss.invalidation, 1u);
+
+    rejected = complete;
+    rejected.header.generation += 1;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.header.x += 1;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.slot_release_succeeded = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.observed_outer_slot_release_attempts = 0;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.observed_outer_slot_release_attempts = 2;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.bounded_copy_completed_before_outer_slot_release = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.rendering_serial = 0;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.record.window.logs_values = true;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.record.shader.retains_private_route = true;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.record.window.pixel_count = 1;
+    rejected.record.window.total_bytes = sizeof(PpUpstreamSampleTeePixelRecord);
+    rejected.header.pixel_count = 1;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.initialized = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.armed = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.draw_executed = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = complete;
+    rejected.post_barrier_complete = false;
+    result = ReconcilePpUpstreamSampleTeeRuntime(rejected);
+    EXPECT_FALSE(result.publish);
+    EXPECT_EQ(result.status, FinalGuestSurfaceStatus::InvalidationLoss);
+}
+
+TEST(PpUpstreamSampleTee, DeferredLifecycleRecordsOwnedCopyBeforeExactlyOneOuterSlotRelease) {
+    const PpUpstreamSampleTeeReadbackHeader header{
+        .magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+        .generation = 7,
+        .candidate_index = 2,
+        .x = 10,
+        .y = 20,
+        .width = 2,
+        .height = 2,
+        .pixel_count = 4,
+    };
+    const PpUpstreamSampleTeeDeferredReadbackPlan plan{
+        .expected_header = header,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .invalidate_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .invalidate_bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .header_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .header_bytes = sizeof(header),
+        .records_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes + sizeof(header),
+        .records_bytes = 4 * sizeof(PpUpstreamSampleTeePixelRecord),
+        .record_count = 4,
+        .expected_generation = 7,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .copy = true,
+        .borrows_outer_slot = true,
+        .outer_slot_release_attempts = 1,
+    };
+    const PpUpstreamSampleTeeOwnedReadback owned{
+        .header = header,
+        .records = std::vector<PpUpstreamSampleTeePixelRecord>(
+            4, PpUpstreamSampleTeePixelRecord{.value = {1, 2, 3, 4}, .writers = 1}),
+        .status = FinalGuestSurfaceStatus::Complete,
+        .mapped_invalidation_succeeded = true,
+        .bounded_record_copy_succeeded = true,
+    };
+    auto state = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    state = ObservePpUpstreamSampleTeeOwnedCopy(state, owned);
+    EXPECT_TRUE(state.mapped_invalidation_succeeded);
+    EXPECT_TRUE(state.bounded_record_copy_succeeded);
+    EXPECT_EQ(state.observed_outer_slot_release_attempts, 0u);
+    EXPECT_FALSE(state.bounded_copy_completed_before_outer_slot_release);
+    state = ObservePpUpstreamSampleTeeOuterSlotRelease(state, true);
+    state = FinalizePpUpstreamSampleTeeDeferredLifecycle(state);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(state.observed_outer_slot_release_attempts, 1u);
+    EXPECT_TRUE(state.bounded_copy_completed_before_outer_slot_release);
+    EXPECT_TRUE(state.slot_release_succeeded);
+
+    auto early = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    early = ObservePpUpstreamSampleTeeOuterSlotRelease(early, true);
+    early = ObservePpUpstreamSampleTeeOwnedCopy(early, owned);
+    early = FinalizePpUpstreamSampleTeeDeferredLifecycle(early);
+    EXPECT_EQ(early.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(early.loss.invalidation, 1u);
+    EXPECT_FALSE(early.bounded_record_copy_succeeded);
+    EXPECT_FALSE(early.bounded_copy_completed_before_outer_slot_release);
+
+    auto duplicate = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    duplicate = ObservePpUpstreamSampleTeeOwnedCopy(duplicate, owned);
+    duplicate = ObservePpUpstreamSampleTeeOuterSlotRelease(duplicate, true);
+    duplicate = ObservePpUpstreamSampleTeeOuterSlotRelease(duplicate, true);
+    duplicate = FinalizePpUpstreamSampleTeeDeferredLifecycle(duplicate);
+    EXPECT_EQ(duplicate.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(duplicate.observed_outer_slot_release_attempts, 2u);
+    EXPECT_FALSE(duplicate.bounded_copy_completed_before_outer_slot_release);
+
+    auto duplicate_copy = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    duplicate_copy = ObservePpUpstreamSampleTeeOwnedCopy(duplicate_copy, owned);
+    duplicate_copy = ObservePpUpstreamSampleTeeOwnedCopy(duplicate_copy, owned);
+    EXPECT_EQ(duplicate_copy.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(duplicate_copy.loss.invalidation, 1u);
+    EXPECT_EQ(duplicate_copy.owned_copy_observations, 2u);
+
+    auto release_failed = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    release_failed = ObservePpUpstreamSampleTeeOwnedCopy(release_failed, owned);
+    release_failed = ObservePpUpstreamSampleTeeOuterSlotRelease(release_failed, false);
+    release_failed = FinalizePpUpstreamSampleTeeDeferredLifecycle(release_failed);
+    EXPECT_EQ(release_failed.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(release_failed.loss.invalidation, 1u);
+    EXPECT_EQ(release_failed.observed_outer_slot_release_attempts, 1u);
+    EXPECT_FALSE(release_failed.bounded_copy_completed_before_outer_slot_release);
+    EXPECT_FALSE(release_failed.slot_release_succeeded);
+
+    auto malformed = plan;
+    malformed.records_offset++;
+    const auto malformed_state = BeginPpUpstreamSampleTeeDeferredLifecycle(malformed);
+    EXPECT_EQ(malformed_state.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(malformed_state.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, DeferredLifecycleReleasesSpecificLossWithoutClaimingCopy) {
+    const PpUpstreamSampleTeeDeferredReadbackPlan busy{
+        .status = FinalGuestSurfaceStatus::BusyLoss,
+        .loss = {.busy = 1},
+        .outer_slot_release_attempts = 1,
+    };
+    auto state = BeginPpUpstreamSampleTeeDeferredLifecycle(busy);
+    state = ObservePpUpstreamSampleTeeOuterSlotRelease(state, true);
+    state = FinalizePpUpstreamSampleTeeDeferredLifecycle(state);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(state.loss.busy, 1u);
+    EXPECT_EQ(state.observed_outer_slot_release_attempts, 1u);
+    EXPECT_FALSE(state.mapped_invalidation_succeeded);
+    EXPECT_FALSE(state.bounded_record_copy_succeeded);
+    EXPECT_FALSE(state.bounded_copy_completed_before_outer_slot_release);
+    EXPECT_TRUE(state.slot_release_succeeded);
+
+    const PpUpstreamSampleTeeDeferredReadbackPlan no_token{
+        .status = FinalGuestSurfaceStatus::BusyLoss,
+        .loss = {.busy = 1},
+    };
+    state = BeginPpUpstreamSampleTeeDeferredLifecycle(no_token);
+    EXPECT_EQ(state.expected_outer_slot_release_attempts, 0u);
+    EXPECT_EQ(state.observed_outer_slot_release_attempts, 0u);
+    const auto finalized_no_token = FinalizePpUpstreamSampleTeeDeferredLifecycle(state);
+    EXPECT_EQ(finalized_no_token.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(finalized_no_token.loss.busy, 1u);
+    EXPECT_EQ(finalized_no_token.loss.invalidation, 0u);
+    state = ObservePpUpstreamSampleTeeOuterSlotRelease(state, false);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(state.loss.busy, 1u);
+    EXPECT_EQ(state.loss.invalidation, 1u);
+    EXPECT_EQ(state.observed_outer_slot_release_attempts, 1u);
+
+    const PpUpstreamSampleTeeDeferredReadbackPlan disabled{
+        .outer_slot_release_attempts = 1,
+    };
+    state = BeginPpUpstreamSampleTeeDeferredLifecycle(disabled);
+    const auto omitted_release = FinalizePpUpstreamSampleTeeDeferredLifecycle(state);
+    EXPECT_EQ(omitted_release.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(omitted_release.loss.invalidation, 1u);
+    state = ObservePpUpstreamSampleTeeOuterSlotRelease(state, true);
+    state = FinalizePpUpstreamSampleTeeDeferredLifecycle(state);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_FALSE(state.loss.Any());
+    EXPECT_EQ(state.observed_outer_slot_release_attempts, 1u);
+    EXPECT_TRUE(state.slot_release_succeeded);
+
+    const PpUpstreamSampleTeeDeferredReadbackPlan malformed_disabled{
+        .loss = {.busy = 1},
+        .outer_slot_release_attempts = 1,
+    };
+    state = BeginPpUpstreamSampleTeeDeferredLifecycle(malformed_disabled);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(state.loss.invalidation, 1u);
+
+    state = BeginPpUpstreamSampleTeeDeferredLifecycle(busy);
+    state = ObservePpUpstreamSampleTeeOuterSlotRelease(state, false);
+    state = FinalizePpUpstreamSampleTeeDeferredLifecycle(state);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(state.loss.busy, 1u);
+    EXPECT_EQ(state.loss.invalidation, 1u);
+
+    auto malformed_busy = busy;
+    malformed_busy.copy = true;
+    malformed_busy.borrows_outer_slot = true;
+    state = BeginPpUpstreamSampleTeeDeferredLifecycle(malformed_busy);
+    EXPECT_EQ(state.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(state.loss.busy, 1u);
+    EXPECT_EQ(state.loss.invalidation, 1u);
+}
+
+TEST(PpUpstreamSampleTee, DeferredObservationFinalizesOneSharedReleaseWithoutPoisoningBase) {
+    const PpUpstreamSampleTeeCandidateRecord record{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 10,
+                   .y = 20,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const FinalGuestSurfaceReadbackSlotPool::Token token{0, 7};
+    const auto capture = PlanPpUpstreamSampleTeeCapture({
+        .enabled = true,
+        .slot_present = true,
+        .slot = token.slot,
+        .generation = token.generation,
+        .candidate_index = 0,
+        .shader = record.shader,
+        .window = record.window,
+    });
+    ASSERT_EQ(capture.status, FinalGuestSurfaceStatus::Complete);
+    const auto commands = PlanPpUpstreamSampleTeeCommands({
+        .enabled = true,
+        .binding = {.status = FinalGuestSurfaceStatus::Complete, .bind = true},
+        .capture = capture,
+        .non_coherent_atom_size = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .output_candidate_count = 1,
+        .direct_draw = true,
+        .rendering_active = true,
+        .observed_rendering_serial = 73,
+        .expected_rendering_serial = 73,
+    });
+    ASSERT_EQ(commands.status, FinalGuestSurfaceStatus::Complete);
+    const PpUpstreamSampleTeeControllerState controller{
+        .candidate_index = 0,
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialized = true,
+        .armed = true,
+        .draw_executed = true,
+        .post_barrier_complete = true,
+        .ready = true,
+    };
+    const PpUpstreamSampleTeeDeferredReadbackDescriptor attempt{
+        .enabled = true,
+        .outer_slot = token,
+        .record = record,
+        .capture = capture,
+        .commands = commands,
+        .controller = controller,
+        .selected_candidate_index = 0,
+        .capture_status = FinalGuestSurfaceStatus::Complete,
+        .capture_has_copy = true,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    };
+    const auto plan = PlanPpUpstreamSampleTeeDeferredReadback(attempt);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    std::vector<std::byte> mapped(Shader::PpUpstreamSampleTeeBufferBytes);
+    const PpUpstreamSampleTeePixelRecord pixel{.value = {1, 2, 3, 4}, .writers = 1};
+    std::memcpy(mapped.data() + plan.header_offset, &plan.expected_header,
+                sizeof(plan.expected_header));
+    std::memcpy(mapped.data() + plan.records_offset, &pixel, sizeof(pixel));
+    auto owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    auto lifecycle = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    lifecycle = ObservePpUpstreamSampleTeeOwnedCopy(lifecycle, owned);
+    lifecycle = ObservePpUpstreamSampleTeeOuterSlotRelease(lifecycle, true);
+    lifecycle = FinalizePpUpstreamSampleTeeDeferredLifecycle(lifecycle);
+    auto observation = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, lifecycle, std::move(owned));
+    EXPECT_TRUE(observation.observe_owned);
+    EXPECT_TRUE(observation.publication.publish);
+    EXPECT_EQ(observation.publication.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(observation.lifecycle.finalized);
+    EXPECT_EQ(observation.lifecycle.observed_outer_slot_release_attempts, 1u);
+    EXPECT_EQ(observation.record.candidate_index, record.candidate_index);
+    EXPECT_EQ(observation.record.shader.resource_index, record.shader.resource_index);
+    EXPECT_EQ(observation.record.window.logical_ordinal, record.window.logical_ordinal);
+    ASSERT_EQ(observation.owned.records.size(), 1u);
+    EXPECT_EQ(observation.owned.records[0].value, pixel.value);
+
+    auto oversized_owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    constexpr size_t MaxRetainedRecords =
+        static_cast<size_t>(Shader::PpUpstreamSampleTeeMaxDimension) *
+        Shader::PpUpstreamSampleTeeMaxDimension;
+    oversized_owned.records.reserve(MaxRetainedRecords + 1);
+    auto oversized_lifecycle = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    oversized_lifecycle =
+        ObservePpUpstreamSampleTeeOwnedCopy(oversized_lifecycle, oversized_owned);
+    oversized_lifecycle =
+        ObservePpUpstreamSampleTeeOuterSlotRelease(oversized_lifecycle, true);
+    oversized_lifecycle = FinalizePpUpstreamSampleTeeDeferredLifecycle(oversized_lifecycle);
+    const auto oversized_observation = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, oversized_lifecycle, std::move(oversized_owned));
+    EXPECT_TRUE(oversized_observation.observe_owned);
+    EXPECT_FALSE(oversized_observation.publication.publish);
+    EXPECT_EQ(oversized_observation.publication.status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(oversized_observation.owned.records.empty());
+    EXPECT_EQ(oversized_observation.owned.records.capacity(), 0u);
+
+    auto unfinalized = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    auto rejected = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, unfinalized, CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped));
+    EXPECT_TRUE(rejected.observe_owned);
+    EXPECT_FALSE(rejected.publication.publish);
+    EXPECT_EQ(rejected.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(rejected.owned.records.empty());
+    EXPECT_EQ(rejected.owned.header, PpUpstreamSampleTeeReadbackHeader{});
+
+    auto release_failed = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    auto failed_owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    release_failed = ObservePpUpstreamSampleTeeOwnedCopy(release_failed, failed_owned);
+    release_failed = ObservePpUpstreamSampleTeeOuterSlotRelease(release_failed, false);
+    release_failed = FinalizePpUpstreamSampleTeeDeferredLifecycle(release_failed);
+    rejected = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, release_failed, std::move(failed_owned));
+    EXPECT_TRUE(rejected.observe_owned);
+    EXPECT_FALSE(rejected.publication.publish);
+    EXPECT_EQ(rejected.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(rejected.owned.records.empty());
+
+    auto forged_busy_owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    forged_busy_owned.status = FinalGuestSurfaceStatus::BusyLoss;
+    forged_busy_owned.loss.busy = 1;
+    auto forged_busy_lifecycle = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    forged_busy_lifecycle =
+        ObservePpUpstreamSampleTeeOwnedCopy(forged_busy_lifecycle, forged_busy_owned);
+    forged_busy_lifecycle =
+        ObservePpUpstreamSampleTeeOuterSlotRelease(forged_busy_lifecycle, true);
+    forged_busy_lifecycle = FinalizePpUpstreamSampleTeeDeferredLifecycle(forged_busy_lifecycle);
+    const auto forged_busy = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, forged_busy_lifecycle, std::move(forged_busy_owned));
+    EXPECT_TRUE(forged_busy.observe_owned);
+    EXPECT_FALSE(forged_busy.publication.publish);
+    EXPECT_EQ(forged_busy.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(forged_busy.publication.loss.invalidation, 1u);
+    EXPECT_TRUE(forged_busy.owned.records.empty());
+    EXPECT_EQ(forged_busy.owned.records.capacity(), 0u);
+
+    auto busy_attempt = attempt;
+    busy_attempt.capture_status = FinalGuestSurfaceStatus::BusyLoss;
+    busy_attempt.capture_loss.busy = 1;
+    busy_attempt.capture_has_copy = false;
+    const auto busy_plan = PlanPpUpstreamSampleTeeDeferredReadback(busy_attempt);
+    auto busy_lifecycle = BeginPpUpstreamSampleTeeDeferredLifecycle(busy_plan);
+    busy_lifecycle = ObservePpUpstreamSampleTeeOuterSlotRelease(busy_lifecycle, true);
+    busy_lifecycle = FinalizePpUpstreamSampleTeeDeferredLifecycle(busy_lifecycle);
+    const auto busy_observation = FinalizePpUpstreamSampleTeeDeferredObservation(
+        busy_attempt, busy_lifecycle, {});
+    EXPECT_TRUE(busy_observation.observe_owned);
+    EXPECT_FALSE(busy_observation.publication.publish);
+    EXPECT_EQ(busy_observation.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(busy_observation.publication.loss.busy, 1u);
+    EXPECT_EQ(busy_observation.owned.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(busy_observation.owned.loss.busy, 1u);
+
+    auto malformed_busy_attempt = busy_attempt;
+    malformed_busy_attempt.record.window.logs_values = true;
+    const auto malformed_busy_plan =
+        PlanPpUpstreamSampleTeeDeferredReadback(malformed_busy_attempt);
+    auto malformed_busy_lifecycle =
+        BeginPpUpstreamSampleTeeDeferredLifecycle(malformed_busy_plan);
+    malformed_busy_lifecycle =
+        ObservePpUpstreamSampleTeeOuterSlotRelease(malformed_busy_lifecycle, true);
+    malformed_busy_lifecycle =
+        FinalizePpUpstreamSampleTeeDeferredLifecycle(malformed_busy_lifecycle);
+    const auto malformed_busy = FinalizePpUpstreamSampleTeeDeferredObservation(
+        malformed_busy_attempt, malformed_busy_lifecycle, {});
+    EXPECT_TRUE(malformed_busy.observe_owned);
+    EXPECT_FALSE(malformed_busy.publication.publish);
+    EXPECT_EQ(malformed_busy.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(malformed_busy.publication.loss.busy, 1u);
+    EXPECT_EQ(malformed_busy.publication.loss.invalidation, 1u);
+    EXPECT_TRUE(malformed_busy.owned.records.empty());
+
+    auto contradictory_busy_attempt = busy_attempt;
+    contradictory_busy_attempt.capture_has_copy = true;
+    const auto contradictory_busy_plan =
+        PlanPpUpstreamSampleTeeDeferredReadback(contradictory_busy_attempt);
+    auto contradictory_busy_lifecycle =
+        BeginPpUpstreamSampleTeeDeferredLifecycle(contradictory_busy_plan);
+    contradictory_busy_lifecycle =
+        ObservePpUpstreamSampleTeeOuterSlotRelease(contradictory_busy_lifecycle, true);
+    contradictory_busy_lifecycle =
+        FinalizePpUpstreamSampleTeeDeferredLifecycle(contradictory_busy_lifecycle);
+    const auto contradictory_busy = FinalizePpUpstreamSampleTeeDeferredObservation(
+        contradictory_busy_attempt, contradictory_busy_lifecycle, {});
+    EXPECT_EQ(contradictory_busy.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(contradictory_busy.publication.loss.busy, 1u);
+    EXPECT_EQ(contradictory_busy.publication.loss.invalidation, 1u);
+
+    auto stale_no_token_attempt = attempt;
+    stale_no_token_attempt.outer_slot = {};
+    stale_no_token_attempt.record.window.logs_values = true;
+    const auto stale_no_token_plan =
+        PlanPpUpstreamSampleTeeDeferredReadback(stale_no_token_attempt);
+    auto stale_no_token_lifecycle =
+        BeginPpUpstreamSampleTeeDeferredLifecycle(stale_no_token_plan);
+    stale_no_token_lifecycle =
+        FinalizePpUpstreamSampleTeeDeferredLifecycle(stale_no_token_lifecycle);
+    const auto stale_no_token = FinalizePpUpstreamSampleTeeDeferredObservation(
+        stale_no_token_attempt, stale_no_token_lifecycle, {});
+    EXPECT_EQ(stale_no_token.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(stale_no_token.publication.loss.busy, 1u);
+    EXPECT_EQ(stale_no_token.publication.loss.invalidation, 1u);
+
+    PpUpstreamSampleTeeDeferredReadbackDescriptor empty_no_token_attempt{
+        .enabled = true,
+        .capture_status = FinalGuestSurfaceStatus::BusyLoss,
+        .capture_loss = {.busy = 1},
+    };
+    const auto empty_no_token_plan =
+        PlanPpUpstreamSampleTeeDeferredReadback(empty_no_token_attempt);
+    auto empty_no_token_lifecycle =
+        BeginPpUpstreamSampleTeeDeferredLifecycle(empty_no_token_plan);
+    empty_no_token_lifecycle =
+        FinalizePpUpstreamSampleTeeDeferredLifecycle(empty_no_token_lifecycle);
+    const auto empty_no_token = FinalizePpUpstreamSampleTeeDeferredObservation(
+        empty_no_token_attempt, empty_no_token_lifecycle, {});
+    EXPECT_TRUE(empty_no_token.observe_owned);
+    EXPECT_FALSE(empty_no_token.publication.publish);
+    EXPECT_EQ(empty_no_token.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(empty_no_token.publication.loss.busy, 1u);
+    EXPECT_EQ(empty_no_token.publication.loss.invalidation, 0u);
+
+    auto disabled_attempt = attempt;
+    disabled_attempt.enabled = false;
+    PpUpstreamSampleTeeOwnedReadback private_payload{
+        .records = {{.value = {9, 9, 9, 9}, .writers = 1}},
+        .status = FinalGuestSurfaceStatus::Complete,
+    };
+    const auto disabled_plan = PlanPpUpstreamSampleTeeDeferredReadback(disabled_attempt);
+    auto disabled_lifecycle = BeginPpUpstreamSampleTeeDeferredLifecycle(disabled_plan);
+    disabled_lifecycle = ObservePpUpstreamSampleTeeOuterSlotRelease(disabled_lifecycle, true);
+    disabled_lifecycle = FinalizePpUpstreamSampleTeeDeferredLifecycle(disabled_lifecycle);
+    const auto disabled = FinalizePpUpstreamSampleTeeDeferredObservation(
+        disabled_attempt, disabled_lifecycle, std::move(private_payload));
+    EXPECT_FALSE(disabled.observe_owned);
+    EXPECT_FALSE(disabled.publication.publish);
+    EXPECT_TRUE(disabled.owned.records.empty());
+    EXPECT_EQ(disabled.owned.header, PpUpstreamSampleTeeReadbackHeader{});
+
+    auto omitted_release = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    auto omitted_owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    omitted_release = ObservePpUpstreamSampleTeeOwnedCopy(omitted_release, omitted_owned);
+    omitted_release = FinalizePpUpstreamSampleTeeDeferredLifecycle(omitted_release);
+    rejected = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, omitted_release, std::move(omitted_owned));
+    EXPECT_TRUE(rejected.observe_owned);
+    EXPECT_FALSE(rejected.publication.publish);
+    EXPECT_EQ(rejected.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+
+    auto duplicate_release = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    auto duplicate_owned = CopyPpUpstreamSampleTeeDeferredReadback(plan, true, mapped);
+    duplicate_release = ObservePpUpstreamSampleTeeOwnedCopy(duplicate_release, duplicate_owned);
+    duplicate_release = ObservePpUpstreamSampleTeeOuterSlotRelease(duplicate_release, true);
+    duplicate_release = ObservePpUpstreamSampleTeeOuterSlotRelease(duplicate_release, true);
+    duplicate_release = FinalizePpUpstreamSampleTeeDeferredLifecycle(duplicate_release);
+    rejected = FinalizePpUpstreamSampleTeeDeferredObservation(
+        attempt, duplicate_release, std::move(duplicate_owned));
+    EXPECT_TRUE(rejected.observe_owned);
+    EXPECT_FALSE(rejected.publication.publish);
+    EXPECT_EQ(rejected.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.lifecycle.observed_outer_slot_release_attempts, 2u);
+
+    const auto base_complete = ReconcilePpUpstreamInputSlotRelease(
+        true, true, FinalGuestSurfaceStatus::Complete, {}, true);
+    EXPECT_EQ(base_complete.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(base_complete.copy);
+    EXPECT_EQ(busy_observation.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    const auto base_release_failed = ReconcilePpUpstreamInputSlotRelease(
+        true, false, FinalGuestSurfaceStatus::Complete, {}, true);
+    EXPECT_EQ(base_release_failed.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(base_release_failed.copy);
+}
+
+TEST(PpUpstreamSampleTee, DeferredConsumeOwnsOneInvalidateCopyAndSharedRelease) {
+    const PpUpstreamSampleTeeCandidateRecord record{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 10,
+                   .y = 20,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const FinalGuestSurfaceReadbackSlotPool::Token token{0, 7};
+    const auto capture = PlanPpUpstreamSampleTeeCapture({
+        .enabled = true,
+        .slot_present = true,
+        .slot = token.slot,
+        .generation = token.generation,
+        .candidate_index = 0,
+        .shader = record.shader,
+        .window = record.window,
+    });
+    const auto commands = PlanPpUpstreamSampleTeeCommands({
+        .enabled = true,
+        .binding = {.status = FinalGuestSurfaceStatus::Complete, .bind = true},
+        .capture = capture,
+        .non_coherent_atom_size = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .output_candidate_count = 1,
+        .direct_draw = true,
+        .rendering_active = true,
+        .observed_rendering_serial = 73,
+        .expected_rendering_serial = 73,
+    });
+    const PpUpstreamSampleTeeControllerState controller{
+        .candidate_index = 0,
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialized = true,
+        .armed = true,
+        .draw_executed = true,
+        .post_barrier_complete = true,
+        .ready = true,
+    };
+    const PpUpstreamSampleTeeDeferredReadbackDescriptor attempt{
+        .enabled = true,
+        .outer_slot = token,
+        .record = record,
+        .capture = capture,
+        .commands = commands,
+        .controller = controller,
+        .selected_candidate_index = 0,
+        .capture_status = FinalGuestSurfaceStatus::Complete,
+        .capture_has_copy = true,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    };
+    const auto plan = PlanPpUpstreamSampleTeeDeferredReadback(attempt);
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    std::vector<std::byte> mapped(Shader::PpUpstreamSampleTeeBufferBytes);
+    const PpUpstreamSampleTeePixelRecord pixel{.value = {1, 2, 3, 4}, .writers = 1};
+    const auto prepare_mapped = [&] {
+        std::memcpy(mapped.data() + plan.header_offset, &plan.expected_header,
+                    sizeof(plan.expected_header));
+        std::memcpy(mapped.data() + plan.records_offset, &pixel, sizeof(pixel));
+    };
+    const PpUpstreamInputPublication base{
+        .status = FinalGuestSurfaceStatus::Complete,
+        .copy = true,
+    };
+
+    prepare_mapped();
+    u32 invalidations{};
+    u32 releases{};
+    auto consumed = ConsumePpUpstreamSampleTeeDeferredReadback(
+        attempt, base, mapped,
+        [&](u64 offset, u64 bytes) {
+            ++invalidations;
+            EXPECT_EQ(offset, plan.invalidate_offset);
+            EXPECT_EQ(bytes, plan.invalidate_bytes);
+            return true;
+        },
+        [&](FinalGuestSurfaceReadbackSlotPool::Token released_token) {
+            ++releases;
+            EXPECT_EQ(released_token.slot, token.slot);
+            EXPECT_EQ(released_token.generation, token.generation);
+            std::memset(mapped.data() + plan.records_offset, 0, sizeof(pixel));
+            return true;
+        });
+    EXPECT_EQ(invalidations, 1u);
+    EXPECT_EQ(releases, 1u);
+    EXPECT_TRUE(consumed.release_attempted);
+    EXPECT_TRUE(consumed.release_succeeded);
+    EXPECT_EQ(consumed.base.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(consumed.base.copy);
+    EXPECT_TRUE(consumed.tee.publication.publish);
+    ASSERT_EQ(consumed.tee.owned.records.size(), 1u);
+    EXPECT_EQ(consumed.tee.owned.records[0].value, pixel.value);
+
+    prepare_mapped();
+    invalidations = 0;
+    releases = 0;
+    consumed = ConsumePpUpstreamSampleTeeDeferredReadback(
+        attempt, base, mapped,
+        [&](u64, u64) {
+            ++invalidations;
+            return false;
+        },
+        [&](FinalGuestSurfaceReadbackSlotPool::Token) {
+            ++releases;
+            return true;
+        });
+    EXPECT_EQ(invalidations, 1u);
+    EXPECT_EQ(releases, 1u);
+    EXPECT_EQ(consumed.base.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(consumed.base.copy);
+    EXPECT_FALSE(consumed.tee.publication.publish);
+    EXPECT_EQ(consumed.tee.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(consumed.tee.owned.records.empty());
+    EXPECT_EQ(consumed.tee.owned.records.capacity(), 0u);
+
+    prepare_mapped();
+    consumed = ConsumePpUpstreamSampleTeeDeferredReadback(
+        attempt, base, mapped, [](u64, u64) { return true; },
+        [](FinalGuestSurfaceReadbackSlotPool::Token) { return false; });
+    EXPECT_EQ(consumed.base.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(consumed.base.copy);
+    EXPECT_EQ(consumed.tee.publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(consumed.tee.owned.records.empty());
+
+    auto disabled = attempt;
+    disabled.enabled = false;
+    invalidations = 0;
+    releases = 0;
+    consumed = ConsumePpUpstreamSampleTeeDeferredReadback(
+        disabled, base, mapped,
+        [&](u64, u64) {
+            ++invalidations;
+            return true;
+        },
+        [&](FinalGuestSurfaceReadbackSlotPool::Token) {
+            ++releases;
+            return true;
+        });
+    EXPECT_EQ(invalidations, 0u);
+    EXPECT_EQ(releases, 1u);
+    EXPECT_EQ(consumed.base.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(consumed.tee.observe_owned);
+
+    auto busy = attempt;
+    busy.capture_status = FinalGuestSurfaceStatus::BusyLoss;
+    busy.capture_loss.busy = 1;
+    busy.capture_has_copy = false;
+    invalidations = 0;
+    releases = 0;
+    consumed = ConsumePpUpstreamSampleTeeDeferredReadback(
+        busy, base, mapped,
+        [&](u64, u64) {
+            ++invalidations;
+            return true;
+        },
+        [&](FinalGuestSurfaceReadbackSlotPool::Token) {
+            ++releases;
+            return true;
+        });
+    EXPECT_EQ(invalidations, 0u);
+    EXPECT_EQ(releases, 1u);
+    EXPECT_EQ(consumed.base.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(consumed.tee.observe_owned);
+    EXPECT_EQ(consumed.tee.publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(consumed.tee.publication.loss.busy, 1u);
+
+    auto no_token = attempt;
+    no_token.outer_slot = {};
+    releases = 0;
+    consumed = ConsumePpUpstreamSampleTeeDeferredReadback(
+        no_token, base, mapped, [](u64, u64) { return true; },
+        [&](FinalGuestSurfaceReadbackSlotPool::Token) {
+            ++releases;
+            return true;
+        });
+    EXPECT_EQ(releases, 0u);
+    EXPECT_FALSE(consumed.release_attempted);
+    EXPECT_FALSE(consumed.release_succeeded);
+    EXPECT_EQ(consumed.base.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(consumed.base.copy);
+}
+
+TEST(PpUpstreamSampleTee, CalibratedReducerUsesExactScreenshotAbcAndReportsAggregatesOnly) {
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 699, .frame_count = 5};
+    PpUpstreamSampleTeeCalibratedReducer reducer{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 0, 3};
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 10,
+                   .y = 20,
+                   .width = 1,
+                   .height = 3,
+                   .pixel_count = 3,
+                   .total_bytes = 3 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const auto make_owned = [&](u32 generation,
+                                std::array<std::array<u32, 4>, 3> values) {
+        PpUpstreamSampleTeeOwnedReadback owned{
+            .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                       .generation = generation,
+                       .candidate_index = 0,
+                       .x = 10,
+                       .y = 20,
+                       .width = 1,
+                       .height = 3,
+                       .pixel_count = 3},
+            .status = FinalGuestSurfaceStatus::Complete,
+            .mapped_invalidation_succeeded = true,
+            .bounded_record_copy_succeeded = true,
+        };
+        for (const auto& value : values) {
+            owned.records.push_back({.value = value, .writers = 1});
+        }
+        return owned;
+    };
+    const std::array a_values{std::array<u32, 4>{1, 1, 1, 1},
+                              std::array<u32, 4>{3, 3, 3, 3},
+                              std::array<u32, 4>{4, 4, 4, 4}};
+    const std::array b_values{std::array<u32, 4>{2, 2, 2, 2},
+                              std::array<u32, 4>{3, 3, 3, 3},
+                              std::array<u32, 4>{5, 5, 5, 5}};
+    const std::array c_values{std::array<u32, 4>{1, 1, 1, 1},
+                              std::array<u32, 4>{3, 3, 3, 3},
+                              std::array<u32, 4>{6, 6, 6, 6}};
+    reducer.ObserveOwned(699, candidate, make_owned(1, a_values));
+    reducer.ObserveOwned(700, candidate, make_owned(2, a_values));
+    reducer.ObserveOwned(701, candidate, make_owned(3, b_values));
+    reducer.ObserveOwned(702, candidate, make_owned(4, c_values));
+    reducer.ObserveOwned(703, candidate, make_owned(5, c_values));
+    reducer.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 700, .process_time_us = 1'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 701, .process_time_us = 2'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 702, .process_time_us = 3'000, .valid = true});
+
+    auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = reports[0];
+    EXPECT_EQ(report.request_ordinal, 3u);
+    EXPECT_EQ(report.sequences, (std::array<u64, 3>{700, 701, 702}));
+    EXPECT_EQ(report.reduction.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(report.reduction.covered_pixels, 3u);
+    EXPECT_EQ(report.reduction.aba_pixels, 1u);
+    EXPECT_EQ(report.reduction.stable_pixels, 1u);
+    EXPECT_EQ(report.reduction.ambiguous_pixels, 1u);
+    EXPECT_TRUE(report.reduction.departed);
+    EXPECT_FALSE(report.reduction.retains_values);
+    const auto line = FormatPpUpstreamSampleTeeCalibratedReport(report);
+    EXPECT_EQ(line,
+              "FGSCTT q=3 abc=700/701/702 cov=3 aba=1 stable=1 amb=1 writers=0 missing=0 "
+              "departed=1 st=0 lm=0");
+    for (const std::string_view forbidden : {"value", "rgba", " x=", " y=", "candidate",
+                                             "generation", "resource", "shader", "uid", "hash"}) {
+        EXPECT_EQ(line.find(forbidden), std::string::npos);
+    }
+    auto coverage = reducer.GetCoverage();
+    EXPECT_FALSE(coverage.ready);
+    EXPECT_EQ(coverage.calibrations, 3u);
+    EXPECT_EQ(coverage.eligible, 1u);
+    EXPECT_EQ(coverage.emitted, 1u);
+    EXPECT_EQ(coverage.complete, 1u);
+    EXPECT_EQ(coverage.loss, 0u);
+    reducer.Finish();
+    coverage = reducer.GetCoverage();
+    EXPECT_TRUE(coverage.ready);
+    const auto coverage_line = FormatPpUpstreamSampleTeeCalibratedCoverage(coverage);
+    EXPECT_EQ(coverage_line, "FGSCTTC c=3 o=0 e=1/1/1 lm=0");
+    for (const std::string_view forbidden : {"ready", "value", "rgba", " x=", " y=",
+                                             "candidate", "generation", "resource", "shader",
+                                             "uid", "hash"}) {
+        EXPECT_EQ(coverage_line.find(forbidden), std::string::npos);
+    }
+}
+
+TEST(PpUpstreamSampleTee, CalibratedOutputPublishesOnlyAfterExactTerminalCoverage) {
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 700, .frame_count = 3};
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const auto populate = [&](PpUpstreamSampleTeeCalibratedReducer& reducer) {
+        for (u32 index = 0; index < 3; ++index) {
+            const u64 sequence = 700 + index;
+            reducer.ObserveOwned(
+                sequence, candidate,
+                {.header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                            .generation = index + 1,
+                            .candidate_index = 0,
+                            .width = 1,
+                            .height = 1,
+                            .pixel_count = 1},
+                 .records = {{.value = {index == 1 ? 2u : 1u, 0, 0, 0}, .writers = 1}},
+                 .status = FinalGuestSurfaceStatus::Complete,
+                 .mapped_invalidation_succeeded = true,
+                 .bounded_record_copy_succeeded = true});
+            reducer.ObserveCalibration({.request_ordinal = index + 1,
+                                        .sequence = sequence,
+                                        .process_time_us = (index + 1) * 1'000,
+                                        .valid = true});
+        }
+    };
+
+    PpUpstreamSampleTeeCalibratedReducer complete{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 0, 3};
+    populate(complete);
+    EXPECT_FALSE(complete.GetCoverage().ready);
+    auto output = FinalizePpUpstreamSampleTeeCalibratedOutput(complete);
+    EXPECT_TRUE(output.coverage.ready);
+    ASSERT_EQ(output.reports.size(), 1u);
+    EXPECT_EQ(output.reports[0].reduction.aba_pixels, 1u);
+
+    PpUpstreamSampleTeeCalibratedReducer incomplete{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 0, 4};
+    populate(incomplete);
+    output = FinalizePpUpstreamSampleTeeCalibratedOutput(incomplete);
+    EXPECT_FALSE(output.coverage.ready);
+    EXPECT_EQ(output.coverage.loss, 1u);
+    EXPECT_TRUE(output.reports.empty());
+}
+
+TEST(PpUpstreamSampleTee, CalibratedReducerCapsHistoryAndNeverSubstitutesNearestFrames) {
+    PpUpstreamSampleTeeCalibratedReducer reducer{
+        {.frame_start = 100, .frame_count = 40}, PpUpstreamSampleTeeCalibratedReducer::MaxHistory};
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    for (u64 sequence = 100; sequence <= 132; ++sequence) {
+        PpUpstreamSampleTeeOwnedReadback owned{
+            .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                       .generation = static_cast<u32>(sequence - 99),
+                       .candidate_index = 0,
+                       .width = 1,
+                       .height = 1,
+                       .pixel_count = 1},
+            .records = {{.value = {static_cast<u32>(sequence), 0, 0, 0}, .writers = 1}},
+            .status = FinalGuestSurfaceStatus::Complete,
+            .mapped_invalidation_succeeded = true,
+            .bounded_record_copy_succeeded = true,
+        };
+        reducer.ObserveOwned(sequence, candidate, std::move(owned));
+    }
+    EXPECT_EQ(reducer.RetainedObservationCount(), 32u);
+    reducer.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 100, .process_time_us = 1'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 101, .process_time_us = 2'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 102, .process_time_us = 3'000, .valid = true});
+    auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].sequences, (std::array<u64, 3>{100, 101, 102}));
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(reports[0].reduction.loss.history, 1u);
+    reducer.Finish();
+    EXPECT_EQ(reducer.RetainedObservationCount(), 0u);
+}
+
+TEST(PpUpstreamSampleTee, CalibratedReducerFailsClosedOnPrivateLayoutDriftAndSpecificLoss) {
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 200, .frame_count = 6};
+    PpUpstreamSampleTeeCalibratedReducer reducer{window};
+    PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const auto owned = [](u32 generation) {
+        return PpUpstreamSampleTeeOwnedReadback{
+            .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                       .generation = generation,
+                       .candidate_index = 0,
+                       .width = 1,
+                       .height = 1,
+                       .pixel_count = 1},
+            .records = {{.value = {1, 2, 3, 4}, .writers = 1}},
+            .status = FinalGuestSurfaceStatus::Complete,
+            .mapped_invalidation_succeeded = true,
+            .bounded_record_copy_succeeded = true,
+        };
+    };
+    reducer.ObserveOwned(200, candidate, owned(1));
+    auto changed = candidate;
+    changed.shader.resource_index = 3;
+    reducer.ObserveOwned(201, changed, owned(2));
+    reducer.ObserveOwned(202, candidate, owned(3));
+    reducer.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 200, .process_time_us = 1'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 201, .process_time_us = 2'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 202, .process_time_us = 3'000, .valid = true});
+    auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(reports[0].reduction.loss.invalidation, 1u);
+
+    PpUpstreamSampleTeeCalibratedReducer specific{window};
+    auto failed = owned(4);
+    failed.status = FinalGuestSurfaceStatus::BusyLoss;
+    failed.loss.busy = 1;
+    failed.records.clear();
+    specific.ObserveOwned(203, candidate, std::move(failed));
+    specific.ObserveOwned(204, candidate, owned(5));
+    specific.ObserveOwned(205, candidate, owned(6));
+    specific.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 203, .process_time_us = 4'000, .valid = true});
+    specific.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 204, .process_time_us = 5'000, .valid = true});
+    specific.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 205, .process_time_us = 6'000, .valid = true});
+    reports = specific.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(reports[0].reduction.loss.busy, 1u);
+
+    PpUpstreamSampleTeeCalibratedReducer specific_with_private_drift{window};
+    auto failed_with_private_drift = owned(7);
+    failed_with_private_drift.status = FinalGuestSurfaceStatus::BusyLoss;
+    failed_with_private_drift.loss.busy = 1;
+    failed_with_private_drift.records.clear();
+    auto private_drift = candidate;
+    private_drift.window.logs_values = true;
+    specific_with_private_drift.ObserveOwned(200, private_drift,
+                                             std::move(failed_with_private_drift));
+    specific_with_private_drift.ObserveOwned(201, candidate, owned(8));
+    specific_with_private_drift.ObserveOwned(202, candidate, owned(9));
+    specific_with_private_drift.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 200, .process_time_us = 7'000, .valid = true});
+    specific_with_private_drift.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 201, .process_time_us = 8'000, .valid = true});
+    specific_with_private_drift.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 202, .process_time_us = 9'000, .valid = true});
+    reports = specific_with_private_drift.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(reports[0].reduction.loss.busy, 1u);
+    EXPECT_EQ(reports[0].reduction.loss.invalidation, 0u);
+}
+
+TEST(PpUpstreamSampleTee, CalibratedReducerFinishIsTerminalAndClearsPrivateHistory) {
+    PpUpstreamSampleTeeCalibratedReducer reducer{{.frame_start = 300, .frame_count = 3}};
+    reducer.Finish();
+    reducer.Finish();
+
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    PpUpstreamSampleTeeOwnedReadback owned{
+        .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                   .generation = 1,
+                   .candidate_index = 0,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1},
+        .records = {{.value = {1, 2, 3, 4}, .writers = 1}},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .mapped_invalidation_succeeded = true,
+        .bounded_record_copy_succeeded = true,
+    };
+    reducer.ObserveOwned(300, candidate, std::move(owned));
+    reducer.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 300, .process_time_us = 1'000, .valid = true});
+
+    EXPECT_EQ(reducer.RetainedObservationCount(), 0u);
+    EXPECT_TRUE(reducer.TakeReports().empty());
+    const auto coverage = reducer.GetCoverage();
+    EXPECT_EQ(coverage.calibrations, 0u);
+    EXPECT_EQ(coverage.outside, 0u);
+    EXPECT_EQ(coverage.eligible, 0u);
+    EXPECT_EQ(coverage.emitted, 0u);
+    EXPECT_EQ(coverage.complete, 0u);
+    EXPECT_EQ(coverage.loss, 0u);
+    EXPECT_TRUE(coverage.ready);
+}
+
+TEST(PpUpstreamSampleTee, CalibratedReducerRejectsUnselectedCandidateAndRetainsNoFailedRecords) {
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 400, .frame_count = 3};
+    PpUpstreamSampleTeeCalibratedReducer reducer{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 0, 3};
+    PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 1,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const auto owned = [](u32 generation, u32 candidate_index, size_t record_count = 1) {
+        PpUpstreamSampleTeeOwnedReadback result{
+            .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                       .generation = generation,
+                       .candidate_index = candidate_index,
+                       .width = 1,
+                       .height = 1,
+                       .pixel_count = 1},
+            .status = FinalGuestSurfaceStatus::Complete,
+            .mapped_invalidation_succeeded = true,
+            .bounded_record_copy_succeeded = true,
+        };
+        result.records.resize(record_count, {.value = {1, 2, 3, 4}, .writers = 1});
+        return result;
+    };
+    reducer.ObserveOwned(400, candidate, owned(1, 1));
+    reducer.ObserveOwned(401, candidate, owned(2, 1));
+    reducer.ObserveOwned(402, candidate, owned(3, 1));
+    reducer.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 400, .process_time_us = 1'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 401, .process_time_us = 2'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 402, .process_time_us = 3'000, .valid = true});
+    auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(reports[0].reduction.loss.invalidation, 3u);
+
+    PpUpstreamSampleTeeCalibratedReducer selected_one{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 1};
+    selected_one.ObserveOwned(400, candidate, owned(4, 1));
+    selected_one.ObserveOwned(401, candidate, owned(5, 1));
+    selected_one.ObserveOwned(402, candidate, owned(6, 1));
+    selected_one.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 400, .process_time_us = 1'000, .valid = true});
+    selected_one.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 401, .process_time_us = 2'000, .valid = true});
+    selected_one.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 402, .process_time_us = 3'000, .valid = true});
+    reports = selected_one.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(reports[0].reduction.loss.Any());
+
+    candidate.candidate_index = 0;
+    PpUpstreamSampleTeeCalibratedReducer failed{window};
+    auto oversized_failure = owned(4, 0, 5'000);
+    oversized_failure.status = FinalGuestSurfaceStatus::BusyLoss;
+    oversized_failure.loss.busy = 1;
+    failed.ObserveOwned(400, candidate, std::move(oversized_failure));
+    EXPECT_EQ(failed.RetainedRecordCapacity(), 0u);
+}
+
+TEST(PpUpstreamSampleTee, CalibratedReducerPreservesSpecificLossBeforeMissingHistory) {
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 500, .frame_count = 3};
+    PpUpstreamSampleTeeCalibratedReducer reducer{window};
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const auto failed = [](u32 generation, u32 busy) {
+        return PpUpstreamSampleTeeOwnedReadback{
+            .header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                       .generation = generation,
+                       .candidate_index = 0,
+                       .width = 1,
+                       .height = 1,
+                       .pixel_count = 1},
+            .status = FinalGuestSurfaceStatus::BusyLoss,
+            .loss = {.busy = busy},
+            .mapped_invalidation_succeeded = true,
+        };
+    };
+    reducer.ObserveOwned(501, candidate, failed(1, std::numeric_limits<u32>::max()));
+    reducer.ObserveOwned(502, candidate, failed(2, 1));
+    reducer.ObserveCalibration(
+        {.request_ordinal = 1, .sequence = 500, .process_time_us = 1'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 501, .process_time_us = 2'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 502, .process_time_us = 3'000, .valid = true});
+    const auto reports = reducer.TakeReports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].reduction.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(reports[0].reduction.loss.busy, std::numeric_limits<u32>::max());
+    EXPECT_EQ(reports[0].reduction.loss.history, 0u);
+}
+
+TEST(PpUpstreamSampleTee, CalibratedCoverageRequiresExactExpectedOrdinalsAndSaturates) {
+    const FinalGuestSurfaceCaptureWindow window{.frame_start = 600, .frame_count = 3};
+    PpUpstreamSampleTeeCalibratedReducer reducer{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 0, 3};
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .width = 1,
+                   .height = 1,
+                   .pixel_count = 1,
+                   .total_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    for (u64 sequence = 600; sequence <= 602; ++sequence) {
+        reducer.ObserveOwned(
+            sequence, candidate,
+            {.header = {.magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+                        .generation = static_cast<u32>(sequence - 599),
+                        .candidate_index = 0,
+                        .width = 1,
+                        .height = 1,
+                        .pixel_count = 1},
+             .records = {{.value = {1, 2, 3, 4}, .writers = 1}},
+             .status = FinalGuestSurfaceStatus::Complete,
+             .mapped_invalidation_succeeded = true,
+             .bounded_record_copy_succeeded = true});
+    }
+    reducer.ObserveCalibration(
+        {.request_ordinal = 2, .sequence = 600, .process_time_us = 1'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 3, .sequence = 601, .process_time_us = 2'000, .valid = true});
+    reducer.ObserveCalibration(
+        {.request_ordinal = 4, .sequence = 602, .process_time_us = 3'000, .valid = true});
+    const auto sparse = reducer.GetCoverage();
+    EXPECT_FALSE(sparse.ready);
+    EXPECT_EQ(sparse.calibrations, 3u);
+    EXPECT_EQ(sparse.loss, 2u);
+
+    PpUpstreamSampleTeeCalibratedReducer saturated{
+        window, PpUpstreamSampleTeeCalibratedReducer::MaxHistory, 0,
+        std::numeric_limits<u32>::max()};
+    saturated.ObserveCalibration({});
+    const auto overflow = saturated.GetCoverage();
+    EXPECT_EQ(overflow.loss, std::numeric_limits<u32>::max());
+    EXPECT_FALSE(overflow.ready);
+}
+
+TEST(PpUpstreamSampleTee, ReductionRejectsMoreThanOneBoundedWindow) {
+    constexpr size_t TooManyRecords =
+        Shader::PpUpstreamSampleTeeMaxDimension * Shader::PpUpstreamSampleTeeMaxDimension + 1;
+    const std::vector<PpUpstreamSampleTeePixelRecord> records(TooManyRecords,
+                                                              {.writers = 1});
+    const auto reduction = ReducePpUpstreamSampleTee(records, records, records);
+    EXPECT_EQ(reduction.status, FinalGuestSurfaceStatus::CapacityLoss);
+    EXPECT_EQ(reduction.loss.byte_capacity, 1u);
+    EXPECT_EQ(reduction.covered_pixels, 0u);
+}
+
+TEST(PpUpstreamSampleTee, CaptureLifecycleLossPrecedesMissingCandidate) {
+    PpUpstreamSampleTeeRuntimeReconciliation failed{
+        .enabled = true,
+        .selected_candidate_index = 0,
+        .capture_status = FinalGuestSurfaceStatus::InvalidationLoss,
+    };
+    failed.capture_loss.invalidation = 1;
+    auto publication = ReconcilePpUpstreamSampleTeeRuntime(failed);
+    EXPECT_FALSE(publication.publish);
+    EXPECT_EQ(publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(publication.loss.invalidation, 1u);
+    EXPECT_EQ(publication.loss.gap, 0u);
+
+    failed.capture_status = FinalGuestSurfaceStatus::BusyLoss;
+    failed.capture_loss = {};
+    failed.capture_loss.busy = 1;
+    publication = ReconcilePpUpstreamSampleTeeRuntime(failed);
+    EXPECT_FALSE(publication.publish);
+    EXPECT_EQ(publication.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(publication.loss.busy, 1u);
+    EXPECT_EQ(publication.loss.gap, 0u);
+
+    failed = {
+        .enabled = true,
+        .selected_candidate_index = 0,
+        .capture_status = FinalGuestSurfaceStatus::Complete,
+        .capture_has_copy = true,
+        .initialized = true,
+        .armed = true,
+        .draw_executed = true,
+        .post_barrier_complete = false,
+    };
+    publication = ReconcilePpUpstreamSampleTeeRuntime(failed);
+    EXPECT_FALSE(publication.publish);
+    EXPECT_EQ(publication.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(publication.loss.invalidation, 1u);
+    EXPECT_EQ(publication.loss.gap, 0u);
+}
+
+TEST(PpUpstreamSampleTee, RuntimePlanEncodesOneBoundedSlotAndLateFragmentPush) {
+    EXPECT_EQ(sizeof(PpUpstreamSampleTeeReadbackHeader), 8u * sizeof(u32));
+    EXPECT_EQ(sizeof(PpUpstreamSampleTeePixelRecord), 5u * sizeof(u32));
+    const auto binding = PlanPpUpstreamSampleTeeBinding({
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .buffer_type = Shader::BufferType::PpUpstreamSampleTee,
+        .is_written = true,
+        .descriptor_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .buffer_present = true,
+        .buffer_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    });
+    ASSERT_EQ(binding.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(binding.bind);
+
+    const PpUpstreamSampleTeeShaderPlan shader{
+        .resource_index = 2,
+        .eligible_result_count = 1,
+        .additional_image_operations = 0,
+        .tee_storage_operations = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .arm = true,
+    };
+    const PpUpstreamSampleTeeWindowPlan window{
+        .logical_ordinal = 1299,
+        .x = 816,
+        .y = 384,
+        .width = 48,
+        .height = 48,
+        .pixel_count = 48 * 48,
+        .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+        .status = FinalGuestSurfaceStatus::Complete,
+        .capture = true,
+    };
+    const auto plan = PlanPpUpstreamSampleTeeCapture({
+        .enabled = true,
+        .slot_present = true,
+        .slot = 7,
+        .generation = 91,
+        .candidate_index = 0,
+        .shader = shader,
+        .window = window,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(plan.initialize);
+    EXPECT_TRUE(plan.arm);
+    EXPECT_TRUE(plan.require_post_barrier);
+    EXPECT_EQ(plan.slot_offset, 917504u);
+    EXPECT_EQ(plan.slot_bytes, 131072u);
+    EXPECT_EQ(plan.clear_offset, 917536u);
+    EXPECT_EQ(plan.clear_bytes, 131040u);
+    EXPECT_EQ(plan.base_dword, 229376u);
+    EXPECT_EQ(plan.control, 0x80000002u);
+    EXPECT_EQ(plan.push_offset, 120u);
+    EXPECT_EQ(plan.push_bytes, 8u);
+    EXPECT_EQ(plan.header.magic, Shader::PpUpstreamSampleTeeHeaderMagic);
+    EXPECT_EQ(plan.header.generation, 91u);
+    EXPECT_EQ(plan.header.candidate_index, 0u);
+    EXPECT_EQ(plan.header.x, 816u);
+    EXPECT_EQ(plan.header.y, 384u);
+    EXPECT_EQ(plan.header.width, 48u);
+    EXPECT_EQ(plan.header.height, 48u);
+    EXPECT_EQ(plan.header.pixel_count, 48u * 48u);
+    EXPECT_EQ(plan.image_operations, 0u);
+    EXPECT_EQ(plan.texture_operations, 0u);
+    EXPECT_EQ(plan.scheduler_waits, 0u);
+    EXPECT_EQ(plan.scheduler_finishes, 0u);
+    EXPECT_FALSE(plan.logs_private_state);
+
+    const auto boundary = PlanPpUpstreamSampleTeeCapture({
+        .enabled = true,
+        .slot_present = true,
+        .slot = 0,
+        .generation = 1,
+        .candidate_index = 3,
+        .shader = {.resource_index = Shader::NUM_IMAGES - 1,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = window,
+    });
+    ASSERT_EQ(boundary.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(boundary.control, 0x800000ffu);
+}
+
+TEST(PpUpstreamSampleTee, RuntimePlanRejectsMissingBindingTokenAndMalformedShape) {
+    PpUpstreamSampleTeeBindingDescriptor binding{
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .buffer_type = Shader::BufferType::PpUpstreamSampleTee,
+        .is_written = true,
+        .descriptor_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .buffer_present = true,
+        .buffer_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    };
+    binding.buffer_present = false;
+    auto binding_plan = PlanPpUpstreamSampleTeeBinding(binding);
+    EXPECT_FALSE(binding_plan.bind);
+    EXPECT_EQ(binding_plan.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    binding.buffer_present = true;
+    binding.stage = Shader::LogicalStage::Vertex;
+    binding_plan = PlanPpUpstreamSampleTeeBinding(binding);
+    EXPECT_FALSE(binding_plan.bind);
+    EXPECT_EQ(binding_plan.status, FinalGuestSurfaceStatus::Unsupported);
+    binding.stage = Shader::LogicalStage::Fragment;
+    binding.is_written = false;
+    EXPECT_FALSE(PlanPpUpstreamSampleTeeBinding(binding).bind);
+    binding.is_written = true;
+    binding.mapped_bytes--;
+    EXPECT_FALSE(PlanPpUpstreamSampleTeeBinding(binding).bind);
+
+    PpUpstreamSampleTeeCaptureDescriptor capture{
+        .enabled = true,
+        .slot_present = true,
+        .slot = 0,
+        .generation = 1,
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 816,
+                   .y = 384,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48,
+                   .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+    };
+    capture.slot_present = false;
+    auto capture_plan = PlanPpUpstreamSampleTeeCapture(capture);
+    EXPECT_EQ(capture_plan.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(capture_plan.loss.busy, 1u);
+    capture.slot_present = true;
+    capture.slot = Shader::PpUpstreamSampleTeeSlotCount;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.slot = 0;
+    capture.generation = 0;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.generation = 1;
+    capture.candidate_index = 4;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.candidate_index = 0;
+    capture.window.width = Shader::PpUpstreamSampleTeeMaxDimension + 1;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.window.width = 48;
+    capture.window.total_bytes += sizeof(PpUpstreamSampleTeePixelRecord);
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.window.total_bytes -= sizeof(PpUpstreamSampleTeePixelRecord);
+    capture.shader.additional_image_operations = 1;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.shader.additional_image_operations = 0;
+    capture.shader.retains_private_route = true;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.shader.retains_private_route = false;
+    capture.window.logs_coordinates = true;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    capture.window.logs_coordinates = false;
+    capture.window.logs_values = true;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCapture(capture).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+}
+
+TEST(PpUpstreamSampleTee, CommandPlanSplitsRenderingAndOrdersExactSlotVisibility) {
+    constexpr auto AllGraphicsPushStages = static_cast<PpUpstreamSampleTeeStage>(1u << 4);
+    const auto binding = PlanPpUpstreamSampleTeeBinding({
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .buffer_type = Shader::BufferType::PpUpstreamSampleTee,
+        .is_written = true,
+        .descriptor_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .buffer_present = true,
+        .buffer_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    });
+    const auto capture = PlanPpUpstreamSampleTeeCapture({
+        .enabled = true,
+        .slot_present = true,
+        .slot = 7,
+        .generation = 91,
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 816,
+                   .y = 384,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48,
+                   .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+    });
+    const auto plan = PlanPpUpstreamSampleTeeCommands({
+        .enabled = true,
+        .binding = binding,
+        .capture = capture,
+        .non_coherent_atom_size = 256,
+        .output_candidate_count = 1,
+        .direct_draw = true,
+        .rendering_active = true,
+        .observed_rendering_serial = 77,
+        .expected_rendering_serial = 77,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(plan.requires_allocation);
+    EXPECT_TRUE(plan.bind_buffer);
+    EXPECT_TRUE(plan.initialize);
+    EXPECT_TRUE(plan.arm);
+    EXPECT_TRUE(plan.issue_draw);
+    EXPECT_TRUE(plan.require_post_barrier);
+    EXPECT_TRUE(plan.defer_readback);
+    EXPECT_TRUE(plan.force_load);
+    EXPECT_TRUE(plan.require_preserved_serial);
+    EXPECT_EQ(plan.serial, 77u);
+    EXPECT_EQ(plan.operation_count, 12u);
+    EXPECT_EQ(plan.operations[0], PpUpstreamSampleTeeCommandOp::EndPreRendering);
+    EXPECT_EQ(plan.operations[1], PpUpstreamSampleTeeCommandOp::BarrierToTransfer);
+    EXPECT_EQ(plan.operations[2], PpUpstreamSampleTeeCommandOp::ClearRecords);
+    EXPECT_EQ(plan.operations[3], PpUpstreamSampleTeeCommandOp::UpdateHeader);
+    EXPECT_EQ(plan.operations[4], PpUpstreamSampleTeeCommandOp::BarrierToFragment);
+    EXPECT_EQ(plan.operations[5], PpUpstreamSampleTeeCommandOp::ResumePreRendering);
+    EXPECT_EQ(plan.operations[6], PpUpstreamSampleTeeCommandOp::LateFragmentPush);
+    EXPECT_EQ(plan.operations[7], PpUpstreamSampleTeeCommandOp::GuestDraw);
+    EXPECT_EQ(plan.operations[8], PpUpstreamSampleTeeCommandOp::EndPostRendering);
+    EXPECT_EQ(plan.operations[9], PpUpstreamSampleTeeCommandOp::BarrierToHost);
+    EXPECT_EQ(plan.operations[10], PpUpstreamSampleTeeCommandOp::ResumePostRendering);
+    EXPECT_EQ(plan.operations[11], PpUpstreamSampleTeeCommandOp::DeferReadback);
+    EXPECT_EQ(plan.reuse_barrier.src_stages,
+              PpUpstreamSampleTeeStage::AllCommands | PpUpstreamSampleTeeStage::Host);
+    EXPECT_EQ(plan.reuse_barrier.src_access,
+              PpUpstreamSampleTeeAccess::MemoryRead | PpUpstreamSampleTeeAccess::MemoryWrite |
+                  PpUpstreamSampleTeeAccess::HostRead);
+    EXPECT_EQ(plan.reuse_barrier.dst_stages, PpUpstreamSampleTeeStage::Transfer);
+    EXPECT_EQ(plan.reuse_barrier.dst_access, PpUpstreamSampleTeeAccess::TransferWrite);
+    EXPECT_EQ(plan.fragment_barrier.src_stages, PpUpstreamSampleTeeStage::Transfer);
+    EXPECT_EQ(plan.fragment_barrier.src_access, PpUpstreamSampleTeeAccess::TransferWrite);
+    EXPECT_EQ(plan.fragment_barrier.dst_stages, PpUpstreamSampleTeeStage::FragmentShader);
+    EXPECT_EQ(plan.fragment_barrier.dst_access,
+              PpUpstreamSampleTeeAccess::ShaderRead | PpUpstreamSampleTeeAccess::ShaderWrite);
+    EXPECT_EQ(plan.host_barrier.src_stages,
+              PpUpstreamSampleTeeStage::Transfer | PpUpstreamSampleTeeStage::FragmentShader);
+    EXPECT_EQ(plan.host_barrier.src_access,
+              PpUpstreamSampleTeeAccess::TransferWrite | PpUpstreamSampleTeeAccess::ShaderWrite);
+    EXPECT_EQ(plan.host_barrier.dst_stages, PpUpstreamSampleTeeStage::Host);
+    EXPECT_EQ(plan.host_barrier.dst_access, PpUpstreamSampleTeeAccess::HostRead);
+    EXPECT_EQ(plan.reuse_barrier.offset, capture.slot_offset);
+    EXPECT_EQ(plan.reuse_barrier.bytes, capture.slot_bytes);
+    EXPECT_EQ(plan.fragment_barrier.offset, capture.slot_offset);
+    EXPECT_EQ(plan.fragment_barrier.bytes, capture.slot_bytes);
+    EXPECT_EQ(plan.host_barrier.offset, capture.slot_offset);
+    EXPECT_EQ(plan.host_barrier.bytes, capture.slot_bytes);
+    EXPECT_EQ(plan.partial_push_stages, AllGraphicsPushStages);
+    EXPECT_EQ(plan.partial_push_offset, capture.push_offset);
+    EXPECT_EQ(plan.partial_push_bytes, capture.push_bytes);
+    EXPECT_EQ(plan.scheduler_waits, 0u);
+    EXPECT_EQ(plan.scheduler_finishes, 0u);
+    EXPECT_FALSE(plan.logs_private_state);
+}
+
+TEST(PpUpstreamSampleTee, DisabledOrAmbiguousCommandPlanDoesNoWorkAndFailsClosed) {
+    const auto disabled = PlanPpUpstreamSampleTeeCommands({});
+    EXPECT_EQ(disabled.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_FALSE(disabled.requires_allocation);
+    EXPECT_FALSE(disabled.bind_buffer);
+    EXPECT_FALSE(disabled.initialize);
+    EXPECT_FALSE(disabled.arm);
+    EXPECT_FALSE(disabled.defer_readback);
+    EXPECT_EQ(disabled.partial_push_stages, PpUpstreamSampleTeeStage::None);
+    EXPECT_EQ(disabled.operation_count, 0u);
+    EXPECT_EQ(disabled.scheduler_waits, 0u);
+    EXPECT_EQ(disabled.scheduler_finishes, 0u);
+
+    const auto binding = PlanPpUpstreamSampleTeeBinding({
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .buffer_type = Shader::BufferType::PpUpstreamSampleTee,
+        .is_written = true,
+        .descriptor_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .buffer_present = true,
+        .buffer_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+    });
+    const auto capture = PlanPpUpstreamSampleTeeCapture({
+        .enabled = true,
+        .slot_present = true,
+        .slot = 7,
+        .generation = 91,
+        .candidate_index = 0,
+        .shader = {.resource_index = 2,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 816,
+                   .y = 384,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48,
+                   .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+    });
+    PpUpstreamSampleTeeCommandDescriptor descriptor{
+        .enabled = true,
+        .binding = binding,
+        .capture = capture,
+        .non_coherent_atom_size = 256,
+        .output_candidate_count = 1,
+        .direct_draw = true,
+        .rendering_active = true,
+        .observed_rendering_serial = 77,
+        .expected_rendering_serial = 77,
+    };
+    descriptor.non_coherent_atom_size = Shader::PpUpstreamSampleTeeSlotStrideBytes;
+    EXPECT_EQ(PlanPpUpstreamSampleTeeCommands(descriptor).status,
+              FinalGuestSurfaceStatus::Complete);
+    descriptor.non_coherent_atom_size = Shader::PpUpstreamSampleTeeSlotStrideBytes * 2ull;
+    auto rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    descriptor.non_coherent_atom_size = 0;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    descriptor.non_coherent_atom_size = 256;
+    descriptor.output_candidate_count = 2;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.operation_count, 0u);
+    descriptor.output_candidate_count = 0;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::GapLoss);
+    descriptor.output_candidate_count = 1;
+    descriptor.non_coherent_atom_size = 192;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    descriptor.non_coherent_atom_size = 256;
+    descriptor.rendering_active = false;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::GapLoss);
+    descriptor.rendering_active = true;
+    descriptor.observed_rendering_serial = 78;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.arm);
+    EXPECT_FALSE(rejected.defer_readback);
+    descriptor.observed_rendering_serial = 77;
+    descriptor.direct_draw = false;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::Unsupported);
+    EXPECT_EQ(rejected.loss.unsupported_type, 1u);
+    EXPECT_FALSE(rejected.arm);
+    EXPECT_FALSE(rejected.defer_readback);
+    descriptor.direct_draw = true;
+    descriptor.observed_rendering_serial = 0;
+    descriptor.expected_rendering_serial = 0;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(rejected.operation_count, 0u);
+    EXPECT_FALSE(rejected.arm);
+    EXPECT_FALSE(rejected.defer_readback);
+
+    descriptor.observed_rendering_serial = 77;
+    descriptor.expected_rendering_serial = 77;
+    descriptor.binding.loss.invalidation = 1;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    descriptor.binding.loss = {};
+    descriptor.capture.loss.invalidation = 1;
+    rejected = PlanPpUpstreamSampleTeeCommands(descriptor);
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(rejected.scheduler_waits, 0u);
+    EXPECT_EQ(rejected.scheduler_finishes, 0u);
+}
+
+TEST(PpUpstreamSampleTee, VulkanMasksAreExplicitAndRejectUnknownNeutralBits) {
+    constexpr auto AllGraphicsPushStages = static_cast<PpUpstreamSampleTeeStage>(1u << 4);
+    const auto reuse = MapPpUpstreamSampleTeeBarrierToVulkan({
+        .src_stages = PpUpstreamSampleTeeStage::AllCommands | PpUpstreamSampleTeeStage::Host,
+        .src_access = PpUpstreamSampleTeeAccess::MemoryRead |
+                      PpUpstreamSampleTeeAccess::MemoryWrite |
+                      PpUpstreamSampleTeeAccess::HostRead,
+        .dst_stages = PpUpstreamSampleTeeStage::Transfer,
+        .dst_access = PpUpstreamSampleTeeAccess::TransferWrite,
+        .offset = 131072,
+        .bytes = 131072,
+    });
+    ASSERT_TRUE(reuse.valid);
+    EXPECT_EQ(reuse.src_stages,
+              vk::PipelineStageFlagBits2::eAllCommands | vk::PipelineStageFlagBits2::eHost);
+    EXPECT_EQ(reuse.src_access,
+              vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
+                  vk::AccessFlagBits2::eHostRead);
+    EXPECT_EQ(reuse.dst_stages, vk::PipelineStageFlagBits2::eTransfer);
+    EXPECT_EQ(reuse.dst_access, vk::AccessFlagBits2::eTransferWrite);
+    EXPECT_EQ(reuse.offset, 131072u);
+    EXPECT_EQ(reuse.bytes, 131072u);
+
+    const auto fragment = MapPpUpstreamSampleTeeBarrierToVulkan({
+        .src_stages = PpUpstreamSampleTeeStage::Transfer,
+        .src_access = PpUpstreamSampleTeeAccess::TransferWrite,
+        .dst_stages = PpUpstreamSampleTeeStage::FragmentShader,
+        .dst_access = PpUpstreamSampleTeeAccess::ShaderRead |
+                      PpUpstreamSampleTeeAccess::ShaderWrite,
+    });
+    ASSERT_TRUE(fragment.valid);
+    EXPECT_EQ(fragment.dst_stages, vk::PipelineStageFlagBits2::eFragmentShader);
+    EXPECT_EQ(fragment.dst_access,
+              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+
+    const auto host = MapPpUpstreamSampleTeeBarrierToVulkan({
+        .src_stages = PpUpstreamSampleTeeStage::Transfer |
+                      PpUpstreamSampleTeeStage::FragmentShader,
+        .src_access = PpUpstreamSampleTeeAccess::TransferWrite |
+                      PpUpstreamSampleTeeAccess::ShaderWrite,
+        .dst_stages = PpUpstreamSampleTeeStage::Host,
+        .dst_access = PpUpstreamSampleTeeAccess::HostRead,
+    });
+    ASSERT_TRUE(host.valid);
+    EXPECT_EQ(host.src_stages,
+              vk::PipelineStageFlagBits2::eTransfer |
+                  vk::PipelineStageFlagBits2::eFragmentShader);
+    EXPECT_EQ(host.src_access,
+              vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderWrite);
+    EXPECT_EQ(host.dst_stages, vk::PipelineStageFlagBits2::eHost);
+    EXPECT_EQ(host.dst_access, vk::AccessFlagBits2::eHostRead);
+
+    const auto unknown_stage = MapPpUpstreamSampleTeeBarrierToVulkan({
+        .src_stages = static_cast<PpUpstreamSampleTeeStage>(1u << 31),
+    });
+    EXPECT_FALSE(unknown_stage.valid);
+    const auto unknown_access = MapPpUpstreamSampleTeeBarrierToVulkan({
+        .src_access = static_cast<PpUpstreamSampleTeeAccess>(1u << 31),
+    });
+    EXPECT_FALSE(unknown_access.valid);
+
+    EXPECT_FALSE(MapPpUpstreamSampleTeeBarrierToVulkan({}).valid);
+
+    const auto push = MapPpUpstreamSampleTeePushStagesToVulkan(AllGraphicsPushStages);
+    ASSERT_TRUE(push.valid);
+    EXPECT_EQ(push.stages,
+              vk::ShaderStageFlagBits::eVertex |
+                  vk::ShaderStageFlagBits::eTessellationControl |
+                  vk::ShaderStageFlagBits::eTessellationEvaluation |
+                  vk::ShaderStageFlagBits::eGeometry | vk::ShaderStageFlagBits::eFragment);
+    EXPECT_FALSE(MapPpUpstreamSampleTeePushStagesToVulkan(PpUpstreamSampleTeeStage::None).valid);
+    EXPECT_FALSE(MapPpUpstreamSampleTeePushStagesToVulkan(
+                     PpUpstreamSampleTeeStage::FragmentShader)
+                     .valid);
+    EXPECT_FALSE(MapPpUpstreamSampleTeePushStagesToVulkan(
+                     PpUpstreamSampleTeeStage::FragmentShader |
+                     PpUpstreamSampleTeeStage::Transfer)
+                     .valid);
+}
+
+TEST(PpUpstreamSampleTee, SparseOutputMaskCountsOnlyActiveAttachments) {
+    auto outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 4,
+        .active_attachment_mask = 0b1000,
+    });
+    EXPECT_EQ(outputs.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(outputs.output_candidate_count, 1u);
+
+    outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 4,
+        .active_attachment_mask = 0b1001,
+    });
+    EXPECT_EQ(outputs.output_candidate_count, 2u);
+
+    outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 4,
+        .active_attachment_mask = 0,
+    });
+    EXPECT_EQ(outputs.output_candidate_count, 0u);
+    EXPECT_EQ(outputs.status, FinalGuestSurfaceStatus::Complete);
+
+    outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 3,
+        .active_attachment_mask = 0b1000,
+    });
+    EXPECT_EQ(outputs.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(outputs.loss.invalidation, 1u);
+
+    outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 9,
+        .active_attachment_mask = 1,
+    });
+    EXPECT_EQ(outputs.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(outputs.loss.invalidation, 1u);
+
+    outputs = PlanPpUpstreamSampleTeeOutputs({});
+    EXPECT_EQ(outputs.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_EQ(outputs.output_candidate_count, 0u);
+}
+
+TEST(PpUpstreamSampleTee, ControllerAdmitsExactlyOneDirectSelectedCandidate) {
+    for (const u32 candidate_index : {0u, 3u}) {
+        const auto controller = PlanPpUpstreamSampleTeeController({
+            .enabled = true,
+            .candidate_selected = true,
+            .direct_draw = true,
+            .fragment_stage_present = true,
+            .observed_candidate_index = candidate_index,
+            .configured_candidate_index = candidate_index,
+            .outputs = PlanPpUpstreamSampleTeeOutputs({
+                .enabled = true,
+                .attachment_span = 4,
+                .active_attachment_mask = 0b1000,
+            }),
+        });
+        EXPECT_EQ(controller.status, FinalGuestSurfaceStatus::Complete);
+        EXPECT_FALSE(controller.loss.Any());
+        EXPECT_TRUE(controller.plan_commands);
+        EXPECT_TRUE(controller.selection_pending);
+        EXPECT_EQ(controller.candidate_index, candidate_index);
+        EXPECT_EQ(controller.output_candidate_count, 1u);
+    }
+}
+
+TEST(PpUpstreamSampleTee, ControllerDoesNoWorkUnlessSelectionIsExactDirectAndUnambiguous) {
+    PpUpstreamSampleTeeControllerDescriptor descriptor{
+        .enabled = true,
+        .candidate_selected = true,
+        .direct_draw = true,
+        .fragment_stage_present = true,
+        .observed_candidate_index = 2,
+        .configured_candidate_index = 2,
+        .outputs = PlanPpUpstreamSampleTeeOutputs({
+            .enabled = true,
+            .attachment_span = 1,
+            .active_attachment_mask = 1,
+        }),
+    };
+    const auto expect_no_work = [](const PpUpstreamSampleTeeControllerPlan& plan,
+                                   FinalGuestSurfaceStatus status) {
+        EXPECT_EQ(plan.status, status);
+        EXPECT_FALSE(plan.plan_commands);
+        EXPECT_EQ(plan.output_candidate_count, 0u);
+    };
+
+    auto rejected = descriptor;
+    rejected.enabled = false;
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    rejected = descriptor;
+    rejected.candidate_selected = false;
+    rejected.direct_draw = false;
+    rejected.outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 2,
+        .active_attachment_mask = 3,
+    });
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::AlreadyConsumed);
+
+    rejected = descriptor;
+    rejected.direct_draw = false;
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected), FinalGuestSurfaceStatus::Unsupported);
+
+    rejected = descriptor;
+    rejected.fragment_stage_present = false;
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = descriptor;
+    rejected.observed_candidate_index = 1;
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = descriptor;
+    rejected.observed_candidate_index = 4;
+    rejected.configured_candidate_index = 4;
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = descriptor;
+    rejected.outputs = PlanPpUpstreamSampleTeeOutputs({.enabled = true});
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected), FinalGuestSurfaceStatus::GapLoss);
+
+    rejected = descriptor;
+    rejected.outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 2,
+        .active_attachment_mask = 3,
+    });
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::InvalidationLoss);
+
+    rejected = descriptor;
+    rejected.outputs = {.status = FinalGuestSurfaceStatus::InvalidationLoss,
+                        .loss = {.invalidation = 1}};
+    expect_no_work(PlanPpUpstreamSampleTeeController(rejected),
+                   FinalGuestSurfaceStatus::InvalidationLoss);
+
+    EXPECT_FALSE(PlanPpUpstreamSampleTeeController({}).selection_pending);
+    auto selected_rejection = descriptor;
+    selected_rejection.direct_draw = false;
+    EXPECT_TRUE(PlanPpUpstreamSampleTeeController(selected_rejection).selection_pending);
+}
+
+TEST(PpUpstreamSampleTee, SelectedGateCompletesExactlyOnceAfterAllArmMilestones) {
+    PpUpstreamInputCaptureGate gate{2};
+    const auto outputs = PlanPpUpstreamSampleTeeOutputs({
+        .enabled = true,
+        .attachment_span = 1,
+        .active_attachment_mask = 1,
+    });
+    const auto make_controller = [&](bool selected) {
+        return PlanPpUpstreamSampleTeeController({
+            .enabled = true,
+            .candidate_selected = selected,
+            .direct_draw = true,
+            .fragment_stage_present = true,
+            .observed_candidate_index = 2,
+            .configured_candidate_index = 2,
+            .outputs = outputs,
+        });
+    };
+
+    const auto unselected = gate.Preview(1);
+    ASSERT_FALSE(unselected.capture);
+    auto completion = PlanPpUpstreamSampleTeeControllerCompletion({
+        .controller = make_controller(unselected.capture),
+    });
+    EXPECT_FALSE(completion.complete_selection);
+    EXPECT_FALSE(completion.record_candidate);
+
+    auto selected = gate.Preview(2);
+    ASSERT_TRUE(selected.capture);
+    completion = PlanPpUpstreamSampleTeeControllerCompletion({
+        .controller = make_controller(selected.capture),
+        .upstream_copy_recorded = true,
+        .slot_initialized = true,
+        .rendering_resumed = true,
+        .late_fragment_push_recorded = true,
+    });
+    ASSERT_TRUE(completion.complete_selection);
+    ASSERT_TRUE(completion.selection_succeeded);
+    ASSERT_TRUE(completion.record_candidate);
+    EXPECT_TRUE(gate.Complete(completion.candidate_index, completion.selection_succeeded).publish);
+    EXPECT_EQ(gate.Complete(completion.candidate_index, true).status,
+              FinalGuestSurfaceStatus::GapLoss);
+
+    selected = gate.Preview(2);
+    ASSERT_TRUE(selected.capture);
+    completion = PlanPpUpstreamSampleTeeControllerCompletion({
+        .controller = make_controller(selected.capture),
+        .upstream_copy_recorded = true,
+        .slot_initialized = true,
+        .rendering_resumed = true,
+        .late_fragment_push_recorded = false,
+    });
+    EXPECT_TRUE(completion.complete_selection);
+    EXPECT_FALSE(completion.selection_succeeded);
+    EXPECT_FALSE(completion.record_candidate);
+    EXPECT_EQ(gate.Complete(completion.candidate_index, completion.selection_succeeded).status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(gate.Preview(2).capture);
+}
+
+TEST(PpUpstreamSampleTee, PlaneRecordDispositionRetriesOnlyTeePreparationFailure) {
+    const auto success = PlanPpUpstreamFeedbackPlaneRecordDisposition({
+        .tee_enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .record = {.recorded = true, .status = FinalGuestSurfaceStatus::Complete},
+    });
+    EXPECT_TRUE(success.mark_copied);
+    EXPECT_FALSE(success.retry_without_tee);
+    EXPECT_FALSE(success.fanout.record_tee_failure);
+
+    const auto tee_only = PlanPpUpstreamFeedbackPlaneRecordDisposition({
+        .tee_enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .record = {.failure_scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+                   .status = FinalGuestSurfaceStatus::InvalidationLoss,
+                   .loss = {.invalidation = 1}},
+    });
+    EXPECT_FALSE(tee_only.mark_copied);
+    EXPECT_TRUE(tee_only.retry_without_tee);
+    EXPECT_TRUE(tee_only.fanout.record_tee_failure);
+    EXPECT_FALSE(tee_only.fanout.reject_base_capture);
+    EXPECT_FALSE(tee_only.fanout.complete_input_selection);
+
+    const auto shared = PlanPpUpstreamFeedbackPlaneRecordDisposition({
+        .tee_enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .record = {.failure_scope = PpUpstreamSampleTeeFailureScope::SharedCapture,
+                   .status = FinalGuestSurfaceStatus::BusyLoss,
+                   .loss = {.busy = 1}},
+    });
+    EXPECT_FALSE(shared.mark_copied);
+    EXPECT_FALSE(shared.retry_without_tee);
+    EXPECT_TRUE(shared.fanout.reject_base_capture);
+    EXPECT_TRUE(shared.fanout.complete_input_selection);
+    EXPECT_FALSE(shared.fanout.input_selection_succeeded);
+
+    const auto already_rejected = PlanPpUpstreamFeedbackPlaneRecordDisposition({
+        .tee_enabled = true,
+        .tee_attempted = true,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Rejected,
+        .record = {.failure_scope = PpUpstreamSampleTeeFailureScope::SharedCapture,
+                   .status = FinalGuestSurfaceStatus::GapLoss,
+                   .loss = {.gap = 1}},
+    });
+    EXPECT_FALSE(already_rejected.fanout.reject_base_capture);
+
+    for (const auto malformed : {
+             PpUpstreamFeedbackPlaneRecordResult{
+                 .recorded = true,
+                 .status = FinalGuestSurfaceStatus::BusyLoss,
+                 .loss = {.busy = 1}},
+             PpUpstreamFeedbackPlaneRecordResult{},
+             PpUpstreamFeedbackPlaneRecordResult{
+                 .failure_scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+                 .status = FinalGuestSurfaceStatus::InvalidationLoss,
+                 .loss = {.invalidation = 1}},
+         }) {
+        const bool tee_attempted = malformed.failure_scope !=
+                                   PpUpstreamSampleTeeFailureScope::TeeOnly;
+        const auto disposition = PlanPpUpstreamFeedbackPlaneRecordDisposition({
+            .tee_enabled = true,
+            .tee_attempted = tee_attempted,
+            .input_selection_pending = true,
+            .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+            .record = malformed,
+        });
+        EXPECT_FALSE(disposition.mark_copied);
+        EXPECT_FALSE(disposition.retry_without_tee);
+        EXPECT_EQ(disposition.fanout.status, FinalGuestSurfaceStatus::InvalidationLoss);
+        EXPECT_EQ(disposition.fanout.loss.invalidation, 1u);
+        EXPECT_TRUE(disposition.fanout.reject_base_capture);
+    }
+}
+
+TEST(PpUpstreamSampleTee, FailureFanoutPreservesBaseAcrossTeeOnlyPreAndPost) {
+    const auto not_started = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .status = FinalGuestSurfaceStatus::BusyLoss,
+        .loss = {.busy = 1},
+    });
+    EXPECT_TRUE(not_started.record_tee_failure);
+    EXPECT_EQ(not_started.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(not_started.loss.busy, 1u);
+    EXPECT_FALSE(not_started.reject_base_capture);
+    EXPECT_TRUE(not_started.continue_base_capture_without_tee);
+    EXPECT_FALSE(not_started.complete_input_selection);
+    EXPECT_TRUE(not_started.preserve_consumer_bookkeeping);
+    EXPECT_TRUE(not_started.preserve_producer_bookkeeping);
+
+    const auto recorded_pre = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Recorded,
+        .status = FinalGuestSurfaceStatus::InvalidationLoss,
+        .loss = {.invalidation = 1},
+    });
+    EXPECT_TRUE(recorded_pre.record_tee_failure);
+    EXPECT_FALSE(recorded_pre.reject_base_capture);
+    EXPECT_FALSE(recorded_pre.continue_base_capture_without_tee);
+    EXPECT_TRUE(recorded_pre.complete_input_selection);
+    EXPECT_TRUE(recorded_pre.input_selection_succeeded);
+
+    const auto recorded_post = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Recorded,
+        .status = FinalGuestSurfaceStatus::InvalidationLoss,
+        .loss = {.invalidation = 1},
+    });
+    EXPECT_TRUE(recorded_post.record_tee_failure);
+    EXPECT_FALSE(recorded_post.reject_base_capture);
+    EXPECT_FALSE(recorded_post.continue_base_capture_without_tee);
+    EXPECT_FALSE(recorded_post.complete_input_selection);
+    EXPECT_TRUE(recorded_post.preserve_consumer_bookkeeping);
+    EXPECT_TRUE(recorded_post.preserve_producer_bookkeeping);
+
+    const PpTerminalScopeDrawSelector draw{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .indexed = true,
+        .element_count = 4,
+        .instance_count = 1,
+        .sampled_images = 1,
+    };
+    const VideoCore::ImageColorScopePrivateLink selected{VideoCore::ImageId{91}, 9100};
+    const PpUpstreamFeedbackPrePostPlan base_plan{
+        .candidate_capacity = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .copy = true,
+    };
+    PpUpstreamFeedbackPrePostFrame frame{draw, 1};
+    ASSERT_TRUE(frame.Arm());
+    ASSERT_TRUE(frame.Configure(base_plan));
+    const auto before = frame.Preview(selected, draw);
+    ASSERT_TRUE(before.capture);
+    frame.MarkCopied(before.candidate_index, false);
+    if (recorded_pre.reject_base_capture) {
+        frame.Reject(recorded_pre.status, recorded_pre.loss);
+    }
+
+    PpUpstreamInputCaptureGate gate{0};
+    ASSERT_TRUE(gate.Preview(0).capture);
+    ASSERT_TRUE(recorded_pre.complete_input_selection);
+    EXPECT_TRUE(gate.Complete(0, recorded_pre.input_selection_succeeded).publish);
+
+    const auto after = frame.Complete(selected, draw);
+    ASSERT_TRUE(after.capture);
+    frame.MarkCopied(after.candidate_index, true);
+    if (recorded_post.reject_base_capture) {
+        frame.Reject(recorded_post.status, recorded_post.loss);
+    }
+    ASSERT_TRUE(frame.Select(selected));
+    const auto take = frame.Take(true);
+    EXPECT_EQ(take.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(take.copy);
+    EXPECT_EQ(take.recorded_plane_mask, 0x3u);
+
+    const auto malformed = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .status = FinalGuestSurfaceStatus::Complete,
+    });
+    EXPECT_TRUE(malformed.record_tee_failure);
+    EXPECT_EQ(malformed.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(malformed.loss.invalidation, 1u);
+    EXPECT_TRUE(malformed.continue_base_capture_without_tee);
+    EXPECT_FALSE(malformed.reject_base_capture);
+    EXPECT_TRUE(malformed.preserve_consumer_bookkeeping);
+    EXPECT_TRUE(malformed.preserve_producer_bookkeeping);
+
+    const auto pending_status = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .status = FinalGuestSurfaceStatus::Pending,
+        .loss = {.busy = 1},
+    });
+    EXPECT_EQ(pending_status.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(pending_status.loss.invalidation, 1u);
+
+    const auto forged_status = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .status = static_cast<FinalGuestSurfaceStatus>(0xff),
+        .loss = {.busy = 1},
+    });
+    EXPECT_EQ(forged_status.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(forged_status.loss.invalidation, 1u);
+
+    const auto disabled = PlanPpUpstreamSampleTeeFailureFanout({});
+    EXPECT_FALSE(disabled.record_tee_failure);
+    EXPECT_FALSE(disabled.reject_base_capture);
+    EXPECT_FALSE(disabled.continue_base_capture_without_tee);
+    EXPECT_FALSE(disabled.complete_input_selection);
+}
+
+TEST(PpUpstreamSampleTee, FailureFanoutRejectsSharedCaptureExactlyOnce) {
+    const auto tee_after_reject = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Rejected,
+        .status = FinalGuestSurfaceStatus::InvalidationLoss,
+        .loss = {.invalidation = 1},
+    });
+    EXPECT_TRUE(tee_after_reject.record_tee_failure);
+    EXPECT_FALSE(tee_after_reject.reject_base_capture);
+    EXPECT_FALSE(tee_after_reject.continue_base_capture_without_tee);
+    EXPECT_TRUE(tee_after_reject.complete_input_selection);
+    EXPECT_FALSE(tee_after_reject.input_selection_succeeded);
+
+    const auto pending = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::SharedCapture,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .status = FinalGuestSurfaceStatus::GapLoss,
+        .loss = {.gap = 1},
+    });
+    EXPECT_TRUE(pending.record_tee_failure);
+    EXPECT_TRUE(pending.reject_base_capture);
+    EXPECT_FALSE(pending.continue_base_capture_without_tee);
+    EXPECT_TRUE(pending.complete_input_selection);
+    EXPECT_FALSE(pending.input_selection_succeeded);
+
+    const auto rejected = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::SharedCapture,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Rejected,
+        .status = FinalGuestSurfaceStatus::GapLoss,
+        .loss = {.gap = 1},
+    });
+    EXPECT_TRUE(rejected.record_tee_failure);
+    EXPECT_FALSE(rejected.reject_base_capture);
+    EXPECT_FALSE(rejected.continue_base_capture_without_tee);
+    EXPECT_TRUE(rejected.complete_input_selection);
+    EXPECT_FALSE(rejected.input_selection_succeeded);
+
+    const auto recorded = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::SharedCapture,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Recorded,
+        .status = FinalGuestSurfaceStatus::InvalidationLoss,
+        .loss = {.invalidation = 1},
+    });
+    EXPECT_TRUE(recorded.record_tee_failure);
+    EXPECT_TRUE(recorded.reject_base_capture);
+    EXPECT_FALSE(recorded.continue_base_capture_without_tee);
+    EXPECT_TRUE(recorded.complete_input_selection);
+    EXPECT_FALSE(recorded.input_selection_succeeded);
+
+    const auto unspecified = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .status = FinalGuestSurfaceStatus::BusyLoss,
+        .loss = {.busy = 1},
+    });
+    EXPECT_TRUE(unspecified.record_tee_failure);
+    EXPECT_EQ(unspecified.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(unspecified.loss.invalidation, 1u);
+    EXPECT_TRUE(unspecified.reject_base_capture);
+    EXPECT_FALSE(unspecified.continue_base_capture_without_tee);
+    EXPECT_TRUE(unspecified.complete_input_selection);
+    EXPECT_FALSE(unspecified.input_selection_succeeded);
+    EXPECT_TRUE(unspecified.preserve_consumer_bookkeeping);
+    EXPECT_TRUE(unspecified.preserve_producer_bookkeeping);
+
+    const auto missing_scope = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .base_state = PpUpstreamSampleTeeBaseCaptureState::Pending,
+        .status = FinalGuestSurfaceStatus::BusyLoss,
+        .loss = {.busy = 1},
+    });
+    EXPECT_EQ(missing_scope.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(missing_scope.reject_base_capture);
+
+    const auto missing_base = PlanPpUpstreamSampleTeeFailureFanout({
+        .enabled = true,
+        .tee_attempted = true,
+        .input_selection_pending = true,
+        .scope = PpUpstreamSampleTeeFailureScope::TeeOnly,
+        .status = FinalGuestSurfaceStatus::BusyLoss,
+        .loss = {.busy = 1},
+    });
+    EXPECT_EQ(missing_base.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(missing_base.reject_base_capture);
+
+    const PpTerminalScopeDrawSelector draw{
+        .kind = VideoCore::ImageColorScopeDrawKind::Direct,
+        .element_count = 3,
+        .instance_count = 1,
+        .sampled_images = 1,
+    };
+    PpUpstreamFeedbackPrePostFrame frame{draw, 1};
+    ASSERT_TRUE(frame.Arm());
+    ASSERT_TRUE(frame.Configure({.candidate_capacity = 1,
+                                 .status = FinalGuestSurfaceStatus::Complete,
+                                 .copy = true}));
+    if (pending.reject_base_capture) {
+        frame.Reject(pending.status, pending.loss);
+    }
+    const auto take = frame.Take(false);
+    EXPECT_EQ(take.status, FinalGuestSurfaceStatus::GapLoss);
+    EXPECT_EQ(take.loss.gap, 1u);
+
+    PpUpstreamFeedbackPrePostFrame already_rejected{draw, 1};
+    ASSERT_TRUE(already_rejected.Arm());
+    ASSERT_TRUE(already_rejected.Configure({.candidate_capacity = 1,
+                                            .status = FinalGuestSurfaceStatus::Complete,
+                                            .copy = true}));
+    already_rejected.Reject(FinalGuestSurfaceStatus::BusyLoss, {.busy = 1});
+    if (rejected.reject_base_capture) {
+        already_rejected.Reject(rejected.status, rejected.loss);
+    }
+    const auto preserved = already_rejected.Take(false);
+    EXPECT_EQ(preserved.status, FinalGuestSurfaceStatus::BusyLoss);
+    EXPECT_EQ(preserved.loss.busy, 1u);
+}
+
+TEST(PpUpstreamSampleTee, SharedReleaseResultInvalidatesBaseAndTee) {
+    constexpr bool released = false;
+
+    const PpUpstreamSampleTeeReadbackHeader header{
+        .magic = Shader::PpUpstreamSampleTeeHeaderMagic,
+        .generation = 7,
+        .candidate_index = 2,
+        .x = 10,
+        .y = 20,
+        .width = 1,
+        .height = 1,
+        .pixel_count = 1,
+    };
+    const PpUpstreamSampleTeeDeferredReadbackPlan plan{
+        .expected_header = header,
+        .mapped_bytes = Shader::PpUpstreamSampleTeeBufferBytes,
+        .invalidate_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .invalidate_bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .header_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .header_bytes = sizeof(header),
+        .records_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes + sizeof(header),
+        .records_bytes = sizeof(PpUpstreamSampleTeePixelRecord),
+        .record_count = 1,
+        .expected_generation = 7,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .copy = true,
+        .borrows_outer_slot = true,
+        .outer_slot_release_attempts = 1,
+    };
+    const PpUpstreamSampleTeeOwnedReadback owned{
+        .header = header,
+        .records = {PpUpstreamSampleTeePixelRecord{.value = {1, 2, 3, 4}, .writers = 1}},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .mapped_invalidation_succeeded = true,
+        .bounded_record_copy_succeeded = true,
+    };
+    auto tee_after_copy = BeginPpUpstreamSampleTeeDeferredLifecycle(plan);
+    tee_after_copy = ObservePpUpstreamSampleTeeOwnedCopy(tee_after_copy, owned);
+    const auto result = ReconcilePpUpstreamSampleTeeSharedSlotRelease(
+        true, released, FinalGuestSurfaceStatus::Complete, {}, true, tee_after_copy);
+    EXPECT_EQ(result.base.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(result.base.loss.invalidation, 1u);
+    EXPECT_FALSE(result.base.copy);
+    EXPECT_EQ(result.tee.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(result.tee.loss.invalidation, 1u);
+    EXPECT_EQ(result.tee.observed_outer_slot_release_attempts, 1u);
+    EXPECT_FALSE(result.tee.slot_release_succeeded);
+    EXPECT_TRUE(result.tee.finalized);
+
+    const auto no_slot = ReconcilePpUpstreamSampleTeeSharedSlotRelease(
+        false, false, FinalGuestSurfaceStatus::Complete, {}, true, tee_after_copy);
+    EXPECT_EQ(no_slot.base.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_EQ(no_slot.base.loss.invalidation, 1u);
+    EXPECT_FALSE(no_slot.base.copy);
+    EXPECT_EQ(no_slot.tee.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_TRUE(no_slot.tee.finalized);
+
+    const auto forged_release_without_slot = ReconcilePpUpstreamSampleTeeSharedSlotRelease(
+        false, true, FinalGuestSurfaceStatus::Complete, {}, true, tee_after_copy);
+    EXPECT_EQ(forged_release_without_slot.base.status,
+              FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(forged_release_without_slot.base.copy);
+
+    const auto released_ok = ReconcilePpUpstreamSampleTeeSharedSlotRelease(
+        true, true, FinalGuestSurfaceStatus::Complete, {}, true, tee_after_copy);
+    EXPECT_EQ(released_ok.base.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(released_ok.base.copy);
+    EXPECT_EQ(released_ok.tee.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_EQ(released_ok.tee.observed_outer_slot_release_attempts, 1u);
+    EXPECT_TRUE(released_ok.tee.slot_release_succeeded);
+    EXPECT_TRUE(released_ok.tee.finalized);
+}
+
+TEST(PpUpstreamSampleTee, ControllerLifecycleRecordsOnlySuccessfulOrderedRuntimeSteps) {
+    const PpUpstreamSampleTeeControllerPlan controller{
+        .candidate_index = 2,
+        .output_candidate_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .plan_commands = true,
+    };
+    const PpUpstreamSampleTeeCommandPlan commands{
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialize = true,
+        .arm = true,
+        .issue_draw = true,
+        .require_post_barrier = true,
+        .require_preserved_serial = true,
+    };
+    auto state = BeginPpUpstreamSampleTeeControllerLifecycle(controller, commands);
+    ASSERT_EQ(state.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(state.active);
+    EXPECT_EQ(state.candidate_index, 2u);
+    EXPECT_EQ(state.serial, 73u);
+
+    state = ObservePpUpstreamSampleTeeControllerLifecycle(
+        state, {.event = PpUpstreamSampleTeeControllerEvent::Initialized,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true});
+    EXPECT_TRUE(state.initialized);
+    EXPECT_FALSE(state.armed);
+    state = ObservePpUpstreamSampleTeeControllerLifecycle(
+        state, {.event = PpUpstreamSampleTeeControllerEvent::Armed,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true});
+    EXPECT_TRUE(state.armed);
+    state = ObservePpUpstreamSampleTeeControllerLifecycle(
+        state, {.event = PpUpstreamSampleTeeControllerEvent::DrawExecuted,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true,
+                .direct_draw_executed = true});
+    EXPECT_TRUE(state.draw_executed);
+    state = ObservePpUpstreamSampleTeeControllerLifecycle(
+        state, {.event = PpUpstreamSampleTeeControllerEvent::PostBarrierComplete,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true,
+                .host_barrier_recorded = true,
+                .post_rendering_resumed = true});
+    EXPECT_TRUE(state.post_barrier_complete);
+    EXPECT_TRUE(state.ready);
+    EXPECT_FALSE(state.active);
+    EXPECT_FALSE(state.loss.Any());
+}
+
+TEST(PpUpstreamSampleTee, ControllerLifecycleRejectsSerialDriftDuplicateAndOutOfOrderSteps) {
+    const PpUpstreamSampleTeeControllerPlan controller{
+        .candidate_index = 1,
+        .output_candidate_count = 1,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .plan_commands = true,
+    };
+    const PpUpstreamSampleTeeCommandPlan commands{
+        .serial = 44,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialize = true,
+        .arm = true,
+        .issue_draw = true,
+        .require_post_barrier = true,
+        .require_preserved_serial = true,
+    };
+    const auto begin = BeginPpUpstreamSampleTeeControllerLifecycle(controller, commands);
+    const auto expect_invalidation = [](const PpUpstreamSampleTeeControllerState& state) {
+        EXPECT_EQ(state.status, FinalGuestSurfaceStatus::InvalidationLoss);
+        EXPECT_EQ(state.loss.invalidation, 1u);
+        EXPECT_FALSE(state.active);
+        EXPECT_FALSE(state.ready);
+    };
+
+    expect_invalidation(ObservePpUpstreamSampleTeeControllerLifecycle(
+        begin, {.event = PpUpstreamSampleTeeControllerEvent::Armed,
+                .observed_candidate_index = 1,
+                .observed_serial = 44,
+                .succeeded = true}));
+    expect_invalidation(ObservePpUpstreamSampleTeeControllerLifecycle(
+        begin, {.event = PpUpstreamSampleTeeControllerEvent::Initialized,
+                .observed_candidate_index = 1,
+                .observed_serial = 45,
+                .succeeded = true}));
+    expect_invalidation(ObservePpUpstreamSampleTeeControllerLifecycle(
+        begin, {.event = PpUpstreamSampleTeeControllerEvent::Initialized,
+                .observed_candidate_index = 1,
+                .observed_serial = 44,
+                .succeeded = false}));
+
+    const auto initialized = ObservePpUpstreamSampleTeeControllerLifecycle(
+        begin, {.event = PpUpstreamSampleTeeControllerEvent::Initialized,
+                .observed_candidate_index = 1,
+                .observed_serial = 44,
+                .succeeded = true});
+    expect_invalidation(ObservePpUpstreamSampleTeeControllerLifecycle(
+        initialized, {.event = PpUpstreamSampleTeeControllerEvent::Initialized,
+                      .observed_candidate_index = 1,
+                      .observed_serial = 44,
+                      .succeeded = true}));
+
+    const auto disabled = BeginPpUpstreamSampleTeeControllerLifecycle({}, {});
+    EXPECT_EQ(disabled.status, FinalGuestSurfaceStatus::AlreadyConsumed);
+    EXPECT_FALSE(disabled.active);
+}
+
+TEST(PpUpstreamSampleTee, ControllerLifecycleRequiresExactCandidateAndExecutedDirectDraw) {
+    PpUpstreamSampleTeeControllerState armed{
+        .candidate_index = 2,
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .active = true,
+        .initialized = true,
+        .armed = true,
+    };
+    const auto expect_rejected = [](const PpUpstreamSampleTeeControllerState& state) {
+        EXPECT_EQ(state.status, FinalGuestSurfaceStatus::InvalidationLoss);
+        EXPECT_EQ(state.loss.invalidation, 1u);
+        EXPECT_FALSE(state.draw_executed);
+        EXPECT_FALSE(state.ready);
+    };
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        armed, {.event = PpUpstreamSampleTeeControllerEvent::DrawExecuted,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true}));
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        armed, {.event = PpUpstreamSampleTeeControllerEvent::DrawExecuted,
+                .observed_candidate_index = 1,
+                .observed_serial = 73,
+                .succeeded = true,
+                .direct_draw_executed = true}));
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        armed, {.event = PpUpstreamSampleTeeControllerEvent::DrawExecuted,
+                .observed_candidate_index = 2,
+                .observed_serial = 74,
+                .succeeded = true,
+                .direct_draw_executed = true}));
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        armed, {.event = PpUpstreamSampleTeeControllerEvent::DrawExecuted,
+                .observed_candidate_index = 2,
+                .succeeded = true,
+                .direct_draw_executed = true}));
+
+    const auto drawn = ObservePpUpstreamSampleTeeControllerLifecycle(
+        armed, {.event = PpUpstreamSampleTeeControllerEvent::DrawExecuted,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true,
+                .direct_draw_executed = true});
+    ASSERT_EQ(drawn.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(drawn.active);
+    EXPECT_TRUE(drawn.draw_executed);
+    EXPECT_FALSE(drawn.post_barrier_complete);
+    EXPECT_FALSE(drawn.ready);
+}
+
+TEST(PpUpstreamSampleTee, ControllerPostBarrierUnblocksConsumerOnlyAfterPreservedResume) {
+    PpUpstreamSampleTeeCommandPlan commands{
+        .host_barrier = {
+            .src_stages = PpUpstreamSampleTeeStage::Transfer |
+                          PpUpstreamSampleTeeStage::FragmentShader,
+            .src_access = PpUpstreamSampleTeeAccess::TransferWrite |
+                          PpUpstreamSampleTeeAccess::ShaderWrite,
+            .dst_stages = PpUpstreamSampleTeeStage::Host,
+            .dst_access = PpUpstreamSampleTeeAccess::HostRead,
+            .offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+            .bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        },
+    };
+    const auto barrier = MapPpUpstreamSampleTeeBarrierToVulkan(commands.host_barrier);
+    ASSERT_TRUE(barrier.valid);
+    EXPECT_EQ(barrier.src_stages,
+              vk::PipelineStageFlagBits2::eTransfer | vk::PipelineStageFlagBits2::eFragmentShader);
+    EXPECT_EQ(barrier.src_access,
+              vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderWrite);
+    EXPECT_EQ(barrier.dst_stages, vk::PipelineStageFlagBits2::eHost);
+    EXPECT_EQ(barrier.dst_access, vk::AccessFlagBits2::eHostRead);
+    EXPECT_EQ(barrier.offset, commands.host_barrier.offset);
+    EXPECT_EQ(barrier.bytes, commands.host_barrier.bytes);
+    const auto split = PlanPpTerminalScopeRenderingSplit(true, 73, 73);
+    ASSERT_EQ(split.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(split.end_rendering);
+    EXPECT_TRUE(split.resume_rendering);
+    EXPECT_TRUE(split.force_load);
+    EXPECT_TRUE(split.preserve_serial);
+
+    PpUpstreamSampleTeeControllerState drawn{
+        .candidate_index = 2,
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .active = true,
+        .initialized = true,
+        .armed = true,
+        .draw_executed = true,
+    };
+    const auto expect_rejected = [](const PpUpstreamSampleTeeControllerState& state) {
+        EXPECT_EQ(state.status, FinalGuestSurfaceStatus::InvalidationLoss);
+        EXPECT_EQ(state.loss.invalidation, 1u);
+        EXPECT_FALSE(state.ready);
+    };
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        drawn, {.event = PpUpstreamSampleTeeControllerEvent::PostBarrierComplete,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true,
+                .post_rendering_resumed = true}));
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        drawn, {.event = PpUpstreamSampleTeeControllerEvent::PostBarrierComplete,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true,
+                .host_barrier_recorded = true}));
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        drawn, {.event = PpUpstreamSampleTeeControllerEvent::PostBarrierComplete,
+                .observed_candidate_index = 1,
+                .observed_serial = 73,
+                .succeeded = true,
+                .host_barrier_recorded = true,
+                .post_rendering_resumed = true}));
+    expect_rejected(ObservePpUpstreamSampleTeeControllerLifecycle(
+        drawn, {.event = PpUpstreamSampleTeeControllerEvent::PostBarrierComplete,
+                .observed_candidate_index = 2,
+                .observed_serial = 74,
+                .succeeded = true,
+                .host_barrier_recorded = true,
+                .post_rendering_resumed = true}));
+    EXPECT_FALSE(drawn.ready);
+    const auto completed = ObservePpUpstreamSampleTeeControllerLifecycle(
+        drawn, {.event = PpUpstreamSampleTeeControllerEvent::PostBarrierComplete,
+                .observed_candidate_index = 2,
+                .observed_serial = 73,
+                .succeeded = true,
+                .host_barrier_recorded = true,
+                .post_rendering_resumed = true});
+    ASSERT_EQ(completed.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(completed.loss.Any());
+    EXPECT_FALSE(completed.active);
+    EXPECT_TRUE(completed.post_barrier_complete);
+    EXPECT_TRUE(completed.ready);
+}
+
+TEST(PpUpstreamSampleTee, PostDrawOrchestrationUsesHostBarrierAndKeepsBookkeepingIndependent) {
+    const PpUpstreamSampleTeeControllerState armed{
+        .candidate_index = 2,
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .active = true,
+        .initialized = true,
+        .armed = true,
+    };
+    const PpUpstreamSampleTeeCandidateRecord candidate{
+        .candidate_index = 2,
+        .shader = {.resource_index = 3,
+                   .eligible_result_count = 1,
+                   .tee_storage_operations = 1,
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .arm = true},
+        .window = {.logical_ordinal = 1299,
+                   .x = 816,
+                   .y = 384,
+                   .width = 48,
+                   .height = 48,
+                   .pixel_count = 48 * 48,
+                   .total_bytes = 48 * 48 * sizeof(PpUpstreamSampleTeePixelRecord),
+                   .status = FinalGuestSurfaceStatus::Complete,
+                   .capture = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+    };
+    const PpUpstreamSampleTeeCapturePlan capture{
+        .header = {.generation = 9, .candidate_index = 2, .pixel_count = 48 * 48},
+        .slot_offset = 2 * Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .slot_bytes = Shader::PpUpstreamSampleTeeSlotStrideBytes,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .initialize = true,
+        .arm = true,
+        .require_post_barrier = true,
+    };
+    const PpUpstreamSampleTeeCommandPlan commands{
+        .fragment_barrier = {.src_stages = PpUpstreamSampleTeeStage::Transfer,
+                             .src_access = PpUpstreamSampleTeeAccess::TransferWrite,
+                             .dst_stages = PpUpstreamSampleTeeStage::FragmentShader,
+                             .dst_access = PpUpstreamSampleTeeAccess::ShaderWrite,
+                             .offset = capture.slot_offset,
+                             .bytes = capture.slot_bytes},
+        .host_barrier = {.src_stages = PpUpstreamSampleTeeStage::Transfer |
+                                       PpUpstreamSampleTeeStage::FragmentShader,
+                         .src_access = PpUpstreamSampleTeeAccess::TransferWrite |
+                                       PpUpstreamSampleTeeAccess::ShaderWrite,
+                         .dst_stages = PpUpstreamSampleTeeStage::Host,
+                         .dst_access = PpUpstreamSampleTeeAccess::HostRead,
+                         .offset = capture.slot_offset,
+                         .bytes = capture.slot_bytes},
+        .serial = 73,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .issue_draw = true,
+        .require_post_barrier = true,
+        .force_load = true,
+        .require_preserved_serial = true,
+    };
+
+    const auto plan = PlanPpUpstreamSampleTeePostDraw({
+        .enabled = true,
+        .controller = armed,
+        .candidate = candidate,
+        .capture = capture,
+        .commands = commands,
+        .observed_candidate_index = 2,
+        .observed_serial = 73,
+        .direct_draw_executed = true,
+    });
+    ASSERT_EQ(plan.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_FALSE(plan.loss.Any());
+    EXPECT_TRUE(plan.controller.draw_executed);
+    EXPECT_TRUE(plan.issue_host_barrier);
+    EXPECT_TRUE(plan.resume_rendering);
+    EXPECT_EQ(plan.host_barrier.src_stages,
+              PpUpstreamSampleTeeStage::Transfer | PpUpstreamSampleTeeStage::FragmentShader);
+    EXPECT_EQ(plan.host_barrier.dst_stages, PpUpstreamSampleTeeStage::Host);
+    EXPECT_EQ(plan.host_barrier.offset, capture.slot_offset);
+    EXPECT_EQ(plan.host_barrier.bytes, capture.slot_bytes);
+    EXPECT_TRUE(plan.observe_consumer);
+    EXPECT_TRUE(plan.continue_producer_bookkeeping);
+
+    auto rejected = PlanPpUpstreamSampleTeePostDraw({
+        .enabled = true,
+        .controller = armed,
+        .candidate = candidate,
+        .capture = capture,
+        .commands = commands,
+        .observed_candidate_index = 1,
+        .observed_serial = 73,
+        .direct_draw_executed = true,
+    });
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.issue_host_barrier);
+    EXPECT_TRUE(rejected.observe_consumer);
+    EXPECT_TRUE(rejected.continue_producer_bookkeeping);
+
+    rejected = PlanPpUpstreamSampleTeePostDraw({
+        .enabled = true,
+        .controller = armed,
+        .candidate = candidate,
+        .capture = capture,
+        .commands = commands,
+        .observed_candidate_index = 2,
+        .observed_serial = 73,
+        .direct_draw_executed = false,
+    });
+    EXPECT_EQ(rejected.status, FinalGuestSurfaceStatus::InvalidationLoss);
+    EXPECT_FALSE(rejected.issue_host_barrier);
+    EXPECT_TRUE(rejected.observe_consumer);
+    EXPECT_TRUE(rejected.continue_producer_bookkeeping);
+}
+
+TEST(PpUpstreamSampleTee, PostDrawCompletionRequiresRecordedBarrierAndPreservedResume) {
+    PpUpstreamSampleTeePostDrawPlan plan{
+        .controller = {.candidate_index = 2,
+                       .serial = 73,
+                       .status = FinalGuestSurfaceStatus::Complete,
+                       .active = true,
+                       .initialized = true,
+                       .armed = true,
+                       .draw_executed = true},
+        .status = FinalGuestSurfaceStatus::Complete,
+        .issue_host_barrier = true,
+        .resume_rendering = true,
+    };
+    const auto expect_rejected = [](const PpUpstreamSampleTeePostDrawCompletion& completion) {
+        EXPECT_EQ(completion.status, FinalGuestSurfaceStatus::InvalidationLoss);
+        EXPECT_FALSE(completion.ready);
+        EXPECT_TRUE(completion.observe_consumer);
+        EXPECT_TRUE(completion.continue_producer_bookkeeping);
+    };
+    expect_rejected(CompletePpUpstreamSampleTeePostDraw({
+        .plan = plan,
+        .observed_candidate_index = 2,
+        .observed_serial = 73,
+        .rendering_resumed = true,
+    }));
+    expect_rejected(CompletePpUpstreamSampleTeePostDraw({
+        .plan = plan,
+        .observed_candidate_index = 2,
+        .observed_serial = 73,
+        .host_barrier_recorded = true,
+    }));
+    expect_rejected(CompletePpUpstreamSampleTeePostDraw({
+        .plan = plan,
+        .observed_candidate_index = 2,
+        .observed_serial = 74,
+        .host_barrier_recorded = true,
+        .rendering_resumed = true,
+    }));
+
+    const auto completed = CompletePpUpstreamSampleTeePostDraw({
+        .plan = plan,
+        .observed_candidate_index = 2,
+        .observed_serial = 73,
+        .host_barrier_recorded = true,
+        .rendering_resumed = true,
+    });
+    ASSERT_EQ(completed.status, FinalGuestSurfaceStatus::Complete);
+    EXPECT_TRUE(completed.ready);
+    EXPECT_TRUE(completed.controller.post_barrier_complete);
+    EXPECT_TRUE(completed.observe_consumer);
+    EXPECT_TRUE(completed.continue_producer_bookkeeping);
+}
+
+TEST(PpUpstreamSampleTeeCompiler, UsesTheRealFragmentStageAndOneSideEffectingVoidOp) {
+    EXPECT_EQ(PpUpstreamSampleTeeShaderPlan::FragmentLogicalStage,
+              static_cast<u32>(Shader::LogicalStage::Fragment));
+    using TeeEmitter = void (Shader::IR::IREmitter::*)(const Shader::IR::Value&, u32);
+    TeeEmitter emitter = &Shader::IR::IREmitter::PpUpstreamSampleTee;
+    EXPECT_NE(emitter, nullptr);
+
+    Shader::IR::Inst tee{Shader::IR::Opcode::PpUpstreamSampleTee, 0};
+    EXPECT_EQ(tee.Type(), Shader::IR::Type::Void);
+    EXPECT_TRUE(tee.MayHaveSideEffects());
+}
+
+TEST(PpUpstreamSampleTeeCompiler, KeepsLegacyPushAbiWhenInstrumentationIsDisabled) {
+    constexpr auto ordinary = Shader::PlanPushDataLayout(false);
+    EXPECT_EQ(ordinary.byte_size, 120u);
+    EXPECT_EQ(ordinary.tail_components, 2u);
+    EXPECT_EQ(ordinary.byte_size,
+              offsetof(Shader::PushData, pp_upstream_sample_tee_control));
+
+    constexpr auto instrumented = Shader::PlanPushDataLayout(true);
+    EXPECT_EQ(instrumented.byte_size, sizeof(Shader::PushData));
+    EXPECT_EQ(instrumented.tail_components,
+              Shader::PushData::PpUpstreamSampleTeeMemberComponents);
+    EXPECT_EQ(instrumented.byte_size, 128u);
+    EXPECT_EQ(instrumented.tail_components, 4u);
+    EXPECT_EQ(ordinary.byte_size + sizeof(u32) * 2, instrumented.byte_size);
+}
+
+TEST(PpUpstreamSampleTeeCompiler, ReservesOnlyTheLastEightPushBytesAndOneWritableBuffer) {
+    EXPECT_EQ(sizeof(Shader::PushData), 128u);
+    EXPECT_EQ(offsetof(Shader::PushData, pp_upstream_sample_tee_control), 120u);
+    EXPECT_EQ(offsetof(Shader::PushData, pp_upstream_sample_tee_base_dword), 124u);
+    EXPECT_EQ(Shader::PushData::PpUpstreamSampleTeeMemberIndex,
+              Shader::PushData::BufOffsetIndex + 2);
+    EXPECT_EQ(Shader::PushData::PpUpstreamSampleTeeMemberComponents, 4u);
+    EXPECT_EQ(Shader::PushData::PpUpstreamSampleTeeControlComponent, 2u);
+    EXPECT_EQ(Shader::PushData::PpUpstreamSampleTeeBaseDwordComponent, 3u);
+
+    Shader::Info info{};
+    EXPECT_EQ(info.pp_upstream_sample_tee_results.size(), Shader::NUM_IMAGES);
+    EXPECT_EQ(info.pp_upstream_sample_tee_results[2], 0u);
+    EXPECT_FALSE(Shader::Profile{}.instrument_pp_upstream_sample_tee);
+
+    const Shader::BufferResource special{
+        .used_types = Shader::IR::Type::U32,
+        .inline_cbuf = AmdGpu::Buffer::Placeholder(Shader::PpUpstreamSampleTeeBufferBytes),
+        .buffer_type = Shader::BufferType::PpUpstreamSampleTee,
+        .is_written = true,
+    };
+    EXPECT_TRUE(special.IsSpecial());
+    EXPECT_TRUE(special.is_written);
+    EXPECT_EQ(special.inline_cbuf.GetSize(), Shader::PpUpstreamSampleTeeBufferBytes);
+    EXPECT_EQ(static_cast<u32>(Shader::BufferType::GdsBuffer), 4u);
+    EXPECT_EQ(static_cast<u32>(Shader::BufferType::SharedMemory), 5u);
+    EXPECT_GT(static_cast<u32>(Shader::BufferType::PpUpstreamSampleTee),
+              static_cast<u32>(Shader::BufferType::SharedMemory));
+}
+
+TEST(PpUpstreamSampleTeeCompiler, BoundsEverySlotInsideOneFixedDescriptor) {
+    EXPECT_EQ(Shader::PpUpstreamSampleTeeSlotCount, 8u);
+    EXPECT_EQ(Shader::PpUpstreamSampleTeeSlotStrideBytes, Shader::PpUpstreamSampleTeeMaxBytes);
+    EXPECT_EQ(Shader::PpUpstreamSampleTeeBufferBytes,
+              Shader::PpUpstreamSampleTeeSlotCount * Shader::PpUpstreamSampleTeeSlotStrideBytes);
+    EXPECT_LE(Shader::PpUpstreamSampleTeeMaxRecordDwords,
+              Shader::PpUpstreamSampleTeeSlotStrideDwords);
+
+    EXPECT_TRUE(Shader::IsValidPpUpstreamSampleTeeBaseDword(0));
+    EXPECT_TRUE(Shader::IsValidPpUpstreamSampleTeeBaseDword(
+        Shader::PpUpstreamSampleTeeBufferDwords - Shader::PpUpstreamSampleTeeSlotStrideDwords));
+    EXPECT_FALSE(Shader::IsValidPpUpstreamSampleTeeBaseDword(1));
+    EXPECT_FALSE(
+        Shader::IsValidPpUpstreamSampleTeeBaseDword(Shader::PpUpstreamSampleTeeBufferDwords));
+}
+
+TEST(PpUpstreamSampleTeeCompiler, InstrumentsOnlyBoundedFragmentResults) {
+    EXPECT_TRUE(
+        Shader::ShouldInstrumentPpUpstreamSampleResult(true, Shader::LogicalStage::Fragment, 2));
+    EXPECT_FALSE(
+        Shader::ShouldInstrumentPpUpstreamSampleResult(false, Shader::LogicalStage::Fragment, 2));
+    EXPECT_FALSE(
+        Shader::ShouldInstrumentPpUpstreamSampleResult(true, Shader::LogicalStage::Vertex, 2));
+    EXPECT_FALSE(Shader::ShouldInstrumentPpUpstreamSampleResult(
+        true, Shader::LogicalStage::Fragment, Shader::NUM_IMAGES));
+}
+
+TEST(PpUpstreamSampleTeeCompiler, ReservesSpecialBufferOrFailsClosedAtCapacity) {
+    std::array<u32, Shader::NUM_IMAGES> results{};
+    results[2] = 1;
+
+    const auto admitted = Shader::PlanPpUpstreamSampleTeeCompilerResource({
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .result_counts = results,
+        .current_buffer_count = Shader::NUM_BUFFERS - 3,
+        .later_required_buffer_count = 2,
+    });
+    EXPECT_TRUE(admitted.append_buffer);
+    EXPECT_FALSE(admitted.clear_result_counts);
+    EXPECT_TRUE(admitted.require_frag_coord);
+
+    const auto full = Shader::PlanPpUpstreamSampleTeeCompilerResource({
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .result_counts = results,
+        .current_buffer_count = Shader::NUM_BUFFERS - 2,
+        .later_required_buffer_count = 2,
+    });
+    EXPECT_FALSE(full.append_buffer);
+    EXPECT_TRUE(full.clear_result_counts);
+    EXPECT_FALSE(full.require_frag_coord);
+
+    results = {};
+    const auto unused = Shader::PlanPpUpstreamSampleTeeCompilerResource({
+        .enabled = true,
+        .stage = Shader::LogicalStage::Fragment,
+        .result_counts = results,
+        .current_buffer_count = 0,
+        .later_required_buffer_count = 0,
+    });
+    EXPECT_FALSE(unused.append_buffer);
+    EXPECT_FALSE(unused.clear_result_counts);
+    EXPECT_FALSE(unused.require_frag_coord);
 }
 
 } // namespace

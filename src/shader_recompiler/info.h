@@ -81,6 +81,10 @@ struct InfoPersistent {
 };
 
 struct Info : InfoPersistent {
+    // Diagnostic-only compiler metadata. Keep this out of InfoPersistent because that
+    // structure is serialized verbatim as the shader-meta cache ABI.
+    std::array<u32, NUM_IMAGES> pp_upstream_sample_tee_results{};
+
     struct AttributeFlags {
         bool Get(IR::Attribute attrib, u32 comp = 0) const {
             return flags[Index(attrib)] & (1 << comp);
