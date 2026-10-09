@@ -15,6 +15,7 @@
 #include "core/libraries/kernel/sync/mutex.h"
 #include "core/libraries/kernel/sync/semaphore.h"
 #include "core/libraries/kernel/threads/exception.h"
+#include "core/libraries/kernel/threads/sched_policy.h"
 #include "core/libraries/kernel/time.h"
 #include "core/thread.h"
 #include "core/tls.h"
@@ -28,16 +29,6 @@ class SymbolsResolver;
 namespace Libraries::Kernel {
 
 constexpr int PthreadInheritSched = 4;
-
-constexpr int ORBIS_KERNEL_PRIO_FIFO_DEFAULT = 700;
-constexpr int ORBIS_KERNEL_PRIO_FIFO_LOWEST = 256;
-constexpr int ORBIS_KERNEL_PRIO_FIFO_HIGHEST = 767;
-constexpr int ORBIS_KERNEL_PRIO_OTHER_DEFAULT = 900;
-constexpr int ORBIS_KERNEL_PRIO_OTHER_LOWEST = 768;
-constexpr int ORBIS_KERNEL_PRIO_OTHER_HIGHEST = 959;
-constexpr int ORBIS_KERNEL_PRIO_RR_DEFAULT = 700;
-constexpr int ORBIS_KERNEL_PRIO_RR_LOWEST = 256;
-constexpr int ORBIS_KERNEL_PRIO_RR_HIGHEST = 767;
 
 struct Pthread;
 
@@ -172,12 +163,6 @@ enum class PthreadAttrFlags : u32 {
     StackUser = 0x100,
 };
 DECLARE_ENUM_FLAG_OPERATORS(PthreadAttrFlags)
-
-enum class SchedPolicy : u32 {
-    Fifo = 1,
-    Other = 2,
-    RoundRobin = 3,
-};
 
 struct Cpuset {
     u64 bits;

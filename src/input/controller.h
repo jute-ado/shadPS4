@@ -14,6 +14,7 @@
 #include "common/ring_buffer_queue.h"
 #include "core/libraries/pad/pad.h"
 #include "core/libraries/system/userservice.h"
+#include "input/controller_connection.h"
 
 namespace Input {
 
@@ -33,6 +34,8 @@ struct TouchpadEntry {
     bool state{};
     u16 x{};
     u16 y{};
+
+    bool operator==(const TouchpadEntry&) const = default;
 };
 
 struct Colour {
@@ -85,9 +88,10 @@ class GameController {
     friend class GameControllers;
 
 public:
-    GameController();
+    explicit GameController(bool record_test_lab_input = false);
     virtual ~GameController() = default;
     void ConnectController(SDL_Gamepad* pad);
+    void ConnectVirtualController();
     void DisconnectController();
 
     State ReadState();
@@ -125,6 +129,8 @@ private:
 
     std::mutex m_state_mutex;
     RingBufferQueue<State> m_states_queue;
+    ControllerConnectionState m_connection;
+    bool m_record_test_lab_input{};
 };
 
 class GameControllers {
@@ -132,7 +138,7 @@ class GameControllers {
 
 public:
     GameControllers()
-        : controllers({new GameController(), new GameController(), new GameController(),
+        : controllers({new GameController(true), new GameController(), new GameController(),
                        new GameController(), new GameController()}) {};
     virtual ~GameControllers() = default;
     GameController* operator[](const size_t& i) const {

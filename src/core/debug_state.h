@@ -193,7 +193,7 @@ public:
         return is_guest_threads_paused;
     }
 
-    void IncFlipFrameNum() {
+    u32 IncFlipFrameNum() {
         // Low weight on the newest frame, so the average settles instead of jumping around.
         static constexpr float smoothing = 0.05f;
         const auto draws = draw_call_count.exchange(0, std::memory_order_relaxed);
@@ -205,7 +205,7 @@ public:
         const auto dispatches_avg = dispatch_count_avg.load(std::memory_order_relaxed);
         dispatch_count_avg.store(dispatches_avg + (float(dispatches) - dispatches_avg) * smoothing,
                                  std::memory_order_relaxed);
-        ++flip_frame_count;
+        return ++flip_frame_count;
     }
 
     void IncDrawCall() noexcept {
