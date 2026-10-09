@@ -775,11 +775,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
-                    SubmitEop(
+                    SubmitEopAfterSubmission(
                         *event_eop,
-                        [this](Common::UniqueFunction<void>&& completion) {
-                            rasterizer->DeferGpuCompletion(std::move(completion));
-                        },
                         [this] { rasterizer->Flush(); },
                         [](void* address, u64 data, u32 num_bytes) {
                             auto* memory = Core::Memory::Instance();

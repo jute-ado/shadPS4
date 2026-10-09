@@ -23,6 +23,17 @@ void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&
     std::forward<SubmitGpuWork>(submit_gpu_work)();
 }
 
+template <typename Packet, typename SubmitGpuWork, typename WriteMemory, typename SignalInterrupt,
+          typename NotifyCompletion>
+void SubmitEopAfterSubmission(Packet packet, SubmitGpuWork&& submit_gpu_work,
+                              WriteMemory&& write_memory, SignalInterrupt&& signal_interrupt,
+                              NotifyCompletion&& notify_completion) {
+    std::forward<SubmitGpuWork>(submit_gpu_work)();
+    packet.SignalFence(std::forward<WriteMemory>(write_memory),
+                       std::forward<SignalInterrupt>(signal_interrupt));
+    std::forward<NotifyCompletion>(notify_completion)();
+}
+
 template <typename Packet, typename DeferCompletion, typename SubmitGpuWork, typename WriteMemory,
           typename SignalInterrupt>
 void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&& submit_gpu_work,
