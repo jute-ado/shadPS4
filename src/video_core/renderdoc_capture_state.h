@@ -11,6 +11,7 @@ class RenderDocCaptureState {
     enum class State {
         Idle,
         Triggered,
+        Capturing,
     };
 
 public:
@@ -19,8 +20,16 @@ public:
         return state.compare_exchange_strong(expected, State::Triggered);
     }
 
-    [[nodiscard]] bool ConsumePresentedFrameTrigger() {
+    [[nodiscard]] bool TryBeginGuestSubmission(const bool has_guest_work) {
+        if (!has_guest_work) {
+            return false;
+        }
         auto expected = State::Triggered;
+        return state.compare_exchange_strong(expected, State::Capturing);
+    }
+
+    [[nodiscard]] bool FinishGuestSubmission() {
+        auto expected = State::Capturing;
         return state.compare_exchange_strong(expected, State::Idle);
     }
 
