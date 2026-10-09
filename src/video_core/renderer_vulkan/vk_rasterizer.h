@@ -28,6 +28,7 @@ class Scheduler;
 class RenderState;
 class GraphicsPipeline;
 class PpTerminalScopeContentRuntime;
+struct PpTerminalScopeRuntimeConfig;
 
 class Rasterizer {
 public:
@@ -104,6 +105,9 @@ public:
     }
 
 private:
+    Rasterizer(const Instance& instance, Scheduler& scheduler, AmdGpu::Liverpool* liverpool,
+               PpTerminalScopeRuntimeConfig config);
+
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
@@ -119,12 +123,13 @@ private:
 
     bool FilterDraw();
 
-    void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
+    bool BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
-    void CapturePpTerminalScopePreDraw(const RenderState& state,
-                                       const VideoCore::ImageColorScopeDrawDescriptor& draw);
+    [[nodiscard]] bool CapturePpTerminalScopePreDraw(
+        const GraphicsPipeline* pipeline, const RenderState& state,
+        const VideoCore::ImageColorScopeDrawDescriptor& draw);
     void MarkEncodedImageProducers(const RenderState& state,
                                    VideoCore::ImageColorScopeDrawDescriptor draw);
     void MarkEncodedStorageImageProducers();

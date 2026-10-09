@@ -140,12 +140,20 @@ list(APPEND TEST_TARGETS shadps4_pp_source_reconstruction_test)
 
 add_executable(shadps4_pp_source_publication_test
     test_pp_source_publication.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/microinstruction.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/opcodes.cpp
+    stubs/pp_sample_tee_ir_stub.cpp
 )
 target_include_directories(shadps4_pp_source_publication_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_pp_source_publication_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_pp_source_publication_test PRIVATE GTest::gtest_main)
+target_link_libraries(shadps4_pp_source_publication_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+    Boost::headers
+    Vulkan::Headers
+)
 list(APPEND TEST_TARGETS shadps4_pp_source_publication_test)
 
 add_executable(shadps4_submit_info_test
@@ -563,6 +571,7 @@ set(GCN_TEST_SOURCES
     # Tests
     gcn/test_buffer_access_range_pass.cpp
     gcn/test_gcn_instructions.cpp
+    gcn/test_pp_upstream_sample_tee_spirv.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})

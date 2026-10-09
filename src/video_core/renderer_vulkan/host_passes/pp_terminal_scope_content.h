@@ -45,6 +45,7 @@ struct PpTerminalScopeContentConfig {
     bool capture_upstream_pre_post{};
     bool capture_upstream_input_content{};
     bool capture_upstream_sample_routes{};
+    bool capture_upstream_sample_tee{};
     u32 upstream_input_index{};
     u32 upstream_candidate_index{};
     u32 upstream_sample_route_input_index{};
@@ -145,6 +146,8 @@ template <typename ReadValue>
         read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE");
     const auto upstream_sample_route_value =
         read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_ROUTE_INPUT");
+    const auto upstream_sample_tee_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_TEE");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
@@ -168,6 +171,11 @@ template <typename ReadValue>
         return std::nullopt;
     }
     if (upstream_sample_route_value && !upstream_input_content_value) {
+        return std::nullopt;
+    }
+    if (upstream_sample_tee_value &&
+        (*upstream_sample_tee_value != "1" || !upstream_sample_route_value ||
+         final_config->watch_ordinals.count != 1)) {
         return std::nullopt;
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
@@ -221,6 +229,7 @@ template <typename ReadValue>
                     .capture_upstream_pre_post = upstream_pre_post_value.has_value(),
                     .capture_upstream_input_content = upstream_input_content_value.has_value(),
                     .capture_upstream_sample_routes = upstream_sample_route_value.has_value(),
+                    .capture_upstream_sample_tee = upstream_sample_tee_value.has_value(),
                     .upstream_input_index = upstream_input_index,
                     .upstream_candidate_index = upstream_candidate_index,
                     .upstream_sample_route_input_index = upstream_sample_route_input_index,

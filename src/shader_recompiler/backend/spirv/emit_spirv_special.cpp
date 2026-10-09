@@ -4,8 +4,152 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/debug_print.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 
 namespace Shader::Backend::SPIRV {
+
+void EmitPpUpstreamSampleTee(EmitContext& ctx, Id value, u32 resource_index) {
+    if (ctx.pp_upstream_sample_tee_buffer_index == EmitContext::InvalidBufferIndex) {
+        return;
+    }
+    ASSERT(ctx.stage == Stage::Fragment && Sirit::ValidId(ctx.frag_coord));
+    ASSERT(resource_index < NUM_IMAGES);
+
+    const Id push_u32_ptr{ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[1])};
+    const auto load_push_component = [&](u32 component) {
+        const Id pointer{ctx.OpAccessChain(push_u32_ptr, ctx.push_data_block,
+                                           ctx.ConstU32(PushData::PpUpstreamSampleTeeMemberIndex),
+                                           ctx.ConstU32(component))};
+        return ctx.OpLoad(ctx.U32[1], pointer);
+    };
+    const Id control{load_push_component(PushData::PpUpstreamSampleTeeControlComponent)};
+    const Id base_dword{load_push_component(PushData::PpUpstreamSampleTeeBaseDwordComponent)};
+
+    const Id armed{ctx.OpIEqual(
+        ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], control, ctx.ConstU32(PpUpstreamSampleTeeArmMask)),
+        ctx.ConstU32(PpUpstreamSampleTeeArmMask))};
+    const Id resource_matches{ctx.OpIEqual(
+        ctx.U1[1],
+        ctx.OpBitwiseAnd(ctx.U32[1], control, ctx.ConstU32(PpUpstreamSampleTeeResourceMask)),
+        ctx.ConstU32(resource_index))};
+    const Id reserved_clear{ctx.OpIEqual(
+        ctx.U1[1],
+        ctx.OpBitwiseAnd(ctx.U32[1], control, ctx.ConstU32(PpUpstreamSampleTeeReservedMask)),
+        ctx.u32_zero_value)};
+    const Id base_aligned{ctx.OpIEqual(
+        ctx.U1[1],
+        ctx.OpUMod(ctx.U32[1], base_dword, ctx.ConstU32(PpUpstreamSampleTeeSlotStrideDwords)),
+        ctx.u32_zero_value)};
+    const Id base_in_range{ctx.OpULessThanEqual(
+        ctx.U1[1], base_dword,
+        ctx.ConstU32(PpUpstreamSampleTeeBufferDwords - PpUpstreamSampleTeeSlotStrideDwords))};
+    const Id control_valid{ctx.OpLogicalAnd(
+        ctx.U1[1], armed,
+        ctx.OpLogicalAnd(
+            ctx.U1[1], resource_matches,
+            ctx.OpLogicalAnd(ctx.U1[1], reserved_clear,
+                             ctx.OpLogicalAnd(ctx.U1[1], base_aligned, base_in_range))))};
+    const Id candidate{ctx.OpBitFieldUExtract(
+        ctx.U32[1], control, ctx.ConstU32(PpUpstreamSampleTeeCandidateShift), ctx.ConstU32(2u))};
+
+    const Id header_label{ctx.OpLabel()};
+    const Id merge_label{ctx.OpLabel()};
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(control_valid, header_label, merge_label);
+    ctx.AddLabel(header_label);
+
+    const auto& buffer = ctx.buffers[ctx.pp_upstream_sample_tee_buffer_index];
+    const auto [buffer_id, pointer_type] = buffer.Alias(EmitContext::PointerType::U32);
+    const auto pointer_at = [&](Id dword) {
+        return ctx.OpAccessChain(pointer_type, buffer_id, ctx.u32_zero_value, dword);
+    };
+    const auto load_header = [&](u32 offset) {
+        return ctx.OpLoad(ctx.U32[1],
+                          pointer_at(ctx.OpIAdd(ctx.U32[1], base_dword, ctx.ConstU32(offset))));
+    };
+    const Id magic{load_header(0)};
+    const Id generation{load_header(1)};
+    const Id header_candidate{load_header(2)};
+    const Id origin_x{load_header(3)};
+    const Id origin_y{load_header(4)};
+    const Id width{load_header(5)};
+    const Id height{load_header(6)};
+    const Id pixel_count{load_header(7)};
+
+    Id header_valid{ctx.OpIEqual(ctx.U1[1], magic, ctx.ConstU32(PpUpstreamSampleTeeHeaderMagic))};
+    const auto append_header_condition = [&](Id condition) {
+        header_valid = ctx.OpLogicalAnd(ctx.U1[1], header_valid, condition);
+    };
+    append_header_condition(ctx.OpINotEqual(ctx.U1[1], generation, ctx.u32_zero_value));
+    append_header_condition(ctx.OpIEqual(ctx.U1[1], header_candidate, candidate));
+    append_header_condition(ctx.OpUGreaterThanEqual(ctx.U1[1], width, ctx.u32_one_value));
+    append_header_condition(
+        ctx.OpULessThanEqual(ctx.U1[1], width, ctx.ConstU32(PpUpstreamSampleTeeMaxDimension)));
+    append_header_condition(ctx.OpUGreaterThanEqual(ctx.U1[1], height, ctx.u32_one_value));
+    append_header_condition(
+        ctx.OpULessThanEqual(ctx.U1[1], height, ctx.ConstU32(PpUpstreamSampleTeeMaxDimension)));
+    append_header_condition(
+        ctx.OpIEqual(ctx.U1[1], pixel_count, ctx.OpIMul(ctx.U32[1], width, height)));
+    const Id required_dwords{ctx.OpIAdd(
+        ctx.U32[1], ctx.ConstU32(PpUpstreamSampleTeeHeaderDwords),
+        ctx.OpIMul(ctx.U32[1], pixel_count, ctx.ConstU32(PpUpstreamSampleTeeRecordDwords)))};
+    append_header_condition(ctx.OpULessThanEqual(
+        ctx.U1[1], required_dwords, ctx.ConstU32(PpUpstreamSampleTeeSlotStrideDwords)));
+    append_header_condition(
+        ctx.OpULessThanEqual(ctx.U1[1], ctx.OpIAdd(ctx.U32[1], base_dword, required_dwords),
+                             ctx.ConstU32(PpUpstreamSampleTeeBufferDwords)));
+
+    const Id write_label{ctx.OpLabel()};
+    const Id header_merge_label{ctx.OpLabel()};
+    const Id frag_coord{ctx.OpLoad(ctx.F32[4], ctx.frag_coord)};
+    const Id pixel_x{
+        ctx.OpConvertFToU(ctx.U32[1], ctx.OpCompositeExtract(ctx.F32[1], frag_coord, 0))};
+    const Id pixel_y{
+        ctx.OpConvertFToU(ctx.U32[1], ctx.OpCompositeExtract(ctx.F32[1], frag_coord, 1))};
+    const Id delta_x{ctx.OpISub(ctx.U32[1], pixel_x, origin_x)};
+    const Id delta_y{ctx.OpISub(ctx.U32[1], pixel_y, origin_y)};
+    const Id x_in_range{ctx.OpLogicalAnd(ctx.U1[1],
+                                         ctx.OpUGreaterThanEqual(ctx.U1[1], pixel_x, origin_x),
+                                         ctx.OpULessThan(ctx.U1[1], delta_x, width))};
+    const Id y_in_range{ctx.OpLogicalAnd(ctx.U1[1],
+                                         ctx.OpUGreaterThanEqual(ctx.U1[1], pixel_y, origin_y),
+                                         ctx.OpULessThan(ctx.U1[1], delta_y, height))};
+    const Id write_valid{ctx.OpLogicalAnd(ctx.U1[1], header_valid,
+                                          ctx.OpLogicalAnd(ctx.U1[1], x_in_range, y_in_range))};
+    ctx.OpSelectionMerge(header_merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(write_valid, write_label, header_merge_label);
+    ctx.AddLabel(write_label);
+
+    const Id local_index{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], delta_y, width), delta_x)};
+    const Id record_dword{ctx.OpIAdd(
+        ctx.U32[1],
+        ctx.OpIAdd(ctx.U32[1], base_dword, ctx.ConstU32(PpUpstreamSampleTeeHeaderDwords)),
+        ctx.OpIMul(ctx.U32[1], local_index, ctx.ConstU32(PpUpstreamSampleTeeRecordDwords)))};
+    const Id writer_dword{ctx.OpIAdd(ctx.U32[1], record_dword, ctx.ConstU32(4u))};
+    const Id previous_writers{ctx.OpAtomicIAdd(ctx.U32[1], pointer_at(writer_dword),
+                                               ctx.ConstU32(static_cast<u32>(spv::Scope::Device)),
+                                               ctx.u32_zero_value, ctx.u32_one_value)};
+    const Id is_winner{ctx.OpIEqual(ctx.U1[1], previous_writers, ctx.u32_zero_value)};
+    const Id winner_label{ctx.OpLabel()};
+    const Id writer_merge_label{ctx.OpLabel()};
+    ctx.OpSelectionMerge(writer_merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(is_winner, winner_label, writer_merge_label);
+    ctx.AddLabel(winner_label);
+    const Id raw_value{ctx.OpBitcast(ctx.U32[4], value)};
+    for (u32 component = 0; component < 4; ++component) {
+        const Id component_dword{ctx.OpIAdd(ctx.U32[1], record_dword, ctx.ConstU32(component))};
+        ctx.OpStore(pointer_at(component_dword),
+                    ctx.OpCompositeExtract(ctx.U32[1], raw_value, component));
+    }
+    ctx.OpBranch(writer_merge_label);
+
+    ctx.AddLabel(writer_merge_label);
+    ctx.OpBranch(header_merge_label);
+
+    ctx.AddLabel(header_merge_label);
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(merge_label);
+}
 
 void EmitPrologue(EmitContext& ctx) {
     if (ctx.stage == Stage::Fragment) {

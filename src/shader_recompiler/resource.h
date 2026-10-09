@@ -8,6 +8,7 @@
 #include "shader_recompiler/ir/type.h"
 #include "video_core/amdgpu/resource.h"
 
+#include <cstddef>
 #include <boost/container/static_vector.hpp>
 
 namespace Shader {
@@ -25,6 +26,7 @@ enum class BufferType : u32 {
     FaultBuffer,
     GdsBuffer,
     SharedMemory,
+    PpUpstreamSampleTee,
 };
 
 struct Info;
@@ -153,6 +155,10 @@ struct PushData {
     static constexpr u32 YScaleIndex = 3;
     static constexpr u32 UdRegsIndex = 4;
     static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
+    static constexpr u32 PpUpstreamSampleTeeMemberIndex = BufOffsetIndex + 2;
+    static constexpr u32 PpUpstreamSampleTeeMemberComponents = 4;
+    static constexpr u32 PpUpstreamSampleTeeControlComponent = 2;
+    static constexpr u32 PpUpstreamSampleTeeBaseDwordComponent = 3;
 
     float xoffset;
     float yoffset;
@@ -160,12 +166,16 @@ struct PushData {
     float yscale;
     std::array<u32, NUM_USER_DATA_REGS> ud_regs;
     std::array<u8, NUM_BUFFERS> buf_offsets;
+    u32 pp_upstream_sample_tee_control{};
+    u32 pp_upstream_sample_tee_base_dword{};
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
     }
 };
+static_assert(offsetof(PushData, pp_upstream_sample_tee_control) == 120);
+static_assert(offsetof(PushData, pp_upstream_sample_tee_base_dword) == 124);
 static_assert(sizeof(PushData) <= 128,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
 

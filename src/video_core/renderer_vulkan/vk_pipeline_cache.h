@@ -37,6 +37,10 @@ class Instance;
 class Scheduler;
 class ShaderCache;
 
+namespace HostPasses {
+struct PpUpstreamSampleTeePipelinePolicy;
+}
+
 struct Program {
     struct Module {
         vk::ShaderModule module;
@@ -66,7 +70,8 @@ struct Program {
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
-                           AmdGpu::Liverpool* liverpool);
+                           AmdGpu::Liverpool* liverpool,
+                           const HostPasses::PpUpstreamSampleTeePipelinePolicy& policy);
     ~PipelineCache();
 
     void WarmUp();
@@ -117,6 +122,8 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     AmdGpu::Liverpool* liverpool;
+    bool allow_persistent_artifacts{};
+    bool allow_shader_patches{};
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;

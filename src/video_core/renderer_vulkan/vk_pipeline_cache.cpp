@@ -14,6 +14,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_tee.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -246,8 +247,11 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
-                             AmdGpu::Liverpool* liverpool_)
+                             AmdGpu::Liverpool* liverpool_,
+                             const HostPasses::PpUpstreamSampleTeePipelinePolicy& policy)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
+      allow_persistent_artifacts{policy.allow_persistent_artifacts},
+      allow_shader_patches{policy.allow_shader_patches},
       desc_heap{instance, scheduler.GetMasterSemaphore(), DescriptorHeapSizes} {
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -305,6 +309,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
+        .instrument_pp_upstream_sample_tee = policy.instrument_profile,
     };
     WarmUp();
 
@@ -330,10 +335,12 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
             runtime_infos, fetch_shader, modules, sdata, false);
 
-        RegisterPipelineData(graphics_key, pipeline_hash, sdata);
+        if (allow_persistent_artifacts) {
+            RegisterPipelineData(graphics_key, pipeline_hash, sdata);
+        }
         ++num_new_pipelines;
 
-        if (EmulatorSettings.IsShaderCollect()) {
+        if (allow_persistent_artifacts && EmulatorSettings.IsShaderCollect()) {
             for (auto stage = 0; stage < MaxShaderStages; ++stage) {
                 if (infos[stage]) {
                     auto& m = modules[stage];
@@ -359,10 +366,12 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
                                                        modules[0], sdata, false);
-        RegisterPipelineData(compute_key, sdata);
+        if (allow_persistent_artifacts) {
+            RegisterPipelineData(compute_key, sdata);
+        }
         ++num_new_pipelines;
 
-        if (EmulatorSettings.IsShaderCollect()) {
+        if (allow_persistent_artifacts && EmulatorSettings.IsShaderCollect()) {
             auto& m = modules[0];
             module_related_pipelines[m].emplace_back(compute_key);
         }
@@ -613,7 +622,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 
     vk::ShaderModule module;
 
-    auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
+    auto patch = allow_shader_patches ? GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv")
+                                      : std::optional<std::vector<u32>>{};
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
@@ -622,11 +632,13 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    if (allow_persistent_artifacts) {
+        RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    }
 
     const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
-    if (EmulatorSettings.IsShaderCollect()) {
+    if (allow_persistent_artifacts && EmulatorSettings.IsShaderCollect()) {
         DebugState.CollectShader(name, info.l_stage, module, spv, code,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
@@ -646,7 +658,9 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
         const auto perm_hash = HashCombine(params.hash, 0);
 
-        RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+        if (allow_persistent_artifacts) {
+            RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+        }
         program->AddPermut(module, std::move(spec));
         return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
                                perm_hash);
@@ -669,7 +683,9 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         auto new_info = Shader::Info(stage, l_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        if (allow_persistent_artifacts) {
+            RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        }
         program->AddPermut(module, std::move(spec));
     } else {
         info.AddBindings(binding);
@@ -683,6 +699,9 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
                                                              std::span<const u32> spv_code) {
+    if (!allow_shader_patches) {
+        return std::nullopt;
+    }
     std::optional<vk::ShaderModule> new_module{};
     for (const auto& [_, program] : program_cache) {
         for (auto& m : program->modules) {
@@ -719,7 +738,7 @@ std::string PipelineCache::GetShaderName(Shader::Stage stage, u64 hash,
 
 void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage,
                                size_t perm_idx, std::string_view ext) {
-    if (!EmulatorSettings.IsDumpShaders()) {
+    if (!allow_persistent_artifacts || !EmulatorSettings.IsDumpShaders()) {
         return;
     }
 
