@@ -2,14 +2,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
 #include <span>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <magic_enum/magic_enum.hpp>
 #include <spirv/unified1/spirv.hpp11>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
+#include "shader_recompiler/frontend/decode.h"
 #include "translator.hpp"
 
 class GcnTest : public ::testing::Test {
@@ -59,6 +65,58 @@ constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
 }
 
 } // Anonymous namespace
+
+TEST(GcnDiagnostic, dump_shader_isa_from_environment) {
+    const char* const path = std::getenv("SHADPS4_GCN_DUMP_PATH");
+    if (path == nullptr) {
+        GTEST_SKIP() << "SHADPS4_GCN_DUMP_PATH is not set";
+    }
+
+    std::ifstream input{path, std::ios::binary | std::ios::ate};
+    ASSERT_TRUE(input.is_open()) << path;
+    const auto byte_size = input.tellg();
+    ASSERT_GT(byte_size, 0);
+    ASSERT_EQ(byte_size % static_cast<std::streamoff>(sizeof(u32)), 0);
+    input.seekg(0);
+
+    std::vector<u32> code(static_cast<size_t>(byte_size) / sizeof(u32));
+    ASSERT_TRUE(input.read(reinterpret_cast<char*>(code.data()), byte_size));
+
+    Shader::Gcn::GcnCodeSlice slice{code.data(), code.data() + code.size()};
+    Shader::Gcn::GcnDecodeContext decoder;
+    u32 pc{};
+    while (!slice.atEnd()) {
+        const Shader::Gcn::GcnInst inst = decoder.decodeInstruction(slice);
+        std::cout << std::format("{:04x}: {}", pc, magic_enum::enum_name(inst.opcode));
+        for (u32 index = 0; index < inst.dst_count; ++index) {
+            const auto& operand = inst.dst[index];
+            std::cout << std::format(" d{}=[{},{}]", index, magic_enum::enum_name(operand.field),
+                                     operand.code);
+        }
+        for (u32 index = 0; index < inst.src_count; ++index) {
+            const auto& operand = inst.src[index];
+            std::cout << std::format(" s{}=[{},{}]", index, magic_enum::enum_name(operand.field),
+                                     operand.code);
+        }
+        const bool is_direct_branch =
+            inst.opcode == Shader::Gcn::Opcode::S_BRANCH ||
+            inst.opcode == Shader::Gcn::Opcode::S_CBRANCH_SCC0 ||
+            inst.opcode == Shader::Gcn::Opcode::S_CBRANCH_SCC1 ||
+            inst.opcode == Shader::Gcn::Opcode::S_CBRANCH_VCCZ ||
+            inst.opcode == Shader::Gcn::Opcode::S_CBRANCH_VCCNZ ||
+            inst.opcode == Shader::Gcn::Opcode::S_CBRANCH_EXECZ ||
+            inst.opcode == Shader::Gcn::Opcode::S_CBRANCH_EXECNZ;
+        if (is_direct_branch) {
+            const s32 byte_offset = static_cast<s32>(inst.control.sopp.simm) * 4;
+            std::cout << std::format(" target={:04x}", pc + byte_offset + inst.length);
+        }
+        std::cout << '\n';
+        pc += inst.length;
+        if (inst.opcode == Shader::Gcn::Opcode::S_ENDPGM) {
+            break;
+        }
+    }
+}
 
 TEST_F(GcnTest, dma_fault_bits_are_marked_atomically) {
     // s_load_dword s4, s[0:1], 0
