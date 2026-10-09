@@ -85,6 +85,12 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     const auto device = instance.GetDevice();
     auto [descriptor_set_result, descriptor_set] =
         device.createDescriptorSetLayoutUnique(desc_layout_ci);
+    if (descriptor_set_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignoring cached compute descriptor layout rejected by Vulkan: {}",
+                    vk::to_string(descriptor_set_result));
+        return;
+    }
     ASSERT_MSG(descriptor_set_result == vk::Result::eSuccess,
                "Failed to create compute descriptor set layout: {}",
                vk::to_string(descriptor_set_result));
@@ -98,6 +104,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .pPushConstantRanges = &push_constants,
     };
     auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
+    if (layout_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached compute pipeline layout rejected by Vulkan: {}",
+                    vk::to_string(layout_result));
+        return;
+    }
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create compute pipeline layout: {}", vk::to_string(layout_result));
     pipeline_layout = std::move(layout);
@@ -109,6 +120,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     };
     auto [pipeline_result, pipe] =
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+    if (pipeline_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached compute pipeline rejected by Vulkan: {}",
+                    vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);

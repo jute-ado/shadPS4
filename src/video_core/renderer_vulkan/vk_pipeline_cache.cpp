@@ -12,6 +12,7 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "shader_recompiler/specialization_identity.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
@@ -323,8 +324,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 
     if (EmulatorSettings.IsAsyncGraphicsPipelineCompilation()) {
-        async_graphics_compiler = std::make_unique<AsyncGraphicsPipelineQueue>(
-            [this](AsyncGraphicsPipelineJob job) {
+        async_graphics_compiler =
+            std::make_unique<AsyncGraphicsPipelineQueue>([this](AsyncGraphicsPipelineJob job) {
                 return CompileGraphicsPipelineAsync(std::move(job));
             });
     }
@@ -736,15 +737,16 @@ bool PipelineCache::RefreshComputeKey() {
 
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{
-        DebugState, !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
+                                              Shader::Backend::Bindings& binding,
+                                              std::vector<u32>& spv) {
+    ScopedHostCompilationGuestPause pause{DebugState,
+                                          !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
     vk::ShaderModule module;
@@ -757,8 +759,6 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     } else {
         module = CompileSPV(spv, instance.GetDevice());
     }
-
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
     const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
@@ -773,19 +773,30 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(stage, l_stage);
-    auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
+    const Shader::ProgramCacheKey cache_key{
+        .program_hash = params.hash,
+        .stage = stage,
+        .logical_stage = l_stage,
+    };
+    auto [it_pgm, new_program] = program_cache.try_emplace(cache_key);
     if (new_program) {
         it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
-        const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
+        std::vector<u32> spv;
+        const auto module =
+            CompileModule(program->info, runtime_info, params.code, 0, binding, spv);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
-        const auto perm_hash = HashCombine(params.hash, 0);
+        const auto permutation_id =
+            Shader::ComputeShaderPermutationIdentity(params.hash, l_stage, spec);
 
-        RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
-        program->AddPermut(module, std::move(spec));
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
-                               perm_hash);
+        if (RegisterShaderMeta(program->info, spec, permutation_id)) {
+            RegisterShaderBinary(std::move(spv), permutation_id);
+        }
+        auto module_info = program->info;
+        program->AddPermut(module, std::move(spec), std::move(module_info), permutation_id);
+        return std::make_tuple(program->modules[0].info.get(), module,
+                               program->modules[0].spec.fetch_shader_data, permutation_id);
     }
 
     auto& program = it_pgm.value();
@@ -793,28 +804,68 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    const auto start = binding;
+    const auto probe_spec = Shader::StageSpecialization(info, runtime_info, profile, start);
 
     size_t perm_idx = program->modules.size();
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
+    u64 permutation_id{};
 
     vk::ShaderModule module{};
+    const Program::Module* selected{};
+    bool binding_advanced_by_compile{};
 
-    const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+    const auto it = std::ranges::find(program->modules, probe_spec, &Program::Module::spec);
     if (it == program->modules.end()) {
         auto new_info = Shader::Info(stage, l_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        std::vector<u32> spv;
+        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding, spv);
+        binding_advanced_by_compile = true;
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
+        // Translation can discover fetch-shader and SRT-backed resources that are absent from the
+        // aggregate Program::info used for the cheap lookup above. Only the fresh, translated Info
+        // may define the semantic identity and metadata of a newly published permutation.
+        auto authoritative_spec =
+            Shader::StageSpecialization(new_info, runtime_info, profile, start);
+        permutation_id =
+            Shader::ComputeShaderPermutationIdentity(params.hash, l_stage, authoritative_spec);
+        const auto authoritative =
+            program->InspectPreloadPermutation(authoritative_spec, permutation_id);
+        if (authoritative.action == Program::PreloadAction::Conflict) {
+            instance.GetDevice().destroyShaderModule(module);
+            UNREACHABLE_MSG("Shader permutation identity {:#x} conflicts with an existing "
+                            "specialization",
+                            permutation_id);
+        }
+
+        if (authoritative.action == Program::PreloadAction::Reuse) {
+            ASSERT(authoritative.module);
+            instance.GetDevice().destroyShaderModule(module);
+            selected = authoritative.module;
+            module = selected->module;
+            permutation_id = selected->permutation_id;
+        } else {
+            if (RegisterShaderMeta(new_info, authoritative_spec, permutation_id)) {
+                RegisterShaderBinary(std::move(spv), permutation_id);
+            }
+            program->AddPermut(module, std::move(authoritative_spec), std::move(new_info),
+                               permutation_id);
+            selected = &program->modules.back();
+        }
     } else {
-        info.AddBindings(binding);
         module = it->module;
-        perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
+        permutation_id = it->permutation_id;
+        selected = &*it;
     }
-    return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+    ASSERT(selected && selected->info);
+    auto& selected_info = *selected->info;
+    selected_info.pgm_base = params.Base();
+    selected_info.user_data = params.user_data;
+    selected_info.RefreshFlatBuf();
+    if (!binding_advanced_by_compile) {
+        selected_info.AddBindings(binding);
+    }
+    return std::make_tuple(&selected_info, module, selected->spec.fetch_shader_data,
+                           permutation_id);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

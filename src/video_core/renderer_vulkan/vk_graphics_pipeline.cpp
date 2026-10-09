@@ -37,8 +37,24 @@ GraphicsPipeline::GraphicsPipeline(
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache}, key{key_},
       fetch_shader{std::move(fetch_shader_)} {
     const vk::Device device = instance.GetDevice();
+    const auto compile_auxiliary = [&](std::span<const u32> code) -> vk::ShaderModule {
+        vk::ShaderModule module{};
+        if (preloading) {
+            const auto cached_module = TryCompileSPV(code, device);
+            if (!cached_module) {
+                return {};
+            }
+            module = *cached_module;
+        } else {
+            module = CompileSPV(code, device);
+        }
+        owned_auxiliary_modules.push_back(module);
+        return module;
+    };
     std::ranges::copy(infos, stages.begin());
-    BuildDescSetLayout(preloading);
+    if (!BuildDescSetLayout(preloading)) {
+        return;
+    }
     const auto debug_str = GetDebugString();
 
     const vk::PushConstantRange push_constants = {
@@ -55,6 +71,12 @@ GraphicsPipeline::GraphicsPipeline(
         .pPushConstantRanges = &push_constants,
     };
     auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
+    if (layout_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignoring cached graphics pipeline layout rejected by Vulkan: {}",
+                    vk::to_string(layout_result));
+        return;
+    }
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create graphics pipeline layout: {}", vk::to_string(layout_result));
     pipeline_layout = std::move(layout);
@@ -197,9 +219,13 @@ GraphicsPipeline::GraphicsPipeline(
             const auto& fs_info = runtime_infos[u32(Shader::LogicalStage::Fragment)].fs_info;
             sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
         }
+        const auto auxiliary_module = compile_auxiliary(sdata.tcs);
+        if (!auxiliary_module) {
+            return;
+        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
-            .module = CompileSPV(sdata.tcs, instance.GetDevice()),
+            .module = auxiliary_module,
             .pName = "main",
         });
     }
@@ -216,9 +242,13 @@ GraphicsPipeline::GraphicsPipeline(
             sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
                 AuxShaderType::PassthroughTES, fs_info);
         }
+        const auto auxiliary_module = compile_auxiliary(sdata.tes);
+        if (!auxiliary_module) {
+            return;
+        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
-            .module = CompileSPV(sdata.tes, instance.GetDevice()),
+            .module = auxiliary_module,
             .pName = "main",
         });
     }
@@ -229,7 +259,9 @@ GraphicsPipeline::GraphicsPipeline(
             .module = modules[stage],
             .pName = "main",
         });
-    } else if (runtime_infos[u32(Shader::LogicalStage::Fragment)].fs_info.clip_distance_emulation) {
+    } else if ((!preloading && runtime_infos[u32(Shader::LogicalStage::Fragment)]
+                                   .fs_info.clip_distance_emulation) ||
+               (preloading && !sdata.fragment.empty())) {
         if (!preloading) {
             const auto vs_runtime_info =
                 runtime_infos[static_cast<u32>(Shader::LogicalStage::Vertex)].vs_info;
@@ -237,9 +269,13 @@ GraphicsPipeline::GraphicsPipeline(
             sdata.fragment =
                 Shader::Backend::SPIRV::EmitDiscardFragmentShader(vs_runtime_info.outputs);
         }
+        const auto auxiliary_module = compile_auxiliary(sdata.fragment);
+        if (!auxiliary_module) {
+            return;
+        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eFragment,
-            .module = CompileSPV(sdata.fragment, instance.GetDevice()),
+            .module = auxiliary_module,
             .pName = "main",
         });
     }
@@ -386,13 +422,23 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    if (pipeline_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached graphics pipeline rejected by Vulkan: {}",
+                    vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
 }
 
-GraphicsPipeline::~GraphicsPipeline() = default;
+GraphicsPipeline::~GraphicsPipeline() {
+    const auto device = instance.GetDevice();
+    for (const auto module : owned_auxiliary_modules) {
+        device.destroyShaderModule(module);
+    }
+}
 
 template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(
@@ -446,7 +492,7 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
 
-void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
+bool GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     u32 binding{};
 
@@ -498,9 +544,16 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     };
     auto [layout_result, layout] =
         instance.GetDevice().createDescriptorSetLayoutUnique(desc_layout_ci);
+    if (layout_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignoring cached graphics descriptor layout rejected by Vulkan: {}",
+                    vk::to_string(layout_result));
+        return false;
+    }
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create graphics descriptor set layout: {}", vk::to_string(layout_result));
     desc_layout = std::move(layout);
+    return true;
 }
 
 } // namespace Vulkan

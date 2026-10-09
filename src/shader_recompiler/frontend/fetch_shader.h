@@ -49,7 +49,9 @@ struct VertexAttribute {
     bool operator==(const VertexAttribute& other) const {
         return semantic == other.semantic && dest_vgpr == other.dest_vgpr &&
                num_elements == other.num_elements && sgpr_base == other.sgpr_base &&
-               dword_offset == other.dword_offset && instance_data == other.instance_data;
+               dword_offset == other.dword_offset && instance_data == other.instance_data &&
+               inst_offset == other.inst_offset && data_format == other.data_format &&
+               num_format == other.num_format;
     }
 };
 

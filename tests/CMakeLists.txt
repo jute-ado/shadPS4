@@ -31,6 +31,7 @@ add_executable(shadps4_controller_trace_test
     test_controller_axis.cpp
     test_controller_button.cpp
     test_controller_connection.cpp
+    test_controller_lightbar.cpp
     test_controller_trace.cpp
 )
 target_include_directories(shadps4_controller_trace_test PRIVATE
@@ -42,6 +43,16 @@ target_link_libraries(shadps4_controller_trace_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
 )
+
+add_executable(shadps4_shadnet_client_version_test
+    test_shadnet_client_version.cpp
+)
+target_include_directories(shadps4_shadnet_client_version_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_shadnet_client_version_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_shadnet_client_version_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_shadnet_client_version_test)
 
 add_executable(shadps4_renderdoc_path_test
     ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
@@ -144,6 +155,31 @@ target_include_directories(shadps4_pipeline_bind_tracker_test PRIVATE
 target_compile_features(shadps4_pipeline_bind_tracker_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_pipeline_bind_tracker_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pipeline_bind_tracker_test)
+
+add_executable(shadps4_shader_permutation_identity_test
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv_discard_frag.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/specialization_identity.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/specialization_serialization.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache_serialization.cpp
+    stubs/serialization_stub.cpp
+    test_pipeline_cache_serialization.cpp
+    test_shader_permutation_identity.cpp
+)
+target_include_directories(shadps4_shader_permutation_identity_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_shader_permutation_identity_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_shader_permutation_identity_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+    magic_enum::magic_enum
+    sirit
+    spdlog::spdlog
+    tsl::robin_map
+    Vulkan::Headers
+    xxHash::xxhash
+)
+list(APPEND TEST_TARGETS shadps4_shader_permutation_identity_test)
 
 add_executable(shadps4_texture_types_test
     test_texture_types.cpp
@@ -280,7 +316,6 @@ target_include_directories(shadps4_host_compilation_pause_test PRIVATE
 target_compile_definitions(shadps4_host_compilation_pause_test PRIVATE
     SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
     SHADPS4_PIPELINE_CACHE_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.h"
-    SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp"
     SHADPS4_EMULATOR_SETTINGS_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/core/emulator_settings.h"
     SHADPS4_EMULATOR_SETTINGS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp"
 )
