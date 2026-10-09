@@ -2,8 +2,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cstring>
+#include <cstdlib>
+#include <limits>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "common/alignment.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/scope_exit.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -13,9 +26,177 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include <vk_mem_alloc.h>
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace VideoCore {
+
+namespace {
+
+std::optional<u64> ParseDiagnosticEnvironment(const char* name) {
+    const char* text = std::getenv(name);
+    if (text == nullptr) {
+        return std::nullopt;
+    }
+    u64 parsed{};
+    const auto [end, error] = std::from_chars(text, text + std::strlen(text), parsed);
+    if (error != std::errc{} || *end != '\0') {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+std::optional<u64> BufferUploadTraceVertexStride() {
+    static const std::optional<u64> value = [] {
+        return ParseDiagnosticEnvironment("SHADPS4_DIAGNOSTIC_VERTEX_STRIDE");
+    }();
+    return value;
+}
+
+std::optional<u64> BufferUploadTraceVertexBindingCount() {
+    static const std::optional<u64> value = [] {
+        return ParseDiagnosticEnvironment("SHADPS4_DIAGNOSTIC_VERTEX_BINDINGS");
+    }();
+    return value;
+}
+
+std::optional<u64> BufferUploadTraceHashBytes() {
+    static const std::optional<u64> value = [] {
+        return ParseDiagnosticEnvironment("SHADPS4_DIAGNOSTIC_HASH_BYTES");
+    }();
+    return value;
+}
+
+thread_local bool trace_selected_vertex_upload{};
+
+struct DiagnosticVertexReadbackRequest {
+    Buffer* buffer{};
+    u64 buffer_offset{};
+    VAddr guest_address{};
+    u64 size{};
+};
+
+thread_local std::optional<DiagnosticVertexReadbackRequest> diagnostic_vertex_readback_request;
+
+const auto diagnostic_process_start = std::chrono::steady_clock::now();
+
+struct BufferUploadTraceRange {
+    VAddr address{};
+    u64 size{};
+};
+
+thread_local std::vector<BufferUploadTraceRange> buffer_upload_trace_ranges;
+
+void RememberBufferUploadTraceRange(VAddr address, u64 size) {
+    if (auto existing = std::ranges::find(buffer_upload_trace_ranges, address,
+                                          &BufferUploadTraceRange::address);
+        existing != buffer_upload_trace_ranges.end()) {
+        existing->size = size;
+        return;
+    }
+    if (buffer_upload_trace_ranges.size() == 256) {
+        buffer_upload_trace_ranges.erase(buffer_upload_trace_ranges.begin());
+    }
+    buffer_upload_trace_ranges.push_back({address, size});
+}
+
+std::optional<BufferUploadTraceRange> FindBufferUploadTraceRange(VAddr address, u64 size) {
+    const VAddr end = address + size;
+    for (const auto& range : buffer_upload_trace_ranges) {
+        if (address < range.address + range.size && range.address < end) {
+            return range;
+        }
+    }
+    return std::nullopt;
+}
+
+u64 HashGuestBufferRange(Core::MemoryManager* memory, VAddr address, u64 size) {
+    thread_local std::vector<u8> snapshot;
+    snapshot.resize(size);
+    memory->CopySparseMemory(address, snapshot.data(), size);
+    u64 hash = 14695981039346656037ULL;
+    for (const u8 value : snapshot) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+struct GuestBufferChange {
+    u64 hash{};
+    u64 previous_hash{};
+    u64 changed_bytes{};
+    u64 first_changed{std::numeric_limits<u64>::max()};
+    u64 last_changed{std::numeric_limits<u64>::max()};
+    bool has_previous{};
+};
+
+GuestBufferChange TraceGuestBufferRange(Core::MemoryManager* memory, VAddr address, u64 size) {
+    thread_local std::unordered_map<VAddr, std::vector<u8>> previous_snapshots;
+    thread_local std::vector<u8> current;
+    current.resize(size);
+    memory->CopySparseMemory(address, current.data(), size);
+
+    GuestBufferChange change{};
+    change.hash = 14695981039346656037ULL;
+    for (const u8 value : current) {
+        change.hash ^= value;
+        change.hash *= 1099511628211ULL;
+    }
+
+    auto& previous = previous_snapshots[address];
+    change.has_previous = previous.size() == current.size();
+    if (change.has_previous) {
+        change.previous_hash = 14695981039346656037ULL;
+        for (u64 offset = 0; offset < size; ++offset) {
+            change.previous_hash ^= previous[offset];
+            change.previous_hash *= 1099511628211ULL;
+            if (previous[offset] == current[offset]) {
+                continue;
+            }
+            if (change.changed_bytes++ == 0) {
+                change.first_changed = offset;
+            }
+            change.last_changed = offset;
+        }
+    }
+    previous.assign(current.begin(), current.end());
+    return change;
+}
+
+u64 QueryGuestPageProtection(VAddr address) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(std::bit_cast<const void*>(address), &info, sizeof(info)) == 0) {
+        return 0;
+    }
+    return info.Protect;
+#else
+    return 0;
+#endif
+}
+
+u64 HashBufferBytes(std::span<const u8> bytes) {
+    u64 hash = 14695981039346656037ULL;
+    for (const u8 value : bytes) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+} // namespace
+
+struct DiagnosticReadbackState {
+    DiagnosticReadbackState(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
+                            u64 size)
+        : download{instance, scheduler, MemoryUsage::Download, 0,
+                   vk::BufferUsageFlagBits::eTransferDst, size} {}
+
+    Buffer download;
+    std::atomic_bool busy{};
+    std::atomic<u64> sample_count{};
+};
 
 static constexpr size_t DataShareBufferSize = 64_KB;
 static constexpr size_t StagingBufferSize = 512_MB;
@@ -41,6 +222,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                           "BDA Page Table Buffer");
 
     memory_tracker = std::make_unique<MemoryTracker>(tracker);
+
+    if (ParseDiagnosticEnvironment("SHADPS4_DIAGNOSTIC_DEVICE_READBACK_LIMIT").value_or(0) > 0) {
+        diagnostic_readback_state = std::make_shared<DiagnosticReadbackState>(
+            instance, scheduler, BufferUploadTraceHashBytes().value_or(17280));
+    }
 
     std::memset(gds_buffer.mapped_data.data(), 0, DataShareBufferSize);
 
@@ -160,6 +346,14 @@ void BufferCache::BindVertexBuffers(
     pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
+    const auto trace_stride = BufferUploadTraceVertexStride();
+    const auto trace_binding_count = BufferUploadTraceVertexBindingCount();
+    const bool trace_vertex_upload =
+        trace_stride && trace_binding_count && guest_buffers.size() == *trace_binding_count &&
+        std::ranges::all_of(guest_buffers, [&](const AmdGpu::Buffer& buffer) {
+            return buffer.base_address != 0 && buffer.GetStride() == *trace_stride;
+        });
+
     if (instance.IsVertexInputDynamicState()) {
         // Update current vertex inputs.
         const auto cmdbuf = scheduler.CommandBuffer();
@@ -207,10 +401,28 @@ void BufferCache::BindVertexBuffers(
         }
     }
 
+    diagnostic_vertex_readback_request.reset();
+
     // Map buffers for merged ranges
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        if (trace_vertex_upload) {
+            RememberBufferUploadTraceRange(
+                range.base_address,
+                std::min<u64>(size, BufferUploadTraceHashBytes().value_or(size)));
+        }
+        trace_selected_vertex_upload = trace_vertex_upload;
         const auto [buffer, offset] = ObtainBuffer(range.base_address, size, false);
+        trace_selected_vertex_upload = false;
+        if (trace_vertex_upload && !diagnostic_vertex_readback_request) {
+            diagnostic_vertex_readback_request = DiagnosticVertexReadbackRequest{
+                .buffer = buffer,
+                .buffer_offset = offset,
+                .guest_address = range.base_address,
+                .size = std::min<u64>(
+                    size, BufferUploadTraceHashBytes().value_or(size)),
+            };
+        }
         range.vk_buffer = buffer->buffer;
         range.offset = offset;
         if (IsRegionGpuModified(range.base_address, size)) {
@@ -658,6 +870,31 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                                     bool is_texel_buffer, bool is_registered) {
+    static std::atomic<u64> trace_sequence{};
+    const bool trace_selected = trace_selected_vertex_upload;
+    const auto tracked_range = FindBufferUploadTraceRange(device_addr, size);
+    const bool trace_upload = trace_selected || tracked_range.has_value();
+    const u64 trace_id = trace_upload ? trace_sequence.fetch_add(1, std::memory_order_relaxed) : 0;
+    const bool dirty_before = trace_upload && memory_tracker->IsRegionCpuModified(device_addr, size);
+    const bool gpu_before = trace_upload && memory_tracker->IsRegionGpuModified(device_addr, size);
+    const VAddr trace_address =
+        trace_upload ? (tracked_range ? std::max(device_addr, tracked_range->address) : device_addr)
+                     : 0;
+    const u64 hash_size = trace_upload
+                              ? (tracked_range
+                                     ? std::min(device_addr + size,
+                                                tracked_range->address + tracked_range->size) -
+                                           trace_address
+                                     : std::min<u64>(
+                                           size, BufferUploadTraceHashBytes().value_or(size)))
+                              : 0;
+    const bool dirty_prefix_before =
+        trace_upload && memory_tracker->IsRegionCpuModified(trace_address, hash_size);
+    const bool gpu_prefix_before =
+        trace_upload && memory_tracker->IsRegionGpuModified(trace_address, hash_size);
+    const GuestBufferChange guest_change =
+        trace_upload ? TraceGuestBufferRange(memory, trace_address, hash_size) : GuestBufferChange{};
+    const u64 page_protection = trace_upload ? QueryGuestPageProtection(trace_address) : 0;
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     boost::container::small_vector<std::pair<VAddr, u64>, 16> uploaded_cpu_ranges;
     size_t total_size_bytes = 0;
@@ -691,6 +928,35 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             }
         },
         [&] { src_buffer = UploadCopies(buffer, copies, total_size_bytes); });
+
+    if (trace_upload && trace_id < 70000) {
+        const u64 guest_hash_after = HashGuestBufferRange(memory, trace_address, hash_size);
+        const bool dirty_after = memory_tracker->IsRegionCpuModified(device_addr, size);
+        const bool gpu_after = memory_tracker->IsRegionGpuModified(device_addr, size);
+        const bool dirty_prefix_after =
+            memory_tracker->IsRegionCpuModified(trace_address, hash_size);
+        const bool gpu_prefix_after =
+            memory_tracker->IsRegionGpuModified(trace_address, hash_size);
+        const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+        LOG_INFO(Render_Vulkan,
+                 "BufferUploadTrace sequence={} wall_ms={} tick={} selected={} guest={:#x} size={} "
+                 "trace_guest={:#x} hash_size={} is_written={} is_texel={} is_registered={} "
+                 "buffer_guest={:#x} buffer_size={} dirty_before={} dirty_after={} gpu_before={} "
+                 "gpu_after={} dirty_prefix_before={} dirty_prefix_after={} gpu_prefix_before={} "
+                 "gpu_prefix_after={} copies={} uploaded_bytes={} submitted={} guest_hash_before={:#x} "
+                 "guest_hash_after={:#x} has_previous={} previous_hash={:#x} changed_bytes={} "
+                 "first_changed={} last_changed={} page_protection={:#x}",
+                 trace_id, wall_ms, scheduler.CurrentTick(), trace_selected, device_addr, size,
+                 trace_address, hash_size, is_written, is_texel_buffer, is_registered,
+                 buffer.CpuAddr(), buffer.SizeBytes(), dirty_before, dirty_after, gpu_before,
+                 gpu_after, dirty_prefix_before, dirty_prefix_after, gpu_prefix_before,
+                 gpu_prefix_after, copies.size(), total_size_bytes, static_cast<bool>(src_buffer),
+                 guest_change.hash, guest_hash_after, guest_change.has_previous,
+                 guest_change.previous_hash, guest_change.changed_bytes, guest_change.first_changed,
+                 guest_change.last_changed, page_protection);
+    }
 
     boost::container::small_vector<VAddr, 16> uploaded_pages;
     for (const auto& [upload_addr, upload_size] : uploaded_cpu_ranges) {
@@ -752,6 +1018,143 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
         return SynchronizeBufferFromImage(buffer, device_addr, size);
     }
     return false;
+}
+
+void BufferCache::CaptureDiagnosticVertexBufferReadback() {
+    const auto request = std::exchange(diagnostic_vertex_readback_request, std::nullopt);
+    if (!request || !diagnostic_readback_state) {
+        return;
+    }
+
+    const u64 elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - diagnostic_process_start)
+                               .count();
+    const u64 start_ms =
+        ParseDiagnosticEnvironment("SHADPS4_DIAGNOSTIC_DEVICE_READBACK_START_MS").value_or(0);
+    const u64 limit =
+        ParseDiagnosticEnvironment("SHADPS4_DIAGNOSTIC_DEVICE_READBACK_LIMIT").value_or(0);
+    auto state = diagnostic_readback_state;
+    if (elapsed_ms < start_ms || state->sample_count.load(std::memory_order_relaxed) >= limit) {
+        return;
+    }
+
+    bool expected_busy = false;
+    if (!state->busy.compare_exchange_strong(expected_busy, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    const u64 sample = state->sample_count.fetch_add(1, std::memory_order_relaxed);
+    if (sample >= limit) {
+        state->busy.store(false, std::memory_order_release);
+        return;
+    }
+
+    const u64 size = std::min<u64>(request->size, state->download.SizeBytes());
+    auto expected = std::make_shared<std::vector<u8>>(size);
+    memory->CopySparseMemory(request->guest_address, expected->data(), size);
+    const u64 expected_hash = HashBufferBytes(*expected);
+    const bool dirty = memory_tracker->IsRegionCpuModified(request->guest_address, size);
+    const bool gpu = memory_tracker->IsRegionGpuModified(request->guest_address, size);
+    const VAddr source_buffer_guest = request->buffer->CpuAddr();
+
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const std::array pre_barriers{
+        vk::BufferMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .buffer = request->buffer->Handle(),
+            .offset = request->buffer_offset,
+            .size = size,
+        },
+        vk::BufferMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+            .srcAccessMask = vk::AccessFlagBits2::eHostRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = state->download.Handle(),
+            .offset = 0,
+            .size = size,
+        },
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+        .pBufferMemoryBarriers = pre_barriers.data(),
+    });
+    cmdbuf.copyBuffer(request->buffer->Handle(), state->download.Handle(),
+                      vk::BufferCopy{.srcOffset = request->buffer_offset, .dstOffset = 0, .size = size});
+    const std::array post_barriers{
+        vk::BufferMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eVertexAttributeInput,
+            .dstAccessMask = vk::AccessFlagBits2::eVertexAttributeRead,
+            .buffer = request->buffer->Handle(),
+            .offset = request->buffer_offset,
+            .size = size,
+        },
+        vk::BufferMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            .buffer = state->download.Handle(),
+            .offset = 0,
+            .size = size,
+        },
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = static_cast<u32>(post_barriers.size()),
+        .pBufferMemoryBarriers = post_barriers.data(),
+    });
+
+    const auto* allocator_instance = &instance;
+    const VAddr guest_address = request->guest_address;
+    const u64 buffer_offset = request->buffer_offset;
+    scheduler.DeferPriorityOperation(
+        [state, expected = std::move(expected), expected_hash, dirty, gpu, sample, elapsed_ms,
+         allocator_instance, guest_address, source_buffer_guest, buffer_offset, size] {
+            if (!state->download.is_coherent) {
+                vmaInvalidateAllocation(allocator_instance->GetAllocator(),
+                                        state->download.buffer.allocation, 0, size);
+            }
+            const auto device_bytes = state->download.mapped_data.first(size);
+            const u64 device_hash = HashBufferBytes(device_bytes);
+            u64 changed_bytes = 0;
+            u64 first_changed = size;
+            u64 last_changed = size;
+            std::array<u64, 36> changed_stride_offsets{};
+            std::vector<bool> changed_vertices((size + 35) / 36);
+            for (u64 offset = 0; offset < size; ++offset) {
+                if ((*expected)[offset] == device_bytes[offset]) {
+                    continue;
+                }
+                if (changed_bytes++ == 0) {
+                    first_changed = offset;
+                }
+                last_changed = offset;
+                ++changed_stride_offsets[offset % 36];
+                changed_vertices[offset / 36] = true;
+            }
+            const u64 changed_vertex_count = std::ranges::count(changed_vertices, true);
+            const auto busiest_stride_offset =
+                std::ranges::max_element(changed_stride_offsets) - changed_stride_offsets.begin();
+            const u64 busiest_stride_count = changed_stride_offsets[busiest_stride_offset];
+            LOG_INFO(Render_Vulkan,
+                     "DeviceBufferReadback sample={} elapsed_ms={} guest={:#x} "
+                     "source_buffer_guest={:#x} source_offset={} size={} dirty={} gpu={} "
+                     "expected_hash={:#x} device_hash={:#x} equal={} changed_bytes={} "
+                     "first_changed={} last_changed={} changed_vertices={} "
+                     "busiest_stride_offset={} busiest_stride_count={}",
+                     sample, elapsed_ms, guest_address, source_buffer_guest, buffer_offset, size,
+                     dirty, gpu, expected_hash, device_hash, expected_hash == device_hash,
+                     changed_bytes, first_changed, last_changed, changed_vertex_count,
+                     busiest_stride_offset, busiest_stride_count);
+            state->busy.store(false, std::memory_order_release);
+        });
 }
 
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
