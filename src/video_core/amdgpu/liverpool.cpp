@@ -155,12 +155,8 @@ void Liverpool::Process(std::stop_token stoken) {
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
-                SubmitSubmissionBoundary(
-                    std::move(submit_done_callback),
-                    [this](Common::UniqueFunction<void>&& completion) {
-                        rasterizer->DeferGpuCompletion(std::move(completion));
-                    },
-                    [this] { rasterizer->Flush(); });
+                SubmitSubmissionBoundary(std::move(submit_done_callback),
+                                         [this] { rasterizer->Flush(); });
             } else if (submit_done_callback) {
                 submit_done_callback();
             }

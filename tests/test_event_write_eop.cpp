@@ -101,7 +101,7 @@ TEST(EventWriteEop, SignalsFlipAfterFenceWriteAndInterrupt) {
               (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
 }
 
-TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
+TEST(EventWriteEop, ReleasesSubmissionBoundaryAfterEarlierEopWorkIsDispatched) {
     std::vector<std::string> operations;
     std::vector<std::function<void()>> gpu_completions;
 
@@ -113,19 +113,16 @@ TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
         TestEopPacket{.data = 1}, defer_completion, [&] { operations.emplace_back("eop-submit"); },
         [&](u32) { operations.emplace_back("fence"); },
         [&] { operations.emplace_back("interrupt"); });
-    AmdGpu::SubmitSubmissionBoundary([&] { operations.emplace_back("boundary"); }, defer_completion,
+    AmdGpu::SubmitSubmissionBoundary([&] { operations.emplace_back("boundary"); },
                                      [&] { operations.emplace_back("boundary-submit"); });
 
-    EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit"}));
-    ASSERT_EQ(gpu_completions.size(), 2u);
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"eop-submit", "boundary-submit", "boundary"}));
+    ASSERT_EQ(gpu_completions.size(), 1u);
 
     gpu_completions[0]();
-    EXPECT_EQ(operations,
-              (std::vector<std::string>{"eop-submit", "boundary-submit", "fence", "interrupt"}));
-
-    gpu_completions[1]();
-    EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit", "fence",
-                                                    "interrupt", "boundary"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"eop-submit", "boundary-submit", "boundary",
+                                                    "fence", "interrupt"}));
 }
 
 TEST(SubmissionBoundaryQueue, PreservesConsecutiveCallbacksInFifoOrder) {
