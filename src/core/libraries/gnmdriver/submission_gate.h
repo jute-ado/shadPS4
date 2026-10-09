@@ -21,6 +21,46 @@ public:
         Common::UniqueFunction<void> complete;
     };
 
+    class ScopedBoundary {
+    public:
+        ScopedBoundary() = default;
+        explicit ScopedBoundary(GuardedBoundary boundary_)
+            : issuance{std::move(boundary_.issuance)}, complete{std::move(boundary_.complete)} {}
+
+        ScopedBoundary(ScopedBoundary&& other) noexcept
+            : issuance{std::move(other.issuance)}, complete{std::move(other.complete)} {}
+
+        ScopedBoundary& operator=(ScopedBoundary&& other) noexcept {
+            if (this != &other) {
+                Finish();
+                issuance = std::move(other.issuance);
+                complete = std::move(other.complete);
+            }
+            return *this;
+        }
+
+        ~ScopedBoundary() {
+            Finish();
+        }
+
+        ScopedBoundary(const ScopedBoundary&) = delete;
+        ScopedBoundary& operator=(const ScopedBoundary&) = delete;
+
+    private:
+        void Finish() {
+            if (issuance.owns_lock()) {
+                issuance.unlock();
+            }
+            if (complete) {
+                complete();
+                complete = {};
+            }
+        }
+
+        Guard issuance;
+        Common::UniqueFunction<void> complete;
+    };
+
     [[nodiscard]] Guard Enter() {
         return Guard{mutex};
     }
@@ -37,6 +77,10 @@ public:
     [[nodiscard]] Common::UniqueFunction<void> BeginBoundary() {
         auto boundary = BeginGuardedBoundary();
         return std::move(boundary.complete);
+    }
+
+    [[nodiscard]] ScopedBoundary BeginScopedBoundary() {
+        return ScopedBoundary{BeginGuardedBoundary()};
     }
 
     [[nodiscard]] bool IsBoundaryOpen() const {

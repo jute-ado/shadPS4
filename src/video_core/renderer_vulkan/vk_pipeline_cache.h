@@ -129,7 +129,6 @@ private:
     AsyncGraphicsPipelineJob MakeAsyncGraphicsPipelineJob() const;
     void PublishAsyncGraphicsPipeline(AsyncGraphicsPipelineQueue::Completion completion);
     void PublishAsyncGraphicsPipelines();
-    const GraphicsPipeline* WaitForAsyncGraphicsPipeline(const GraphicsPipelineKey& key);
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage, size_t perm_idx,
                     std::string_view ext);

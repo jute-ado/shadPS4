@@ -89,6 +89,19 @@ target_compile_features(shadps4_screenshot_request_queue_test PRIVATE cxx_std_23
 target_link_libraries(shadps4_screenshot_request_queue_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_screenshot_request_queue_test)
 
+add_executable(shadps4_sampler_lod_test
+    test_sampler_lod.cpp
+)
+target_include_directories(shadps4_sampler_lod_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_sampler_lod_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_sampler_lod_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_sampler_lod_test)
+
 add_executable(shadps4_present_frame_ownership_test
     test_present_frame_ownership.cpp
 )
@@ -150,10 +163,12 @@ add_executable(shadps4_texture_types_test
 )
 target_include_directories(shadps4_texture_types_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/externals/ext-boost
 )
 target_compile_features(shadps4_texture_types_test PRIVATE cxx_std_23)
 target_compile_definitions(shadps4_texture_types_test PRIVATE
     SHADPS4_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    SHADPS4_SPIRV_IMAGE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp"
 )
 target_link_libraries(shadps4_texture_types_test PRIVATE
     GTest::gtest_main
@@ -259,6 +274,48 @@ target_compile_definitions(shadps4_gnm_submission_gate_test PRIVATE
     LIVERPOOL_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/amdgpu/liverpool.cpp"
 )
 list(APPEND TEST_TARGETS shadps4_gnm_submission_gate_test)
+
+add_executable(shadps4_graphics_dynamic_state_test
+    test_graphics_dynamic_state.cpp
+)
+target_include_directories(shadps4_graphics_dynamic_state_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_graphics_dynamic_state_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_graphics_dynamic_state_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_graphics_dynamic_state_test)
+
+add_executable(shadps4_device_fault_diagnostics_test
+    test_device_fault_diagnostics.cpp
+)
+target_compile_features(shadps4_device_fault_diagnostics_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_device_fault_diagnostics_test PRIVATE
+    SHADPS4_VK_INSTANCE_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_instance.h"
+    SHADPS4_VK_INSTANCE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_instance.cpp"
+    SHADPS4_VK_SCHEDULER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_scheduler.cpp"
+)
+target_link_libraries(shadps4_device_fault_diagnostics_test PRIVATE
+    GTest::gtest_main
+)
+list(APPEND TEST_TARGETS shadps4_device_fault_diagnostics_test)
+
+add_executable(shadps4_command_checkpoint_test
+    test_command_checkpoint.cpp
+)
+target_include_directories(shadps4_command_checkpoint_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_command_checkpoint_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_command_checkpoint_test PRIVATE
+    SHADPS4_VK_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+)
+target_link_libraries(shadps4_command_checkpoint_test PRIVATE
+    GTest::gtest_main
+)
+list(APPEND TEST_TARGETS shadps4_command_checkpoint_test)
 
 add_executable(shadps4_sysmodule_requirement_test
     test_sysmodule_requirement.cpp

@@ -116,6 +116,27 @@ TEST(GnmSubmissionGate, PublishedBoundaryCannotBeOvertakenByTheNextSubmission) {
     boundary.complete();
 }
 
+TEST(GnmSubmissionGate, ScopedHostBoundaryBlocksSubmitsButNotUnrelatedGuestWork) {
+    SubmissionGate gate;
+    auto boundary = gate.BeginScopedBoundary();
+
+    auto entrant = std::async(std::launch::async, [&] {
+        auto guard = gate.Enter();
+        return true;
+    });
+    auto unrelated_guest_work = std::async(std::launch::async, [] { return true; });
+
+    EXPECT_EQ(entrant.wait_for(20ms), std::future_status::timeout);
+    EXPECT_EQ(unrelated_guest_work.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(unrelated_guest_work.get());
+
+    boundary = {};
+
+    EXPECT_EQ(entrant.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(entrant.get());
+    EXPECT_TRUE(gate.IsBoundaryOpen());
+}
+
 TEST(GnmSubmissionGate, ConsecutiveBoundariesDoNotBlockTheGuestAndWaitForAllCompletions) {
     SubmissionGate gate;
     auto complete_first = gate.BeginBoundary();

@@ -78,6 +78,10 @@ void WaitForSubmissionBoundary() {
     submission_gate.WaitForBoundary();
 }
 
+SubmissionGate::ScopedBoundary BeginHostSubmissionBarrier() {
+    return submission_gate.BeginScopedBoundary();
+}
+
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
