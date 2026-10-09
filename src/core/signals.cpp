@@ -65,6 +65,25 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
+    if (reinterpret_cast<uintptr_t>(address) == 0x8003c6f35) {
+        constexpr uintptr_t CurrentFrameAddress = 0x80098f7f0;
+        constexpr uintptr_t FrameParamsBase = 0x800d06df0;
+        constexpr uintptr_t FrameStateRingBase = 0x800f291d8;
+        const u64 current_frame = *reinterpret_cast<const volatile u64*>(CurrentFrameAddress);
+        const u64 target_frame = current_frame - 3;
+        const u64 slot = target_frame & 0x1f;
+        const uintptr_t state_pointer_address = FrameStateRingBase + slot * 0x40 + 0x18;
+        const u64 state_pointer =
+            *reinterpret_cast<const volatile u64*>(state_pointer_address);
+        const u64 state = *reinterpret_cast<const volatile u64*>(state_pointer);
+        const uintptr_t tick_address = FrameParamsBase + slot * 0xa50 + 0xa08;
+        const u64 tick = *reinterpret_cast<const volatile u64*>(tick_address);
+        LOG_CRITICAL(Debug,
+                     "Uncharted FrameBegin fault state: current={} target={} slot={} "
+                     "state_ptr={:#x} state={:#x} tick={:#x}",
+                     current_frame, target_frame, slot, state_pointer, state, tick);
+    }
+
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);

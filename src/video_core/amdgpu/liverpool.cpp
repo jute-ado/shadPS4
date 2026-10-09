@@ -35,6 +35,80 @@ static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
+static void SignalGfxEopWithFrameStateDiagnostics() {
+    constexpr VAddr CurrentFrameAddress = 0x80098f7f0;
+    constexpr VAddr FrameParamsBase = 0x800d06df0;
+    constexpr VAddr FrameStateRingBase = 0x800f291d8;
+    constexpr u64 FrameParamsStride = 0xa50;
+    constexpr u64 FrameStateStride = 0x40;
+    constexpr u64 GfxEopTickOffset = 0xa08;
+
+    static std::mutex diagnostic_mutex;
+    static u64 last_frame = std::numeric_limits<u64>::max();
+    static u64 signal_count{};
+
+    auto* memory = Core::Memory::Instance();
+    std::scoped_lock lock{diagnostic_mutex};
+    VAddr eligible_tick_address{};
+    if (memory->IsValidMapping(CurrentFrameAddress, sizeof(u64))) {
+        const u64 current_frame = *reinterpret_cast<const u64*>(CurrentFrameAddress);
+        if (current_frame != last_frame) {
+            if (last_frame != std::numeric_limits<u64>::max()) {
+                LOG_WARNING(Lib_GnmDriver, "Uncharted EOP frame {} received {} signal(s)",
+                            last_frame, signal_count);
+            }
+            last_frame = current_frame;
+            signal_count = 0;
+            for (u64 age = 0; age <= 6 && age <= current_frame; ++age) {
+                const u64 frame = current_frame - age;
+                const u64 slot = frame & 0x1f;
+                const VAddr state_pointer_address =
+                    FrameStateRingBase + slot * FrameStateStride + 0x18;
+                const VAddr tick_address =
+                    FrameParamsBase + slot * FrameParamsStride + GfxEopTickOffset;
+                u64 state_pointer{};
+                u64 state = std::numeric_limits<u64>::max();
+                u64 tick = std::numeric_limits<u64>::max();
+                if (memory->IsValidMapping(state_pointer_address, sizeof(u64))) {
+                    state_pointer = *reinterpret_cast<const u64*>(state_pointer_address);
+                    if (state_pointer != 0 &&
+                        memory->IsValidMapping(state_pointer, sizeof(u64))) {
+                        state = *reinterpret_cast<const u64*>(state_pointer);
+                    }
+                }
+                if (memory->IsValidMapping(tick_address, sizeof(u64))) {
+                    tick = *reinterpret_cast<const u64*>(tick_address);
+                }
+                if (age == 2 && state == 1 && tick == 0) {
+                    eligible_tick_address = tick_address;
+                }
+                LOG_WARNING(Lib_GnmDriver,
+                            "Uncharted EOP state current={} frame={} slot={} state_ptr={:#x} "
+                            "state={:#x} tick={:#x}",
+                            current_frame, frame, slot, state_pointer, state, tick);
+            }
+        }
+        ++signal_count;
+    }
+    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+    if (eligible_tick_address != 0) {
+        const auto wait_start = std::chrono::steady_clock::now();
+        while (*reinterpret_cast<const volatile u64*>(eligible_tick_address) == 0 &&
+               std::chrono::steady_clock::now() - wait_start < std::chrono::milliseconds{20}) {
+            std::this_thread::yield();
+        }
+        const auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - wait_start)
+                                 .count();
+        const bool delivered = *reinterpret_cast<const volatile u64*>(eligible_tick_address) != 0;
+        if (!delivered || wait_us >= 100) {
+            LOG_WARNING(Lib_GnmDriver,
+                        "Uncharted EOP delivery wait frame={} delivered={} elapsed_us={}",
+                        last_frame - 2, delivered, wait_us);
+        }
+    }
+}
+
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
@@ -787,7 +861,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 memcpy(address, &data, num_bytes);
                             }
                         },
-                        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
+                        [] { SignalGfxEopWithFrameStateDiagnostics(); },
                         [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
                             complete_eop_flip();
                         });
@@ -800,7 +874,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             memcpy(address, &data, num_bytes);
                         }
                     },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                    [] { SignalGfxEopWithFrameStateDiagnostics(); });
                 complete_eop_flip();
                 break;
             }
