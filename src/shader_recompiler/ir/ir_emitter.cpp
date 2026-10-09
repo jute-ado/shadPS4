@@ -137,6 +137,11 @@ void IREmitter::SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value) {
     Inst(Opcode::SetThreadBitScalarReg, reg, value);
 }
 
+void IREmitter::SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value) {
+    ASSERT(static_cast<u32>(reg) + 1 < IR::NumScalarRegs);
+    Inst(Opcode::SetThreadBitScalarRegPair, reg, value);
+}
+
 template <>
 U32 IREmitter::GetScalarReg(IR::ScalarReg reg) {
     ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
@@ -672,6 +677,10 @@ U32 IREmitter::QuadShuffle(const U32& value, const U32& index) {
     return Inst<U32>(Opcode::QuadShuffle, value, index);
 }
 
+U32 IREmitter::ShuffleXor(const U32& value, const U32& mask) {
+    return Inst<U32>(Opcode::ShuffleXor, value, mask);
+}
+
 U32 IREmitter::ReadFirstLane(const U32& value) {
     return Inst<U32>(Opcode::ReadFirstLane, value);
 }
@@ -686,6 +695,11 @@ U32 IREmitter::WriteLane(const U32& value, const U32& write_value, const U32& la
 
 Value IREmitter::Ballot(const U1& bit) {
     return Inst(Opcode::Ballot, bit);
+}
+
+U32 IREmitter::MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                         const U32& scalar, u32 word) {
+    return Inst<U32>(Opcode::MaterializeScalarMaskWord, is_thread_bit, bit, scalar, Imm32(word));
 }
 
 U32 IREmitter::BallotFindLsb(const Value& mask) {
@@ -1002,6 +1016,16 @@ U32 IREmitter::Pack10_11_11(const AmdGpu::NumberFormat number_format, const Valu
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst<U32>(Opcode::PackUfloat10_11_11, vector);
+    case AmdGpu::NumberFormat::Uint:
+    case AmdGpu::NumberFormat::Sint: {
+        const auto component = [&](u32 index) {
+            return BitCast<U32>(F32{CompositeExtract(vector, index)});
+        };
+        U32 packed = Imm32(0U);
+        packed = BitFieldInsert(packed, component(0), Imm32(0U), Imm32(11U));
+        packed = BitFieldInsert(packed, component(1), Imm32(11U), Imm32(11U));
+        return BitFieldInsert(packed, component(2), Imm32(22U), Imm32(10U));
+    }
     default:
         UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }
@@ -1041,6 +1065,14 @@ Value IREmitter::Unpack10_11_11(const AmdGpu::NumberFormat number_format, const 
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst(Opcode::UnpackUfloat10_11_11, value);
+    case AmdGpu::NumberFormat::Uint:
+    case AmdGpu::NumberFormat::Sint: {
+        const bool is_signed = number_format == AmdGpu::NumberFormat::Sint;
+        const auto extract = [&](u32 offset, u32 count) {
+            return BitCast<F32>(BitFieldExtract(value, Imm32(offset), Imm32(count), is_signed));
+        };
+        return CompositeConstruct(extract(0, 11), extract(11, 11), extract(22, 10));
+    }
     default:
         UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }

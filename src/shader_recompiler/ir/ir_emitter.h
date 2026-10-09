@@ -54,6 +54,7 @@ public:
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
     [[nodiscard]] U1 GetThreadBitScalarReg(IR::ScalarReg reg);
     void SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value);
+    void SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value);
 
     template <typename T = U32>
     [[nodiscard]] T GetScalarReg(IR::ScalarReg reg);
@@ -183,10 +184,13 @@ public:
     [[nodiscard]] U32 LaneId();
     [[nodiscard]] U32 WarpId();
     [[nodiscard]] U32 QuadShuffle(const U32& value, const U32& index);
+    [[nodiscard]] U32 ShuffleXor(const U32& value, const U32& mask);
     [[nodiscard]] U32 ReadFirstLane(const U32& value);
     [[nodiscard]] U32 ReadLane(const U32& value, const U32& lane);
     [[nodiscard]] U32 WriteLane(const U32& value, const U32& write_value, const U32& lane);
     [[nodiscard]] Value Ballot(const U1& bit);
+    [[nodiscard]] U32 MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                                const U32& scalar, u32 word);
     [[nodiscard]] U32 BallotFindLsb(const Value& mask);
     [[nodiscard]] U1 GroupAny(const U1& bit);
 

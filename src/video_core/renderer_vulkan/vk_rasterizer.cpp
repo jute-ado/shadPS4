@@ -44,7 +44,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       buffer_cache{instance, scheduler, liverpool_, texture_cache, page_manager},
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
-      pipeline_cache{instance, scheduler, liverpool} {
+      pipeline_cache{instance, scheduler, liverpool, page_manager, buffer_cache} {
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -1284,9 +1284,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     // Images may still be referenced by commands being recorded on the GPU thread. Queue their
     // eviction in the same command stream so it cannot race resource lookup or recording. This
     // must remain non-blocking: guest VMM threads are allowed to unmap while GPU work runs.
-    liverpool->SendCommand<false>([this, addr, size] {
-        texture_cache.UnmapMemory(addr, size);
-    });
+    liverpool->SendCommand<false>([this, addr, size] { texture_cache.UnmapMemory(addr, size); });
     page_manager.OnGpuUnmap(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};
