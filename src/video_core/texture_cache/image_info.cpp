@@ -7,6 +7,7 @@
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_buffer_transfer_policy.h"
 #include "video_core/texture_cache/image_layout_policy.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/tile.h"
@@ -18,6 +19,25 @@ namespace VideoCore {
 using namespace Vulkan;
 using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
+
+namespace {
+
+bool SetSingleMipLayout(ImageInfo& info, const u32 pitch, const u32 height,
+                        const u64 slice_size) noexcept {
+    const u64 total_size = slice_size * info.resources.layers;
+    if (!IsGuestImageFootprintRepresentable(total_size)) {
+        info.guest_size = 0;
+        info.has_valid_guest_size = false;
+        info.mips_layout[0] = {};
+        return false;
+    }
+
+    info.guest_size = static_cast<u32>(total_size);
+    info.mips_layout[0] = ImageInfo::MipInfo{info.guest_size, pitch, height, 0};
+    return true;
+}
+
+} // namespace
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
     switch (format) {
@@ -59,7 +79,12 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
 ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint) noexcept {
     props.is_tiled = buffer.IsTiled();
     tile_mode = buffer.GetTileMode();
-    array_mode = AmdGpu::GetArrayMode(tile_mode);
+    const auto array_mode_result = AmdGpu::TryGetArrayMode(tile_mode);
+    if (!array_mode_result) {
+        has_valid_guest_size = false;
+        return;
+    }
+    array_mode = *array_mode_result;
     pixel_format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
     num_samples = buffer.NumSamples();
     num_bits = NumBitsPerBlock(buffer.GetDataFmt());
@@ -74,13 +99,14 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
 
     guest_address = buffer.Address();
     if (props.is_tiled) {
-        guest_size = buffer.GetColorSliceSize() * resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, buffer.Height(), 0);
+        SetSingleMipLayout(*this, pitch, buffer.Height(), buffer.GetColorSliceSize());
     } else {
-        std::tie(std::ignore, std::ignore, guest_size) =
+        u32 linear_pitch;
+        u32 linear_height;
+        size_t slice_size;
+        std::tie(linear_pitch, linear_height, slice_size) =
             ImageSizeLinearAligned(pitch, size.height, num_bits, num_samples);
-        guest_size *= resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
+        SetSingleMipLayout(*this, linear_pitch, linear_height, slice_size);
     }
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && buffer.info.alt_tile_mode;
 }
@@ -88,7 +114,12 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
 ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr htile_address,
                      AmdGpu::CbDbExtent hint, bool write_buffer) noexcept {
     tile_mode = buffer.GetTileMode();
-    array_mode = AmdGpu::GetArrayMode(tile_mode);
+    const auto array_mode_result = AmdGpu::TryGetArrayMode(tile_mode);
+    if (!array_mode_result) {
+        has_valid_guest_size = false;
+        return;
+    }
+    array_mode = *array_mode_result;
     pixel_format = LiverpoolToVK::DepthFormat(buffer.z_info.format, buffer.stencil_info.format);
     type = AmdGpu::ImageType::Color2D;
     props.is_tiled = buffer.IsTiled();
@@ -104,23 +135,34 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
     meta_info.htile_addr = buffer.z_info.tile_surface_enable ? htile_address : 0;
 
     stencil_addr = write_buffer ? buffer.StencilWriteAddress() : buffer.StencilAddress();
-    stencil_size = pitch * size.height * sizeof(u8);
+    const auto stencil_footprint =
+        CheckedImageBufferTransferSize(pitch, size.height, 1, 1, sizeof(u8) * 8);
+    stencil_size = stencil_footprint && IsGuestImageFootprintRepresentable(*stencil_footprint)
+                       ? static_cast<u32>(*stencil_footprint)
+                       : 0;
 
     guest_address = write_buffer ? buffer.DepthWriteAddress() : buffer.DepthAddress();
     if (props.is_tiled) {
-        guest_size = buffer.GetDepthSliceSize() * resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, buffer.Height(), 0);
+        SetSingleMipLayout(*this, pitch, buffer.Height(), buffer.GetDepthSliceSize());
     } else {
-        std::tie(std::ignore, std::ignore, guest_size) =
+        u32 linear_pitch;
+        u32 linear_height;
+        size_t slice_size;
+        std::tie(linear_pitch, linear_height, slice_size) =
             ImageSizeLinearAligned(pitch, size.height, num_bits, num_samples);
-        guest_size *= resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
+        SetSingleMipLayout(*this, linear_pitch, linear_height, slice_size);
     }
 }
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
+    storage_required = desc.is_written;
     tile_mode = image.GetTileMode();
-    array_mode = AmdGpu::GetArrayMode(tile_mode);
+    const auto array_mode_result = AmdGpu::TryGetArrayMode(tile_mode);
+    if (!array_mode_result) {
+        has_valid_guest_size = false;
+        return;
+    }
+    array_mode = *array_mode_result;
     pixel_format = LiverpoolToVK::SurfaceFormat(image.GetDataFmt(), image.GetNumberFmt());
     if (desc.is_depth) {
         pixel_format = LiverpoolToVK::PromoteFormatToDepth(pixel_format);
@@ -132,7 +174,12 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
     props.is_pow2 = image.pow2pad;
     props.is_block = AmdGpu::IsBlockCoded(image.GetDataFmt());
     size.width = image.width + 1;
-    size.height = image.height + 1;
+    // The height field is unused for 1D images and can contain stale guest
+    // descriptor bits.  Vulkan's 1D image contract is stricter: both height
+    // and depth must be one, including for 1D array images.  Keep the guest
+    // array count in resources.layers below, but never propagate the unused
+    // height into host image creation or buffer-image copies.
+    size.height = type == AmdGpu::ImageType::Color1D ? 1 : image.height + 1;
     size.depth = props.is_volume ? image.depth + 1 : 1;
     pitch = image.Pitch();
     resources.levels = image.NumLevels();
@@ -154,7 +201,30 @@ bool ImageInfo::IsCompatible(const ImageInfo& info) const {
 }
 
 void ImageInfo::UpdateSize() {
+    if (resources.levels == 0 || resources.levels > mips_layout.size()) {
+        guest_size = 0;
+        has_valid_guest_size = false;
+        mips_layout = {};
+        return;
+    }
+    if (!HasValidTileMode()) {
+        guest_size = 0;
+        has_valid_guest_size = false;
+        mips_layout = {};
+        return;
+    }
+    // The current macro-tile geometry tables cover only 1/2/4/8 samples. Keep linear layouts
+    // capable of representing 16 samples, but reject an unsupported tiled combination before
+    // GetMacroTileExtents can assert or index beyond its table.
+    if (IsTiled() && num_samples > 8) {
+        guest_size = 0;
+        has_valid_guest_size = false;
+        mips_layout = {};
+        return;
+    }
     guest_size = 0;
+    has_valid_guest_size = true;
+    mips_layout = {};
     for (s32 mip = 0; mip < resources.levels; ++mip) {
         u32 mip_w = pitch >> mip;
         u32 mip_h = size.height >> mip;
@@ -175,23 +245,31 @@ void ImageInfo::UpdateSize() {
             mip_d = std::bit_ceil(mip_d);
         }
 
-        auto& mip_info = mips_layout[mip];
+        u32 mip_pitch;
+        u32 mip_height;
+        size_t mip_size;
         switch (layout.kind) {
+        case ImageArrayLayoutKind::LinearGeneral: {
+            std::tie(mip_pitch, mip_height, mip_size) =
+                ImageSizeLinearGeneral(mip_w, mip_h, num_bits, num_samples);
+            break;
+        }
         case ImageArrayLayoutKind::Linear: {
-            std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
+            std::tie(mip_pitch, mip_height, mip_size) =
                 ImageSizeLinearAligned(mip_w, mip_h, num_bits, num_samples);
             break;
         }
         case ImageArrayLayoutKind::MicroTiled: {
             mip_d += (-mip_d) & (thickness - 1);
-            std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
+            std::tie(mip_pitch, mip_height, mip_size) =
                 ImageSizeMicroTiled(mip_w, mip_h, thickness, num_bits, num_samples);
             break;
         }
         case ImageArrayLayoutKind::MacroTiled: {
             mip_d += (-mip_d) & (thickness - 1);
-            std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
-                mip_w, mip_h, thickness, num_bits, num_samples, tile_mode, mip, alt_tile);
+            std::tie(mip_pitch, mip_height, mip_size) =
+                ImageSizeMacroTiled(mip_w, mip_h, thickness, num_bits, num_samples, tile_mode,
+                                    mip, alt_tile);
             break;
         }
         case ImageArrayLayoutKind::Invalid: {
@@ -199,14 +277,25 @@ void ImageInfo::UpdateSize() {
         }
         }
         if (props.is_block) {
-            const auto texels =
-                FromBlockCompressedMipGeometry(mip_info.pitch, mip_info.height);
-            mip_info.pitch = texels.pitch;
-            mip_info.height = texels.height;
+            const auto texels = FromBlockCompressedMipGeometry(mip_pitch, mip_height);
+            mip_pitch = texels.pitch;
+            mip_height = texels.height;
         }
-        mip_info.size *= mip_d * resources.layers;
+        const u64 total_mip_size = static_cast<u64>(mip_size) * mip_d * resources.layers;
+        const u64 next_guest_size = static_cast<u64>(guest_size) + total_mip_size;
+        if (!IsGuestImageFootprintRepresentable(total_mip_size) ||
+            !IsGuestImageFootprintRepresentable(next_guest_size)) {
+            guest_size = 0;
+            has_valid_guest_size = false;
+            mips_layout = {};
+            return;
+        }
+        auto& mip_info = mips_layout[mip];
+        mip_info.pitch = mip_pitch;
+        mip_info.height = mip_height;
+        mip_info.size = static_cast<u32>(total_mip_size);
         mip_info.offset = guest_size;
-        guest_size += mip_info.size;
+        guest_size = static_cast<u32>(next_guest_size);
     }
 }
 

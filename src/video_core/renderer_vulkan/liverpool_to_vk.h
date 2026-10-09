@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <span>
 #include "common/assert.h"
 #include "video_core/amdgpu/pixel_format.h"
@@ -60,6 +61,12 @@ struct SurfaceFormatInfo {
     vk::FormatFeatureFlags2 flags;
 };
 std::span<const SurfaceFormatInfo> SurfaceFormats();
+
+// Returns no value when the guest data/number-format pair has no Vulkan image
+// representation. Unlike SurfaceFormat(), this helper is safe for untrusted
+// texture descriptors and never asserts for an unsupported combination.
+[[nodiscard]] std::optional<vk::Format> TrySurfaceFormat(
+    AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
 
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
 

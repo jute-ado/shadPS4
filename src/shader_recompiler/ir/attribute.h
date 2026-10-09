@@ -91,6 +91,9 @@ enum class Attribute : u64 {
     StencilRef = 94,
     SampleMask = 95,
     PackedAncillary = 96,
+    BaseVertex = 97,
+    BaseInstance = 98,
+    DrawIndex = 99,
     Max,
 };
 

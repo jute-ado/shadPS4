@@ -61,7 +61,8 @@ static constexpr size_t MaxInterpVgpr = 16;
 
 class Translator {
 public:
-    explicit Translator(Info& info, const RuntimeInfo& runtime_info, const Profile& profile);
+    explicit Translator(Info& info, const RuntimeInfo& runtime_info, const Profile& profile,
+                        SrtMemoryReader reader = {});
 
     void Translate(IR::Block* block, u32 pc, std::span<const GcnInst> inst_list);
     void TranslateInstruction(const GcnInst& inst);
@@ -359,6 +360,7 @@ private:
     template <typename T = IR::U32, bool is_signed = false>
     [[nodiscard]] pk_type<T> GetSrcPk(const InstOperand& operand);
     void SetDst1(const InstOperand& operand, const IR::U1& value);
+    void SetCompareMaskDst(const InstOperand& operand, const IR::U1& result, bool set_exec);
     void SetDst(const InstOperand& operand, const IR::U32F32& value);
     template <bool is_signed = false>
     void SetDst16(const InstOperand& operand, const IR::U32F32& value);
@@ -386,6 +388,7 @@ private:
     Info& info;
     const RuntimeInfo& runtime_info;
     const Profile& profile;
+    SrtMemoryReader guest_memory_reader;
     u32 next_vgpr_num;
     std::unordered_map<u32, IR::VectorReg> vgpr_map;
     std::array<IR::Attribute, MaxInterpVgpr> vgpr_to_interp{};

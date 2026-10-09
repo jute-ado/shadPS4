@@ -4,6 +4,7 @@
 #pragma once
 
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/deferred_ready_queue.h"
 #include "video_core/buffer_cache/range_set.h"
 
 namespace VideoCore {
@@ -25,11 +26,15 @@ public:
 
     void ProcessFaultBuffer();
 
+    void DrainReadyFaults();
+
 private:
+    void CollectCompletedFaults(u32 area);
+    void MakeCompletedFaultsResident(std::span<const u64> records);
+
     Vulkan::Scheduler& scheduler;
     BufferCache& buffer_cache;
     PageManager& page_manager;
-    RangeSet fault_ranges;
     u64 caching_pagesize;
     u64 caching_num_pages;
     u64 fault_buffer_size;
@@ -37,6 +42,7 @@ private:
     Buffer download_buffer;
     std::array<u64, MaxPendingFaults> fault_areas{};
     u32 current_area{};
+    DeferredReadyQueue<u64> completed_faults;
     vk::UniqueDescriptorSetLayout fault_process_desc_layout;
     vk::UniquePipeline fault_process_pipeline;
     vk::UniquePipelineLayout fault_process_pipeline_layout;
