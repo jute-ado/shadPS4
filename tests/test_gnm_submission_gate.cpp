@@ -6,6 +6,7 @@
 #include <chrono>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <ranges>
 #include <string>
 #include <thread>
@@ -51,6 +52,26 @@ TEST(GnmSubmissionGate, PendingBoundaryBlocksGpuVisibleMappingWork) {
 
     EXPECT_EQ(mapping.wait_for(1s), std::future_status::ready);
     EXPECT_TRUE(mapping.get());
+}
+
+TEST(GnmSubmissionGate, GpuVisibleAddressChangeExcludesLaterSubmissions) {
+    SubmissionGate gate;
+    auto admission = gate.WaitForBoundaryAndEnter();
+    std::promise<void> entrant_started;
+    auto started = entrant_started.get_future();
+
+    auto entrant = std::async(std::launch::async, [&] {
+        entrant_started.set_value();
+        auto submission = gate.Enter();
+        return true;
+    });
+    ASSERT_EQ(started.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(entrant.wait_for(20ms), std::future_status::timeout);
+
+    admission.unlock();
+
+    EXPECT_EQ(entrant.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(entrant.get());
 }
 
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
@@ -197,6 +218,58 @@ TEST(SubmissionCompletionQueue, BoundaryWithoutSubmissionsRunsOnExplicitDrain) {
 
     EXPECT_TRUE(boundary_completed);
     EXPECT_FALSE(queue.HasPendingBoundaries());
+}
+
+TEST(GnmSubmissionGate, SubmitDoneAdmissionIsNotAnIssuedSubmissionCompletionFence) {
+    SubmissionGate gate;
+    AmdGpu::SubmissionCompletionQueue queue;
+    const auto submitted = queue.IssueSubmission();
+    bool issued_work_finished{};
+
+    // No SubmitDone has been published. Its gate is open even though submitted work remains.
+    // Holding this admission prevents later submissions; it does not finish the existing one.
+    EXPECT_TRUE(gate.IsBoundaryOpen());
+    auto admission = gate.WaitForBoundaryAndEnter();
+    queue.EnqueueBoundary([&] { issued_work_finished = true; });
+    queue.DrainReadyBoundaries();
+    EXPECT_FALSE(issued_work_finished);
+
+    queue.CompleteSubmission(submitted);
+    EXPECT_TRUE(issued_work_finished);
+}
+
+TEST(SubmissionCompletionQueue, IssuedWorkFenceNeedsAllocatorProgressUntilPendingWorkCompletes) {
+    AmdGpu::SubmissionCompletionQueue queue;
+    const auto submitted = queue.IssueSubmission();
+    std::promise<void> finished;
+    auto finish = finished.get_future();
+    queue.EnqueueBoundary([&] { finished.set_value(); });
+
+    // Model an unrelated allocation needed to satisfy a pending guest WaitRegMem. A retirement
+    // path must not hold the global allocation lock while waiting for all issued work to finish.
+    std::mutex allocation_mutex;
+    std::unique_lock retirement_allocation_lock{allocation_mutex};
+    std::promise<void> allocation_started;
+    auto started = allocation_started.get_future();
+    auto allocation = std::async(std::launch::async, [&] {
+        allocation_started.set_value();
+        {
+            std::scoped_lock lock{allocation_mutex};
+            // Publishing fresh backing lets the guest satisfy its pending command dependency.
+        }
+        queue.CompleteSubmission(submitted);
+    });
+
+    EXPECT_EQ(started.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(allocation.wait_for(20ms), std::future_status::timeout);
+    EXPECT_EQ(finish.wait_for(0ms), std::future_status::timeout);
+
+    // Always release before assertions that could end the test: the counterexample must never
+    // leave an intentionally blocked worker behind.
+    retirement_allocation_lock.unlock();
+    EXPECT_EQ(allocation.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(finish.wait_for(1s), std::future_status::ready);
+    allocation.get();
 }
 
 TEST(OwnedCommandBuffers, ConsecutiveCopiesRetainIndependentImmutableStorage) {

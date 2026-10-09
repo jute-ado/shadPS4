@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "common/recursive_lock.h"
-#include "common/shared_first_mutex.h"
+#include <boost/container/small_vector.hpp>
+
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/descriptor_image_layout.h"
@@ -63,25 +63,20 @@ public:
     bool ReadMemory(VAddr addr, u64 size);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
-    void MapMemory(VAddr addr, u64 size);
-    void UnmapMemory(VAddr addr, u64 size);
+    void MapMemory(VAddr addr, u64 size,
+                   VideoCore::GpuMappingKind kind = VideoCore::GpuMappingKind::HostMapped);
+    void UnmapMemory(VAddr addr, u64 size,
+                     VideoCore::GpuMappingKind kind = VideoCore::GpuMappingKind::HostMapped);
 
     void CpSync();
     u64 Flush();
+    void FlushWithGpuCompletion(Common::UniqueFunction<void, u64>&& on_submitted,
+                                Common::UniqueFunction<void>&& wake_owner);
     void Finish();
     void OnSubmit();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
-    }
-
-    template <typename Func>
-    void ForEachMappedRangeInRange(VAddr addr, u64 size, Func&& func) {
-        const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
-        Common::RecursiveSharedLock lock{mapped_ranges_mutex};
-        for (const auto& mapped_range : (mapped_ranges & range)) {
-            func(mapped_range);
-        }
     }
 
 private:
@@ -128,18 +123,16 @@ private:
     VideoCore::TextureCache texture_cache;
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
-    boost::icl::interval_set<VAddr> mapped_ranges;
-    Common::SharedFirstMutex mapped_ranges_mutex;
     PipelineCache pipeline_cache;
 
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
-    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
-    boost::container::static_vector<DescriptorImageLayoutBinding, Shader::NUM_IMAGES>
+    boost::container::small_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+    boost::container::small_vector<DescriptorImageLayoutBinding, Shader::NUM_IMAGES>
         descriptor_image_layout_bindings;
-    boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+    boost::container::small_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
+    boost::container::small_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
@@ -149,7 +142,7 @@ private:
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
-    boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+    boost::container::small_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
     u32 prepared_host_scale{1};

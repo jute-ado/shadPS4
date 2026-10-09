@@ -7,6 +7,7 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_info.h"
+#include "video_core/texture_cache/image_tiling_range.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -241,29 +242,26 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     return {out_buffer, 0};
 }
 
-void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                            vk::Buffer out_buffer, u32 out_offset, u32 copy_size) {
+bool TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
+                            vk::Buffer out_buffer, u64 out_offset, u64 out_size) {
     const auto& info = in_image.info;
+    const auto plan = PlanImageTilingRange(info, buffer_copies, out_offset, out_size);
+    if (!plan) {
+        return false;
+    }
     if (!info.props.is_tiled) {
         for (auto& copy : buffer_copies) {
             copy.bufferOffset += out_offset;
         }
-        in_image.Download(buffer_copies, out_buffer, out_offset, copy_size);
-        return;
+        in_image.Download(buffer_copies, out_buffer, out_offset, plan->byte_size);
+        return true;
     }
 
     TilingInfo params{};
     params.bank_swizzle = info.bank_swizzle;
-    params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
-    params.num_mips = static_cast<u32>(buffer_copies.size());
-    for (u32 mip = 0; mip < params.num_mips; ++mip) {
-        auto& mip_info = params.mips[mip];
-        mip_info = info.mips_layout[mip];
-        if (info.props.is_block) {
-            mip_info.pitch = std::max((mip_info.pitch + 3) / 4, 1U);
-            mip_info.height = std::max((mip_info.height + 3) / 4, 1U);
-        }
-    }
+    params.num_slices = plan->num_slices;
+    params.num_mips = plan->num_mips;
+    params.mips = plan->mips;
 
     const vk::DescriptorBufferInfo params_buffer_info{
         .buffer = stream_buffer.Handle(),
@@ -271,26 +269,26 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
         .range = sizeof(params),
     };
 
-    const auto [temp_buffer, temp_allocation] = GetScratchBuffer(info.guest_size);
+    const auto [temp_buffer, temp_allocation] = GetScratchBuffer(plan->byte_size);
     scheduler.DeferOperation([this, temp_buffer, temp_allocation]() {
         vmaDestroyBuffer(instance.GetAllocator(), temp_buffer, temp_allocation);
     });
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    in_image.Download(buffer_copies, temp_buffer, 0, copy_size);
+    in_image.Download(buffer_copies, temp_buffer, 0, plan->byte_size);
 
     scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, GetTilingPipeline(info, true));
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = out_buffer,
         .offset = out_offset,
-        .range = info.guest_size,
+        .range = plan->byte_size,
     };
 
     const vk::DescriptorBufferInfo linear_buffer_info{
         .buffer = temp_buffer,
         .offset = 0,
-        .range = info.guest_size,
+        .range = plan->byte_size,
     };
 
     const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
@@ -321,8 +319,8 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     }};
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
-    const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-    cmdbuf.dispatch(dim_x, 1, 1);
+    cmdbuf.dispatch(plan->dispatch_x, 1, 1);
+    return true;
 }
 
 } // namespace VideoCore
