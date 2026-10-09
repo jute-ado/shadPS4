@@ -7,6 +7,7 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_info.h"
+#include "video_core/texture_cache/image_tiling_range.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -94,14 +95,20 @@ TileManager::ScratchBuffer TileManager::GetScratchBuffer(u32 size) {
     const auto buffer_ci_unsafe = static_cast<VkBufferCreateInfo>(buffer_ci);
     const auto result = vmaCreateBuffer(instance.GetAllocator(), &buffer_ci_unsafe, &alloc_info,
                                         &buffer, &allocation, nullptr);
+    if (result != VK_SUCCESS) {
+        instance.LogDeviceMemoryBudget("tile_scratch_allocation", vk::Result{result});
+    }
     ASSERT(result == VK_SUCCESS);
     return {buffer, allocation};
 }
 
 vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler) {
-    const u32 pl_id = u32(info.tile_mode) * NUM_BPPS + std::bit_width(info.num_bits) - 4;
+    const auto pl_id = TilingPipelineCacheIndex(info.tile_mode, info.num_bits, info.num_samples);
+    if (!pl_id) {
+        return {};
+    }
     auto& tiling_pipelines = is_tiler ? tilers : detilers;
-    if (auto pipeline = *tiling_pipelines[pl_id]; pipeline != VK_NULL_HANDLE) {
+    if (auto pipeline = *tiling_pipelines[*pl_id]; pipeline != VK_NULL_HANDLE) {
         return pipeline;
     }
 
@@ -156,15 +163,24 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         device.createComputePipelineUnique(VK_NULL_HANDLE, compute_pipeline_ci);
     ASSERT_MSG(result == vk::Result::eSuccess, "Detiler pipeline creation failed {}",
                vk::to_string(result));
-    tiling_pipelines[pl_id] = std::move(pipeline);
+    tiling_pipelines[*pl_id] = std::move(pipeline);
     device.destroyShaderModule(module);
-    return *tiling_pipelines[pl_id];
+    return *tiling_pipelines[*pl_id];
 }
 
 TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset,
                                              const ImageInfo& info) {
     if (!info.props.is_tiled) {
         return {in_buffer, in_offset};
+    }
+
+    const auto pipeline = GetTilingPipeline(info, false);
+    if (!pipeline) {
+        LOG_ERROR(Render_Vulkan,
+                  "Skipping detile for unsupported pipeline specialization: tile={} bpp={} "
+                  "samples={}",
+                  u32(info.tile_mode), info.num_bits, info.num_samples);
+        return {};
     }
 
     TilingInfo params{};
@@ -194,7 +210,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     scheduler.EndRendering();
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, GetTilingPipeline(info, false));
+    scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, pipeline);
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = in_buffer,
@@ -241,29 +257,35 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     return {out_buffer, 0};
 }
 
-void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                            vk::Buffer out_buffer, u32 out_offset, u32 copy_size) {
+bool TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
+                            vk::Buffer out_buffer, u64 out_offset, u64 out_size) {
     const auto& info = in_image.info;
+    const auto plan = PlanImageTilingRange(info, buffer_copies, out_offset, out_size);
+    if (!plan) {
+        return false;
+    }
     if (!info.props.is_tiled) {
         for (auto& copy : buffer_copies) {
             copy.bufferOffset += out_offset;
         }
-        in_image.Download(buffer_copies, out_buffer, out_offset, copy_size);
-        return;
+        in_image.Download(buffer_copies, out_buffer, out_offset, plan->byte_size);
+        return true;
+    }
+
+    const auto pipeline = GetTilingPipeline(info, true);
+    if (!pipeline) {
+        LOG_ERROR(Render_Vulkan,
+                  "Skipping tile for unsupported pipeline specialization: tile={} bpp={} "
+                  "samples={}",
+                  u32(info.tile_mode), info.num_bits, info.num_samples);
+        return false;
     }
 
     TilingInfo params{};
     params.bank_swizzle = info.bank_swizzle;
-    params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
-    params.num_mips = static_cast<u32>(buffer_copies.size());
-    for (u32 mip = 0; mip < params.num_mips; ++mip) {
-        auto& mip_info = params.mips[mip];
-        mip_info = info.mips_layout[mip];
-        if (info.props.is_block) {
-            mip_info.pitch = std::max((mip_info.pitch + 3) / 4, 1U);
-            mip_info.height = std::max((mip_info.height + 3) / 4, 1U);
-        }
-    }
+    params.num_slices = plan->num_slices;
+    params.num_mips = plan->num_mips;
+    params.mips = plan->mips;
 
     const vk::DescriptorBufferInfo params_buffer_info{
         .buffer = stream_buffer.Handle(),
@@ -271,26 +293,26 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
         .range = sizeof(params),
     };
 
-    const auto [temp_buffer, temp_allocation] = GetScratchBuffer(info.guest_size);
+    const auto [temp_buffer, temp_allocation] = GetScratchBuffer(plan->byte_size);
     scheduler.DeferOperation([this, temp_buffer, temp_allocation]() {
         vmaDestroyBuffer(instance.GetAllocator(), temp_buffer, temp_allocation);
     });
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    in_image.Download(buffer_copies, temp_buffer, 0, copy_size);
+    in_image.Download(buffer_copies, temp_buffer, 0, plan->byte_size);
 
-    scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, GetTilingPipeline(info, true));
+    scheduler.BindPipeline(Vulkan::PipelineBindPoint::Compute, pipeline);
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = out_buffer,
         .offset = out_offset,
-        .range = info.guest_size,
+        .range = plan->byte_size,
     };
 
     const vk::DescriptorBufferInfo linear_buffer_info{
         .buffer = temp_buffer,
         .offset = 0,
-        .range = info.guest_size,
+        .range = plan->byte_size,
     };
 
     const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
@@ -321,8 +343,8 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     }};
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
-    const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-    cmdbuf.dispatch(dim_x, 1, 1);
+    cmdbuf.dispatch(plan->dispatch_x, 1, 1);
+    return true;
 }
 
 } // namespace VideoCore
