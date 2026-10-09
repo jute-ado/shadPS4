@@ -112,8 +112,49 @@ target_include_directories(shadps4_pipeline_bind_tracker_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_pipeline_bind_tracker_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_pipeline_bind_tracker_test PRIVATE
+    VK_GRAPHICS_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp"
+)
 target_link_libraries(shadps4_pipeline_bind_tracker_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pipeline_bind_tracker_test)
+
+add_executable(shadps4_attachment_feedback_loop_access_test
+    test_attachment_feedback_loop_access.cpp
+)
+target_include_directories(shadps4_attachment_feedback_loop_access_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_attachment_feedback_loop_access_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_attachment_feedback_loop_access_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_attachment_feedback_loop_access_test)
+
+add_executable(shadps4_image_access_test
+    test_image_access.cpp
+)
+target_include_directories(shadps4_image_access_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_image_access_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_image_access_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+    Vulkan::Headers
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_image_access_test)
+
+add_executable(shadps4_compute_subgroup_policy_test
+    test_compute_subgroup_policy.cpp
+)
+target_include_directories(shadps4_compute_subgroup_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_compute_subgroup_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_compute_subgroup_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_compute_subgroup_policy_test)
 
 add_executable(shadps4_texture_types_test
     test_texture_types.cpp

@@ -28,6 +28,13 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
     return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1});
 }
 
+static TranslationResult TranslateToSpirvForProgram(std::span<const u64> raw_gcn_insts,
+                                                     u64 program_hash);
+
+std::vector<u32> TranslateToSpirvForProgram(u64 raw_gcn_inst, u64 program_hash) {
+    return TranslateToSpirvForProgram(std::span<const u64>{&raw_gcn_inst, 1}, program_hash).spirv;
+}
+
 std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
     return TranslateToSpirvWithInfo(raw_gcn_insts).spirv;
 }
@@ -45,6 +52,11 @@ TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_
 }
 
 TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
+    return TranslateToSpirvForProgram(raw_gcn_insts, 0);
+}
+
+static TranslationResult TranslateToSpirvForProgram(std::span<const u64> raw_gcn_insts,
+                                                     u64 program_hash) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -63,6 +75,7 @@ TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
     Gcn::GcnInst store_inst = decoder.decodeInstruction(second);
 
     Shader::Info info{};
+    info.pgm_hash = program_hash;
     info.stage = Stage::Compute;
     info.l_stage = LogicalStage::Compute;
     info.flattened_ud_buf.resize(8);
