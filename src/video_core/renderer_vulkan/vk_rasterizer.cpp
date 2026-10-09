@@ -332,6 +332,19 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    if (cs.pgm_hash == 0x0a57ac2f) {
+        static u64 diagnostic_dispatch_count{};
+        if ((++diagnostic_dispatch_count & 0x3ff) == 0) {
+            LOG_WARNING(Render_Vulkan,
+                        "Diagnostic compute 0a57 count={} submit_tick={} gpu_tick={} lag={} "
+                        "dims=[{},{},{}]",
+                        diagnostic_dispatch_count, scheduler.CurrentTick(),
+                        scheduler.KnownGpuTick(),
+                        scheduler.CurrentTick() - scheduler.KnownGpuTick(), cs_program.dim_x,
+                        cs_program.dim_y, cs_program.dim_z);
+        }
+    }
+
     scheduler.EndRendering();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 

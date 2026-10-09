@@ -393,6 +393,10 @@ public:
         return master_semaphore.CurrentTick();
     }
 
+    [[nodiscard]] u64 KnownGpuTick() const noexcept {
+        return master_semaphore.KnownGpuTick();
+    }
+
     /// Returns true when a tick has been triggered by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) noexcept {
         if (master_semaphore.IsFree(tick)) {
