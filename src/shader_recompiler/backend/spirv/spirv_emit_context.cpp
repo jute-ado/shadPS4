@@ -7,6 +7,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/descriptor_binding_cursor.h"
 
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -975,8 +976,8 @@ void EmitContext::DefineImagesAndSamplers() {
 
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
-        Decorate(id, spv::Decoration::Binding, binding.unified);
-        binding.unified += num_bindings;
+        Decorate(id, spv::Decoration::Binding,
+                 VideoCore::ConsumeDescriptorBinding(binding.unified));
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         // TODO better naming for resources (flattened sharp_idx is not informative)
         Name(id, fmt::format("{}_{}{}", stage, "img", image_desc.sharp_idx));
