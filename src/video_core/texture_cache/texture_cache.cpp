@@ -13,9 +13,9 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/texture_cache/depth_color_copy.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
-#include "video_core/texture_cache/depth_color_copy.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
@@ -241,9 +241,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         if (cache_image.info.num_samples == 1 && new_info.num_samples == 1) {
             // Perform depth<->color copy using the intermediate copy buffer.
             if (CanCopyImageDirectly(instance.IsMaintenance8Supported(),
-                                     cache_image.info.props.is_depth,
-                                     cache_image.info.pixel_format, new_image.info.props.is_depth,
-                                     new_image.info.pixel_format)) {
+                                     cache_image.info.props.is_depth, cache_image.info.pixel_format,
+                                     new_image.info.props.is_depth, new_image.info.pixel_format)) {
                 new_image.CopyImage(cache_image);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
@@ -460,6 +459,26 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Left overlap, the image from cache is a possible subresource of the image requested
         if (auto mip = cache_image.info.MipOf(image_info); mip >= 0) {
             if (auto slice = cache_image.info.SliceOf(image_info, mip); slice >= 0) {
+                static u32 logical_mip_merge_diagnostic_count{};
+                const u32 parent_slice_size =
+                    image_info.mips_layout[mip].size / image_info.resources.layers;
+                if (logical_mip_merge_diagnostic_count < 32 &&
+                    cache_image.info.guest_size < parent_slice_size &&
+                    cache_image.info.size.width >= 128 && cache_image.info.size.height >= 128) {
+                    ++logical_mip_merge_diagnostic_count;
+                    LOG_INFO(Render_Vulkan,
+                             "LogicalMipMerge child={} addr={:#x} size={:#x} extent={}x{} "
+                             "parent_addr={:#x} parent_size={:#x} mip={} slice={} "
+                             "parent_slice_size={:#x} target={} bound={} parent_available={}",
+                             cache_image_id.index, cache_image.info.guest_address,
+                             cache_image.info.guest_size, cache_image.info.size.width,
+                             cache_image.info.size.height, image_info.guest_address,
+                             image_info.guest_size, mip, slice, parent_slice_size,
+                             static_cast<bool>(cache_image.binding.is_target),
+                             static_cast<bool>(cache_image.binding.is_bound),
+                             static_cast<bool>(merged_image_id));
+                }
+
                 // We have a larger image created and a separate one, representing a subres of it
                 // bound as render target. In this case we need to rebind render target.
                 if (cache_image.binding.is_target) {
