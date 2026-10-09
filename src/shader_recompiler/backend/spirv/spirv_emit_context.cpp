@@ -1169,12 +1169,25 @@ Id EmitContext::DefineGetBdaPointer() {
     Name(func, "get_bda_pointer");
     AddLabel();
 
+    const auto valid_page_label{OpLabel()};
+    const auto invalid_page_label{OpLabel()};
     const auto fault_label{OpLabel()};
     const auto available_label{OpLabel()};
+    const auto lookup_merge_label{OpLabel()};
     const auto merge_label{OpLabel()};
+    const auto& fault_buffer{buffers[fault_buffer_index]};
+    const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
+    const auto fault_scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
 
-    // Get page BDA
+    // Keep the page index at guest-address width until it has been proven to fit the table.
     const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
+    const auto page_limit{Constant(U64, VideoCore::BufferCache::CACHING_NUMPAGES)};
+    const auto is_valid_page{OpULessThan(U1[1], page, page_limit)};
+    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(is_valid_page, valid_page_label, invalid_page_label);
+
+    // Get page BDA.
+    AddLabel(valid_page_label);
     const auto page32{OpUConvert(U32[1], page)};
     const auto& bda_buffer{buffers[bda_pagetable_index]};
     const auto [bda_buffer_id, bda_pointer_type] = bda_buffer.Alias(PointerType::U64);
@@ -1183,13 +1196,11 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Check if page is GPU cached
     const auto is_fault{OpIEqual(U1[1], bda, u64_zero_value)};
-    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpSelectionMerge(lookup_merge_label, spv::SelectionControlMask::MaskNone);
     OpBranchConditional(is_fault, fault_label, available_label);
 
-    // First time acces, mark as fault
+    // First time access, mark as fault.
     AddLabel(fault_label);
-    const auto& fault_buffer{buffers[fault_buffer_index]};
-    const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
     const auto page_div32{OpShiftRightLogical(U32[1], page32, ConstU32(5U))};
     const auto page_mod32{OpBitwiseAnd(U32[1], page32, ConstU32(31U))};
     const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
@@ -1201,17 +1212,29 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Return null pointer
     const auto fallback_result{u64_zero_value};
-    OpBranch(merge_label);
+    OpBranch(lookup_merge_label);
 
     // Value is available, compute address
     AddLabel(available_label);
     const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
     const auto addr{OpIAdd(U64, bda, offset_in_bda)};
+    OpBranch(lookup_merge_label);
+
+    AddLabel(lookup_merge_label);
+    const auto valid_result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    OpBranch(merge_label);
+
+    // An address outside the guest address space has no representable page or fault bit.
+    AddLabel(invalid_page_label);
+    const auto invalid_fault_ptr{OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value,
+                                               u32_zero_value)};
+    OpAtomicOr(U32[1], invalid_fault_ptr, fault_scope, u32_zero_value, u32_one_value);
     OpBranch(merge_label);
 
     // Merge
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    const auto result{OpPhi(U64, valid_result, lookup_merge_label, u64_zero_value,
+                            invalid_page_label)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;
