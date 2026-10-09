@@ -29,7 +29,8 @@ IR::BlockList GenerateBlocks(const IR::AbstractSyntaxList& syntax_list) {
 }
 
 IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Info& info,
-                             RuntimeInfo& runtime_info, const Profile& profile) {
+                             RuntimeInfo& runtime_info, const Profile& profile,
+                             SrtMemoryReader reader) {
     // Ensure first instruction is expected.
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] != token_mov_vcchi) {
@@ -55,7 +56,8 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
 
     // Structurize control flow graph and create program.
     program.syntax_list =
-        Shader::Gcn::BuildASL(pools.inst_pool, pools.block_pool, cfg, info, runtime_info, profile);
+        Shader::Gcn::BuildASL(pools.inst_pool, pools.block_pool, cfg, info, runtime_info, profile,
+                              reader);
     program.blocks = GenerateBlocks(program.syntax_list);
     program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
 
@@ -71,16 +73,19 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::IdentityRemovalPass(program.blocks);
     if (info.l_stage == LogicalStage::TessellationControl) {
-        Shader::Optimization::TessellationPreprocess(program, runtime_info);
+        Shader::Optimization::TessellationPreprocess(program, runtime_info, reader);
         Shader::Optimization::HullShaderTransform(program, runtime_info);
     } else if (info.l_stage == LogicalStage::TessellationEval) {
-        Shader::Optimization::TessellationPreprocess(program, runtime_info);
+        Shader::Optimization::TessellationPreprocess(program, runtime_info, reader);
         Shader::Optimization::DomainShaderTransform(program, runtime_info);
     }
     Shader::Optimization::RingAccessElimination(program, runtime_info);
     Shader::Optimization::ReadLaneEliminationPass(program);
-    Shader::Optimization::FlattenExtendedUserdataPass(program);
-    Shader::Optimization::ResourceTrackingPass(program, profile);
+    const bool coherent_reserved_ranges_ready =
+        Shader::Optimization::FlattenExtendedUserdataPass(program, reader);
+    Shader::Optimization::ResourceTrackingPass(program, profile,
+                                               coherent_reserved_ranges_ready);
+    Shader::Optimization::LowerLaneIdToLocalInvocationIndexPass(program, runtime_info, profile);
     Shader::Optimization::LowerBufferFormatToRaw(program);
     Shader::Optimization::SharedMemorySimplifyPass(program, profile);
     Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);
