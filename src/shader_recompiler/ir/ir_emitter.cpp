@@ -1002,6 +1002,13 @@ U32 IREmitter::Pack10_11_11(const AmdGpu::NumberFormat number_format, const Valu
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst<U32>(Opcode::PackUfloat10_11_11, vector);
+    case AmdGpu::NumberFormat::Sint: {
+        const auto x = BitCast<U32>(F32{CompositeExtract(vector, 0)});
+        const auto y = BitCast<U32>(F32{CompositeExtract(vector, 1)});
+        const auto z = BitCast<U32>(F32{CompositeExtract(vector, 2)});
+        const auto xy = BitFieldInsert(x, y, Imm32(11U), Imm32(11U));
+        return BitFieldInsert(xy, z, Imm32(22U), Imm32(10U));
+    }
     default:
         UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }
@@ -1041,6 +1048,12 @@ Value IREmitter::Unpack10_11_11(const AmdGpu::NumberFormat number_format, const 
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst(Opcode::UnpackUfloat10_11_11, value);
+    case AmdGpu::NumberFormat::Sint: {
+        const auto x = BitFieldExtract(value, Imm32(0U), Imm32(11U), true);
+        const auto y = BitFieldExtract(value, Imm32(11U), Imm32(11U), true);
+        const auto z = BitFieldExtract(value, Imm32(22U), Imm32(10U), true);
+        return CompositeConstruct(BitCast<F32>(x), BitCast<F32>(y), BitCast<F32>(z));
+    }
     default:
         UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }
@@ -2101,6 +2114,13 @@ Value IREmitter::ImageSampleImplicitLod(const Value& handle, const Value& coords
 Value IREmitter::ImageSampleExplicitLod(const Value& handle, const Value& coords, const F32& lod,
                                         const Value& offset, TextureInstInfo info) {
     return Inst(Opcode::ImageSampleExplicitLod, Flags{info}, handle, coords, lod, offset);
+}
+
+Value IREmitter::ImageSampleExplicitLodDynamic(const Value& handle, const U32& descriptor_index,
+                                               const Value& coords, const F32& lod,
+                                               const Value& offset, TextureInstInfo info) {
+    return Inst(Opcode::ImageSampleExplicitLodDynamic, Flags{info}, handle, descriptor_index,
+                coords, lod, offset);
 }
 
 Value IREmitter::ImageSampleDrefImplicitLod(const Value& handle, const Value& coords,

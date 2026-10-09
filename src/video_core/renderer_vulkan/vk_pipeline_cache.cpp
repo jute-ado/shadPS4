@@ -2,18 +2,28 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <ranges>
+#include <string_view>
 
 #include "common/hash.h"
 #include "common/io_file.h"
+#include "common/logging/log.h"
 #include "common/path_util.h"
+#include "common/scope_exit.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "shader_recompiler/specialization_identity.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/srt_memory_sync.h"
+#include "video_core/buffer_cache/srt_preparation_retry.h"
 #include "video_core/cache_storage.h"
+#include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/async_compilation_completion.h"
+#include "video_core/renderer_vulkan/compilation_latency_timer.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -23,16 +33,24 @@
 
 namespace Vulkan {
 
+using SrtReadSession =
+    VideoCore::SrtMemoryReadSession<VideoCore::PageManager, VideoCore::BufferCache>;
+
+static Shader::SrtMemoryReader MakeSrtMemoryReader(SrtReadSession& session) {
+    return {&SrtReadSession::ReadCallback, &session, session.FailureFlag()};
+}
+
 using Shader::LogicalStage;
 using Shader::Output;
 using Shader::Stage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
+constexpr static u32 DescriptorHeapSampledImages = 8192U;
 
 constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 8192},
-    vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, 8192},
+    vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, DescriptorHeapSampledImages},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 1024},
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
@@ -88,7 +106,8 @@ static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsO
     return num_outputs;
 }
 
-const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_stage) {
+const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_stage,
+                                                           Shader::SrtMemoryReader reader) {
     auto& info = runtime_infos[u32(l_stage)];
     const auto& regs = liverpool->regs;
     const auto BuildCommon = [&](const auto& program) {
@@ -106,7 +125,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
         BuildCommon(regs.ls_program);
         Shader::TessellationDataConstantBuffer tess_constants{};
         const auto* hull_info = infos[u32(Shader::LogicalStage::TessellationControl)];
-        hull_info->ReadTessConstantBuffer(tess_constants);
+        hull_info->ReadTessConstantBuffer(tess_constants, reader);
         info.ls_info.ls_stride = tess_constants.ls_stride;
         break;
     }
@@ -255,8 +274,10 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
-                             AmdGpu::Liverpool* liverpool_)
+                             AmdGpu::Liverpool* liverpool_, VideoCore::PageManager& page_manager_,
+                             VideoCore::BufferCache& buffer_cache_)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
+      page_manager{page_manager_}, buffer_cache{buffer_cache_},
       desc_heap{instance, scheduler.GetMasterSemaphore(), DescriptorHeapSizes} {
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -267,6 +288,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
         .max_shared_memory_size = instance.MaxComputeSharedMemorySize(),
+        .max_sampled_images_per_stage = instance.MaxPerStageDescriptorSampledImages(),
+        .max_sampled_images_per_set = instance.MaxDescriptorSetSampledImages(),
+        .max_resources_per_stage = instance.MaxPerStageResources(),
+        .max_sampled_images_per_descriptor_heap_set =
+            DescriptorHeapSampledImages / DescriptorHeap::DescriptorSetBatch,
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
         .support_int8 = instance.IsShaderInt8Supported(),
@@ -294,6 +320,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_fp64_signed_zero_inf_nan_preserve =
             bool(vk12_props.shaderSignedZeroInfNanPreserveFloat64),
         .supports_image_load_store_lod = instance_.IsImageLoadStoreLodSupported(),
+        .supports_sampled_image_array_nonuniform_indexing =
+            instance_.IsSampledImageArrayNonUniformIndexingSupported(),
         .supports_native_cube_calc = instance_.IsAmdGcnShaderSupported(),
         .supports_trinary_minmax = instance_.IsAmdShaderTrinaryMinMaxSupported(),
         .supports_buffer_fp32_atomic_min_max =
@@ -323,8 +351,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 
     if (EmulatorSettings.IsAsyncGraphicsPipelineCompilation()) {
-        async_graphics_compiler = std::make_unique<AsyncGraphicsPipelineQueue>(
-            [this](AsyncGraphicsPipelineJob job) {
+        async_graphics_compiler =
+            std::make_unique<AsyncGraphicsPipelineQueue>([this](AsyncGraphicsPipelineJob job) {
                 return CompileGraphicsPipelineAsync(std::move(job));
             });
     }
@@ -366,13 +394,33 @@ AsyncGraphicsPipelineJob PipelineCache::MakeAsyncGraphicsPipelineJob() const {
     return job;
 }
 
+static bool IsCompilationTimingEnabled() {
+    const auto logger = Common::Log::ALL_LOGGERS.find(Common::Log::Class::Render_Compilation);
+    return logger != Common::Log::ALL_LOGGERS.end() && logger->second &&
+           logger->second->should_log(spdlog::level::debug);
+}
+
 AsyncGraphicsPipelineResult PipelineCache::CompileGraphicsPipelineAsync(
     AsyncGraphicsPipelineJob job) {
     job.RebindCompileInfo();
     GraphicsPipeline::SerializationSupport serialization{};
+    CompilationLatencyTimer<> timing{IsCompilationTimingEnabled()};
+    const auto pipeline_hash = timing.IsEnabled() ? std::hash<GraphicsPipelineKey>{}(job.key) : 0;
+    if (timing.IsEnabled()) {
+        LOG_DEBUG(Render_Compilation, "async_pipeline_worker_start key={:#x}", pipeline_hash);
+    }
+    const char* outcome = "exception";
+    SCOPE_EXIT {
+        if (timing.IsEnabled()) {
+            LOG_DEBUG(Render_Compilation,
+                      "async_pipeline_worker_finish key={:#x} elapsedMs={:.3f} outcome={}",
+                      pipeline_hash, timing.ElapsedMilliseconds(), outcome);
+        }
+    };
     auto pipeline = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, job.key, vk::PipelineCache{}, job.compile_infos,
         job.runtime_infos, job.fetch_shader, job.modules, serialization, false);
+    outcome = "complete";
     return {
         .pipeline = std::move(pipeline),
         .serialization = std::move(serialization),
@@ -409,30 +457,50 @@ void PipelineCache::PublishAsyncGraphicsPipeline(
     LOG_INFO(Render_Vulkan, "Published asynchronous graphics pipeline {:#x}", pipeline_hash);
 }
 
-void PipelineCache::PublishAsyncGraphicsPipelines() {
+bool PipelineCache::PublishAsyncGraphicsPipelines(const GraphicsPipelineKey* requested_key) {
     if (!async_graphics_compiler) {
-        return;
+        return false;
     }
-    while (auto completion = async_graphics_compiler->TryTake()) {
-        PublishAsyncGraphicsPipeline(std::move(*completion));
-    }
+    return DrainAsyncCompilationResults(
+        *async_graphics_compiler, requested_key, [this](auto completion) {
+            PublishAsyncGraphicsPipeline(std::move(completion));
+        });
 }
 
 const GraphicsPipeline* PipelineCache::WaitForAsyncGraphicsPipeline(
     const GraphicsPipelineKey& key) {
+    CompilationLatencyTimer<> timing{IsCompilationTimingEnabled()};
+    const auto pipeline_hash = timing.IsEnabled() ? std::hash<GraphicsPipelineKey>{}(key) : 0;
+    if (timing.IsEnabled()) {
+        LOG_DEBUG(Render_Compilation, "async_pipeline_wait_start key={:#x}", pipeline_hash);
+    }
+    const char* outcome = "exception";
+    SCOPE_EXIT {
+        if (timing.IsEnabled()) {
+            LOG_DEBUG(Render_Compilation,
+                      "async_pipeline_wait_finish key={:#x} elapsedMs={:.3f} outcome={}",
+                      pipeline_hash, timing.ElapsedMilliseconds(), outcome);
+        }
+    };
     for (;;) {
-        PublishAsyncGraphicsPipelines();
+        if (PublishAsyncGraphicsPipelines(&key)) {
+            outcome = "failed";
+            return nullptr;
+        }
         if (const auto it = graphics_pipelines.find(key); it != graphics_pipelines.end()) {
+            outcome = "ready";
             return it->second.get();
         }
 
         auto completion = async_graphics_compiler->WaitTake();
         if (!completion) {
+            outcome = "stopped";
             return nullptr;
         }
         const bool requested_pipeline_failed = completion->key == key && !completion->result;
         PublishAsyncGraphicsPipeline(std::move(*completion));
         if (requested_pipeline_failed) {
+            outcome = "failed";
             return nullptr;
         }
     }
@@ -492,7 +560,9 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
-        ScopedHostCompilationGuestPause pause{DebugState};
+        // The dispatch waits for its pipeline, but async mode must not stop guest threads.
+        ScopedHostCompilationGuestPause pause{
+            DebugState, !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
 
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
@@ -629,6 +699,10 @@ bool PipelineCache::RefreshGraphicsStages() {
         std::tie(infos[stage_out_idx], modules[stage_out_idx], fetch_shader_,
                  key.stage_hashes[stage_out_idx]) =
             GetProgram(stage_in, stage_out, params, binding);
+        if (infos[stage_out_idx] == nullptr || !modules[stage_out_idx]) {
+            key.stage_hashes[stage_out_idx] = 0;
+            return false;
+        }
         if (fetch_shader_) {
             fetch_shader = fetch_shader_;
         }
@@ -638,7 +712,10 @@ bool PipelineCache::RefreshGraphicsStages() {
     infos.fill(nullptr);
     modules.fill(nullptr);
 
-    bind_stage(Stage::Fragment, LogicalStage::Fragment);
+    if (regs.stage_enable.IsStageEnabled(static_cast<u32>(Stage::Fragment)) &&
+        !bind_stage(Stage::Fragment, LogicalStage::Fragment)) {
+        return false;
+    }
 
     const auto* fs_info = infos[static_cast<u32>(LogicalStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -701,7 +778,9 @@ bool PipelineCache::RefreshGraphicsStages() {
         }
         break;
     case AmdGpu::ShaderStageEnable::VgtStages::Vs:
-        bind_stage(Stage::Vertex, LogicalStage::Vertex);
+        if (!bind_stage(Stage::Vertex, LogicalStage::Vertex)) {
+            return false;
+        }
         break;
     default:
         UNREACHABLE_MSG("unhandled stage_en: {}", (u32)regs.stage_enable.raw);
@@ -711,9 +790,13 @@ bool PipelineCache::RefreshGraphicsStages() {
     if (vs_info && fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
         // Stride will still be handled outside the pipeline using dynamic state.
+        if (vs_info->captured_vertex_buffers.size() != fetch_shader->attributes.size()) {
+            LOG_ERROR(Render_Vulkan,
+                      "Vertex descriptor snapshot count does not match fetch shader attributes");
+            return false;
+        }
         u32 vertex_binding = 0;
-        for (const auto& attrib : fetch_shader->attributes) {
-            const auto& buffer = attrib.GetSharp(*vs_info);
+        for (const auto& buffer : vs_info->captured_vertex_buffers) {
             ASSERT_MSG(vertex_binding < MaxVertexBufferCount,
                        "Vertex attribute binding count exceeded limit: {} >= {}", vertex_binding,
                        MaxVertexBufferCount);
@@ -731,24 +814,30 @@ bool PipelineCache::RefreshComputeKey() {
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
     std::tie(infos[0], modules[0], fetch_shader, compute_key.value) =
         GetProgram(Shader::Stage::Compute, LogicalStage::Compute, cs_params, binding);
-    return true;
+    return infos[0] != nullptr && static_cast<bool>(modules[0]);
 }
 
-vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
+std::optional<Shader::IR::Program> PipelineCache::TranslateModule(
+    Shader::Info& info, Shader::RuntimeInfo& runtime_info, const std::span<const u32>& code,
+    Shader::SrtMemoryReader reader) {
+    auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile, reader);
+    if (!reader.Valid() || info.translation_failed) {
+        return std::nullopt;
+    }
+    return ir_program;
+}
+
+vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info,
                                               const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{
-        DebugState, !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
+                                              const std::vector<u32>& spv) {
+    ScopedHostCompilationGuestPause pause{DebugState,
+                                          !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
-
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
     vk::ShaderModule module;
-
     auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     if (is_patched) {
@@ -757,8 +846,6 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     } else {
         module = CompileSPV(spv, instance.GetDevice());
     }
-
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
     const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
@@ -772,51 +859,200 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
-    auto runtime_info = BuildRuntimeInfo(stage, l_stage);
-    auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
-    if (new_program) {
-        it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
-        auto& program = it_pgm.value();
-        auto start = binding;
-        const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
-        auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
-        const auto perm_hash = HashCombine(params.hash, 0);
+    return VideoCore::RetrySrtPreparation(
+        binding,
+        [&](Shader::Backend::Bindings& binding, VideoCore::SrtMemoryReadFailure& attempt_failure,
+            bool& attempt_translation_rejected) -> Result {
+            SrtReadSession srt_read_session{page_manager, buffer_cache};
+            const auto reader = MakeSrtMemoryReader(srt_read_session);
+            auto runtime_info = BuildRuntimeInfo(stage, l_stage, reader);
+            const Shader::ProgramCacheKey cache_key{
+                .program_hash = params.hash,
+                .stage = stage,
+                .logical_stage = l_stage,
+            };
 
-        RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
-        program->AddPermut(module, std::move(spec));
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
-                               perm_hash);
-    }
+            const auto fail_snapshot = [&](std::string_view phase,
+                                           bool translation_rejected = false) {
+                attempt_failure = srt_read_session.LastFailure();
+                attempt_translation_rejected = translation_rejected;
+                LOG_WARNING(Render_Vulkan,
+                            "Preparing {} shader {:#x}: resource preparation failed "
+                            "phase={} read={} translationRejected={}",
+                            stage, params.hash, phase,
+                            VideoCore::SrtMemoryReadFailureName(srt_read_session.LastFailure()),
+                            translation_rejected);
+                return Result{};
+            };
+            const auto seal_snapshot = [&] { return reader.Valid() && srt_read_session.Seal(); };
+            const auto capture_vertex_buffers = [&](Shader::Info& info,
+                                                    const auto& fetch_shader_data) {
+                if (!fetch_shader_data) {
+                    info.captured_vertex_buffers.clear();
+                    return reader.Valid();
+                }
+                return Shader::Gcn::CaptureVertexBuffers(info, *fetch_shader_data, reader);
+            };
 
-    auto& program = it_pgm.value();
-    auto& info = program->info;
-    info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
-    info.user_data = params.user_data;
-    info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+            auto [it_pgm, new_program] = program_cache.try_emplace(cache_key);
+            if (new_program) {
+                it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
+                auto& program = it_pgm.value();
+                const auto start = binding;
+                auto ir_program = TranslateModule(program->info, runtime_info, params.code, reader);
+                if (!ir_program) {
+                    const bool translation_rejected = program->info.translation_failed;
+                    program_cache.erase(cache_key);
+                    return fail_snapshot("initial_translation", translation_rejected);
+                }
 
-    size_t perm_idx = program->modules.size();
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
+                auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start,
+                                                        reader);
+                const auto permutation_id =
+                    Shader::ComputeShaderPermutationIdentity(params.hash, l_stage, spec);
+                auto compiled_binding = binding;
+                auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, *ir_program,
+                                                             compiled_binding, reader);
+                if (!capture_vertex_buffers(program->info, spec.fetch_shader_data)) {
+                    program_cache.erase(cache_key);
+                    return fail_snapshot("initial_vertex_capture");
+                }
+                if (!seal_snapshot()) {
+                    program_cache.erase(cache_key);
+                    return fail_snapshot("initial_seal");
+                }
 
-    vk::ShaderModule module{};
+                const auto module = CompileModule(program->info, params.code, 0, spv);
+                if (RegisterShaderMeta(program->info, spec, permutation_id)) {
+                    RegisterShaderBinary(std::move(spv), permutation_id);
+                }
+                auto module_info = program->info;
+                program->AddPermut(module, std::move(spec), std::move(module_info), permutation_id);
+                binding = compiled_binding;
+                return std::make_tuple(program->modules[0].info.get(), module,
+                                       program->modules[0].spec.fetch_shader_data, permutation_id);
+            }
 
-    const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
-    if (it == program->modules.end()) {
-        auto new_info = Shader::Info(stage, l_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+            auto& program = it_pgm.value();
+            auto aggregate_snapshot = program->info;
+            aggregate_snapshot.pgm_base = params.Base();
+            aggregate_snapshot.user_data = params.user_data;
+            if (!aggregate_snapshot.RefreshFlatBuf(reader)) {
+                return fail_snapshot("aggregate_refresh");
+            }
+            const auto start = binding;
+            const auto probe_spec = Shader::StageSpecialization(aggregate_snapshot, runtime_info,
+                                                                profile, start, reader);
+            if (!reader.Valid()) {
+                return fail_snapshot("probe_specialization");
+            }
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
-    } else {
-        info.AddBindings(binding);
-        module = it->module;
-        perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
-    }
-    return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+            std::string_view selected_failure = "selected_missing_info";
+            const auto validate_selected =
+                [&](const Program::Module& candidate) -> std::optional<Shader::Info> {
+                if (!candidate.info) {
+                    selected_failure = "selected_missing_info";
+                    return std::nullopt;
+                }
+                auto selected_info = *candidate.info;
+                selected_info.pgm_base = params.Base();
+                selected_info.user_data = params.user_data;
+                if (!selected_info.RefreshFlatBuf(reader)) {
+                    selected_failure = "selected_refresh";
+                    return std::nullopt;
+                }
+                const auto selected_spec = Shader::StageSpecialization(selected_info, runtime_info,
+                                                                       profile, start, reader);
+                const auto selected_id =
+                    Shader::ComputeShaderPermutationIdentity(params.hash, l_stage, selected_spec);
+                if (!reader.Valid() || selected_id != candidate.permutation_id ||
+                    selected_spec != candidate.spec) {
+                    selected_failure = "selected_specialization";
+                    return std::nullopt;
+                }
+                if (!capture_vertex_buffers(selected_info, candidate.spec.fetch_shader_data)) {
+                    selected_failure = "selected_vertex_capture";
+                    return std::nullopt;
+                }
+                return selected_info;
+            };
+
+            if (const auto probe =
+                    std::ranges::find(program->modules, probe_spec, &Program::Module::spec);
+                probe != program->modules.end()) {
+                auto selected_info = validate_selected(*probe);
+                if (selected_info) {
+                    if (!seal_snapshot()) {
+                        return fail_snapshot("cached_seal");
+                    }
+                    *probe->info = std::move(*selected_info);
+                    probe->info->AddBindings(binding);
+                    return std::make_tuple(probe->info.get(), probe->module,
+                                           probe->spec.fetch_shader_data, probe->permutation_id);
+                }
+            }
+            if (!reader.Valid()) {
+                return fail_snapshot(selected_failure);
+            }
+
+            const size_t perm_idx = program->modules.size();
+            auto new_info = Shader::Info(stage, l_stage, params);
+            auto ir_program = TranslateModule(new_info, runtime_info, params.code, reader);
+            if (!ir_program) {
+                return fail_snapshot("permutation_translation", new_info.translation_failed);
+            }
+            auto authoritative_spec =
+                Shader::StageSpecialization(new_info, runtime_info, profile, start, reader);
+            const u64 permutation_id =
+                Shader::ComputeShaderPermutationIdentity(params.hash, l_stage, authoritative_spec);
+            const auto authoritative =
+                program->InspectPreloadPermutation(authoritative_spec, permutation_id);
+            if (authoritative.action == Program::PreloadAction::Conflict || !reader.Valid()) {
+                return fail_snapshot("permutation_identity");
+            }
+
+            if (authoritative.action == Program::PreloadAction::Reuse) {
+                if (!authoritative.module) {
+                    return fail_snapshot("reuse_missing_module");
+                }
+                auto selected_info = validate_selected(*authoritative.module);
+                if (!selected_info) {
+                    return fail_snapshot(selected_failure);
+                }
+                if (!seal_snapshot()) {
+                    return fail_snapshot("reuse_seal");
+                }
+                *authoritative.module->info = std::move(*selected_info);
+                authoritative.module->info->AddBindings(binding);
+                return std::make_tuple(authoritative.module->info.get(),
+                                       authoritative.module->module,
+                                       authoritative.module->spec.fetch_shader_data,
+                                       authoritative.module->permutation_id);
+            }
+
+            auto compiled_binding = binding;
+            auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, *ir_program,
+                                                         compiled_binding, reader);
+            if (!capture_vertex_buffers(new_info, authoritative_spec.fetch_shader_data)) {
+                return fail_snapshot("permutation_vertex_capture");
+            }
+            if (!seal_snapshot()) {
+                return fail_snapshot("permutation_seal");
+            }
+
+            const auto module = CompileModule(new_info, params.code, perm_idx, spv);
+            if (RegisterShaderMeta(new_info, authoritative_spec, permutation_id)) {
+                RegisterShaderBinary(std::move(spv), permutation_id);
+            }
+            program->AddPermut(module, std::move(authoritative_spec), std::move(new_info),
+                               permutation_id);
+            binding = compiled_binding;
+            const auto& selected = program->modules.back();
+            return std::make_tuple(selected.info.get(), selected.module,
+                                   selected.spec.fetch_shader_data, selected.permutation_id);
+        },
+        [](const Result& result) { return std::get<0>(result) && std::get<1>(result); });
 }
-
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
                                                              std::span<const u32> spv_code) {
     std::optional<vk::ShaderModule> new_module{};
