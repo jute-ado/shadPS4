@@ -66,6 +66,15 @@ inline F32 ApplyReadNumberConversion(IREmitter& ir, const F32& value,
         const IR::F32 max = ir.Imm32(float(std::numeric_limits<u16>::max()));
         return ir.FPDiv(left, max);
     }
+    case AmdGpu::NumberConversion::Sint32ToSnormNz: {
+        // SNORM_NZ maps the full signed integer interval evenly to [-1, 1], without a duplicate
+        // zero. Convert before doubling so the signed 32-bit endpoints cannot overflow in IR.
+        const IR::F32 signed_value = ir.ConvertSToF(32, 32, ir.BitCast<U32>(value));
+        const IR::F32 numerator =
+            ir.FPAdd(ir.FPMul(signed_value, ir.Imm32(2.f)), ir.Imm32(1.f));
+        return ir.FPDiv(
+            numerator, ir.Imm32(static_cast<float>(std::numeric_limits<u32>::max())));
+    }
     case AmdGpu::NumberConversion::Uint32ToUnorm: {
         const auto float_val = ir.ConvertUToF(32, 32, ir.BitCast<U32>(value));
         return ir.FPDiv(float_val, ir.Imm32(static_cast<float>(std::numeric_limits<u32>::max())));
@@ -118,6 +127,13 @@ inline F32 ApplyWriteNumberConversion(IREmitter& ir, const F32& value,
         const IR::F32 left = ir.FPSub(mul, ir.Imm32(1.f));
         const IR::U32 raw = ir.ConvertFToS(32, ir.FPDiv(left, ir.Imm32(2.f)));
         return ir.BitCast<F32>(raw);
+    }
+    case AmdGpu::NumberConversion::Sint32ToSnormNz: {
+        const IR::F32 max =
+            ir.Imm32(static_cast<float>(std::numeric_limits<u32>::max()));
+        const IR::F32 mul = ir.FPMul(ir.FPClamp(value, ir.Imm32(-1.f), ir.Imm32(1.f)), max);
+        const IR::F32 raw_value = ir.FPDiv(ir.FPSub(mul, ir.Imm32(1.f)), ir.Imm32(2.f));
+        return ir.BitCast<F32>(U32{ir.ConvertFToS(32, raw_value)});
     }
     case AmdGpu::NumberConversion::Uint32ToUnorm: {
         const auto clamped = ir.FPClamp(value, ir.Imm32(0.f), ir.Imm32(1.f));

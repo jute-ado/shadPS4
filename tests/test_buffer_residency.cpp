@@ -50,6 +50,18 @@ public:
     std::vector<RecordedResidencyCall> calls;
 };
 
+class RecordedPageManager {
+public:
+    bool IsGpuMapped(VAddr address, size_t size) {
+        calls.emplace_back(address, size);
+        return address == mapped_address && size <= mapped_size;
+    }
+
+    VAddr mapped_address{0x200000};
+    size_t mapped_size{0x1000};
+    std::vector<std::pair<VAddr, size_t>> calls;
+};
+
 } // namespace
 
 TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThread) {
@@ -190,6 +202,110 @@ TEST(BufferResidency, RecordsDrawStateAfterEveryPotentiallyFlushingBufferAcquisi
         EXPECT_EQ(vertex_state_generation, command_buffer_generation);
         EXPECT_EQ(index_state_generation, command_buffer_generation);
     }
+}
+
+TEST(BufferResidency, RequiresTheEntireGuestDescriptorBindingToBeGpuMapped) {
+    RecordedPageManager page_manager;
+
+    EXPECT_TRUE(VideoCore::IsGuestBufferBindingMapped(page_manager, false, 0x200000, 0x1000));
+    ASSERT_EQ(page_manager.calls.size(), 1U);
+    EXPECT_EQ(page_manager.calls[0].first, 0x200000U);
+    EXPECT_EQ(page_manager.calls[0].second, 0x1000U);
+
+    page_manager.calls.clear();
+    EXPECT_FALSE(VideoCore::IsGuestBufferBindingMapped(page_manager, false, 0x200000, 0x1001));
+    ASSERT_EQ(page_manager.calls.size(), 1U);
+    EXPECT_EQ(page_manager.calls[0].first, 0x200000U);
+    EXPECT_EQ(page_manager.calls[0].second, 0x1001U);
+
+    page_manager.calls.clear();
+    EXPECT_FALSE(VideoCore::IsGuestBufferBindingMapped(page_manager, false, 0, 0x100));
+    EXPECT_TRUE(page_manager.calls.empty());
+
+    EXPECT_TRUE(VideoCore::IsGuestBufferBindingMapped(page_manager, true, 0, 0));
+    EXPECT_TRUE(page_manager.calls.empty());
+}
+
+TEST(BufferResidency, RefreshesResourceAndFixedBufferStateAfterTopologyChanges) {
+    enum class Operation {
+        AcquireFixedTopology,
+        PrepareFixedForPublication,
+        RefreshResources,
+        PublishResources,
+        PublishFixed,
+    };
+    constexpr std::array expected_operations{
+        Operation::AcquireFixedTopology, Operation::RefreshResources,
+        Operation::PrepareFixedForPublication, Operation::PublishResources,
+        Operation::PublishFixed,
+    };
+
+    for (u32 topology_change = 0; topology_change < 3; ++topology_change) {
+        u32 topology_generation = topology_change == 0 ? 1 : 0;
+        u32 resource_generation = std::numeric_limits<u32>::max();
+        u32 fixed_generation = std::numeric_limits<u32>::max();
+        std::vector<Operation> operations;
+
+        VideoCore::RefreshDrawBufferStateBeforePublication(
+            [&] {
+                operations.push_back(Operation::AcquireFixedTopology);
+                if (topology_change == 1) {
+                    ++topology_generation;
+                }
+            },
+            [&] {
+                operations.push_back(Operation::RefreshResources);
+                if (topology_change == 2) {
+                    ++topology_generation;
+                }
+                resource_generation = topology_generation;
+            },
+            [&] {
+                operations.push_back(Operation::PrepareFixedForPublication);
+                fixed_generation = topology_generation;
+            },
+            [&] {
+                operations.push_back(Operation::PublishResources);
+                EXPECT_EQ(resource_generation, topology_generation);
+            },
+            [&] {
+                operations.push_back(Operation::PublishFixed);
+                EXPECT_EQ(fixed_generation, topology_generation);
+            });
+
+        EXPECT_EQ(operations, std::vector(expected_operations.begin(), expected_operations.end()));
+    }
+}
+
+TEST(BufferResidency, DrawDiscoversFixedRangesBeforeRefreshingAndPreparingBuffers) {
+    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    const auto function_begin = source.find("void Rasterizer::Draw(bool is_indexed");
+    const auto function_end = source.find("void Rasterizer::DrawIndirect(", function_begin);
+    ASSERT_NE(function_begin, std::string::npos);
+    ASSERT_NE(function_end, std::string::npos);
+    const auto body = source.substr(function_begin, function_end - function_begin);
+
+    const auto stabilize = body.find("RefreshDrawBufferStateBeforePublication(");
+    const auto discover = body.find("DiscoverVertexBufferRanges", stabilize);
+    const auto refresh = body.find("RefreshGuestBufferBindings()", discover);
+    const auto prepare = body.find("PrepareVertexBuffers", refresh);
+    const auto publish_resources = body.find("pipeline->BindResources", prepare);
+    const auto publish_fixed = body.find("buffer_cache.BindVertexBuffers", publish_resources);
+    ASSERT_NE(stabilize, std::string::npos);
+    ASSERT_NE(discover, std::string::npos);
+    ASSERT_NE(refresh, std::string::npos);
+    ASSERT_NE(prepare, std::string::npos);
+    ASSERT_NE(publish_resources, std::string::npos);
+    ASSERT_NE(publish_fixed, std::string::npos);
+    EXPECT_LT(stabilize, discover);
+    EXPECT_LT(discover, refresh);
+    EXPECT_LT(refresh, prepare);
+    EXPECT_LT(prepare, publish_resources);
+    EXPECT_LT(publish_resources, publish_fixed);
 }
 
 TEST(BufferResidency, SelectsOnlyAdjacentFlattenedPointerWordsFromAddr64Dependencies) {

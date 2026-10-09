@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/amdgpu/resource.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/texture_cache/types.h"
 
 namespace {
@@ -82,17 +83,71 @@ TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
     ASSERT_NE(helper_end, std::string::npos);
     const auto helper = body.substr(helper_begin, helper_end - helper_begin);
     EXPECT_NE(helper.find("image_bindings.emplace_back"), std::string::npos);
-    EXPECT_NE(helper.find("image_descriptor_array_sizes.push_back(1)"), std::string::npos);
+    EXPECT_NE(helper.find("image_desc.is_written ? VideoCore::TextureCache::BindingType::Storage"),
+              std::string::npos);
+    EXPECT_NE(helper.find("image_desc.NumBindings(stage)"), std::string::npos);
+    EXPECT_NE(helper.find("image_descriptor_array_sizes.push_back(num_bindings)"),
+              std::string::npos);
     EXPECT_NE(helper.find("image_native_extent_requirements.emplace_back(false, false)"),
               std::string::npos);
 
     size_t call_count = 0;
     size_t call = helper_end;
-    while ((call = body.find("append_invalid_image_binding();", call)) != std::string::npos) {
+    while ((call = body.find("append_invalid_image_binding(image_desc);", call)) !=
+           std::string::npos) {
         ++call_count;
         ++call;
     }
     EXPECT_EQ(call_count, 2U);
 }
 
+TEST(SamplerDescriptor, AcceptsOnlyEncodingsDefinedByTheGuestIsa) {
+    AmdGpu::Sampler sampler{};
+    sampler.max_lod.Assign(0x100);
+
+    for (u64 ratio = static_cast<u64>(AmdGpu::AnisoRatio::One);
+         ratio <= static_cast<u64>(AmdGpu::AnisoRatio::Sixteen); ++ratio) {
+        sampler.max_aniso.Assign(static_cast<AmdGpu::AnisoRatio>(ratio));
+        EXPECT_TRUE(sampler.Valid()) << ratio;
+    }
+
+    for (u64 ratio = 5; ratio < 8; ++ratio) {
+        sampler.max_aniso.Assign(static_cast<AmdGpu::AnisoRatio>(ratio));
+        EXPECT_FALSE(sampler.Valid()) << ratio;
+    }
+
+    sampler.max_aniso.Assign(AmdGpu::AnisoRatio::One);
+    sampler.filter_mode.Assign(static_cast<AmdGpu::FilterMode>(3));
+    EXPECT_FALSE(sampler.Valid());
+    sampler.filter_mode.Assign(AmdGpu::FilterMode::Blend);
+    sampler.mip_filter.Assign(static_cast<AmdGpu::MipFilter>(3));
+    EXPECT_FALSE(sampler.Valid());
+    sampler.mip_filter.Assign(AmdGpu::MipFilter::Linear);
+    sampler.min_lod.Assign(0x200);
+    EXPECT_FALSE(sampler.Valid());
+}
+
+TEST(SamplerDescriptor, InvalidRuntimeDescriptorIsCanonicalizedBeforeVulkanCreation) {
+    const auto source = ReadText(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const auto loop = source.find("for (const auto& sampler : stage.samplers)");
+    const auto get_sampler = source.find("texture_cache.GetSampler(ssharp", loop);
+    ASSERT_NE(loop, std::string::npos);
+    ASSERT_NE(get_sampler, std::string::npos);
+    const auto prefix = source.substr(loop, get_sampler - loop);
+    EXPECT_NE(prefix.find("if (!ssharp.Valid())"), std::string::npos);
+    EXPECT_NE(prefix.find("ssharp = {}"), std::string::npos);
+}
+
 } // namespace
+
+TEST(DescriptorBindingCursor, ArraysConsumeOneBindingAndAllDescriptorCapacity) {
+    VideoCore::DescriptorBindingCursor cursor;
+
+    EXPECT_EQ(cursor.Add(), 0U);
+    EXPECT_EQ(cursor.Add(6), 1U);
+    EXPECT_EQ(cursor.Add(), 2U);
+    EXPECT_EQ(cursor.BindingCount(), 3U);
+    EXPECT_EQ(cursor.DescriptorCount(), 8U);
+    EXPECT_TRUE(cursor.CanUsePushDescriptors(8));
+    EXPECT_FALSE(cursor.CanUsePushDescriptors(7));
+}

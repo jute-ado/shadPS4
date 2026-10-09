@@ -9,7 +9,26 @@
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
 #include "shader_recompiler/frontend/decode.h"
+#include "spirv/unified1/spirv.hpp"
 #include "translator.hpp"
+
+namespace {
+
+size_t CountSpirvOpcode(const std::vector<u32>& spirv, spv::Op opcode) {
+    size_t count = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        EXPECT_GT(word_count, 0u);
+        if (static_cast<spv::Op>(instruction & 0xffff) == opcode) {
+            ++count;
+        }
+        offset += word_count;
+    }
+    return count;
+}
+
+} // Anonymous namespace
 
 class GcnTest : public ::testing::Test {
 protected:
@@ -26,6 +45,17 @@ struct F32x2 {
     float a;
     float b;
 };
+
+TEST_F(GcnTest, ds_swizzle_xor_uses_lane_varying_shuffle) {
+    // ds_swizzle_b32 v0, v0 offset:0x041f
+    // OFFSET0=0x1f and OFFSET1=0x04 encode index = lane_id XOR 1.
+    constexpr u64 ds_swizzle_xor = 0x00000000d8d4041fULL;
+
+    const auto spirv = TranslateToSpirv(ds_swizzle_xor);
+
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpGroupNonUniformShuffleXor), 1U);
+    EXPECT_EQ(CountSpirvOpcode(spirv, spv::Op::OpGroupNonUniformBroadcast), 0U);
+}
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64

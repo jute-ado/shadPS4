@@ -7,6 +7,15 @@
 
 namespace VideoCore {
 
+template <typename PageManager>
+[[nodiscard]] bool IsGuestBufferBindingMapped(PageManager& page_manager, bool is_special,
+                                              VAddr address, u64 size) {
+    if (is_special) {
+        return true;
+    }
+    return address != 0 && size != 0 && page_manager.IsGpuMapped(address, size);
+}
+
 template <typename Buffer, typename Synchronize, typename Publish>
 void PublishDmaBufferAfterSynchronization(Buffer& buffer, Synchronize&& synchronize,
                                           Publish&& publish) {
@@ -35,6 +44,24 @@ void PrepareDrawBuffersThenBindCommandState(PrepareVertexBuffers&& prepare_verte
     prepare_indirect_buffers();
     bind_vertex_buffers(prepared_vertex_state);
     bind_index_buffer(prepared_index_state);
+}
+
+template <typename DiscoverFixedBuffers, typename RefreshResourceBuffers,
+          typename PrepareFixedBuffers,
+          typename PublishResourceBuffers, typename PublishFixedBuffers>
+void RefreshDrawBufferStateBeforePublication(DiscoverFixedBuffers&& discover_fixed_buffers,
+                                             RefreshResourceBuffers&& refresh_resource_buffers,
+                                             PrepareFixedBuffers&& prepare_fixed_buffers,
+                                             PublishResourceBuffers&& publish_resource_buffers,
+                                             PublishFixedBuffers&& publish_fixed_buffers) {
+    // Resource and fixed-function ranges can overlap. Discover both sets before resolving their
+    // Vulkan handles, then perform each stateful acquisition exactly once. Neither published set
+    // can then refer to a buffer replaced by a later topology-changing discovery.
+    (void)discover_fixed_buffers;
+    (void)refresh_resource_buffers;
+    prepare_fixed_buffers();
+    publish_resource_buffers();
+    publish_fixed_buffers();
 }
 
 } // namespace VideoCore

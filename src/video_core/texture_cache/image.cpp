@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <ranges>
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -114,6 +116,31 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VkImage unsafe_image{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_info, &unsafe_image,
                                      &allocation, nullptr);
+    if (result != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan,
+                     "Failed allocating image: result={}, type={}, format={}, extent={}x{}x{}, "
+                     "mip_levels={}, array_layers={}, samples={}, tiling={}, usage=0x{:x}, "
+                     "flags=0x{:x}",
+                     vk::to_string(vk::Result{result}), vk::to_string(image_ci.imageType),
+                     vk::to_string(image_ci.format), image_ci.extent.width, image_ci.extent.height,
+                     image_ci.extent.depth, image_ci.mipLevels, image_ci.arrayLayers,
+                     vk::to_string(image_ci.samples), vk::to_string(image_ci.tiling),
+                     static_cast<VkImageUsageFlags>(image_ci.usage),
+                     static_cast<VkImageCreateFlags>(image_ci.flags));
+
+        std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> heap_budgets{};
+        vmaGetHeapBudgets(allocator, heap_budgets.data());
+        for (size_t heap = 0; heap < heap_budgets.size(); ++heap) {
+            const auto& budget = heap_budgets[heap];
+            if (budget.budget == 0 && budget.usage == 0 && budget.statistics.blockBytes == 0) {
+                continue;
+            }
+            LOG_CRITICAL(Render_Vulkan,
+                         "VMA heap {}: block_bytes={}, allocation_bytes={}, usage={}, budget={}",
+                         heap, budget.statistics.blockBytes, budget.statistics.allocationBytes,
+                         budget.usage, budget.budget);
+        }
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
