@@ -252,7 +252,8 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         for (IR::Inst& inst : *block) {
             if (inst.GetOpcode() == IR::Opcode::ReadConst) {
                 if (!inst.Arg(1).IsImmediate()) {
-                    LOG_WARNING(Render_Recompiler, "ReadConst has non-immediate offset");
+                    // Dynamic offsets cannot be compacted into the flat buffer. They use the
+                    // guarded DMA path selected during shader-info collection instead.
                     continue;
                 }
 

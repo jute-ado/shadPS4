@@ -118,6 +118,11 @@ public:
         return vk12_features.shaderInt8;
     }
 
+    /// Returns true if runtime image gather offsets are supported in shaders
+    bool IsShaderImageGatherExtendedSupported() const {
+        return features.shaderImageGatherExtended;
+    }
+
     /// Returns true if VK_KHR_maintenance8 is supported
     bool IsMaintenance8Supported() const {
         return maintenance_8;

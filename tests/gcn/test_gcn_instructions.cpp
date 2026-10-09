@@ -147,6 +147,19 @@ TEST_F(GcnTest, dma_helper_uses_unique_structured_control_flow_merge_blocks) {
     EXPECT_TRUE(HasUniqueMergeTargets(spirv));
 }
 
+TEST_F(GcnTest, dynamic_read_const_uses_guarded_dma_when_global_dma_is_disabled) {
+    constexpr u64 s_load_dword_s4_s0_s1_s2 = 0xc0020002;
+    const std::array<u64, 2> instructions{
+        s_load_dword_s4_s0_s1_s2,
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S4).Get(),
+    };
+
+    const auto spirv = TranslateToSpirv(instructions);
+
+    EXPECT_TRUE(HasOpcode(spirv, spv::Op::OpULessThan));
+    EXPECT_TRUE(HasOpcode(spirv, spv::Op::OpAtomicOr));
+}
+
 TEST_F(GcnTest, compute_wave64_lane_id_preserves_native_subgroup_builtin) {
     TranslationEnvironment environment{};
     environment.subgroup_size = 64;

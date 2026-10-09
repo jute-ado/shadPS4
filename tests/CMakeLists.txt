@@ -312,6 +312,26 @@ target_compile_features(shadps4_kernel_semaphore_policy_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_kernel_semaphore_policy_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_kernel_semaphore_policy_test)
 
+add_executable(shadps4_event_flag_policy_test
+    test_event_flag_policy.cpp
+)
+target_include_directories(shadps4_event_flag_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_event_flag_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_event_flag_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_event_flag_policy_test)
+
+add_executable(shadps4_libc_time_test
+    test_libc_time.cpp
+)
+target_include_directories(shadps4_libc_time_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_libc_time_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_libc_time_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_libc_time_test)
+
 add_executable(shadps4_shared_slot_registry_test
     test_shared_slot_registry.cpp
 )
@@ -381,6 +401,26 @@ target_link_libraries(shadps4_device_feature_policy_test PRIVATE
 )
 list(APPEND TEST_TARGETS shadps4_device_feature_policy_test)
 
+add_executable(shadps4_image_offset_policy_test
+    test_image_offset_policy.cpp
+)
+target_include_directories(shadps4_image_offset_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_image_offset_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_image_offset_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_image_offset_policy_test)
+
+add_executable(shadps4_read_const_access_policy_test
+    test_read_const_access_policy.cpp
+)
+target_include_directories(shadps4_read_const_access_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_read_const_access_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_read_const_access_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_read_const_access_policy_test)
+
 add_executable(shadps4_descriptor_type_test
     test_descriptor_type.cpp
 )
@@ -406,6 +446,16 @@ target_link_libraries(shadps4_image_copy_policy_test PRIVATE
     Vulkan::Headers
 )
 list(APPEND TEST_TARGETS shadps4_image_copy_policy_test)
+
+add_executable(shadps4_stream_buffer_copy_test
+    test_stream_buffer_copy.cpp
+)
+target_include_directories(shadps4_stream_buffer_copy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_stream_buffer_copy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_stream_buffer_copy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_stream_buffer_copy_test)
 
 add_executable(shadps4_aux_tess_shader_test
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv_quad_rect.cpp
