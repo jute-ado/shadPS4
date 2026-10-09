@@ -220,8 +220,15 @@ struct PageManager::Impl {
 
         const auto access =
             DecodeWindowsFaultAccess(exception->ExceptionRecord->ExceptionInformation[0]);
+        const bool is_guard_fault =
+            exception->ExceptionRecord->ExceptionCode == EXCEPTION_GUARD_PAGE;
         bool handled = false;
-        if (access == WindowsFaultAccess::Write) {
+        if (is_guard_fault) {
+            // A writable guard is one-shot and can be cleared by reads or instruction fetches as
+            // well as writes. Conservatively invalidate the watch on every guarded access. This
+            // also performs any required GPU readback before marking buffer memory CPU-dirty.
+            handled = rasterizer->InvalidateMemory(addr, 8);
+        } else if (access == WindowsFaultAccess::Write) {
             handled = rasterizer->InvalidateMemory(addr, 8);
         } else if (access == WindowsFaultAccess::Read) {
             handled = rasterizer->ReadMemory(addr, 8);
@@ -230,7 +237,7 @@ struct PageManager::Impl {
         // A CPU can enter this handler after another thread removed the final watcher and restored
         // host access. The cache no longer owns that delayed fault, so retry the instruction only
         // when the page's current protection independently permits the requested data access.
-        return handled || IsWindowsFaultAccessAllowed(fault_address, access);
+        return handled || (!is_guard_fault && IsWindowsFaultAccessAllowed(fault_address, access));
     }
 #endif
 

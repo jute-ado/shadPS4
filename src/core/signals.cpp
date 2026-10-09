@@ -44,6 +44,7 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     bool handled = false;
     switch (code) {
     case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_GUARD_PAGE:
         handled = signals->DispatchAccessViolation(
             pExp, reinterpret_cast<void*>(pExp->ExceptionRecord->ExceptionInformation[1]));
         break;
@@ -63,6 +64,11 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 
     if (handled) {
         return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (code == EXCEPTION_GUARD_PAGE) {
+        // Native Windows stack growth also uses guard pages. Leave guards that do not belong to
+        // an emulator data watch for the operating system's normal exception handling.
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.

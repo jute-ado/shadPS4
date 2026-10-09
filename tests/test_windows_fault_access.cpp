@@ -127,12 +127,17 @@ TEST(WindowsFaultAccess, AcceptsDelayedWriteAfterAnotherThreadRestoresAccess) {
     EXPECT_TRUE(VirtualFree(const_cast<std::uint8_t*>(page), 0, MEM_RELEASE));
 }
 
-TEST(WindowsMemoryProtection, DataWatchesPreservePerPageExecutePermission) {
+TEST(WindowsMemoryProtection, DataWatchesRemainWritableForGuardExceptionDispatch) {
     SYSTEM_INFO system_info{};
     GetSystemInfo(&system_info);
     const auto page_size = static_cast<SIZE_T>(system_info.dwPageSize);
+    auto* mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
+                                       PAGE_EXECUTE_READWRITE | SEC_COMMIT, 0,
+                                       static_cast<DWORD>(page_size * 2), nullptr);
+    ASSERT_NE(mapping, nullptr);
     auto* pages = static_cast<std::uint8_t*>(
-        VirtualAlloc(nullptr, page_size * 2, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+        MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, 0, 0,
+                      page_size * 2));
     ASSERT_NE(pages, nullptr);
 
     DWORD old_protection{};
@@ -141,23 +146,25 @@ TEST(WindowsMemoryProtection, DataWatchesPreservePerPageExecutePermission) {
     const auto protection_at = [](const void* address) {
         MEMORY_BASIC_INFORMATION info{};
         EXPECT_NE(VirtualQuery(address, &info, sizeof(info)), 0U);
-        return info.Protect & 0xff;
+        EXPECT_EQ(info.Type, MEM_MAPPED);
+        return info.Protect & (0xff | PAGE_GUARD);
     };
 
     EXPECT_TRUE(Core::ProtectWindowsDataAccessPreservingExecute(
         GetCurrentProcess(), reinterpret_cast<VAddr>(pages), page_size * 2, true, false));
-    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE_READ);
-    EXPECT_EQ(protection_at(pages + page_size), PAGE_READONLY);
+    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE_READWRITE | PAGE_GUARD);
+    EXPECT_EQ(protection_at(pages + page_size), PAGE_READWRITE | PAGE_GUARD);
 
     EXPECT_TRUE(Core::ProtectWindowsDataAccessPreservingExecute(
         GetCurrentProcess(), reinterpret_cast<VAddr>(pages), page_size * 2, false, false));
-    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE);
-    EXPECT_EQ(protection_at(pages + page_size), PAGE_NOACCESS);
+    EXPECT_EQ(protection_at(pages), PAGE_EXECUTE_READWRITE | PAGE_GUARD);
+    EXPECT_EQ(protection_at(pages + page_size), PAGE_READWRITE | PAGE_GUARD);
 
     EXPECT_TRUE(Core::ProtectWindowsDataAccessPreservingExecute(
         GetCurrentProcess(), reinterpret_cast<VAddr>(pages), page_size * 2, true, true));
     EXPECT_EQ(protection_at(pages), PAGE_EXECUTE_READWRITE);
     EXPECT_EQ(protection_at(pages + page_size), PAGE_READWRITE);
 
-    EXPECT_TRUE(VirtualFree(pages, 0, MEM_RELEASE));
+    EXPECT_TRUE(UnmapViewOfFile(pages));
+    EXPECT_TRUE(CloseHandle(mapping));
 }
