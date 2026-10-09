@@ -615,6 +615,7 @@ class ManifestTests(unittest.TestCase):
                             "useIpc": True,
                             "postCheckpointScreenshotSeconds": [0.1, 0.2, 0.3],
                             "postCheckpointScreenshotSource": "presented_frame",
+                            "stopAfterPostCheckpointScreenshots": True,
                             "minimumDistinctPostCheckpointScreenshots": 2,
                             "minimumPostCheckpointScreenshotNonBlackFraction": 0.01,
                             "maximumPostCheckpointInvisibleFlashes": 0,
@@ -633,6 +634,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(
                 case.post_checkpoint_screenshot_source, "presented_frame"
             )
+            self.assertTrue(case.stop_after_post_checkpoint_screenshots)
             self.assertEqual(
                 case.minimum_distinct_post_checkpoint_screenshots, 2
             )
@@ -669,6 +671,35 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ManifestError,
                 "minimumDistinctPostCheckpointScreenshots cannot exceed "
+                "postCheckpointScreenshotSeconds",
+            ):
+                load_manifest(path)
+
+    def test_load_manifest_rejects_stop_without_post_checkpoint_frames(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "missing focused window",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "stopAfterPostCheckpointScreenshots": True,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ManifestError,
+                "stopAfterPostCheckpointScreenshots requires "
                 "postCheckpointScreenshotSeconds",
             ):
                 load_manifest(path)
@@ -3875,6 +3906,32 @@ class RunnerTests(unittest.TestCase):
             )
 
             self.assertTrue(result.passed, result.failures)
+
+    def test_run_case_stops_after_post_checkpoint_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "focused intro window",
+                    "timeoutSeconds": 2,
+                    "args": ["--expect-ipc", "--screenshot-red", "64"],
+                    "useIpc": True,
+                    "postCheckpointScreenshotSeconds": [0.1, 0.2],
+                    "stopAfterPostCheckpointScreenshots": True,
+                    "allowedOutcomes": ["exited_zero"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(result.outcome, "exited_zero")
+            self.assertLess(result.duration_seconds, 1)
 
     def test_run_case_rejects_stuck_post_checkpoint_frames(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

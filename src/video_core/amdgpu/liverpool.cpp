@@ -13,7 +13,6 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
-#include "video_core/amdgpu/eop_flip_completion.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/amdgpu/pm4_lod_stats.h"
@@ -154,16 +153,23 @@ void Liverpool::Process(std::stop_token stoken) {
         if (has_submit_done) {
             VideoCore::EndCapture();
             if (rasterizer) {
-                rasterizer->OnSubmit();
                 SubmitSubmissionBoundary(
                     std::move(submit_done_callback),
                     [this](Common::UniqueFunction<void>&& completion) {
                         rasterizer->DeferGpuCompletion(std::move(completion));
                     },
-                    [this] { rasterizer->Flush(); });
+                    [this] {
+                        eop_submission_batch.SubmitBoundary(
+                            [this] { rasterizer->OnSubmit(); },
+                            [this] { rasterizer->Flush(); });
+                    });
             } else if (submit_done_callback) {
                 submit_done_callback();
             }
+        } else if (rasterizer) {
+            eop_submission_batch.FlushIfPending(
+                [this] { rasterizer->ProcessDownloadImages(); },
+                [this] { rasterizer->Flush(); });
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
@@ -289,18 +295,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
-                    // The flip marker follows the frame's EOP packet. Preserve that ordering so
-                    // the guest cannot recycle the frame before its fence and interrupt.
-                    auto eop_completion = std::move(last_eop_completion);
-                    if (eop_completion) {
-                        eop_completion->AttachFlip([this] {
-                            SendCommand([] {
-                                Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
-                            });
-                        });
-                    } else {
-                        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
-                    }
+                    // Interrupt flip packets end the marker before a following EOP. Plain and
+                    // label-only packets use the marker as their tail and belong to the preceding
+                    // EOP. Decode the patched layout rather than assuming one ordering.
+                    ASSERT_MSG(
+                        eop_flip_tracker.QueueFlip(
+                            DecodeFlipEopPosition(nop->header.count.Value()), [this] {
+                                SendCommand([] {
+                                    Platform::IrqC::Instance()->Signal(
+                                        Platform::InterruptId::GfxFlip);
+                                });
+                            }),
+                        "A patched flip could not be associated with its EOP packet");
                     break;
                 }
                 case PM4CmdNop::PayloadType::DebugMarkerPush: {
@@ -690,6 +696,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* dispatch_indirect =
                     reinterpret_cast<const PM4CmdDispatchIndirect*>(header);
                 auto& cs_program = GetCsRegs();
+                cs_program.dispatch_initiator = dispatch_indirect->dispatch_initiator;
                 const auto offset = dispatch_indirect->data_offset;
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
                 if (DebugState.DumpingCurrentReg()) {
@@ -776,16 +783,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                auto complete_eop_flip = eop_flip_tracker.BeginEop();
                 if (rasterizer) {
-                    auto eop_completion = std::make_shared<EopFlipCompletion>();
-                    last_eop_completion = eop_completion;
-                    rasterizer->ProcessDownloadImages();
                     SubmitEop(
                         *event_eop,
                         [this](Common::UniqueFunction<void>&& completion) {
                             rasterizer->DeferGpuCompletion(std::move(completion));
                         },
-                        [this] { rasterizer->Flush(); },
+                        [this] { eop_submission_batch.MarkEopPending(); },
                         [](void* address, u64 data, u32 num_bytes) {
                             auto* memory = Core::Memory::Instance();
                             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
@@ -793,11 +798,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             }
                         },
                         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                        [eop_completion] { eop_completion->CompleteEop(); });
+                        [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
+                            complete_eop_flip();
+                        });
                     break;
                 }
-                auto eop_completion = std::make_shared<EopFlipCompletion>();
-                last_eop_completion = eop_completion;
                 event_eop->SignalFence(
                     [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
@@ -806,7 +811,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         }
                     },
                     [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
-                eop_completion->CompleteEop();
+                complete_eop_flip();
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -905,6 +910,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
+                }
+                if (rasterizer &&
+                    wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory) {
+                    eop_submission_batch.FlushIfPending(
+                        [this] { rasterizer->ProcessDownloadImages(); },
+                        [this] { rasterizer->Flush(); });
                 }
                 const auto wait_satisfied = [&] {
                     if (!rasterizer ||
@@ -1194,6 +1205,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* dispatch_indirect =
                 reinterpret_cast<const PM4CmdDispatchIndirectMec*>(header);
             auto& cs_program = GetCsRegs();
+            cs_program.dispatch_initiator = dispatch_indirect->dispatch_initiator;
             const auto ib_address = dispatch_indirect->Address<VAddr>();
             const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
             if (DebugState.DumpingCurrentReg()) {
@@ -1239,6 +1251,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            if (rasterizer &&
+                wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory) {
+                eop_submission_batch.FlushIfPending(
+                    [this] { rasterizer->ProcessDownloadImages(); },
+                    [this] { rasterizer->Flush(); });
+            }
             const auto wait_satisfied = [&] {
                 if (!rasterizer ||
                     wait_reg_mem->mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory) {

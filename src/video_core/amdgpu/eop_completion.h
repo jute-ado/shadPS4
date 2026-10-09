@@ -13,7 +13,8 @@ void SubmitEop(Packet packet, DeferCompletion&& defer_completion, SubmitGpuWork&
                WriteMemory&& write_memory, SignalInterrupt&& signal_interrupt,
                NotifyCompletion&& notify_completion) {
     auto completion = [packet, write_memory = std::forward<WriteMemory>(write_memory),
-                       signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+                       signal_interrupt =
+                           std::forward<SignalInterrupt>(signal_interrupt),
                        notify_completion =
                            std::forward<NotifyCompletion>(notify_completion)]() mutable {
         packet.SignalFence(write_memory, signal_interrupt);

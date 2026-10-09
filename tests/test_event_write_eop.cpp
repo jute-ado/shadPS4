@@ -9,7 +9,8 @@
 
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
-#include "video_core/amdgpu/eop_flip_completion.h"
+#include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/eop_submission_batch.h"
 #include "video_core/amdgpu/submission_boundary.h"
 #include "video_core/amdgpu/submission_boundary_queue.h"
 
@@ -60,44 +61,118 @@ TEST(EventWriteEop, DefersFenceWriteAndInterruptUntilSubmittedGpuWorkCompletes) 
     EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit", "fence", "interrupt"}));
 }
 
-TEST(EventWriteEop, DefersFlipUntilThePrecedingEopIsSubmitted) {
+TEST(EventWriteEop, DefersInterruptFlipMarkerUntilTheFollowingEop) {
     bool flip_signalled = false;
-    AmdGpu::EopFlipCompletion completion;
+    AmdGpu::EopFlipTracker tracker;
 
-    completion.AttachFlip([&] { flip_signalled = true; });
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Following,
+                                 [&] { flip_signalled = true; }));
     EXPECT_FALSE(flip_signalled);
 
-    completion.CompleteEop();
+    auto complete_eop = tracker.BeginEop();
+    complete_eop();
     EXPECT_TRUE(flip_signalled);
 }
 
-TEST(EventWriteEop, SignalsFlipImmediatelyWhenThePrecedingEopWasAlreadySubmitted) {
-    bool flip_signalled = false;
-    AmdGpu::EopFlipCompletion completion;
-
-    completion.CompleteEop();
-    completion.AttachFlip([&] { flip_signalled = true; });
-
-    EXPECT_TRUE(flip_signalled);
-}
-
-TEST(EventWriteEop, MakesFlipEligibleAfterSubmissionBeforeGpuCompletion) {
+TEST(EventWriteEop, AssociatesFlipMarkerWithTheFollowingEop) {
     std::vector<std::string> operations;
-    std::function<void()> gpu_completion;
-    AmdGpu::EopFlipCompletion completion;
-    completion.AttachFlip([&] { operations.emplace_back("flip"); });
+    Common::UniqueFunction<void> gpu_completion;
+    AmdGpu::EopFlipTracker tracker;
 
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Following,
+                                 [&] { operations.emplace_back("flip"); }));
+    EXPECT_TRUE(operations.empty());
+
+    auto complete_eop_flip = tracker.BeginEop();
     AmdGpu::SubmitEop(
         TestEopPacket{.data = 1},
         [&](auto&& callback) { gpu_completion = std::forward<decltype(callback)>(callback); },
         [&] { operations.emplace_back("submit"); }, [&](u32) { operations.emplace_back("fence"); },
-        [&] { operations.emplace_back("interrupt"); }, [&] { completion.CompleteEop(); });
+        [&] { operations.emplace_back("interrupt"); },
+        [complete_eop_flip = std::move(complete_eop_flip)]() mutable { complete_eop_flip(); });
 
-    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "flip"}));
+    EXPECT_EQ(operations, (std::vector<std::string>{"submit"}));
     ASSERT_TRUE(gpu_completion);
     gpu_completion();
 
-    EXPECT_EQ(operations, (std::vector<std::string>{"submit", "flip", "fence", "interrupt"}));
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"submit", "fence", "interrupt", "flip"}));
+}
+
+TEST(EventWriteEop, AssociatesPlainFlipMarkerWithThePrecedingEop) {
+    bool flip_signalled = false;
+    AmdGpu::EopFlipTracker tracker;
+
+    auto complete_eop = tracker.BeginEop();
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                 [&] { flip_signalled = true; }));
+    EXPECT_FALSE(flip_signalled);
+
+    complete_eop();
+    EXPECT_TRUE(flip_signalled);
+}
+
+TEST(EventWriteEop, AssociatesEveryFlipMarkerSharingThePrecedingEop) {
+    std::vector<int> signalled_flips;
+    AmdGpu::EopFlipTracker tracker;
+
+    auto complete_eop = tracker.BeginEop();
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                 [&] { signalled_flips.push_back(1); }));
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                 [&] { signalled_flips.push_back(2); }));
+    EXPECT_TRUE(signalled_flips.empty());
+
+    complete_eop();
+    EXPECT_EQ(signalled_flips, (std::vector<int>{1, 2}));
+}
+
+TEST(EventWriteEop, ReleasesLatePrecedingFlipAfterItsEopAlreadyCompleted) {
+    bool flip_signalled = false;
+    AmdGpu::EopFlipTracker tracker;
+
+    auto complete_eop = tracker.BeginEop();
+    complete_eop();
+    ASSERT_TRUE(tracker.QueueFlip(AmdGpu::FlipEopPosition::Preceding,
+                                 [&] { flip_signalled = true; }));
+
+    EXPECT_TRUE(flip_signalled);
+}
+
+TEST(EventWriteEop, DecodesPatchedFlipPacketLayouts) {
+    EXPECT_EQ(AmdGpu::DecodeFlipEopPosition(0x33), AmdGpu::FlipEopPosition::Following);
+    EXPECT_EQ(AmdGpu::DecodeFlipEopPosition(0x34), AmdGpu::FlipEopPosition::Preceding);
+    EXPECT_EQ(AmdGpu::DecodeFlipEopPosition(0x39), AmdGpu::FlipEopPosition::Preceding);
+}
+
+TEST(EventWriteEop, BatchesConsecutiveEopsIntoOneSubmissionBoundary) {
+    std::vector<std::string> operations;
+    AmdGpu::EopSubmissionBatch batch;
+
+    batch.MarkEopPending();
+    batch.MarkEopPending();
+    EXPECT_TRUE(operations.empty());
+
+    batch.SubmitBoundary([&] { operations.emplace_back("prepare"); },
+                         [&] { operations.emplace_back("submit"); });
+    EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
+
+    batch.FlushIfPending([&] { operations.emplace_back("prepare"); },
+                         [&] { operations.emplace_back("submit"); });
+    EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
+}
+
+TEST(EventWriteEop, FlushesPendingEopsWithoutASubmissionBoundary) {
+    std::vector<std::string> operations;
+    AmdGpu::EopSubmissionBatch batch;
+
+    batch.MarkEopPending();
+    batch.FlushIfPending([&] { operations.emplace_back("prepare"); },
+                         [&] { operations.emplace_back("submit"); });
+    batch.FlushIfPending([&] { operations.emplace_back("prepare"); },
+                         [&] { operations.emplace_back("submit"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"prepare", "submit"}));
 }
 
 TEST(EventWriteEop, CompletesSubmissionBoundaryAfterEarlierEopSideEffects) {
