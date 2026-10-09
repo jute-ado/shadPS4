@@ -21,6 +21,7 @@ struct Program {
     Info& info;
 };
 
+[[nodiscard]] bool ShouldDumpProgram(bool global_dump_enabled, const Info& info) noexcept;
 void DumpProgram(const Program& program, const Info& info, const std::string& type = "");
 
 } // namespace Shader::IR

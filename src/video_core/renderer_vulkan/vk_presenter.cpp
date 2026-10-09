@@ -2343,6 +2343,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     const auto capture_with_overlays = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     FinalGuestSurfacePresentationMapping final_surface_mapping{};
     std::vector<ScreenshotReadback> pending_screenshots;
+    bool frame_capture_before_sampling{};
     if (capture_with_overlays.Total() > 0) {
         pending_screenshots.reserve(2);
     }
@@ -2397,6 +2398,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         const bool copy_frame_before_sampling =
             (post_pp_surface_capture && post_pp_surface_capture->HasCopy()) ||
             (pp_sampled_input_capture && pp_sampled_input_capture->HasCopy());
+        frame_capture_before_sampling = copy_frame_before_sampling;
         const auto frame_transitions =
             GetPresentFrameTransitions(is_reusing_frame, copy_frame_before_sampling);
         std::array<vk::ImageMemoryBarrier2, 2> pre_barriers;
@@ -2746,7 +2748,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick,
-                 FrameReadyWaitStage(pp_input_shadow_stage || pp_sampled_input_stage));
+                 FrameReadyWaitStage(frame_capture_before_sampling));
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     void* const vulkan_instance =

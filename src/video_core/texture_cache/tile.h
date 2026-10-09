@@ -288,7 +288,6 @@ constexpr std::array macro_tile_extents_alt{
 
 constexpr std::pair micro_tile_extent{8u, 8u};
 constexpr auto hw_pipe_interleave = 256u;
-
 constexpr std::pair<u32, u32> GetMacroTileExtents(AmdGpu::TileMode tile_mode, u32 bpp,
                                                   u32 num_samples, bool alt) {
     ASSERT(num_samples <= 8);

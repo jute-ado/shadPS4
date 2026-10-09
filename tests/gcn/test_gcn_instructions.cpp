@@ -5,9 +5,12 @@
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp>
 
+#include "core/emulator_settings.h"
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
+#include "shader_recompiler/read_const_access_policy.h"
 #include "translator.hpp"
 
 class GcnTest : public ::testing::Test {
@@ -25,6 +28,21 @@ struct F32x2 {
     float a;
     float b;
 };
+
+static bool ContainsSpirvOpcode(std::span<const u32> words, spv::Op expected) {
+    for (size_t offset = 5; offset < words.size();) {
+        const u32 instruction = words[offset];
+        const u32 word_count = instruction >> 16;
+        if (word_count == 0 || offset + word_count > words.size()) {
+            return false;
+        }
+        if (static_cast<spv::Op>(instruction & 0xffffu) == expected) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
@@ -47,6 +65,23 @@ TEST_F(GcnTest, mubuf_addr64_tracks_source_buffer_residency) {
     const auto result = TranslateToSpirvWithInfo(addr64_load, true);
 
     EXPECT_EQ(result.guest_buffer_count, 2U);
+}
+
+TEST_F(GcnTest, dynamic_read_const_uses_guarded_dma_when_global_dma_is_disabled) {
+    // s_load_dword s4, s[0:1], s2 followed by a use that keeps the dynamic read live.
+    constexpr u64 dynamic_read_const = 0xc0020002;
+    const std::array<u64, 2> instructions{
+        dynamic_read_const,
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S4).Get(),
+    };
+
+    const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    EmulatorSettings.SetDirectMemoryAccessEnabled(false);
+    const auto spirv = TranslateToSpirv(instructions);
+    EmulatorSettings.SetDirectMemoryAccessEnabled(previous);
+
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpConvertUToPtr));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::Op::OpINotEqual));
 }
 
 // Example

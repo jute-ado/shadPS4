@@ -49,7 +49,9 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     if (!info.has_fetch_shader) {
         return std::nullopt;
     }
-
+    if (info.compile_fetch_shader_snapshot) {
+        return *info.compile_fetch_shader_snapshot;
+    }
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
     FetchShaderData data{};
     GcnCodeSlice code_slice(code, code + std::numeric_limits<u32>::max());

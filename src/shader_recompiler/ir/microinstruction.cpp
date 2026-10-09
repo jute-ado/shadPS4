@@ -42,6 +42,7 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::DeviceMemoryBarrier:
     case Opcode::ConditionRef:
     case Opcode::Reference:
+    case Opcode::PpUpstreamSampleTee:
     case Opcode::PhiMove:
     case Opcode::Prologue:
     case Opcode::Epilogue:

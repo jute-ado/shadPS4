@@ -72,6 +72,62 @@ struct SamplerSpecialization {
     bool operator==(const SamplerSpecialization&) const = default;
 };
 
+// Immutable draw-local values of every shader resource descriptor. Pipeline specialization and
+// descriptor binding must consume the same snapshot; reading guest descriptor memory independently
+// in those phases can combine two guest generations in one draw.
+struct StageResourceSnapshot {
+    static constexpr size_t MaxBuffers = NUM_BUFFERS;
+    static constexpr size_t MaxImages = NUM_IMAGES;
+    static constexpr size_t MaxSamplers = NUM_SAMPLERS;
+    static constexpr size_t MaxFMasks = NUM_FMASKS;
+
+    boost::container::static_vector<AmdGpu::Buffer, MaxBuffers> buffers;
+    boost::container::static_vector<AmdGpu::Image, MaxImages> images;
+    boost::container::static_vector<AmdGpu::Sampler, MaxSamplers> samplers;
+    boost::container::static_vector<AmdGpu::Image, MaxFMasks> fmasks;
+    bool valid{true};
+
+    template <typename BufferReader, typename ImageReader, typename SamplerReader,
+              typename FMaskReader>
+    static StageResourceSnapshot Capture(size_t buffer_count, size_t image_count,
+                                         size_t sampler_count, size_t fmask_count,
+                                         BufferReader&& buffer_reader,
+                                         ImageReader&& image_reader,
+                                         SamplerReader&& sampler_reader,
+                                         FMaskReader&& fmask_reader) {
+        StageResourceSnapshot snapshot;
+        if (buffer_count > snapshot.buffers.capacity() ||
+            image_count > snapshot.images.capacity() ||
+            sampler_count > snapshot.samplers.capacity() ||
+            fmask_count > snapshot.fmasks.capacity()) {
+            snapshot.valid = false;
+            return snapshot;
+        }
+        for (size_t index = 0; index < buffer_count; ++index) {
+            snapshot.buffers.emplace_back(buffer_reader(index));
+        }
+        for (size_t index = 0; index < image_count; ++index) {
+            snapshot.images.emplace_back(image_reader(index));
+        }
+        for (size_t index = 0; index < sampler_count; ++index) {
+            snapshot.samplers.emplace_back(sampler_reader(index));
+        }
+        for (size_t index = 0; index < fmask_count; ++index) {
+            snapshot.fmasks.emplace_back(fmask_reader(index));
+        }
+        return snapshot;
+    }
+
+    static StageResourceSnapshot Capture(const Info& info) {
+        return Capture(
+            info.buffers.size(), info.images.size(), info.samplers.size(), info.fmasks.size(),
+            [&](size_t index) { return info.buffers[index].GetSharp(info); },
+            [&](size_t index) { return info.images[index].GetSharp(info); },
+            [&](size_t index) { return info.samplers[index].GetSharp(info); },
+            [&](size_t index) { return info.fmasks[index].GetSharp(info); });
+    }
+};
+
 /**
  * Alongside runtime information, this structure also checks bound resources
  * for compatibility. Can be used as a key for storing shader permutations.
@@ -94,28 +150,54 @@ struct StageSpecialization {
 
     StageSpecialization() = default;
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
-                        Backend::Bindings start_)
+                        Backend::Bindings start_, Gcn::VertexInputSnapshot* vertex_inputs = nullptr,
+                        const StageResourceSnapshot* resource_snapshot = nullptr)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
+        const StageResourceSnapshot captured_resources =
+            resource_snapshot ? StageResourceSnapshot{} : StageResourceSnapshot::Capture(info_);
+        const StageResourceSnapshot& resources =
+            resource_snapshot ? *resource_snapshot : captured_resources;
+        if (!resources.valid || resources.buffers.size() != info_.buffers.size() ||
+            resources.images.size() != info_.images.size() ||
+            resources.samplers.size() != info_.samplers.size() ||
+            resources.fmasks.size() != info_.fmasks.size()) {
+            info = nullptr;
+            return;
+        }
         fetch_shader_data = Gcn::ParseFetchShader(info_);
+        Gcn::VertexInputSnapshot captured_vertex_inputs;
+        if (fetch_shader_data) {
+            captured_vertex_inputs = Gcn::VertexInputSnapshot::Capture(*fetch_shader_data, info_);
+        }
+        if (vertex_inputs) {
+            *vertex_inputs = captured_vertex_inputs;
+        }
+        if (!captured_vertex_inputs.valid) {
+            return;
+        }
         if (info_.stage == Stage::Vertex && fetch_shader_data) {
             // Specialize shader on VS input number types to follow spec.
-            ForEachSharp(vs_attribs, fetch_shader_data->attributes,
-                         [this](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                             using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
-                             if (const auto step_rate = desc.GetStepRate();
-                                 step_rate != InstanceIdType::None) {
-                                 spec.divisor = step_rate == InstanceIdType::OverStepRate0
-                                                    ? runtime_info.vs_info.step_rate_0
-                                                    : (step_rate == InstanceIdType::OverStepRate1
-                                                           ? runtime_info.vs_info.step_rate_1
-                                                           : 1);
-                             }
-                             spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
-                         });
+            for (size_t index = 0; index < fetch_shader_data->attributes.size(); ++index) {
+                const auto& desc = fetch_shader_data->attributes[index];
+                auto& spec = vs_attribs.emplace_back();
+                const auto sharp = captured_vertex_inputs.buffers[index];
+                if (!sharp) {
+                    continue;
+                }
+                using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
+                if (const auto step_rate = desc.GetStepRate(); step_rate != InstanceIdType::None) {
+                    spec.divisor = step_rate == InstanceIdType::OverStepRate0
+                                       ? runtime_info.vs_info.step_rate_0
+                                       : (step_rate == InstanceIdType::OverStepRate1
+                                              ? runtime_info.vs_info.step_rate_1
+                                              : 1);
+                }
+                spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
+                spec.dst_select = sharp.DstSelect();
+            }
         }
         u32 binding{};
-        ForEachSharp(binding, buffers, info->buffers,
+        ForEachSharp(binding, buffers, info->buffers, resources.buffers,
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                          spec.stride = sharp.GetStride();
                          spec.is_storage = desc.IsStorage(sharp);
@@ -132,7 +214,7 @@ struct StageSpecialization {
                              spec.element_size = sharp.element_size;
                          }
                      });
-        ForEachSharp(binding, images, info->images,
+        ForEachSharp(binding, images, info->images, resources.images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.type = sharp.GetViewType(desc.is_array);
                          spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
@@ -146,12 +228,12 @@ struct StageSpecialization {
                          spec.num_conversion = sharp.GetNumberConversion();
                          spec.num_bindings = desc.NumBindings(*info);
                      });
-        ForEachSharp(binding, fmasks, info->fmasks,
+        ForEachSharp(binding, fmasks, info->fmasks, resources.fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.width = sharp.width;
                          spec.height = sharp.height;
                      });
-        ForEachSharp(samplers, info->samplers,
+        ForEachSharp(samplers, info->samplers, resources.samplers,
                      [](auto& spec, const auto& desc, AmdGpu::Sampler sharp) {
                          spec.force_unnormalized = sharp.force_unnormalized;
                          spec.force_degamma = sharp.force_degamma;
@@ -166,10 +248,11 @@ struct StageSpecialization {
         }
     }
 
-    void ForEachSharp(auto& spec_list, auto& desc_list, auto&& func) {
-        for (const auto& desc : desc_list) {
+    void ForEachSharp(auto& spec_list, auto& desc_list, const auto& sharp_list, auto&& func) {
+        for (size_t index = 0; index < desc_list.size(); ++index) {
+            const auto& desc = desc_list[index];
             auto& spec = spec_list.emplace_back();
-            const auto sharp = desc.GetSharp(*info);
+            const auto sharp = sharp_list[index];
             if (!sharp) {
                 continue;
             }
@@ -177,10 +260,12 @@ struct StageSpecialization {
         }
     }
 
-    void ForEachSharp(u32& binding, auto& spec_list, auto& desc_list, auto&& func) {
-        for (const auto& desc : desc_list) {
+    void ForEachSharp(u32& binding, auto& spec_list, auto& desc_list, const auto& sharp_list,
+                      auto&& func) {
+        for (size_t index = 0; index < desc_list.size(); ++index) {
+            const auto& desc = desc_list[index];
             auto& spec = spec_list.emplace_back();
-            const auto sharp = desc.GetSharp(*info);
+            const auto sharp = sharp_list[index];
             if (!sharp) {
                 binding++;
                 continue;
@@ -207,11 +292,18 @@ struct StageSpecialization {
             return false;
         }
 
-        if (fetch_shader_data != other.fetch_shader_data) {
+        // Descriptor presence is part of the compiled permutation. The scalar
+        // specialization entries are value-initialized for missing descriptors,
+        // so comparing those entries alone cannot distinguish a missing binding
+        // from a present descriptor whose specialization fields are all default.
+        if (bitset != other.bitset) {
             return false;
         }
 
-        if (fmasks != other.fmasks) {
+        // The fetch program defines vertex input routing even when the shader has no ordinary
+        // buffer/image/sampler resources. Compare it before the empty-resource shortcut so a
+        // cached module cannot be reused for a different fetch layout with identical formats.
+        if (fetch_shader_data != other.fetch_shader_data) {
             return false;
         }
 
@@ -221,6 +313,10 @@ struct StageSpecialization {
         // for other types of shaders with no bindings.
         if (bitset.none() && other.bitset.none()) {
             return true;
+        }
+
+        if (fmasks != other.fmasks) {
+            return false;
         }
 
         if (start != other.start) {

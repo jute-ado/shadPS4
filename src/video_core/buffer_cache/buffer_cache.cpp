@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <vector>
 #include "common/alignment.h"
 #include "common/debug.h"
 #include "common/scope_exit.h"
@@ -10,6 +11,8 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
+#include "video_core/buffer_cache/readonly_stream_snapshot.h"
+#include "video_core/quad_list_indices.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -150,20 +153,19 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 }
 
 void BufferCache::BindVertexBuffers(
-    const Vulkan::GraphicsPipeline& pipeline,
+    const Vulkan::GraphicsPipeline& pipeline, const Shader::Gcn::VertexInputSnapshot& vertex_inputs,
     boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
     Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
     Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
-    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers, vertex_inputs,
                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
     if (instance.IsVertexInputDynamicState()) {
         // Update current vertex inputs.
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.setVertexInputEXT(bindings, attributes);
+        scheduler.CommandBuffer().setVertexInputEXT(bindings, attributes);
     }
 
     if (bindings.empty()) {
@@ -278,6 +280,69 @@ void BufferCache::BindIndexBuffer(
     }
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindIndexBuffer(vk_buffer->Handle(), offset, index_type);
+}
+
+u32 BufferCache::BindQuadListIndexBuffer(bool is_indexed, u32 index_offset) {
+    const auto& regs = liverpool->regs;
+    const u32 output_count = QuadListTriangleIndexCount(regs.num_indices);
+    if (output_count == 0) {
+        return 0;
+    }
+
+    if (!is_indexed) {
+        const u64 output_size = static_cast<u64>(output_count) * sizeof(u32);
+        const auto [output, offset] = stream_buffer.Map(output_size);
+        if (!output) {
+            LOG_ERROR(Render_Vulkan, "Direct QuadList index conversion exceeds stream capacity");
+            return 0;
+        }
+        GenerateQuadListTriangleIndices(
+            {reinterpret_cast<u32*>(output), static_cast<size_t>(output_count)}, regs.num_indices);
+        stream_buffer.Commit();
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.bindIndexBuffer(stream_buffer.Handle(), offset, vk::IndexType::eUint32);
+        return output_count;
+    }
+
+    const bool is_index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
+    const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
+    const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
+    const u32 input_count = (regs.num_indices / 4) * 4;
+    const u64 input_size = static_cast<u64>(input_count) * index_size;
+    const u64 output_size = static_cast<u64>(output_count) * index_size;
+    const VAddr index_address =
+        regs.index_base_address.Address<VAddr>() + static_cast<u64>(index_offset) * index_size;
+
+    if (!memory->IsValidMapping(index_address, input_size)) {
+        LOG_ERROR(Render_Vulkan, "Direct QuadList index range is not mapped: {:#x}+{:#x}",
+                  index_address, input_size);
+        return 0;
+    }
+    if (IsRegionGpuModified(index_address, input_size)) {
+        ReadMemory(index_address, input_size);
+    }
+
+    std::vector<u8> input(input_size);
+    memory->CopySparseMemory(index_address, input.data(), input_size);
+    const auto [output, offset] = stream_buffer.Map(output_size);
+    if (!output) {
+        LOG_ERROR(Render_Vulkan, "Direct QuadList index conversion exceeds stream capacity");
+        return 0;
+    }
+
+    if (is_index16) {
+        ConvertQuadListTriangleIndices(
+            {reinterpret_cast<u16*>(output), static_cast<size_t>(output_count)},
+            {reinterpret_cast<const u16*>(input.data()), static_cast<size_t>(input_count)});
+    } else {
+        ConvertQuadListTriangleIndices(
+            {reinterpret_cast<u32*>(output), static_cast<size_t>(output_count)},
+            {reinterpret_cast<const u32*>(input.data()), static_cast<size_t>(input_count)});
+    }
+    stream_buffer.Commit();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.bindIndexBuffer(stream_buffer.Handle(), offset, index_type);
+    return output_count;
 }
 
 void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
@@ -395,8 +460,17 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
-        const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
-        return {&stream_buffer, offset};
+        const auto reservation = StageReadonlyStreamSnapshot(
+            [&] { return stream_buffer.Map(size, instance.UniformMinAlignment()); },
+            [&](auto&& snapshot) {
+                memory_tracker->WithReadonlyStreamSnapshot(
+                    device_addr, size, std::forward<decltype(snapshot)>(snapshot));
+            },
+            [&](const auto& reservation) {
+                memory->CopySparseMemory(device_addr, reservation.first, size);
+            },
+            [&] { stream_buffer.Commit(); });
+        return {&stream_buffer, reservation.second};
     }
     if (IsBufferInvalid(buffer_id)) {
         buffer_id = FindBuffer(device_addr, size);

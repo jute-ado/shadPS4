@@ -37,6 +37,10 @@ class Instance;
 class Scheduler;
 class ShaderCache;
 
+namespace HostPasses {
+struct PpUpstreamSampleTeePipelinePolicy;
+}
+
 struct Program {
     struct Module {
         vk::ShaderModule module;
@@ -66,7 +70,8 @@ struct Program {
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
-                           AmdGpu::Liverpool* liverpool);
+                           AmdGpu::Liverpool* liverpool,
+                           const HostPasses::PpUpstreamSampleTeePipelinePolicy& policy);
     ~PipelineCache();
 
     void WarmUp();
@@ -76,12 +81,20 @@ public:
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
 
-    const GraphicsPipeline* GetGraphicsPipeline();
+    struct GraphicsPipelineResult {
+        const GraphicsPipeline* pipeline{};
+        Shader::Gcn::VertexInputSnapshot vertex_inputs{};
+        std::array<Shader::StageResourceSnapshot, MaxShaderStages> resources{};
+    };
+
+    GraphicsPipelineResult GetGraphicsPipeline(AmdGpu::PrimitiveType primitive_type);
 
     const ComputePipeline* GetComputePipeline();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
-                              std::optional<Shader::Gcn::FetchShaderData>, u64>;
+                              std::optional<Shader::Gcn::FetchShaderData>,
+                              Shader::Gcn::VertexInputSnapshot, Shader::StageResourceSnapshot,
+                              u64>;
     Result GetProgram(Shader::Stage stage, Shader::LogicalStage l_stage,
                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
 
@@ -96,7 +109,7 @@ public:
     }
 
 private:
-    bool RefreshGraphicsKey();
+    bool RefreshGraphicsKey(AmdGpu::PrimitiveType primitive_type);
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
 
@@ -106,7 +119,11 @@ private:
                                                    std::string_view ext);
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
-                                   Shader::Backend::Bindings& binding);
+                                   Shader::Backend::Bindings& binding,
+                                   const Shader::CompileResourceSnapshot* compile_resources =
+                                       nullptr,
+                                   const Shader::Gcn::FetchShaderData* compile_fetch_shader =
+                                       nullptr);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::Stage stage, Shader::LogicalStage l_stage);
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
@@ -117,6 +134,10 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     AmdGpu::Liverpool* liverpool;
+    bool allow_persistent_artifacts{};
+    bool allow_shader_patches{};
+    u64 pp_upstream_sample_tee_fragment_pgm_hash{};
+    bool pp_upstream_sample_tee_capture_fragment_export{};
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
@@ -129,6 +150,8 @@ private:
     std::array<const Shader::Info*, MaxShaderStages> infos{};
     std::array<vk::ShaderModule, MaxShaderStages> modules{};
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
+    Shader::Gcn::VertexInputSnapshot vertex_inputs{};
+    std::array<Shader::StageResourceSnapshot, MaxShaderStages> resource_snapshots{};
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start

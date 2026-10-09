@@ -40,6 +40,67 @@ struct ImageViewInfo {
     auto operator<=>(const ImageViewInfo&) const = default;
 };
 
+enum class ImageViewFormatClass : u8 {
+    Unknown,
+    Color,
+    DepthCompatible,
+    StencilCompatible,
+    Depth,
+    Stencil,
+    DepthStencil,
+    Unsupported,
+};
+
+enum class ImageViewAspectClass : u8 {
+    None,
+    Color,
+    Depth,
+    Stencil,
+    DepthStencil,
+    Other,
+};
+
+enum class ImageViewMappingClass : u8 {
+    Identity,
+    ReplicatedR,
+    ScalarConstants,
+    Other,
+};
+
+struct ImageViewCreationObservation {
+    ImageViewFormatClass requested_format_class{ImageViewFormatClass::Unknown};
+    ImageViewFormatClass backing_format_class{ImageViewFormatClass::Unknown};
+    ImageViewFormatClass actual_format_class{ImageViewFormatClass::Unknown};
+    ImageViewAspectClass actual_aspect_class{ImageViewAspectClass::None};
+    ImageViewMappingClass mapping_class{ImageViewMappingClass::Other};
+    bool image_exact{};
+    bool view_type_exact{};
+    bool format_exact{};
+    bool aspect_exact{};
+    bool subresource_exact{};
+    bool mapping_exact{};
+    bool usage_exact{};
+    bool min_lod_exact{};
+    bool chain_exact{};
+    bool created{};
+
+    [[nodiscard]] constexpr bool Exact() const noexcept {
+        return image_exact && view_type_exact && format_exact && aspect_exact &&
+               subresource_exact && mapping_exact && usage_exact && min_lod_exact && chain_exact &&
+               created;
+    }
+
+    auto operator<=>(const ImageViewCreationObservation&) const = default;
+};
+
+[[nodiscard]] ImageViewCreationObservation BuildImageViewCreationObservation(
+    const ImageViewInfo& requested, vk::Format backing_format,
+    vk::ImageAspectFlags backing_aspect, vk::ImageUsageFlags backing_usage,
+    vk::Image expected_image, vk::Format expected_resolved_format,
+    vk::ImageAspectFlags expected_resolved_aspect, const vk::ImageViewCreateInfo& create_info,
+    const vk::ImageViewUsageCreateInfo& usage_info,
+    const vk::ImageViewMinLodCreateInfoEXT* min_lod_info, bool created) noexcept;
+
 struct Image;
 
 struct ImageView {
@@ -52,8 +113,15 @@ struct ImageView {
     ImageView(ImageView&&) = default;
     ImageView& operator=(ImageView&&) = default;
 
+    [[nodiscard]] const ImageViewCreationObservation& CreationObservation() const noexcept {
+        return creation_observation;
+    }
+
     ImageViewInfo info;
     vk::UniqueImageView image_view;
+
+private:
+    ImageViewCreationObservation creation_observation{};
 };
 
 } // namespace VideoCore

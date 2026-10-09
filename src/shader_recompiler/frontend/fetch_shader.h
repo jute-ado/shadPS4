@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <vector>
+#include <boost/container/static_vector.hpp>
 #include "common/types.h"
 #include "shader_recompiler/info.h"
 
@@ -13,6 +14,8 @@ struct Archive;
 }
 
 namespace Shader::Gcn {
+
+static constexpr size_t MaxVertexBufferCount = 32;
 
 struct VertexAttribute {
     enum InstanceIdType : u8 {
@@ -49,7 +52,9 @@ struct VertexAttribute {
     bool operator==(const VertexAttribute& other) const {
         return semantic == other.semantic && dest_vgpr == other.dest_vgpr &&
                num_elements == other.num_elements && sgpr_base == other.sgpr_base &&
-               dword_offset == other.dword_offset && instance_data == other.instance_data;
+               dword_offset == other.dword_offset && instance_data == other.instance_data &&
+               inst_offset == other.inst_offset && data_format == other.data_format &&
+               num_format == other.num_format;
     }
 };
 
@@ -66,6 +71,31 @@ struct FetchShaderData {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& buffer);
+};
+
+struct VertexInputSnapshot {
+    boost::container::static_vector<AmdGpu::Buffer, MaxVertexBufferCount> buffers;
+    bool valid{true};
+
+    template <typename Reader>
+    static VertexInputSnapshot Capture(const FetchShaderData& fetch_shader, Reader&& reader) {
+        VertexInputSnapshot snapshot;
+        if (fetch_shader.attributes.size() > snapshot.buffers.capacity()) {
+            snapshot.valid = false;
+            return snapshot;
+        }
+        for (const auto& attribute : fetch_shader.attributes) {
+            snapshot.buffers.emplace_back(reader(attribute));
+        }
+        return snapshot;
+    }
+
+    static VertexInputSnapshot Capture(const FetchShaderData& fetch_shader,
+                                       const Shader::Info& info) {
+        return Capture(fetch_shader, [&info](const VertexAttribute& attribute) {
+            return attribute.GetSharp(info);
+        });
+    }
 };
 
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);

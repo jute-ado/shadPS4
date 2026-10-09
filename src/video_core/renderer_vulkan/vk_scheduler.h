@@ -11,6 +11,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/pending_operation_queue.h"
 #include "video_core/renderer_vulkan/pipeline_bind_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -53,6 +54,11 @@ struct RenderState {
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
 
+enum class HostRenderingInstanceOrigin : u8 {
+    Regular,
+    DiagnosticResume,
+};
+
 struct SubmitInfo {
     std::array<vk::Semaphore, 3> wait_semas;
     std::array<u64, 3> wait_ticks;
@@ -81,10 +87,10 @@ struct SubmitInfo {
 };
 
 [[nodiscard]] constexpr vk::PipelineStageFlags FrameReadyWaitStage(
-    const bool pp_input_shadow) noexcept {
-    return pp_input_shadow
+    const bool capture_before_sampling) noexcept {
+    return capture_before_sampling
                ? vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eTransfer
-               : vk::PipelineStageFlagBits::eColorAttachmentOutput;
+               : vk::PipelineStageFlagBits::eFragmentShader;
 }
 
 using Viewports = boost::container::static_vector<vk::Viewport, AmdGpu::NUM_VIEWPORTS>;
@@ -379,7 +385,9 @@ public:
     void PopPendingOperations();
 
     /// Starts a new rendering scope with provided state.
-    void BeginRendering(const RenderState& new_state);
+    void BeginRendering(
+        const RenderState& new_state,
+        HostRenderingInstanceOrigin origin = HostRenderingInstanceOrigin::Regular);
 
     /// Ends current rendering scope.
     void EndRendering();
@@ -393,6 +401,14 @@ public:
 
     [[nodiscard]] u64 RenderingSerial() const noexcept {
         return rendering_serial;
+    }
+
+    [[nodiscard]] u64 HostRenderingInstanceId() const noexcept {
+        return host_rendering_instance_id;
+    }
+
+    [[nodiscard]] HostRenderingInstanceOrigin HostRenderingOrigin() const noexcept {
+        return host_rendering_origin;
     }
 
     /// Returns the current render state.
@@ -442,7 +458,7 @@ public:
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Will be run when submitting or calling PopPendingOperations.
     void DeferOperation(Common::UniqueFunction<void>&& func) {
-        pending_ops.emplace(std::move(func), CurrentTick());
+        pending_ops.Emplace(std::move(func), CurrentTick());
     }
 
     /// Defers an operation until the gpu has reached the current cpu tick.
@@ -476,13 +492,15 @@ private:
         Common::UniqueFunction<void> callback;
         u64 gpu_tick;
     };
-    std::queue<PendingOp> pending_ops;
+    VideoCore::PendingOperationQueue<Common::UniqueFunction<void>> pending_ops;
     std::queue<PendingOp> priority_pending_ops;
     std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
     u64 rendering_serial{};
+    u64 host_rendering_instance_id{};
+    HostRenderingInstanceOrigin host_rendering_origin{HostRenderingInstanceOrigin::Regular};
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};
 };

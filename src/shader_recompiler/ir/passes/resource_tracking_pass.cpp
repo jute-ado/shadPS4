@@ -1,21 +1,265 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
+#include <unordered_set>
+#include <vector>
+
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
+
 namespace {
 
 using SharpLocation = u32;
+
+bool IsBufferInstruction(const IR::Inst& inst);
+bool IsImageInstruction(const IR::Inst& inst);
+
+bool IsLoweredImageDependency(const IR::Inst& inst) noexcept {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::ImageSampleImplicitLod:
+    case IR::Opcode::ImageSampleExplicitLod:
+    case IR::Opcode::ImageSampleDrefImplicitLod:
+    case IR::Opcode::ImageSampleDrefExplicitLod:
+    case IR::Opcode::ImageGather:
+    case IR::Opcode::ImageGatherDref:
+    case IR::Opcode::ImageGradient:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void VisitPpUpstreamFragmentExportDependency(
+    const IR::Value& value, Info::PpUpstreamFragmentExportDependencies& fact,
+    std::unordered_set<const IR::Inst*>& visited) noexcept {
+    if (value.IsImmediate()) {
+        return;
+    }
+    const IR::Inst* const inst = value.TryInstRecursive();
+    if (inst == nullptr || !visited.insert(inst).second) {
+        return;
+    }
+
+    const auto is_composite_extract = [](IR::Opcode opcode) {
+        switch (opcode) {
+        case IR::Opcode::CompositeExtractU32x2:
+        case IR::Opcode::CompositeExtractU32x3:
+        case IR::Opcode::CompositeExtractU32x4:
+        case IR::Opcode::CompositeExtractF32x2:
+        case IR::Opcode::CompositeExtractF32x3:
+        case IR::Opcode::CompositeExtractF32x4:
+            return true;
+        default:
+            return false;
+        }
+    };
+    const auto is_composite_construct = [](IR::Opcode opcode) {
+        switch (opcode) {
+        case IR::Opcode::CompositeConstructU32x2:
+        case IR::Opcode::CompositeConstructU32x3:
+        case IR::Opcode::CompositeConstructU32x4:
+        case IR::Opcode::CompositeConstructF32x2:
+        case IR::Opcode::CompositeConstructF32x3:
+        case IR::Opcode::CompositeConstructF32x4:
+            return true;
+        default:
+            return false;
+        }
+    };
+    if (is_composite_extract(inst->GetOpcode()) && inst->Arg(1).IsImmediate()) {
+        const IR::Inst* const vector = inst->Arg(0).TryInstRecursive();
+        const u32 component = inst->Arg(1).U32();
+        if (vector != nullptr && is_composite_construct(vector->GetOpcode()) &&
+            component < vector->NumArgs()) {
+            VisitPpUpstreamFragmentExportDependency(vector->Arg(component), fact, visited);
+            return;
+        }
+    }
+
+    const auto record_binding = [&](const IR::Value& handle, bool image) {
+        if (!handle.IsImmediate()) {
+            fact.unknown = true;
+            return;
+        }
+        u32 binding = handle.U32();
+        if (image) {
+            binding &= 0xFFFFu;
+            if (binding >= NUM_IMAGES) {
+                fact.overflowed = true;
+                return;
+            }
+            fact.image_binding_mask |= u64{1} << binding;
+        } else {
+            if (binding >= 64) {
+                fact.overflowed = true;
+                return;
+            }
+            fact.buffer_binding_mask |= u64{1} << binding;
+        }
+    };
+
+    if ((IsImageInstruction(*inst) || IsLoweredImageDependency(*inst)) &&
+        inst->Type() != IR::Type::Void) {
+        record_binding(inst->Arg(0), true);
+    } else if (IsBufferInstruction(*inst) && inst->Type() != IR::Type::Void) {
+        record_binding(inst->Arg(0), false);
+    } else {
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::GetAttribute: {
+            const auto attribute = inst->Arg(0).Attribute();
+            if (IR::IsParam(attribute)) {
+                fact.parameter_mask |= 1u << (static_cast<u32>(attribute) -
+                                              static_cast<u32>(IR::Attribute::Param0));
+            } else if (attribute == IR::Attribute::FragCoord) {
+                fact.frag_coord = true;
+            } else if (attribute == IR::Attribute::IsFrontFace) {
+                fact.front_face = true;
+            } else {
+                fact.other_attribute = true;
+            }
+            return;
+        }
+        case IR::Opcode::GetUserData: {
+            const u32 reg = static_cast<u32>(inst->Arg(0).ScalarReg());
+            if (reg >= 32) {
+                fact.overflowed = true;
+            } else {
+                fact.user_data_mask |= 1u << reg;
+            }
+            return;
+        }
+        case IR::Opcode::ReadConst:
+            fact.read_const = true;
+            break;
+        case IR::Opcode::UndefU1:
+        case IR::Opcode::UndefU8:
+        case IR::Opcode::UndefU16:
+        case IR::Opcode::UndefU32:
+        case IR::Opcode::UndefU64:
+            fact.undef = true;
+            return;
+        case IR::Opcode::LaneId:
+        case IR::Opcode::WarpId:
+            fact.other_attribute = true;
+            return;
+        default:
+            if (inst->NumArgs() == 0 && inst->Type() != IR::Type::Void) {
+                fact.unknown = true;
+            }
+            break;
+        }
+    }
+
+    for (u32 index = 0; index < inst->NumArgs(); ++index) {
+        VisitPpUpstreamFragmentExportDependency(inst->Arg(index), fact, visited);
+    }
+}
+
+void CollectPpUpstreamFragmentExportBufferValues(
+    const IR::Value& value, std::vector<IR::U32>& values,
+    std::unordered_set<const IR::Inst*>& visited) noexcept {
+    if (value.IsImmediate()) {
+        return;
+    }
+    const IR::Inst* const inst = value.TryInstRecursive();
+    if (inst == nullptr || !visited.insert(inst).second) {
+        return;
+    }
+    if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer && inst->Type() == IR::Type::U32) {
+        values.emplace_back(value);
+        return;
+    }
+
+    const auto is_composite_extract = [](IR::Opcode opcode) {
+        switch (opcode) {
+        case IR::Opcode::CompositeExtractU32x2:
+        case IR::Opcode::CompositeExtractU32x3:
+        case IR::Opcode::CompositeExtractU32x4:
+        case IR::Opcode::CompositeExtractF32x2:
+        case IR::Opcode::CompositeExtractF32x3:
+        case IR::Opcode::CompositeExtractF32x4:
+            return true;
+        default:
+            return false;
+        }
+    };
+    const auto is_composite_construct = [](IR::Opcode opcode) {
+        switch (opcode) {
+        case IR::Opcode::CompositeConstructU32x2:
+        case IR::Opcode::CompositeConstructU32x3:
+        case IR::Opcode::CompositeConstructU32x4:
+        case IR::Opcode::CompositeConstructF32x2:
+        case IR::Opcode::CompositeConstructF32x3:
+        case IR::Opcode::CompositeConstructF32x4:
+            return true;
+        default:
+            return false;
+        }
+    };
+    if (is_composite_extract(inst->GetOpcode()) && inst->Arg(1).IsImmediate()) {
+        const IR::Inst* const vector = inst->Arg(0).TryInstRecursive();
+        const u32 component = inst->Arg(1).U32();
+        if (vector != nullptr && is_composite_construct(vector->GetOpcode()) &&
+            component < vector->NumArgs()) {
+            CollectPpUpstreamFragmentExportBufferValues(vector->Arg(component), values, visited);
+            return;
+        }
+    }
+    for (u32 index = 0; index < inst->NumArgs(); ++index) {
+        CollectPpUpstreamFragmentExportBufferValues(inst->Arg(index), values, visited);
+    }
+}
+
+void CollectPpUpstreamFragmentExportImageScalars(
+    const IR::Value& value, std::vector<IR::F32>& values,
+    std::unordered_set<const IR::Inst*>& visited) noexcept {
+    if (value.IsImmediate()) {
+        return;
+    }
+    const IR::Inst* const inst = value.TryInstRecursive();
+    if (inst == nullptr || !visited.insert(inst).second) {
+        return;
+    }
+    const auto is_extract = [](IR::Opcode opcode) {
+        return opcode == IR::Opcode::CompositeExtractF32x2 ||
+               opcode == IR::Opcode::CompositeExtractF32x3 ||
+               opcode == IR::Opcode::CompositeExtractF32x4;
+    };
+    if (is_extract(inst->GetOpcode()) && inst->Arg(1).IsImmediate()) {
+        const IR::Inst* const vector = inst->Arg(0).TryInstRecursive();
+        if (vector != nullptr &&
+            (IsImageInstruction(*vector) || IsLoweredImageDependency(*vector))) {
+            const u32 component = inst->Arg(1).U32();
+            const bool already_recorded = std::ranges::any_of(values, [&](const IR::F32& prior) {
+                const IR::Inst* const prior_inst = prior.TryInstRecursive();
+                return prior_inst != nullptr && is_extract(prior_inst->GetOpcode()) &&
+                       prior_inst->Arg(0).TryInstRecursive() == vector &&
+                       prior_inst->Arg(1).IsImmediate() && prior_inst->Arg(1).U32() == component;
+            });
+            if (already_recorded) {
+                return;
+            }
+            values.emplace_back(value);
+            return;
+        }
+    }
+    for (u32 index = 0; index < inst->NumArgs(); ++index) {
+        CollectPpUpstreamFragmentExportImageScalars(inst->Arg(index), values, visited);
+    }
+}
 
 bool IsBufferAtomic(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
@@ -259,9 +503,7 @@ public:
 
     u32 Add(const ImageResource& desc) {
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
-            return desc.sharp_idx == existing.sharp_idx && desc.is_array == existing.is_array &&
-                   desc.mip_fallback_mode == existing.mip_fallback_mode &&
-                   desc.constant_mip_index == existing.constant_mip_index;
+            return ImageResourcesShareBindingKey(desc, existing);
         })};
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
@@ -629,11 +871,14 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     }
 
     u32 image_binding = descriptors.Add(image_res);
+    static_cast<void>(RecordPpUpstreamImageOperationUseAtBinding(
+        info, image_binding, inst.GetOpcode(), inst_info));
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
 
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
         u32 sampler_binding = 0;
+        bool sampler_disable_aniso = false;
         const IR::Inst* sampler = inst.Arg(1).InstRecursive();
         ASSERT(sampler && sampler->GetOpcode() == IR::Opcode::CompositeConstructU32x4);
         // Inline sampler resource.
@@ -651,6 +896,7 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
             // Normal sampler resource.
             const auto& [sampler_handle, disable_aniso] =
                 TryDisableAnisoLod0(sampler->Arg(0).InstRecursive());
+            sampler_disable_aniso = disable_aniso;
             const auto ssharp = TrackSharp(sampler_handle, block, inst_info.pc);
             sampler_binding = descriptors.Add(SamplerResource{
                 .sharp_idx = ssharp,
@@ -659,6 +905,9 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
                 .disable_aniso = disable_aniso,
             });
         }
+        static_cast<void>(RecordPpUpstreamSamplerImagePairAtBindings(
+            info, sampler_binding, image_binding, inst.GetOpcode(), inst_info,
+            sampler_disable_aniso));
         inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
     } else {
         inst.SetArg(0, ir.Imm32(image_binding));
@@ -898,9 +1147,63 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
     return ir.CompositeConstruct(fixed_x, fixed_y, face);
 }
 
+[[nodiscard]] std::optional<float> ResolveConstantPpUpstreamSampleTeeCubeFace(
+    const IR::Value& value) {
+    if (value.IsImmediate()) {
+        return value.F32();
+    }
+    const IR::Inst* const inst = value.TryInstRecursive();
+    if (inst == nullptr || inst->GetOpcode() != IR::Opcode::FPAdd32) {
+        return std::nullopt;
+    }
+    const auto lhs = ResolveConstantPpUpstreamSampleTeeCubeFace(inst->Arg(0));
+    const auto rhs = ResolveConstantPpUpstreamSampleTeeCubeFace(inst->Arg(1));
+    if (!lhs || !rhs) {
+        return std::nullopt;
+    }
+    return *lhs + *rhs;
+}
+
+[[nodiscard]] IR::U32 ClassifyPpUpstreamSampleTeeCubeFace(
+    IR::IREmitter& ir, bool is_cube, const IR::F32& raw_face) {
+    using Class = PpUpstreamSampleTeeCubeFaceClass;
+    const auto packed = [](Class classification) {
+        return PackPpUpstreamSampleTeeCubeMetadata(
+            {.classification = classification, .observed = true});
+    };
+    if (!is_cube) {
+        return ir.Imm32(packed(Class::NonCube));
+    }
+    if (const auto face = ResolveConstantPpUpstreamSampleTeeCubeFace(raw_face)) {
+        return ir.Imm32(PackPpUpstreamSampleTeeCubeMetadata(
+            Shader::ClassifyPpUpstreamSampleTeeCubeFace(true, *face)));
+    }
+
+    const IR::U1 finite{
+        ir.LogicalNot(ir.LogicalOr(ir.FPIsNan(raw_face), ir.FPIsInf(raw_face)))};
+    const IR::U1 nonnegative{ir.FPGreaterThanEqual(raw_face, ir.Imm32(0.0f))};
+    const IR::U1 integral{ir.FPEqual(raw_face, ir.FPTrunc(raw_face))};
+    const IR::U1 in_range{ir.FPLessThanEqual(raw_face, ir.Imm32(4294967040.0f))};
+    const IR::U1 valid{ir.LogicalAnd(
+        finite, ir.LogicalAnd(nonnegative, ir.LogicalAnd(integral, in_range)))};
+    const IR::F32 safe_face{ir.Select(valid, raw_face, ir.Imm32(0.0f))};
+    const IR::U32 face_code{ir.ConvertFToU(32, safe_face)};
+    const IR::U32 face_modulo{ir.IMod(face_code, ir.Imm32(8u))};
+    const IR::U1 reserved{ir.IGreaterThanEqual(face_modulo, ir.Imm32(6u), false)};
+    const IR::U1 stride_compressed{ir.IGreaterThanEqual(face_code, ir.Imm32(8u), false)};
+    const IR::U32 ordinary_class{ir.Select(stride_compressed,
+                                           ir.Imm32(packed(Class::StrideCompressed)),
+                                           ir.Imm32(packed(Class::Identity)))};
+    const IR::U32 valid_class{ir.Select(reserved, ir.Imm32(packed(Class::Reserved)),
+                                        ordinary_class)};
+    return IR::U32{ir.Select(valid, valid_class, ir.Imm32(packed(Class::Invalid)))};
+}
+
 void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
-                          const ImageResource& image_res, const AmdGpu::Image& image) {
+                          const ImageResource& image_res, const AmdGpu::Image& image,
+                          const Profile& profile) {
     const auto handle = inst.Arg(0);
+    const u32 image_binding_index = handle.U32() & 0xFFFF;
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
 
@@ -1026,6 +1329,8 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
         return coord;
     };
 
+    IR::F32 raw_cube_face{};
+
     // Now we can load body components as noted in Table 8.9 Image Opcodes with Sampler
     const IR::Value coords = [&] -> IR::Value {
         switch (view_type) {
@@ -1039,9 +1344,10 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             return ir.CompositeConstruct(get_coord(addr_reg - 2, 0), get_coord(addr_reg - 1, 1));
         case AmdGpu::ImageType::Color2DArray: // x, y, slice
             addr_reg = addr_reg + 3;
+            raw_cube_face = get_addr_reg(addr_reg - 1);
             // Note we can use FixCubeCoords with fallthrough cases since it checks for image type.
             return FixCubeCoords(ir, image, get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
-                                 get_addr_reg(addr_reg - 1));
+                                 raw_cube_face);
         case AmdGpu::ImageType::Color3D: // x, y, z
             addr_reg = addr_reg + 3;
             return ir.CompositeConstruct(get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
@@ -1088,10 +1394,22 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
     if (sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
         converted = ApplyForceDegamma(ir, texel);
     }
+    if (!info.pp_upstream_sample_tee_capture_fragment_export && !image_res.is_written &&
+        ShouldInstrumentPpUpstreamSampleResult(
+                                     info.is_pp_upstream_sample_tee_target, info.l_stage,
+                                     image_binding_index)) {
+        auto& result_count = info.pp_upstream_sample_tee_results[image_binding_index];
+        if (result_count < 2) {
+            ++result_count;
+        }
+        const IR::U32 cube_metadata =
+            ClassifyPpUpstreamSampleTeeCubeFace(ir, image.IsCube(), raw_cube_face);
+        ir.PpUpstreamSampleTee(converted, image_binding_index, cube_metadata, ir.Imm32(0));
+    }
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info, const Profile& profile) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -1104,7 +1422,7 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     // Sample instructions must be handled separately using address register data.
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
-        return PatchImageSampleArgs(block, inst, info, image_res, image);
+        return PatchImageSampleArgs(block, inst, info, image_res, image, profile);
     }
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
@@ -1168,6 +1486,20 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
         }
         const auto converted =
             ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
+        if (!info.pp_upstream_sample_tee_capture_fragment_export && !is_storage &&
+            ShouldInstrumentPpUpstreamSampleResult(
+                               info.is_pp_upstream_sample_tee_target, info.l_stage,
+                               binding_index)) {
+            auto& result_count = info.pp_upstream_sample_tee_results[binding_index];
+            if (result_count < 2) {
+                ++result_count;
+            }
+            const auto cube_class = image.IsCube() ? PpUpstreamSampleTeeCubeFaceClass::Invalid
+                                                   : PpUpstreamSampleTeeCubeFaceClass::NonCube;
+            const IR::U32 cube_metadata = ir.Imm32(PackPpUpstreamSampleTeeCubeMetadata(
+                {.classification = cube_class, .observed = true}));
+            ir.PpUpstreamSampleTee(converted, binding_index, cube_metadata, ir.Imm32(0));
+        }
         inst.ReplaceUsesWith(converted);
     } else {
         inst.SetArg(1, coords);
@@ -1190,6 +1522,8 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
     // Iterate resource instructions and patch them after finding the sharp.
     auto& info = program.info;
+    ResetImageResourceOperationUses(info);
+    ResetSamplerImagePairUses(info);
 
     // Pass 1: Track resource sharps
     Descriptors descriptors{info};
@@ -1205,16 +1539,163 @@ void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
 
     // Pass 2: Patch instruction args
     for (IR::Block* const block : program.blocks) {
+        std::array<IR::F32, 4> fragment_export_components{};
+        u32 fragment_export_component_mask{};
+        IR::Inst* last_fragment_export{};
+        std::vector<IR::U32> fragment_export_buffer_values;
+        std::vector<IR::F32> fragment_export_image_scalars;
+        if (info.pp_upstream_sample_tee_capture_fragment_export) {
+            for (IR::Inst& candidate : block->Instructions()) {
+                if (candidate.GetOpcode() != IR::Opcode::SetAttribute ||
+                    candidate.Arg(0).Attribute() != IR::Attribute::RenderTarget0) {
+                    continue;
+                }
+                const u32 component = candidate.Arg(2).U32();
+                if (component < fragment_export_components.size()) {
+                    fragment_export_components[component] = IR::F32{candidate.Arg(1)};
+                    fragment_export_component_mask |= 1u << component;
+                    last_fragment_export = &candidate;
+                }
+            }
+            std::unordered_set<const IR::Inst*> visited;
+            std::unordered_set<const IR::Inst*> image_visited;
+            for (u32 component = 0; component < fragment_export_components.size(); ++component) {
+                if ((fragment_export_component_mask & (1u << component)) != 0) {
+                    CollectPpUpstreamFragmentExportBufferValues(
+                        fragment_export_components[component], fragment_export_buffer_values,
+                        visited);
+                    CollectPpUpstreamFragmentExportImageScalars(
+                        fragment_export_components[component], fragment_export_image_scalars,
+                        image_visited);
+                }
+            }
+        }
         for (IR::Inst& inst : block->Instructions()) {
             if (IsBufferInstruction(inst)) {
                 PatchBufferArgs(*block, inst, info);
             } else if (IsImageInstruction(inst)) {
-                PatchImageArgs(*block, inst, info);
+                PatchImageArgs(*block, inst, info, profile);
             } else if (IsDataRingInstruction(inst)) {
                 PatchGlobalDataShareAccess(*block, inst, info, descriptors, profile);
+            } else if (&inst == last_fragment_export &&
+                       info.is_pp_upstream_sample_tee_target &&
+                       info.l_stage == LogicalStage::Fragment && (info.mrt_mask & 1u) != 0 &&
+                       fragment_export_component_mask != 0) {
+                IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+                for (u32 component = 0; component < fragment_export_components.size();
+                     ++component) {
+                    if ((fragment_export_component_mask & (1u << component)) == 0) {
+                        fragment_export_components[component] = ir.Imm32(0.0f);
+                    }
+                }
+                const auto value = ir.CompositeConstruct(
+                    fragment_export_components[0], fragment_export_components[1],
+                    fragment_export_components[2], fragment_export_components[3]);
+                const auto metadata = ir.Imm32(PackPpUpstreamSampleTeeCubeMetadata({
+                    .classification = PpUpstreamSampleTeeCubeFaceClass::NonCube,
+                    .observed = true,
+                }));
+                IR::U32 dependency_metadata = ir.Imm32(0);
+                if (fragment_export_image_scalars.size() == 1) {
+                    const IR::F32 quantized = ir.FPFloor(ir.FPAdd(
+                        ir.FPMul(ir.FPClamp(fragment_export_image_scalars[0], ir.Imm32(0.0f),
+                                           ir.Imm32(1.0f)),
+                                 ir.Imm32(255.0f)),
+                        ir.Imm32(0.5f)));
+                    IR::U32 coordinate_hash = ir.Imm32(2166136261u);
+                    const IR::Inst* const scalar =
+                        fragment_export_image_scalars[0].TryInstRecursive();
+                    const IR::Inst* const sampled =
+                        scalar != nullptr ? scalar->Arg(0).TryInstRecursive() : nullptr;
+                    if (sampled != nullptr && sampled->NumArgs() > 1) {
+                        const IR::Value coordinates = sampled->Arg(1);
+                        for (u32 component = 0; component < 2; ++component) {
+                            const IR::F32 coordinate{ir.CompositeExtract(coordinates, component)};
+                            coordinate_hash = ir.IMul(
+                                ir.BitwiseXor(coordinate_hash, ir.BitCast<IR::U32>(coordinate)),
+                                ir.Imm32(16777619u));
+                        }
+                    }
+                    const IR::U32 packed_coordinate = ir.ShiftLeftLogical(
+                        ir.BitwiseAnd(coordinate_hash, ir.Imm32(0x003fffffu)), ir.Imm32(8u));
+                    dependency_metadata = ir.BitwiseOr(
+                        ir.BitwiseOr(IR::U32{ir.ConvertFToU(32, quantized)}, packed_coordinate),
+                        ir.Imm32(0xc0000000u));
+                } else if (!fragment_export_buffer_values.empty()) {
+                    dependency_metadata = ir.Imm32(2166136261u);
+                    for (const IR::U32& dependency : fragment_export_buffer_values) {
+                        dependency_metadata = ir.IMul(
+                            ir.BitwiseXor(dependency_metadata, dependency),
+                            ir.Imm32(16777619u));
+                    }
+                    dependency_metadata = ir.BitwiseOr(
+                        ir.BitwiseAnd(dependency_metadata, ir.Imm32(0x7fffffffu)),
+                        ir.Imm32(0x80000000u));
+                }
+                for (u32 resource_index = 0; resource_index < info.images.size();
+                     ++resource_index) {
+                    auto& result_count = info.pp_upstream_sample_tee_results[resource_index];
+                    if (result_count < 2) {
+                        ++result_count;
+                    }
+                    ir.PpUpstreamSampleTee(value, resource_index, metadata,
+                                           dependency_metadata);
+                }
             }
         }
     }
+}
+
+void AnalyzePpUpstreamFragmentExportDependencies(IR::Program& program) noexcept {
+    auto& info = program.info;
+    auto& fact = info.pp_upstream_fragment_export_dependencies;
+    fact = {};
+    if (!info.is_pp_upstream_sample_tee_target ||
+        !info.pp_upstream_sample_tee_capture_fragment_export ||
+        info.l_stage != LogicalStage::Fragment) {
+        return;
+    }
+
+    for (const IR::Block* const block : program.blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() != IR::Opcode::SetAttribute ||
+                inst.Arg(0).Attribute() != IR::Attribute::RenderTarget0) {
+                continue;
+            }
+            fact.observed = true;
+            const u32 component = inst.Arg(2).U32();
+            if (component >= 4) {
+                fact.overflowed = true;
+                continue;
+            }
+            fact.component_mask |= 1u << component;
+            Info::PpUpstreamFragmentExportDependencies local{};
+            std::unordered_set<const IR::Inst*> visited;
+            VisitPpUpstreamFragmentExportDependency(inst.Arg(1), local, visited);
+            const u32 component_bit = 1u << component;
+            fact.image_binding_mask |= local.image_binding_mask;
+            fact.buffer_binding_mask |= local.buffer_binding_mask;
+            fact.parameter_mask |= local.parameter_mask;
+            fact.user_data_mask |= local.user_data_mask;
+            fact.image_component_mask |= local.image_binding_mask != 0 ? component_bit : 0;
+            fact.buffer_component_mask |= local.buffer_binding_mask != 0 ? component_bit : 0;
+            fact.parameter_component_mask |= local.parameter_mask != 0 ? component_bit : 0;
+            fact.user_data_component_mask |= local.user_data_mask != 0 ? component_bit : 0;
+            fact.other_attribute_component_mask |= local.other_attribute ? component_bit : 0;
+            fact.read_const_component_mask |= local.read_const ? component_bit : 0;
+            fact.undef_component_mask |= local.undef ? component_bit : 0;
+            fact.unknown_component_mask |= local.unknown ? component_bit : 0;
+            fact.frag_coord |= local.frag_coord;
+            fact.front_face |= local.front_face;
+            fact.other_attribute |= local.other_attribute;
+            fact.read_const |= local.read_const;
+            fact.undef |= local.undef;
+            fact.unknown |= local.unknown;
+            fact.overflowed |= local.overflowed;
+        }
+    }
+    fact.valid = fact.observed && fact.component_mask != 0 && !fact.overflowed && !fact.unknown &&
+                 !fact.undef;
 }
 
 } // namespace Shader::Optimization

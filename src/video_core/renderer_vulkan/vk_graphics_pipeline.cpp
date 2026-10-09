@@ -7,6 +7,8 @@
 
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
+#include "video_core/renderer_vulkan/attachment_feedback_loop_pipeline.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -32,18 +34,25 @@ GraphicsPipeline::GraphicsPipeline(
     vk::PipelineCache pipeline_cache, std::span<const Shader::Info*, MaxShaderStages> infos,
     std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader_,
+    const Shader::Gcn::VertexInputSnapshot& vertex_inputs,
     std::span<const vk::ShaderModule> modules, SerializationSupport& sdata, bool preloading)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache}, key{key_},
       fetch_shader{std::move(fetch_shader_)} {
     const vk::Device device = instance.GetDevice();
     std::ranges::copy(infos, stages.begin());
+    uses_pp_upstream_sample_tee_push_data =
+        std::ranges::any_of(infos, [](const Shader::Info* info) {
+            return info && Shader::UsesPpUpstreamSampleTeePushData(info->l_stage, info->buffers);
+        });
     BuildDescSetLayout(preloading);
     const auto debug_str = GetDebugString();
+    const auto push_layout =
+        Shader::PlanPushDataLayout(uses_pp_upstream_sample_tee_push_data);
 
     const vk::PushConstantRange push_constants = {
         .stageFlags = AllGraphicsStageBits,
         .offset = 0,
-        .size = sizeof(Shader::PushData),
+        .size = push_layout.byte_size,
     };
 
     const vk::DescriptorSetLayout set_layout = *desc_layout;
@@ -64,7 +73,7 @@ GraphicsPipeline::GraphicsPipeline(
         if (!instance.IsVertexInputDynamicState()) {
             const auto& vs_info = runtime_infos[u32(Shader::LogicalStage::Vertex)].vs_info;
             GetVertexInputs(sdata.vertex_attributes, sdata.vertex_bindings, sdata.divisors,
-                            guest_buffers, vs_info.step_rate_0, vs_info.step_rate_1);
+                            guest_buffers, vertex_inputs, vs_info.step_rate_0, vs_info.step_rate_1);
         }
     }
 
@@ -153,6 +162,10 @@ GraphicsPipeline::GraphicsPipeline(
     }
     if (instance.IsDynamicColorWriteMaskSupported()) {
         dynamic_states.push_back(vk::DynamicState::eColorWriteMaskEXT);
+    }
+    if (PlanAttachmentFeedbackLoopPipeline(instance.IsAttachmentFeedbackLoopLayoutSupported())
+            .declare_dynamic_state) {
+        dynamic_states.push_back(vk::DynamicState::eAttachmentFeedbackLoopEnableEXT);
     }
     if (instance.IsVertexInputDynamicState()) {
         dynamic_states.push_back(vk::DynamicState::eVertexInputEXT);
@@ -384,15 +397,19 @@ template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(
     VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
-    VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const {
+    VertexInputs<AmdGpu::Buffer>& guest_buffers,
+    const Shader::Gcn::VertexInputSnapshot& vertex_inputs, u32 step_rate_0, u32 step_rate_1) const {
     using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
     if (!fetch_shader || fetch_shader->attributes.empty()) {
         return;
     }
-    const auto& vs_info = GetStage(Shader::LogicalStage::Vertex);
-    for (const auto& attrib : fetch_shader->attributes) {
+    ASSERT_MSG(vertex_inputs.valid && fetch_shader->attributes.size() == vertex_inputs.buffers.size(),
+               "Vertex input snapshot does not match fetch shader: {} attributes, {} buffers",
+               fetch_shader->attributes.size(), vertex_inputs.buffers.size());
+    for (size_t index = 0; index < fetch_shader->attributes.size(); ++index) {
+        const auto& attrib = fetch_shader->attributes[index];
         const auto step_rate = attrib.GetStepRate();
-        const auto buffer = attrib.GetSharp(vs_info);
+        const auto buffer = vertex_inputs.buffers[index];
         attributes.push_back(Attribute{
             .location = attrib.semantic,
             .binding = attrib.semantic,
@@ -425,12 +442,14 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputAttributeDescription>& attributes,
     VertexInputs<vk::VertexInputBindingDescription>& bindings,
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
-    VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
+    VertexInputs<AmdGpu::Buffer>& guest_buffers,
+    const Shader::Gcn::VertexInputSnapshot& vertex_inputs, u32 step_rate_0, u32 step_rate_1) const;
 template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputAttributeDescription2EXT>& attributes,
     VertexInputs<vk::VertexInputBindingDescription2EXT>& bindings,
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
-    VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
+    VertexInputs<AmdGpu::Buffer>& guest_buffers,
+    const Shader::Gcn::VertexInputSnapshot& vertex_inputs, u32 step_rate_0, u32 step_rate_1) const;
 
 void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;

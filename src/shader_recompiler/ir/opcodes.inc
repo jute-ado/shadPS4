@@ -4,6 +4,7 @@
 //     opcode name,                                         return type,    arg1 type,      arg2 type,      arg3 type,      arg4 type,      arg4 type,      ...
 OPCODE(Phi,                                                 Opaque,                                                                                         )
 OPCODE(Identity,                                            Opaque,         Opaque,                                                                         )
+OPCODE(PpUpstreamSampleTee,                                 Void,           F32x4,          U32,            U32,            U32,                            )
 OPCODE(Void,                                                Void,                                                                                           )
 OPCODE(ConditionRef,                                        U1,             U1,                                                                             )
 OPCODE(Reference,                                           Void,           Opaque,                                                                         )

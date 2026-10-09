@@ -3,7 +3,9 @@
 
 #include "core/emulator_settings.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/read_const_access_policy.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 
 namespace Shader::Optimization {
@@ -164,9 +166,29 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         }
     }
 
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
-        info.uses_dma = false;
-        info.readconst_types = Info::ReadConstType::None;
+    const bool direct_memory_access_enabled = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    if (!direct_memory_access_enabled) {
+        const bool has_dynamic_read_const =
+            True(info.readconst_types & Info::ReadConstType::Dynamic);
+        const bool has_read_const = info.readconst_types != Info::ReadConstType::None;
+        info.uses_dma = has_read_const &&
+                        RequiresReadConstDma(has_dynamic_read_const,
+                                            direct_memory_access_enabled);
+    }
+
+    const auto tee_plan = PlanPpUpstreamSampleTeeCompilerResource({
+        .is_target = info.is_pp_upstream_sample_tee_target,
+        .stage = info.l_stage,
+        .result_counts = info.pp_upstream_sample_tee_results,
+        .current_buffer_count = info.buffers.size(),
+        .later_required_buffer_count = info.uses_dma ? 2u : 0u,
+    });
+    if (tee_plan.clear_result_counts) {
+        info.pp_upstream_sample_tee_results.fill(0);
+    }
+    if (tee_plan.require_frag_coord) {
+        info.loads.Set(IR::Attribute::FragCoord, 0);
+        info.loads.Set(IR::Attribute::FragCoord, 1);
     }
 
     if (info.uses_dma) {
@@ -180,6 +202,14 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
             .used_types = IR::Type::U32,
             .inline_cbuf = AmdGpu::Buffer::Placeholder(std::numeric_limits<u32>::max()),
             .buffer_type = BufferType::FaultBuffer,
+            .is_written = true,
+        });
+    }
+    if (tee_plan.append_buffer) {
+        info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            .inline_cbuf = AmdGpu::Buffer::Placeholder(PpUpstreamSampleTeeBufferBytes),
+            .buffer_type = BufferType::PpUpstreamSampleTee,
             .is_written = true,
         });
     }

@@ -239,7 +239,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-        runtime_infos, fetch_shader, modules, sdata, true);
+        runtime_infos, fetch_shader, Shader::Gcn::VertexInputSnapshot{}, modules, sdata, true);
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -295,7 +295,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 }
 
 void PipelineCache::WarmUp() {
-    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
+    if (!allow_persistent_artifacts || !EmulatorSettings.IsPipelineCacheEnabled()) {
         return;
     }
 
@@ -371,6 +371,9 @@ void PipelineCache::WarmUp() {
 }
 
 void PipelineCache::Sync() {
+    if (!allow_persistent_artifacts) {
+        return;
+    }
     Storage::DataBase::Instance().Close();
 }
 

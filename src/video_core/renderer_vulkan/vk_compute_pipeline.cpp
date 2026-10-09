@@ -4,6 +4,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -19,6 +20,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
       compute_key{compute_key_} {
     auto& info = stages[int(Shader::LogicalStage::Compute)];
     info = &info_;
+    uses_pp_upstream_sample_tee_push_data =
+        Shader::UsesPpUpstreamSampleTeePushData(info->l_stage, info->buffers);
     const auto debug_str = GetDebugString();
 
     const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
@@ -67,10 +70,12 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         });
     }
 
+    const auto push_layout =
+        Shader::PlanPushDataLayout(uses_pp_upstream_sample_tee_push_data);
     const vk::PushConstantRange push_constants = {
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .offset = 0,
-        .size = sizeof(Shader::PushData),
+        .size = push_layout.byte_size,
     };
 
     uses_push_descriptors = binding < instance.MaxPushDescriptors();

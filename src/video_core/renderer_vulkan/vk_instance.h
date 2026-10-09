@@ -94,6 +94,17 @@ public:
         return vk12_features.shaderFloat16;
     }
 
+    /// Returns whether the physical device advertises sampler min/max filtering.
+    bool IsSamplerFilterMinmaxSupported() const {
+        return vk12_features.samplerFilterMinmax;
+    }
+
+    /// Returns whether sampler min/max filtering is enabled on the logical device.
+    bool IsSamplerFilterMinmaxEnabled() const {
+        // The current device feature chain intentionally does not enable this queried feature.
+        return false;
+    }
+
     /// Returns true if 64-bit floats are supported in shaders
     bool IsShaderFloat64Supported() const {
         return features.shaderFloat64;
