@@ -4,6 +4,12 @@
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
+#include <atomic>
+#include <cstdlib>
+#include <limits>
+#include <memory>
+#include <mutex>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
@@ -12,10 +18,13 @@
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/gnmdriver/gfx_boundary_wait_diagnostic.h"
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/libraries/gnmdriver/graphics_event.h"
 #include "core/libraries/gnmdriver/submission_gate.h"
+#include "core/libraries/gnmdriver/submission_transaction.h"
+#include "core/libraries/gnmdriver/vmm_gpu_completion_diagnostic.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/libs.h"
@@ -27,12 +36,40 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern Frontend::WindowSDL* g_window;
+// Outlives the owner and its outstanding submission-boundary callbacks.
+static auto submission_gate = std::make_shared<Libraries::GnmDriver::SubmissionGate>();
 std::unique_ptr<Vulkan::Presenter> presenter;
 std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Libraries::GnmDriver {
 
 using namespace AmdGpu;
+
+Common::UniqueFunction<void> AcquireGpuAddressSpaceGuard() {
+    // Read this once per process. The diagnostic is intentionally launch-time only so a guest
+    // cannot change synchronization policy by mutating its environment during execution.
+    static const bool wait_gpu_completion = IsVmmGpuCompletionWaitEnabled(
+        std::getenv("SHADPS4_VMM_WAIT_GPU_COMPLETION"));
+
+    // Keep the normal admission-only path explicit: it is the production default and also covers
+    // the short initialization window before the GPU owner has been installed.
+    if (!wait_gpu_completion || liverpool == nullptr) {
+        auto admission = submission_gate->Enter();
+        return [admission = std::move(admission)] {};
+    }
+
+    auto admission = AcquireVmmGpuAddressSpaceGuard(*submission_gate, liverpool.get(), true);
+    return [admission = std::move(admission)] {};
+}
+
+static GuestCommandBufferReader MakeGuestCommandBufferReader() {
+    return [](VAddr address, std::span<u32> destination) {
+        auto* memory = Core::Memory::Instance();
+        return memory != nullptr &&
+               memory->TryReadBacking(reinterpret_cast<const void*>(address), destination.data(),
+                                      destination.size_bytes());
+    };
+}
 
 enum GnmEventType : u64 {
     Compute0RelMem = 0x00,
@@ -65,18 +102,24 @@ static constexpr std::array indirect_sgpr_offsets{0u, 0u, 0x4cu, 0u, 0xccu, 0u, 
 // this flag in case we need it in the future.
 static constexpr bool UseNeoCompatSequences = false;
 
-// Keep host submissions and GPU-visible address-space changes out until the command processor
-// acknowledges the matching SubmitDone boundary.
-static SubmissionGate submission_gate{};
+static bool GfxBoundaryWaitDiagnosticEnabledForProcess() {
+    static const bool enabled = [] {
+        const bool enabled =
+            IsGfxBoundaryWaitDiagnosticEnabled(std::getenv("SHADPS4_GFX_BOUNDARY_WAIT_DIAGNOSTIC"));
+        if (enabled) {
+            LOG_WARNING(
+                Lib_GnmDriver,
+                "DIAGNOSTIC: GFX admission waits for the prior global SubmitDone parser boundary; "
+                "ASC admission remains open. Guest dependencies may stall; this is not a fix.");
+        }
+        return enabled;
+    }();
+    return enabled;
+}
+
 static u64 frames_submitted{};      // frame counter
 static bool send_init_packet{true}; // initialize HW state before first game's submit in a frame
 static s32 sdk_version{0};
-
-static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
-
-void WaitForSubmissionBoundary() {
-    submission_gate.WaitForBoundary();
-}
 
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
@@ -147,7 +190,7 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
 
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed() {
     LOG_TRACE(Lib_GnmDriver, "called");
-    return submission_gate.AreGuestSubmitsAllowed();
+    return submission_gate->AreGuestSubmitsAllowed();
 }
 
 int PS4_SYSV_ABI sceGnmBeginWorkload(u32 workload_stream, u64* workload) {
@@ -279,20 +322,34 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "vqid {}, offset_dw {}", gnm_vqid, next_offs_dw);
 
-    if (gnm_vqid == 0) {
+    if (gnm_vqid == 0 || gnm_vqid >= Liverpool::NumTotalQueues) {
         return;
     }
 
-    auto submission = submission_gate.Enter();
+    auto submission = submission_gate->Enter();
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
     }
 
-    auto vqid = gnm_vqid - 1;
-    auto& asc_queue = liverpool->asc_queues[{vqid}];
+    const auto vqid = gnm_vqid - 1;
+    const Common::SlotId slot{vqid};
+    std::scoped_lock queue_lock{liverpool->asc_queue_mutex};
+    if (!liverpool->asc_queues.is_allocated(slot)) {
+        return;
+    }
+    const auto asc_queue = liverpool->asc_queues[slot];
+    if (!asc_queue || !asc_queue->active.load(std::memory_order_acquire) ||
+        asc_queue->retired.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (next_offs_dw > asc_queue->ring_size_dw) {
+        LOG_WARNING(Lib_GnmDriver, "ASC vqueue {} submission offset {} exceeds ring size {}",
+                    gnm_vqid, next_offs_dw, asc_queue->ring_size_dw);
+        return;
+    }
 
-    auto& offs_dw = asc_next_offs_dw[vqid];
+    auto& offs_dw = asc_queue->next_offs_dw;
 
     if (next_offs_dw == offs_dw) {
         return;
@@ -301,16 +358,34 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     if (next_offs_dw < offs_dw && next_offs_dw != 0) {
         // For cases if a submission is split at the end of the ring buffer, we need to submit it in
         // two parts to handle the wrap
-        liverpool->SubmitAsc(gnm_vqid, {reinterpret_cast<const u32*>(asc_queue.map_addr) + offs_dw,
-                                        asc_queue.ring_size_dw - offs_dw});
+        const auto wrapped_span = std::span<const u32>{
+            reinterpret_cast<const u32*>(asc_queue->map_addr) + offs_dw,
+            asc_queue->ring_size_dw - offs_dw};
+        auto wrapped_submission =
+            PrepareComputeSubmission(wrapped_span, MakeGuestCommandBufferReader());
+        if (!wrapped_submission.owner) {
+            LOG_WARNING(Lib_GnmDriver,
+                        "Dropping ASC vqueue {} wrapped submission whose command-buffer range is "
+                        "unreadable",
+                        gnm_vqid);
+            return;
+        }
+        liverpool->SubmitAsc(gnm_vqid, wrapped_span, asc_queue,
+                             std::move(wrapped_submission.owner));
         offs_dw = 0;
     }
 
-    const auto* acb_ptr = reinterpret_cast<const u32*>(asc_queue.map_addr) + offs_dw;
-    const auto acb_size_dw = (next_offs_dw ? next_offs_dw : asc_queue.ring_size_dw) - offs_dw;
+    const auto* acb_ptr = reinterpret_cast<const u32*>(asc_queue->map_addr) + offs_dw;
+    const auto acb_size_dw = (next_offs_dw ? next_offs_dw : asc_queue->ring_size_dw) - offs_dw;
     const std::span acb_span{acb_ptr, acb_size_dw};
-
-    asc_next_offs_dw[vqid] = next_offs_dw;
+    auto owned_submission = PrepareComputeSubmission(acb_span, MakeGuestCommandBufferReader());
+    if (!owned_submission.owner) {
+        LOG_WARNING(Lib_GnmDriver,
+                    "Dropping ASC vqueue {} submission whose command-buffer range is unreadable",
+                    gnm_vqid);
+        return;
+    }
+    offs_dw = next_offs_dw;
 
     if (DebugState.DumpingCurrentFrame()) {
         static auto last_frame_num = -1LL;
@@ -325,13 +400,14 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         // Up to this point, all ACB submissions have been stored in a secondary command buffer.
         // Dumping them using the current ring pointer would result in files containing only the
         // `IndirectBuffer` command. To access the actual command stream, we need to unwrap the IB.
-        auto acb = acb_span;
+        auto acb = owned_submission.acb;
         auto base_addr = reinterpret_cast<uintptr_t>(acb_ptr);
         const auto* indirect_buffer =
-            reinterpret_cast<const PM4CmdIndirectBuffer*>(acb_span.data());
+            reinterpret_cast<const PM4CmdIndirectBuffer*>(acb.data());
         if (indirect_buffer->header.opcode == PM4ItOpcode::IndirectBuffer) {
             base_addr = reinterpret_cast<uintptr_t>(indirect_buffer->Address<const u32>());
-            acb = {reinterpret_cast<const u32*>(base_addr), indirect_buffer->ib_size};
+            acb = owned_submission.owner->ResolveIndirect(
+                indirect_buffer->Address<const u32>(), indirect_buffer->ib_size);
         }
 
         using namespace DebugStateType;
@@ -344,7 +420,8 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
             .base_addr = base_addr,
         });
     }
-    liverpool->SubmitAsc(gnm_vqid, acb_span);
+    liverpool->SubmitAsc(gnm_vqid, acb_span, asc_queue,
+                         std::move(owned_submission.owner));
 }
 
 void PS4_SYSV_ABI sceGnmDingDongForWorkload(u32 gnm_vqid, u32 next_offs_dw, u64 workload_id) {
@@ -1186,6 +1263,8 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
                                        u32 ring_size_dw, u32* read_ptr_addr) {
     LOG_TRACE(Lib_GnmDriver, "called");
 
+    auto submission = submission_gate->Enter();
+
     if (pipe_id >= Liverpool::NumComputePipes) {
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_PIPE_ID;
     }
@@ -1194,7 +1273,7 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_QUEUE_ID;
     }
 
-    if (VAddr(ring_base_addr) % 256 != 0) { // alignment check
+    if (ring_base_addr == 0 || VAddr(ring_base_addr) % 256 != 0) { // alignment check
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_RING_BASE_ADDR;
     }
 
@@ -1202,19 +1281,41 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_RING_SIZE;
     }
 
-    if (VAddr(read_ptr_addr) % 4 != 0) { // alignment check
+    if (read_ptr_addr == nullptr || VAddr(read_ptr_addr) % 4 != 0) { // alignment check
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_READ_PTR_ADDR;
     }
 
-    const auto vqid =
-        liverpool->asc_queues.insert(VAddr(ring_base_addr), read_ptr_addr, ring_size_dw, pipe_id);
+    auto queue_state = std::make_shared<Liverpool::AscQueueInfo>();
+    queue_state->map_addr = VAddr(ring_base_addr);
+    queue_state->read_addr = VAddr(read_ptr_addr);
+    queue_state->ring_size_dw = ring_size_dw;
+    queue_state->pipe_id = pipe_id;
+    queue_state->next_offs_dw = 0;
+    queue_state->read_offset_dw = 0;
+
+    Common::SlotId vqid;
+    {
+        std::scoped_lock queue_lock{liverpool->asc_queue_mutex};
+        vqid = liverpool->asc_queues.insert(queue_state);
+    }
     // We need to offset index as `dingDong` assumes it to be from the range [1..64]
     const auto gnm_vqid = vqid.index + 1;
     LOG_INFO(Lib_GnmDriver, "ASC pipe {} queue {} mapped to vqueue {}", pipe_id, queue_id,
              gnm_vqid);
 
-    const auto& queue = liverpool->asc_queues[vqid];
-    *queue.read_addr = 0u;
+    const u32 zero = 0;
+    const Core::GuestMemoryWrite destination{queue_state->read_addr, &zero, sizeof(zero)};
+    auto* memory = Core::Memory::Instance();
+    const bool read_ptr_initialized =
+        memory && memory->TryWriteGuest(std::span<const Core::GuestMemoryWrite>{&destination, 1});
+    if (!read_ptr_initialized) {
+        LOG_ERROR(Lib_GnmDriver,
+                  "Cannot initialize ASC vqueue {} read pointer at guest address {:#x}",
+                  gnm_vqid, queue_state->read_addr);
+        std::scoped_lock queue_lock{liverpool->asc_queue_mutex};
+        liverpool->asc_queues.erase(vqid);
+        return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_READ_PTR_ADDR;
+    }
 
     return gnm_vqid;
 }
@@ -2155,6 +2256,115 @@ static inline s32 PatchFlipRequest(u32* cmdbuf, u32 size, u32 vo_handle, u32 buf
     return ORBIS_OK;
 }
 
+constexpr int InvalidSubmitArguments = 0x80d11000;
+constexpr u32 MaxCommandBufferSizeInBytes = 0x3ffffc;
+constexpr u32 MinimumFlipCommandBufferSizeInBytes = 64 * sizeof(u32);
+
+static bool IsReadableGuestRange(const void* address, u64 size) {
+    if (address == nullptr || size == 0) {
+        return false;
+    }
+    auto* memory = Core::Memory::Instance();
+    if (memory == nullptr) {
+        return false;
+    }
+    const Core::GuestMemoryRange range{reinterpret_cast<VAddr>(address), size};
+    return memory->CanReadBacking(std::span<const Core::GuestMemoryRange>{&range, 1});
+}
+
+static bool IsReadableGuestArray(const void* address, u64 count, u64 element_size) {
+    if (count == 0) {
+        return true;
+    }
+    if (address == nullptr || element_size == 0 ||
+        count > std::numeric_limits<u64>::max() / element_size) {
+        return false;
+    }
+    return IsReadableGuestRange(address, count * element_size);
+}
+
+static int ValidateCommandBuffers(u32 count, const u32* dcb_gpu_addrs[],
+                                  u32* dcb_sizes_in_bytes, const u32* ccb_gpu_addrs[],
+                                  u32* ccb_sizes_in_bytes, bool require_flip_packet = false,
+                                  u32 buf_idx = 0) {
+    if (count == 0 || dcb_gpu_addrs == nullptr || dcb_sizes_in_bytes == nullptr) {
+        LOG_ERROR(Lib_GnmDriver,
+                  "count, dcbGpuAddrs, and dcbSizesInBytes must describe at least one DCB");
+        return InvalidSubmitArguments;
+    }
+
+    // All five arrays are guest pointers.  Check their complete backing before indexing any
+    // element so malformed pointers/counts fail with the GNM error instead of a host access
+    // violation.  CCB arrays are optional when every CCB size is zero.
+    if (!IsReadableGuestArray(dcb_gpu_addrs, count, sizeof(*dcb_gpu_addrs)) ||
+        !IsReadableGuestArray(dcb_sizes_in_bytes, count, sizeof(*dcb_sizes_in_bytes)) ||
+        (ccb_sizes_in_bytes &&
+         !IsReadableGuestArray(ccb_sizes_in_bytes, count, sizeof(*ccb_sizes_in_bytes))) ||
+        (ccb_sizes_in_bytes && ccb_gpu_addrs &&
+         !IsReadableGuestArray(ccb_gpu_addrs, count, sizeof(*ccb_gpu_addrs)))) {
+        LOG_ERROR(Lib_GnmDriver, "Command-buffer metadata arrays are not readable guest ranges");
+        return InvalidSubmitArguments;
+    }
+
+    for (u32 i = 0; i < count; i++) {
+        if (dcb_gpu_addrs[i] == nullptr || dcb_sizes_in_bytes[i] == 0) {
+            LOG_ERROR(Lib_GnmDriver, "Submitting an invalid DCB {}", i);
+            return InvalidSubmitArguments;
+        }
+        if (dcb_sizes_in_bytes[i] > MaxCommandBufferSizeInBytes) {
+            LOG_ERROR(Lib_GnmDriver,
+                      "dcbSizesInBytes[{}] ({}) is limited to (2*20)-1 DWORDS", i,
+                      dcb_sizes_in_bytes[i]);
+            return InvalidSubmitArguments;
+        }
+        if ((dcb_sizes_in_bytes[i] % sizeof(u32)) != 0 ||
+            !IsReadableGuestRange(dcb_gpu_addrs[i], dcb_sizes_in_bytes[i])) {
+            LOG_ERROR(Lib_GnmDriver, "DCB {} is not a complete readable guest range", i);
+            return InvalidSubmitArguments;
+        }
+
+        const auto ccb_size_in_bytes = ccb_sizes_in_bytes ? ccb_sizes_in_bytes[i] : 0;
+        if (ccb_size_in_bytes > MaxCommandBufferSizeInBytes) {
+            LOG_ERROR(Lib_GnmDriver,
+                      "ccbSizesInBytes[{}] ({}) is limited to (2*20)-1 DWORDS", i,
+                      ccb_size_in_bytes);
+            return InvalidSubmitArguments;
+        }
+        if ((ccb_size_in_bytes % sizeof(u32)) != 0) {
+            LOG_ERROR(Lib_GnmDriver, "CCB {} has a non-dword-aligned size", i);
+            return InvalidSubmitArguments;
+        }
+        if (ccb_size_in_bytes != 0 && (ccb_gpu_addrs == nullptr || ccb_gpu_addrs[i] == nullptr)) {
+            LOG_ERROR(Lib_GnmDriver, "Submitting an invalid CCB {}", i);
+            return InvalidSubmitArguments;
+        }
+        if (ccb_size_in_bytes != 0 &&
+            !IsReadableGuestRange(ccb_gpu_addrs[i], ccb_size_in_bytes)) {
+            LOG_ERROR(Lib_GnmDriver, "CCB {} is not a complete readable guest range", i);
+            return InvalidSubmitArguments;
+        }
+    }
+
+    if (require_flip_packet) {
+        if (dcb_sizes_in_bytes[count - 1] < MinimumFlipCommandBufferSizeInBytes) {
+            LOG_ERROR(Lib_GnmDriver,
+                      "The last DCB must contain at least the 64-DWORD flip packet ({} bytes)",
+                      MinimumFlipCommandBufferSizeInBytes);
+            return InvalidSubmitArguments;
+        }
+        if (buf_idx >= VideoOut::MaxDisplayBuffers) {
+            LOG_ERROR(Lib_GnmDriver, "Invalid VO buffer index {}", buf_idx);
+            return InvalidSubmitArguments;
+        }
+    }
+
+    return ORBIS_OK;
+}
+
+static int SubmitCommandBuffersLocked(u32 count, const u32* dcb_gpu_addrs[],
+                                      u32* dcb_sizes_in_bytes, const u32* ccb_gpu_addrs[],
+                                      u32* ccb_sizes_in_bytes);
+
 s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffers(u32 count, u32* dcb_gpu_addrs[],
                                                    u32* dcb_sizes_in_bytes, u32* ccb_gpu_addrs[],
                                                    u32* ccb_sizes_in_bytes, u32 vo_handle,
@@ -2169,52 +2379,36 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     u32* ccb_sizes_in_bytes, u32 vo_handle, u32 buf_idx, u32 flip_mode, s64 flip_arg) {
     LOG_DEBUG(Lib_GnmDriver, "called [buf = {}]", buf_idx);
 
-    auto* cmdbuf = dcb_gpu_addrs[count - 1];
-    const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
-
-    const s32 patch_result =
-        PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg, nullptr /*unk*/);
-    if (patch_result != ORBIS_OK) {
-        return patch_result;
-    }
-
-    return sceGnmSubmitCommandBuffers(count, const_cast<const u32**>(dcb_gpu_addrs),
-                                      dcb_sizes_in_bytes, const_cast<const u32**>(ccb_gpu_addrs),
-                                      ccb_sizes_in_bytes);
+    return RunSubmissionTransaction(
+        *submission_gate,
+        [&] {
+            return ValidateCommandBuffers(count, const_cast<const u32**>(dcb_gpu_addrs),
+                                          dcb_sizes_in_bytes, const_cast<const u32**>(ccb_gpu_addrs),
+                                          ccb_sizes_in_bytes, true, buf_idx);
+        },
+        [&] {
+            const auto validation_result = ValidateCommandBuffers(
+                count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
+                const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes, true, buf_idx);
+            if (validation_result != ORBIS_OK) {
+                return validation_result;
+            }
+            auto* cmdbuf = dcb_gpu_addrs[count - 1];
+            const auto size_dw = dcb_sizes_in_bytes[count - 1] / sizeof(u32);
+            return PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg,
+                                    nullptr /*unk*/);
+        },
+        [&] {
+            return SubmitCommandBuffersLocked(count, const_cast<const u32**>(dcb_gpu_addrs),
+                                              dcb_sizes_in_bytes,
+                                              const_cast<const u32**>(ccb_gpu_addrs),
+                                              ccb_sizes_in_bytes);
+        });
 }
 
-int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
-                                                       const u32* dcb_gpu_addrs[],
-                                                       u32* dcb_sizes_in_bytes,
-                                                       const u32* ccb_gpu_addrs[],
-                                                       u32* ccb_sizes_in_bytes) {
-    HLE_TRACE;
-    LOG_DEBUG(Lib_GnmDriver, "called");
-
-    if (!dcb_gpu_addrs || !dcb_sizes_in_bytes) {
-        LOG_ERROR(Lib_GnmDriver, "dcbGpuAddrs and dcbSizesInBytes must not be NULL");
-        return 0x80d11000;
-    }
-
-    for (u32 i = 0; i < count; i++) {
-        if (dcb_sizes_in_bytes[i] == 0) {
-            LOG_ERROR(Lib_GnmDriver, "Submitting a null DCB {}", i);
-            return 0x80d11000;
-        }
-        if (dcb_sizes_in_bytes[i] > 0x3ffffc) {
-            LOG_ERROR(Lib_GnmDriver, "dcbSizesInBytes[{}] ({}) is limited to (2*20)-1 DWORDS", i,
-                      dcb_sizes_in_bytes[i]);
-            return 0x80d11000;
-        }
-        if (ccb_sizes_in_bytes && ccb_sizes_in_bytes[i] > 0x3ffffc) {
-            LOG_ERROR(Lib_GnmDriver, "ccbSizesInBytes[{}] ({}) is limited to (2*20)-1 DWORDS", i,
-                      ccb_sizes_in_bytes[i]);
-            return 0x80d11000;
-        }
-    }
-
-    auto submission = submission_gate.Enter();
-
+static int SubmitCommandBuffersLocked(u32 count, const u32* dcb_gpu_addrs[],
+                                      u32* dcb_sizes_in_bytes, const u32* ccb_gpu_addrs[],
+                                      u32* ccb_sizes_in_bytes) {
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
     }
@@ -2247,7 +2441,7 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
     }
 
     for (auto cbpair = 0u; cbpair < count; ++cbpair) {
-        const auto* ccb = ccb_gpu_addrs ? ccb_gpu_addrs[cbpair] : nullptr;
+        const auto* ccb = (ccb_gpu_addrs && ccb_sizes_in_bytes) ? ccb_gpu_addrs[cbpair] : nullptr;
         const auto ccb_size_in_bytes = ccb_sizes_in_bytes ? ccb_sizes_in_bytes[cbpair] : 0;
 
         const auto dcb_size_dw = dcb_sizes_in_bytes[cbpair] >> 2;
@@ -2283,10 +2477,30 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
                 .base_addr = reinterpret_cast<uintptr_t>(ccb),
             });
         }
-        liverpool->SubmitGfx(dcb_span, ccb_span);
+        liverpool->SubmitGfx(dcb_span, ccb_span, MakeGuestCommandBufferReader());
     }
 
     return ORBIS_OK;
+}
+
+int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
+                                                       const u32* dcb_gpu_addrs[],
+                                                       u32* dcb_sizes_in_bytes,
+                                                       const u32* ccb_gpu_addrs[],
+                                                       u32* ccb_sizes_in_bytes) {
+    HLE_TRACE;
+    LOG_DEBUG(Lib_GnmDriver, "called");
+
+    auto submission = EnterGraphicsSubmissionDiagnostic(
+        *submission_gate, GfxBoundaryWaitDiagnosticEnabledForProcess());
+    const int validation_result =
+        ValidateCommandBuffers(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs,
+                               ccb_sizes_in_bytes);
+    if (validation_result != ORBIS_OK) {
+        return validation_result;
+    }
+    return SubmitCommandBuffersLocked(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs,
+                                      ccb_sizes_in_bytes);
 }
 
 s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[],
@@ -2299,7 +2513,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 int PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    auto boundary = submission_gate.BeginGuardedBoundary();
+    auto boundary = submission_gate->BeginGuardedBoundary();
     liverpool->SubmitDone(std::move(boundary.complete));
     send_init_packet = true;
     ++frames_submitted;
@@ -2308,7 +2522,24 @@ int PS4_SYSV_ABI sceGnmSubmitDone() {
 }
 
 int PS4_SYSV_ABI sceGnmUnmapComputeQueue(u32 vqid) {
-    liverpool->asc_queues.erase(Common::SlotId{vqid - 1});
+    if (vqid == 0 || vqid >= Liverpool::NumTotalQueues) {
+        return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_QUEUE_ID;
+    }
+
+    auto submission = submission_gate->Enter();
+    const Common::SlotId slot{vqid - 1};
+    std::scoped_lock queue_lock{liverpool->asc_queue_mutex};
+    if (!liverpool->asc_queues.is_allocated(slot)) {
+        return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_QUEUE_ID;
+    }
+    const auto queue_state = liverpool->asc_queues[slot];
+    if (queue_state) {
+        // Retire only admission. Already captured packets retain this shared state and must
+        // drain; wait instructions observe retirement and abandon impossible waits, while
+        // checked read-pointer publication becomes a no-op.
+        queue_state->retired.store(true, std::memory_order_release);
+    }
+    liverpool->asc_queues.erase(slot);
     return ORBIS_OK;
 }
 
@@ -2861,6 +3092,9 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
     presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    auto owner_lifetime = std::make_shared<Core::GpuOwnerLifetime>();
+    liverpool->SetGpuOwnerLifetime(owner_lifetime);
+    Core::Memory::Instance()->SetGpuOwnerLifetime(std::move(owner_lifetime));
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {

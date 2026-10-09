@@ -3,8 +3,12 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
+#include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/gpu_completion_submission.h"
+#include "video_core/renderer_vulkan/submit_wait_diagnostic.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -91,6 +95,14 @@ void Scheduler::EndRendering() {
     current_cmdbuf.endRendering();
 }
 
+void Scheduler::MarkGuestWork(std::optional<u64> compute_shader_hash,
+                              std::optional<u64> vertex_shader_hash,
+                              bool has_color_attachment) noexcept {
+    pending_guest_work |=
+        VideoCore::IsGuestWorkCaptureEligible(compute_shader_hash, vertex_shader_hash,
+                                             has_color_attachment);
+}
+
 void Scheduler::Flush(SubmitInfo& info) {
     // When flushing, we only send data to the driver; no waiting is necessary.
     SubmitExecution(info);
@@ -99,6 +111,20 @@ void Scheduler::Flush(SubmitInfo& info) {
 void Scheduler::Flush() {
     SubmitInfo info{};
     Flush(info);
+}
+
+void Scheduler::FlushWithGpuCompletion(Common::UniqueFunction<void, u64>&& on_submitted,
+                                      Common::UniqueFunction<void>&& wake_owner) {
+    SubmitInfo info{};
+    GpuCompletionSubmission sequencer{submit_mutex};
+    static_cast<void>(sequencer.Submit(
+        std::move(wake_owner), [this, &info] { return SubmitExecutionWithSubmitLockHeld(info); },
+        [this, &on_submitted](Common::UniqueFunction<void>&& callback, u64 completion_tick) {
+            on_submitted(u64{completion_tick});
+            QueuePriorityOperationAtTick(std::move(callback), completion_tick);
+    }));
+    priority_pending_ops_cv.notify_one();
+    PopPendingOperations();
 }
 
 void Scheduler::Finish() {
@@ -119,6 +145,12 @@ void Scheduler::Wait(u64 tick) {
 }
 
 void Scheduler::PopPendingOperations() {
+    // A cache operation may hold raw references into a SlotVector while a stream-buffer wait
+    // flushes the current command buffer. Defer owner callbacks until that operation has finished
+    // recording its commands and the enclosing owner boundary is safe to drain them.
+    if (IsPendingOperationDrainSuppressed()) {
+        return;
+    }
     std::unique_lock lk(pending_ops_mutex);
     master_semaphore.Refresh();
     while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
@@ -150,7 +182,20 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
+    {
+        std::scoped_lock lk{submit_mutex};
+        SubmitExecutionWithSubmitLockHeld(info);
+    }
+    // Owner-side callbacks may themselves submit work; never invoke them under
+    // the shared queue submission mutex.
+    PopPendingOperations();
+}
+
+u64 Scheduler::SubmitExecutionWithSubmitLockHeld(SubmitInfo& info) {
+    const bool trace_submit = SubmitWaitDiagnosticEnabled();
+    const u64 submit_id = trace_submit ? NextSubmitDiagnosticId() : 0;
+    const u64 logical_tick_before = master_semaphore.CurrentTick();
+    const u64 known_gpu_tick_before = master_semaphore.KnownGpuTick();
     const u64 signal_value = master_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
@@ -191,14 +236,39 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     };
 
     ImGui::Core::TextureManager::Submit();
+    auto capture = VideoCore::BeginGuestWorkCapture(
+        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance())), pending_guest_work);
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    if (trace_submit) {
+        LOG_INFO(Render_Vulkan,
+                 "submit_wait submit_result id={} result={} signal_tick={} logical_tick_before={} "
+                 "logical_tick_after={} known_gpu_tick_before_refresh={} waits={} wait0={} wait1={} "
+                 "wait2={} signals={} fence={:#x}",
+                 submit_id, vk::to_string(submit_result), signal_value, logical_tick_before,
+                 master_semaphore.CurrentTick(), known_gpu_tick_before, info.num_wait_semas,
+                 info.num_wait_semas > 0 ? info.wait_ticks[0] : 0,
+                 info.num_wait_semas > 1 ? info.wait_ticks[1] : 0,
+                 info.num_wait_semas > 2 ? info.wait_ticks[2] : 0, info.num_signal_semas,
+                 static_cast<u64>(reinterpret_cast<uintptr_t>(static_cast<VkFence>(info.fence))));
+    }
+    VideoCore::CompleteGuestWorkCapture(capture, submit_result == vk::Result::eSuccess,
+                                        pending_guest_work);
+    if (submit_result != vk::Result::eSuccess) {
+        instance.LogDeviceMemoryBudget("queue_submit", submit_result);
+    }
+    Check<"submit GPU command buffer">(submit_result);
 
     master_semaphore.Refresh();
+    if (trace_submit) {
+        LOG_INFO(Render_Vulkan,
+                 "submit_wait submit_end id={} result={} signal_tick={} logical_tick={} "
+                 "known_gpu_tick={}",
+                 submit_id, vk::to_string(submit_result), signal_value,
+                 master_semaphore.CurrentTick(), master_semaphore.KnownGpuTick());
+    }
     AllocateWorkerCommandBuffers();
 
-    // Apply pending operations
-    PopPendingOperations();
+    return signal_value;
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {

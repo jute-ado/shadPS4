@@ -52,26 +52,49 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
 VideoOutDriver::~VideoOutDriver() = default;
 
 int VideoOutDriver::Open(const ServiceThreadParams* params) {
-    if (main_port.is_open) {
+    std::scoped_lock port_lock{main_port.port_mutex};
+    std::scoped_lock lock{mutex};
+    if (main_port.lifecycle.IsOpen()) {
         return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY;
     }
-    main_port.is_open = true;
+    main_port.lifecycle.Open();
     liverpool->SetVoPort(&main_port);
     return 1;
 }
 
 void VideoOutDriver::Close(s32 handle) {
+    std::scoped_lock port_lock{main_port.port_mutex};
     std::scoped_lock lock{mutex};
 
     // Mark as closed
-    main_port.is_open = false;
+    main_port.lifecycle.Close();
     main_port.flip_rate = 0;
     main_port.prev_index = -1;
 
-    // Clear port information
-    std::memset(main_port.buffer_labels.data(), 0, sizeof(main_port.buffer_labels));
+    // Requests are tied to the open lifetime that created them. Discard queued requests while the
+    // queue lock is held so a close/reopen cannot present a stale frame on the new lifetime.
+    DrainVideoOutRequests(requests);
+
+    // Clear port information. VO labels are polled by the graphics owner while the presenter
+    // thread may be resetting them, so publish the reset under the waiter's mutex and wake any
+    // owner that was waiting for a label transition.
+    {
+        std::scoped_lock lock{main_port.vo_mutex};
+        std::memset(main_port.buffer_labels.data(), 0, sizeof(main_port.buffer_labels));
+        main_port.vo_cv.notify_all();
+
+        for (auto event : main_port.vblank_events) {
+            auto equeue = Kernel::GetEqueue(event);
+            if (equeue != nullptr) {
+                equeue->RemoveEvent(static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
+                                    Kernel::OrbisKernelEvent::Filter::VideoOut);
+            }
+        }
+        main_port.vblank_events.clear();
+        std::memset(&main_port.vblank_status, 0, sizeof(main_port.vblank_status));
+        main_port.vblank_cv.notify_all();
+    }
     std::memset(main_port.groups.data(), 0, sizeof(main_port.groups));
-    std::memset(&main_port.vblank_status, 0, sizeof(main_port.vblank_status));
     main_port.flip_status = FlipStatus{};
 
     // Re-initialize buffers
@@ -89,14 +112,6 @@ void VideoOutDriver::Close(s32 handle) {
         }
     }
     main_port.flip_events.clear();
-    for (auto event : main_port.vblank_events) {
-        auto equeue = Kernel::GetEqueue(event);
-        if (equeue != nullptr) {
-            equeue->RemoveEvent(static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
-                                Kernel::OrbisKernelEvent::Filter::VideoOut);
-        }
-    }
-    main_port.vblank_events.clear();
 }
 
 VideoOutPort* VideoOutDriver::GetPort(int handle) {
@@ -108,6 +123,10 @@ VideoOutPort* VideoOutDriver::GetPort(int handle) {
 
 int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* const* addresses,
                                     s32 bufferNum, const BufferAttribute* attribute) {
+    std::scoped_lock port_lock{port->port_mutex};
+    if (!port->lifecycle.IsOpen()) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
     const s32 group_index = port->FindFreeGroup();
     if (group_index >= MaxDisplayBufferGroups) {
         return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT;
@@ -166,8 +185,12 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
             .address_right = 0,
         };
 
-        // Reset flip label also when registering buffer
-        port->buffer_labels[startIndex + i] = 0;
+        // Reset flip label also when registering buffer. This is synchronized with graphics
+        // WaitRegMem polls of the host-owned label array.
+        {
+            std::scoped_lock lock{port->vo_mutex};
+            port->buffer_labels[startIndex + i] = 0;
+        }
         port->SignalVoLabel();
 
         presenter->RegisterVideoOutSurface(group, address);
@@ -178,7 +201,12 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
 }
 
 int VideoOutDriver::UnregisterBuffers(VideoOutPort* port, s32 attributeIndex) {
-    if (attributeIndex >= MaxDisplayBufferGroups || !port->groups[attributeIndex].is_occupied) {
+    std::scoped_lock port_lock{port->port_mutex};
+    if (!port->lifecycle.IsOpen()) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    if (attributeIndex < 0 || attributeIndex >= MaxDisplayBufferGroups ||
+        !port->groups[attributeIndex].is_occupied) {
         LOG_ERROR(Lib_VideoOut, "Invalid attribute index {}", attributeIndex);
         return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
     }
@@ -198,7 +226,12 @@ int VideoOutDriver::UnregisterBuffers(VideoOutPort* port, s32 attributeIndex) {
 
 int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex,
                                           const BufferAttribute* attribute) {
-    if (attributeIndex >= MaxDisplayBufferGroups || !port->groups[attributeIndex].is_occupied) {
+    std::scoped_lock port_lock{port->port_mutex};
+    if (!port->lifecycle.IsOpen()) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    if (attributeIndex < 0 || attributeIndex >= MaxDisplayBufferGroups ||
+        !port->groups[attributeIndex].is_occupied) {
         LOG_ERROR(Lib_VideoOut, "Invalid attribute index {}", attributeIndex);
         return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
     }
@@ -229,33 +262,34 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
              static_cast<u32>(attribute->tiling_mode), attribute->width, attribute->height,
              attribute->pitch_in_pixel, attribute->option);
 
-    std::unique_lock lock{port->port_mutex};
     std::memcpy(&port->groups[attributeIndex].attrib, attribute, sizeof(BufferAttribute));
     return 0;
 }
 
 void VideoOutDriver::Flip(const Request& req) {
+    auto* port = req.port;
+    std::unique_lock port_lock{port->port_mutex};
+    if (!port->lifecycle.IsCurrent(req.lifecycle_epoch)) {
+        return;
+    }
+
     // Update HDR status before presenting.
-    presenter->SetHDR(req.port->is_hdr);
+    presenter->SetHDR(port->is_hdr);
 
     // Present the frame.
     presenter->Present(req.frame);
 
     // Update flip status.
-    auto* port = req.port;
-    {
-        std::unique_lock lock{port->port_mutex};
-        auto& flip_status = port->flip_status;
-        flip_status.count++;
-        flip_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
-        flip_status.tsc = Libraries::Kernel::sceKernelReadTsc();
-        flip_status.flip_arg = req.flip_arg;
-        flip_status.current_buffer = req.index;
-        if (req.eop) {
-            --flip_status.gc_queue_num;
-        }
-        --flip_status.flip_pending_num;
+    auto& flip_status = port->flip_status;
+    flip_status.count++;
+    flip_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
+    flip_status.tsc = Libraries::Kernel::sceKernelReadTsc();
+    flip_status.flip_arg = req.flip_arg;
+    flip_status.current_buffer = req.index;
+    if (req.eop) {
+        --flip_status.gc_queue_num;
     }
+    --flip_status.flip_pending_num;
 
     // Trigger flip events for the port.
     for (auto event : port->flip_events) {
@@ -269,13 +303,29 @@ void VideoOutDriver::Flip(const Request& req) {
         }
     }
 
-    // Reset prev flip label
-    if (port->prev_index != -1) {
-        port->buffer_labels[port->prev_index] = 0;
+    // Reset the previous flip label only when no newer request has reserved this buffer. A
+    // queued request can publish its label before an older request reaches the presenter.
+    bool released_label = false;
+    bool release_was_eligible = false;
+    s32 previous_index = -1;
+    previous_index = port->prev_index;
+    release_was_eligible =
+        previous_index != -1 && port->flip_label_generations[previous_index].CanReleaseDisplayed();
+    if (release_was_eligible) {
+        // Keep the port lock while taking vo_mutex so a newer reservation cannot slip between the
+        // generation check and the label clear, and so Close cannot reset the port concurrently.
+        std::scoped_lock vo_lock{port->vo_mutex};
+        port->buffer_labels[previous_index] = 0;
+        released_label = true;
+    }
+    if (req.index != -1) {
+        port->flip_label_generations[req.index].Display(req.generation);
+    }
+    port->prev_index = req.index;
+    port_lock.unlock();
+    if (released_label) {
         port->SignalVoLabel();
     }
-    // save to prev buf index
-    port->prev_index = req.index;
 }
 
 void VideoOutDriver::DrawBlankFrame() {
@@ -290,10 +340,24 @@ void VideoOutDriver::DrawLastFrame() {
     }
 }
 
-bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
-                                bool is_eop /*= false*/) {
+u64 VideoOutDriver::ReserveFlipLabel(VideoOutPort* port, s32 index) {
+    if (index == -1) {
+        return 0;
+    }
+    std::scoped_lock lock{port->port_mutex};
+    return port->flip_label_generations[index].Reserve();
+}
+
+bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                                u64 generation, u64 lifecycle_epoch) {
+    u64 request_epoch;
     {
         std::unique_lock lock{port->port_mutex};
+        if (!port->lifecycle.IsOpen() ||
+            (lifecycle_epoch != 0 && port->lifecycle.CurrentEpoch() != lifecycle_epoch)) {
+            return false;
+        }
+        request_epoch = port->lifecycle.CurrentEpoch();
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
             LOG_ERROR(Lib_VideoOut, "Flip queue is full");
             return false;
@@ -302,44 +366,92 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         if (is_eop) {
             ++port->flip_status.gc_queue_num;
         }
+        if (is_eop && index != -1 && generation == 0) {
+            generation = port->flip_label_generations[index].Reserve();
+        }
+        // EOP registration reserves a generation before the GPU reaches its GfxFlip IRQ. Mark it
+        // complete only at that IRQ/SubmitFlip boundary; a newer reservation must not postpone
+        // release of the older presentation indefinitely.
+        if (is_eop && index != -1) {
+            port->flip_label_generations[index].Complete(generation);
+        }
         ++port->flip_status.flip_pending_num; // integral GPU and CPU pending flips counter
         port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
     }
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        liverpool->SendCommand([=, this]() {
+            SubmitFlipInternal(port, index, flip_arg, is_eop, generation, request_epoch);
+        });
     } else {
-        SubmitFlipInternal(port, index, flip_arg, is_eop);
+        SubmitFlipInternal(port, index, flip_arg, is_eop, generation, request_epoch);
     }
 
     return true;
 }
 
-void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
-    Vulkan::Frame* frame;
-    if (index == -1) {
-        frame = presenter->PrepareBlankFrame(false);
-    } else {
-        const auto& buffer = port->buffer_slots[index];
-        ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
-        const auto& group = port->groups[buffer.group_index];
-        frame = presenter->PrepareFrame(group, buffer.address_left);
-    }
+void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                                        u64 generation, u64 lifecycle_epoch) {
+    const auto discard_pending = [&] {
+        // A callback can outlive its port lifetime. Only roll back accounting when the request
+        // still belongs to the current open lifetime; Close resets the counters, and a reopened
+        // port may already have admitted unrelated flips.
+        if (!port->lifecycle.IsCurrent(lifecycle_epoch)) {
+            return;
+        }
+        if (port->flip_status.flip_pending_num > 0) {
+            --port->flip_status.flip_pending_num;
+        }
+        if (is_eop && port->flip_status.gc_queue_num > 0) {
+            --port->flip_status.gc_queue_num;
+        }
+    };
 
+    Vulkan::Frame* frame;
     u64 submitted_vblank;
     {
-        std::scoped_lock lock{port->vo_mutex};
+        std::scoped_lock port_lock{port->port_mutex};
+        if (!port->lifecycle.IsCurrent(lifecycle_epoch)) {
+            discard_pending();
+            return;
+        }
+        if (index == -1) {
+            frame = presenter->PrepareBlankFrame(false);
+        } else {
+            const auto& buffer = port->buffer_slots[index];
+            if (buffer.group_index < 0) {
+                discard_pending();
+                return;
+            }
+            ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
+            const auto& group = port->groups[buffer.group_index];
+            frame = presenter->PrepareFrame(group, buffer.address_left);
+        }
+
+        std::scoped_lock vo_lock{port->vo_mutex};
         submitted_vblank = port->vblank_status.count;
     }
 
-    std::scoped_lock lock{mutex};
+    std::unique_lock lock{mutex};
+    if (!port->lifecycle.IsCurrent(lifecycle_epoch)) {
+        // Close takes port_mutex before mutex. Release the queue lock before touching the port so
+        // this stale callback cannot invert that order while rolling back its own accounting.
+        lock.unlock();
+        {
+            std::scoped_lock port_lock{port->port_mutex};
+            discard_pending();
+        }
+        return;
+    }
     requests.push({
         .frame = frame,
         .port = port,
         .flip_arg = flip_arg,
         .index = index,
         .eop = is_eop,
+        .generation = generation,
+        .lifecycle_epoch = lifecycle_epoch,
         .submitted_vblank = submitted_vblank,
     });
 }
@@ -375,12 +487,21 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         }
 
         // Check if it's time to take a request.
-        auto& vblank_status = main_port.vblank_status;
-        if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
-            const auto request = receive_request(vblank_status.count);
+        u64 current_vblank;
+        s32 flip_rate;
+        {
+            // Keep the lock order identical to Close/Flip: port state first, then vblank state.
+            // The presenter must not race a guest SetFlipRate or a close/reopen transition.
+            std::scoped_lock port_lock{main_port.port_mutex};
+            std::scoped_lock vo_lock{main_port.vo_mutex};
+            current_vblank = main_port.vblank_status.count;
+            flip_rate = main_port.flip_rate;
+        }
+        if (current_vblank % (flip_rate + 1) == 0) {
+            const auto request = receive_request(current_vblank);
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
-                    if (!main_port.is_open) {
+                    if (!main_port.lifecycle.IsOpen()) {
                         DrawBlankFrame();
                     } else if (ImGui::Core::MustKeepDrawing()) {
                         DrawLastFrame();
@@ -405,14 +526,14 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                         Kernel::OrbisKernelEvent::Filter::VideoOut,
                         reinterpret_cast<void*>(
                             static_cast<u64>(OrbisVideoOutInternalEventId::Vblank) |
-                            (vblank_status.count << 16)));
+                            (main_port.vblank_status.count << 16)));
                 }
             }
 
             // Update vblank status
-            vblank_status.count++;
-            vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
-            vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
+            main_port.vblank_status.count++;
+            main_port.vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
+            main_port.vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
             main_port.vblank_cv.notify_all();
         }
 

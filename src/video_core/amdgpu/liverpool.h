@@ -3,22 +3,28 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstring>
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <queue>
 #include <semaphore>
 #include <span>
 #include <thread>
 #include <vector>
-#include <queue>
 
 #include "common/assert.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "common/unique_function.h"
+#include "core/gpu_owner_lifetime.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/eop_submission_batch.h"
 #include "video_core/amdgpu/owned_command_buffers.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/amdgpu/submission_completion_queue.h"
@@ -70,10 +76,69 @@ public:
     explicit Liverpool();
     ~Liverpool();
 
-    void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
-    void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
+    void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb,
+                   GuestCommandBufferReader reader = {});
+    struct AscQueueInfo {
+        static constexpr size_t Pm4BufferSize = 1024;
+        static constexpr u32 ComputeRegBase = 0x200;
+        static constexpr u32 ComputeRegEnd =
+            ComputeRegBase + sizeof(ComputeProgram) / sizeof(u32);
+        VAddr map_addr{};
+        VAddr read_addr{};
+        u32 ring_size_dw{};
+        u32 pipe_id{};
+        u32 next_offs_dw{};
+        u32 read_offset_dw{};
+        std::array<u32, Pm4BufferSize> tmp_packet{};
+        u32 tmp_dwords{};
+        // Guest address of the first dword captured in tmp_packet.  The packet is reassembled
+        // from an immutable host snapshot, so its host pointer cannot identify DMA patches.
+        VAddr tmp_source_base_addr{};
+        ComputeProgram cs_state{};
+        // A retired queue cannot accept new DingDong submissions, but work already captured by
+        // a coroutine must still be allowed to drain. Wait instructions use this bit to abandon
+        // an impossible wait after unmap without discarding earlier packets.
+        std::atomic_bool retired{false};
+        std::atomic_bool active{true};
+
+        // WAIT_REG_MEM register polls on an ASC must not observe the shared graphics register
+        // image. Accept both the PM4 shader-space offset (0x200 + n) and the corresponding
+        // absolute register index (Regs::ShRegWordOffset + 0x200 + n), then read the queue-owned
+        // compute state only. All other register spaces are unsupported for deferred ASC work.
+        [[nodiscard]] std::optional<u32> TryReadComputeRegister(u32 register_index) const noexcept {
+            if (register_index >= Regs::ShRegWordOffset) {
+                register_index -= Regs::ShRegWordOffset;
+            }
+            if (register_index < ComputeRegBase || register_index >= ComputeRegEnd) {
+                return std::nullopt;
+            }
+
+            const auto state_offset =
+                static_cast<size_t>(register_index - ComputeRegBase) * sizeof(u32);
+            u32 value{};
+            std::memcpy(&value, reinterpret_cast<const u8*>(&cs_state) + state_offset,
+                        sizeof(value));
+            return value;
+        }
+    };
+
+    void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb,
+                   std::shared_ptr<AscQueueInfo> queue_state,
+                   std::shared_ptr<const OwnedCommandBuffers> owner = {});
 
     void SubmitDone(Common::UniqueFunction<void>&& completion) noexcept;
+
+    void WaitGpuCompletion();
+
+    SubmissionCompletionQueue::CompletionTicket CaptureRetirementTicket();
+
+    SubmissionCompletionQueue::Sequence IssuedSubmissionSequence() const {
+        return submission_completions.IssuedSequence();
+    }
+
+    void SetGpuOwnerLifetime(std::shared_ptr<Core::GpuOwnerLifetime> lifetime) {
+        gpu_owner_lifetime = std::move(lifetime);
+    }
 
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
@@ -121,16 +186,8 @@ public:
         return mapped_queues[curr_qid].cs_state;
     }
 
-    struct AscQueueInfo {
-        static constexpr size_t Pm4BufferSize = 1024;
-        VAddr map_addr;
-        u32* read_addr;
-        u32 ring_size_dw;
-        u32 pipe_id;
-        std::array<u32, Pm4BufferSize> tmp_packet;
-        u32 tmp_dwords;
-    };
-    Common::SlotVector<AscQueueInfo> asc_queues{};
+    Common::SlotVector<std::shared_ptr<AscQueueInfo>> asc_queues{};
+    std::mutex asc_queue_mutex{};
 
 private:
     struct Task {
@@ -172,9 +229,15 @@ private:
     Task ProcessCeUpdate(std::span<const u32> ccb, CmdBufferOwner owner);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid,
-                        SubmissionCompletionQueue::Sequence submission_sequence);
+                        SubmissionCompletionQueue::Sequence submission_sequence,
+                        CmdBufferOwner owner, std::shared_ptr<AscQueueInfo> queue_state,
+                        VAddr source_base_addr);
+
+    void AdvanceAscReadPointer(const std::shared_ptr<AscQueueInfo>& queue_state, u32 delta);
 
     void ProcessCommands();
+    void FlushPendingEops();
+    void DrainCompletedEops();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -188,12 +251,13 @@ private:
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
-    u32 num_mapped_queues{1u}; // GFX is always available
+    std::atomic<u32> num_mapped_queues{1u}; // GFX is always available
 
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    EopSubmissionBatch eop_submission_batch;
     struct ConstantEngine {
         void Reset() {
             ce_count = 0;
@@ -221,6 +285,7 @@ private:
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     SubmissionCompletionQueue submission_completions;
+    std::shared_ptr<Core::GpuOwnerLifetime> gpu_owner_lifetime;
     std::thread::id gpu_id;
     s32 curr_qid{-1};
 };

@@ -74,5 +74,28 @@ TEST(ImageUsagePolicy, FailsClosedWhenEvenRequiredCompressedUsageIsUnsupported) 
               (std::vector<vk::ImageUsageFlags>{PreferredUsage, RequiredSampledUsage}));
 }
 
+TEST(ImageUsagePolicy, SampledMsaaDropsStorageWithoutFeature) {
+    // Storage is optional for the cache's broad image usage, but Vulkan forbids a multisampled
+    // image with STORAGE usage when shaderStorageImageMultisample is unavailable.  A read-only
+    // MSAA descriptor must therefore keep the sampled/transfer uses and drop only storage.
+    const auto sampled_only = SelectImageUsageForSamples(PreferredUsage, 4U, false, false);
+    ASSERT_TRUE(sampled_only.has_value());
+    EXPECT_EQ(sampled_only->usage, RequiredSampledUsage);
+    EXPECT_TRUE(sampled_only->dropped_optional_storage);
+
+    const auto feature_supported = SelectImageUsageForSamples(PreferredUsage, 4U, false, true);
+    ASSERT_TRUE(feature_supported.has_value());
+    EXPECT_EQ(feature_supported->usage, PreferredUsage);
+    EXPECT_FALSE(feature_supported->dropped_optional_storage);
+
+    const auto required_storage = SelectImageUsageForSamples(PreferredUsage, 4U, true, false);
+    EXPECT_FALSE(required_storage.has_value());
+
+    const auto single_sample_storage = SelectImageUsageForSamples(PreferredUsage, 1U, true, false);
+    ASSERT_TRUE(single_sample_storage.has_value());
+    EXPECT_EQ(single_sample_storage->usage, PreferredUsage);
+    EXPECT_FALSE(single_sample_storage->dropped_optional_storage);
+}
+
 } // namespace
 } // namespace VideoCore

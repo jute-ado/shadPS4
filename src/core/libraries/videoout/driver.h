@@ -5,6 +5,8 @@
 
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
+#include "core/libraries/videoout/flip_label_generation.h"
+#include "core/libraries/videoout/videoout_lifecycle.h"
 #include "core/libraries/videoout/video_out.h"
 
 #include <condition_variable>
@@ -22,6 +24,7 @@ struct VideoOutPort {
     std::array<VideoOutBuffer, MaxDisplayBuffers> buffer_slots;
     std::array<u64, MaxDisplayBuffers> buffer_labels; // should be contiguous in memory
     static_assert(sizeof(buffer_labels[0]) == 8u);
+    std::array<FlipLabelGeneration, MaxDisplayBuffers> flip_label_generations;
     std::array<BufferAttributeGroup, MaxDisplayBufferGroups> groups;
     FlipStatus flip_status;
     SceVideoOutVblankStatus vblank_status;
@@ -33,7 +36,10 @@ struct VideoOutPort {
     std::condition_variable vblank_cv;
     int flip_rate = 0;
     int prev_index = -1;
-    bool is_open = false;
+    // The graphics owner can sleep in WaitVoLabel while the video-out API closes the port from a
+    // guest thread. Make the close escape independently observable by the waiter, and tag GPU
+    // callbacks/requests so a previous open lifetime cannot touch a reopened port.
+    VideoOutLifecycle lifecycle;
     bool is_hdr = false;
 
     s32 FindFreeGroup() const {
@@ -90,7 +96,9 @@ public:
     int ChangeBufferAttribute(VideoOutPort* port, s32 bufferIndex,
                               const BufferAttribute* attribute);
 
-    bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    u64 ReserveFlipLabel(VideoOutPort* port, s32 index);
+    bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false,
+                    u64 generation = 0, u64 lifecycle_epoch = 0);
 
 private:
     struct Request {
@@ -99,6 +107,8 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        u64 generation;
+        u64 lifecycle_epoch;
         u64 submitted_vblank;
 
         operator bool() const noexcept {
@@ -109,7 +119,8 @@ private:
     void Flip(const Request& req);
     void DrawBlankFrame(); // Video port out not open
     void DrawLastFrame();  // Used when there is no flip request
-    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                            u64 generation, u64 lifecycle_epoch);
     void PresentThread(std::stop_token token);
 
     std::mutex mutex;

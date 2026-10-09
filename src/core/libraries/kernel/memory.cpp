@@ -100,7 +100,8 @@ s32 PS4_SYSV_ABI sceKernelCheckedReleaseDirectMemory(u64 start, u64 len) {
         return ORBIS_OK;
     }
     auto* memory = Core::Memory::Instance();
-    return memory->Free(start, len, true);
+    return memory->Free(start, len, true,
+                        [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 }
 
 s32 PS4_SYSV_ABI sceKernelReleaseDirectMemory(u64 start, u64 len) {
@@ -114,7 +115,8 @@ s32 PS4_SYSV_ABI sceKernelReleaseDirectMemory(u64 start, u64 len) {
         return ORBIS_OK;
     }
     auto* memory = Core::Memory::Instance();
-    memory->Free(start, len, false);
+    memory->Free(start, len, false,
+                 [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     return ORBIS_OK;
 }
 
@@ -180,7 +182,8 @@ s32 PS4_SYSV_ABI sceKernelReserveVirtualRange(void** addr, u64 len, s32 flags, u
     }
 
     s32 result = memory->MapMemory(addr, in_addr, len, Core::MemoryProt::NoAccess, map_flags,
-                                   Core::VMAType::Reserved, "anon", false, -1, alignment);
+                                   Core::VMAType::Reserved, "anon", false, -1, alignment,
+                                   [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     if (result == 0) {
         LOG_INFO(Kernel_Vmm, "out_addr = {}", fmt::ptr(*addr));
     }
@@ -221,10 +224,6 @@ s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s
         LOG_ERROR(Kernel_Vmm, "Executable permissions are not allowed.");
         return ORBIS_KERNEL_ERROR_EACCES;
     }
-    if (Core::RequiresSubmissionBoundaryBeforeMapping(mem_prot)) {
-        GnmDriver::WaitForSubmissionBoundary();
-    }
-
     auto map_flags = static_cast<Core::MemoryMapFlags>(flags);
     const VAddr in_addr = reinterpret_cast<VAddr>(*addr);
 
@@ -245,7 +244,8 @@ s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s
 
     const auto ret =
         memory->MapMemory(addr, in_addr, len, mem_prot, map_flags, Core::VMAType::Direct, name,
-                          should_check, phys_addr, alignment);
+                          should_check, phys_addr, alignment,
+                          [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 
     LOG_INFO(Kernel_Vmm, "out_addr = {}", fmt::ptr(*addr));
     return ret;
@@ -286,17 +286,14 @@ s32 PS4_SYSV_ABI sceKernelMapDirectMemory2(void** addr, u64 len, s32 type, s32 p
         LOG_ERROR(Kernel_Vmm, "Executable permissions are not allowed.");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    if (Core::RequiresSubmissionBoundaryBeforeMapping(mem_prot)) {
-        GnmDriver::WaitForSubmissionBoundary();
-    }
-
     const auto map_flags = static_cast<Core::MemoryMapFlags>(flags);
     const VAddr in_addr = reinterpret_cast<VAddr>(*addr);
 
     auto* memory = Core::Memory::Instance();
     const auto ret =
         memory->MapMemory(addr, in_addr, len, mem_prot, map_flags, Core::VMAType::Direct, "anon",
-                          !g_alias_dmem, phys_addr, alignment);
+                          !g_alias_dmem, phys_addr, alignment,
+                          [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 
     if (ret == 0) {
         // If the map call succeeds, set the direct memory type using the output address.
@@ -339,8 +336,9 @@ s32 PS4_SYSV_ABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, u64 len, s3
         map_flags &= ~Core::MemoryMapFlags::Fixed;
     }
 
-    const auto ret = memory->MapMemory(addr_in_out, in_addr, len, mem_prot, map_flags,
-                                       Core::VMAType::Flexible, name);
+    const auto ret = memory->MapMemory(
+        addr_in_out, in_addr, len, mem_prot, map_flags, Core::VMAType::Flexible, name, false, -1,
+        0, [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     LOG_INFO(Kernel_Vmm, "out_addr = {}", fmt::ptr(*addr_in_out));
     return ret;
 }
@@ -382,8 +380,9 @@ s32 PS4_SYSV_ABI sceKernelMapNamedSystemFlexibleMemory(void** addr_in_out, u64 l
     }
     const auto mem_prot = static_cast<Core::MemoryProt>(prot);
     auto* memory = Core::Memory::Instance();
-    const auto ret = memory->MapMemory(addr_in_out, in_addr, len, mem_prot, map_flags,
-                                       Core::VMAType::System, name);
+    const auto ret = memory->MapMemory(
+        addr_in_out, in_addr, len, mem_prot, map_flags, Core::VMAType::System, name, false, -1, 0,
+        [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     LOG_INFO(Kernel_Vmm, "out_addr = {}", fmt::ptr(*addr_in_out));
     return ret;
 }
@@ -627,7 +626,8 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignmen
 
     return memory->MapMemory(addr_out, std::bit_cast<VAddr>(addr_in), len,
                              Core::MemoryProt::NoAccess, map_flags, Core::VMAType::PoolReserved,
-                             "anon", false, -1, map_alignment);
+                             "anon", false, -1, map_alignment,
+                             [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 }
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolCommit(void* addr, u64 len, s32 type, s32 prot, s32 flags) {
@@ -669,7 +669,8 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags) {
     const VAddr pool_addr = reinterpret_cast<VAddr>(addr);
     auto* memory = Core::Memory::Instance();
 
-    return memory->PoolDecommit(pool_addr, len);
+    return memory->PoolDecommit(pool_addr, len,
+                                [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 }
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry* entries, s32 count,
@@ -779,20 +780,24 @@ void* PS4_SYSV_ABI posix_mmap(void* addr, u64 len, s32 prot, s32 flags, s32 fd, 
                                                ? Core::VMAType::System
                                                : Core::VMAType::Flexible;
         result = memory->MapMemory(&addr_out, aligned_addr, aligned_size, mem_prot, mem_flags,
-                                   mapping_type, "anon", false);
+                                   mapping_type, "anon", false, -1, 0,
+                                   [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     } else if (True(mem_flags & Core::MemoryMapFlags::Stack)) {
         // Maps stack memory
         result = memory->MapMemory(&addr_out, aligned_addr, aligned_size, mem_prot, mem_flags,
-                                   Core::VMAType::Stack, "anon", false);
+                                   Core::VMAType::Stack, "anon", false, -1, 0,
+                                   [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     } else if (True(mem_flags & Core::MemoryMapFlags::Void)) {
         // Reserves memory
-        result =
-            memory->MapMemory(&addr_out, aligned_addr, aligned_size, Core::MemoryProt::NoAccess,
-                              mem_flags, Core::VMAType::Reserved, "anon", false);
+        result = memory->MapMemory(&addr_out, aligned_addr, aligned_size,
+                                   Core::MemoryProt::NoAccess, mem_flags,
+                                   Core::VMAType::Reserved, "anon", false, -1, 0,
+                                   [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     } else {
         // Default to file mapping
         result = memory->MapFile(&addr_out, aligned_addr, aligned_size, mem_prot, mem_flags, fd,
-                                 phys_addr);
+                                 phys_addr,
+                                 [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
     }
 
     if (result != ORBIS_OK) {
@@ -837,7 +842,9 @@ s32 PS4_SYSV_ABI sceKernelMunmap(void* addr, u64 len) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
     auto* memory = Core::Memory::Instance();
-    return memory->UnmapMemory(std::bit_cast<VAddr>(addr), len);
+    const VAddr virtual_addr = std::bit_cast<VAddr>(addr);
+    return memory->UnmapMemory(
+        virtual_addr, len, [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 }
 
 s32 PS4_SYSV_ABI posix_munmap(void* addr, u64 len) {
@@ -864,6 +871,7 @@ s32 PS4_SYSV_ABI posix_msync(void* addr, u64 len, s32 flags) {
 static constexpr s32 MAX_PRT_APERTURES = 3;
 static constexpr VAddr PRT_AREA_START_ADDR = 0x1000000000;
 static constexpr u64 PRT_AREA_SIZE = 0xec00000000;
+static constexpr VAddr PRT_AREA_END_ADDR = PRT_AREA_START_ADDR + PRT_AREA_SIZE;
 static std::array<std::pair<VAddr, u64>, MAX_PRT_APERTURES> PrtApertures{};
 
 s32 PS4_SYSV_ABI sceKernelSetPrtAperture(s32 id, VAddr address, u64 size) {
@@ -871,7 +879,8 @@ s32 PS4_SYSV_ABI sceKernelSetPrtAperture(s32 id, VAddr address, u64 size) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    if (address < PRT_AREA_START_ADDR || address + size > PRT_AREA_START_ADDR + PRT_AREA_SIZE) {
+    if (address < PRT_AREA_START_ADDR || address > PRT_AREA_END_ADDR ||
+        size > PRT_AREA_END_ADDR - address) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
@@ -884,7 +893,8 @@ s32 PS4_SYSV_ABI sceKernelSetPrtAperture(s32 id, VAddr address, u64 size) {
                 address, size);
 
     auto* memory = Core::Memory::Instance();
-    memory->SetPrtArea(id, address, size);
+    memory->SetPrtArea(id, address, size,
+                       [] { return GnmDriver::AcquireGpuAddressSpaceGuard(); });
 
     PrtApertures[id] = {address, size};
     return ORBIS_OK;
@@ -892,6 +902,9 @@ s32 PS4_SYSV_ABI sceKernelSetPrtAperture(s32 id, VAddr address, u64 size) {
 
 s32 PS4_SYSV_ABI sceKernelGetPrtAperture(s32 id, VAddr* address, u64* size) {
     if (id < 0 || id >= MAX_PRT_APERTURES) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    if (address == nullptr || size == nullptr) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 

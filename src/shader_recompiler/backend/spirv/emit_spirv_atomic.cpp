@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/spirv_image_coordinates.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
 namespace Shader::Backend::SPIRV {
@@ -103,9 +104,29 @@ Id BufferAtomicU64(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id 
     return (ctx.*atomic_func)(ctx.U64, ptr, scope, semantics, value);
 }
 
+[[nodiscard]] bool ValidateImageAtomicCoordinates(
+    EmitContext& ctx, const IR::Inst& inst, const EmitContext::TextureDefinition& texture) {
+    const IR::Type coordinate_type = inst.Arg(1).Type();
+    if (IsImageCoordinateTypeValid(texture.view_type, coordinate_type, true)) {
+        return true;
+    }
+
+    LOG_WARNING(Render_Recompiler,
+                "Rejecting image atomic operation {} for shader {:#x}: view type {} requires at "
+                "least {} 32-bit unsigned integer coordinate components, but IR supplied {} ({})",
+                u32(inst.GetOpcode()), ctx.info.pgm_hash, AmdGpu::NameOf(texture.view_type),
+                ImageCoordinateComponentCount(texture.view_type),
+                CoordinateComponentCount(coordinate_type), IR::NameOf(coordinate_type));
+    ctx.info.translation_failed = true;
+    return false;
+}
+
 Id ImageAtomicU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id value,
                   Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id)) {
     const auto& texture = ctx.images[handle & 0xFFFF];
+    if (!ValidateImageAtomicCoordinates(ctx, *inst, texture)) {
+        return ctx.ConstU32(0U);
+    }
     const Id pointer{ctx.OpImageTexelPointer(ctx.image_u32, texture.id, coords, ctx.ConstU32(0U))};
     const auto [scope, semantics]{AtomicArgs(ctx)};
     return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);
@@ -114,6 +135,9 @@ Id ImageAtomicU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id va
 Id ImageAtomicF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id value,
                   Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id)) {
     const auto& texture = ctx.images[handle & 0xFFFF];
+    if (!ValidateImageAtomicCoordinates(ctx, *inst, texture)) {
+        return ctx.ConstF32(0.0f);
+    }
     const Id pointer{ctx.OpImageTexelPointer(ctx.image_f32, texture.id, coords, ctx.ConstU32(0U))};
     const auto [scope, semantics]{AtomicArgs(ctx)};
     return (ctx.*atomic_func)(ctx.F32[1], pointer, scope, semantics, value);
@@ -123,6 +147,9 @@ Id ImageAtomicU32CmpSwap(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords
                          Id cmp_value,
                          Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id, Id, Id)) {
     const auto& texture = ctx.images[handle & 0xFFFF];
+    if (!ValidateImageAtomicCoordinates(ctx, *inst, texture)) {
+        return ctx.ConstU32(0U);
+    }
     const Id pointer{ctx.OpImageTexelPointer(ctx.image_u32, texture.id, coords, ctx.ConstU32(0U))};
     const auto [scope, semantics]{AtomicArgs(ctx)};
     return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, semantics, value, cmp_value);

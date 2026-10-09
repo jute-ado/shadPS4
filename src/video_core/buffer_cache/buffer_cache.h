@@ -3,15 +3,24 @@
 
 #pragma once
 
+#include <optional>
+
 #include <boost/container/small_vector.hpp>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/buffer_registration_index.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/cpu_page_write_snapshot.h"
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/buffer_cache/gpu_modified_range_owner.h"
+#include "video_core/buffer_cache/memory_invalidation_reason.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/buffer_cache/srt_overlay_reuse.h"
+#include "video_core/buffer_cache/srt_snapshot_composition_receipt.h"
+#include "video_core/buffer_cache/srt_snapshot_timing.h"
 #include "video_core/multi_level_page_table.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 
@@ -67,16 +76,54 @@ public:
         bool has_stream_leap = false;
     };
 
+    struct BufferBindingEndpoint {
+        vk::Buffer buffer;
+        vk::DeviceSize offset;
+    };
+
+    // Collects all uses of final buffer allocations for one guest command. Resolution is
+    // side-effect free; CommitBufferBindings publishes one whole-allocation dependency per
+    // allocation only after every logical binding has resolved successfully.
+    struct BufferBindingBatch {
+        struct Access {
+            Buffer* buffer;
+            vk::AccessFlags2 access_mask;
+            vk::PipelineStageFlags2 stage_mask;
+        };
+
+        boost::container::small_vector<Access, 16> accesses;
+        bool committed{};
+    };
+
+    using PreparedBufferBinding = VideoCore::PreparedBufferBinding<BufferBindingEndpoint>;
+
+    struct PreparedVertexBufferRange {
+        VAddr base_address;
+        VAddr end_address;
+        PreparedBufferBinding binding;
+
+        [[nodiscard]] size_t GetSize() const {
+            return end_address - base_address;
+        }
+    };
+
     struct PreparedVertexBuffers {
+        // False means a guest vertex descriptor was malformed and the draw must be rejected
+        // before any host vertex-buffer state is committed.
+        bool valid{true};
         Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
         Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
         Vulkan::VertexInputs<vk::Buffer> host_buffers;
         Vulkan::VertexInputs<vk::DeviceSize> host_offsets;
         Vulkan::VertexInputs<vk::DeviceSize> host_sizes;
         Vulkan::VertexInputs<vk::DeviceSize> host_strides;
+        Vulkan::VertexInputs<PreparedVertexBufferRange> ranges;
+        Vulkan::VertexInputs<u32> host_range_indices;
+        Vulkan::VertexInputs<VAddr> guest_addresses;
     };
 
     struct PreparedIndexBuffer {
+        PreparedBufferBinding binding;
         vk::Buffer buffer;
         vk::DeviceSize offset;
         vk::IndexType type;
@@ -122,23 +169,51 @@ public:
     }
 
     /// Invalidates any buffer in the logical page range.
-    void InvalidateMemory(VAddr device_addr, u64 size);
+    void InvalidateMemory(VAddr device_addr, u64 size,
+                          MemoryInvalidationReason reason = MemoryInvalidationReason::CpuWrite);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
+
+    /// Flushes exactly the requested GPU-modified range from an existing containing buffer.
+    [[nodiscard]] bool ReadMemoryExact(VAddr device_addr, u64 size);
+
+    /// Reads authoritative bytes into caller-owned memory without publishing them into mutable
+    /// guest memory or changing GPU/CPU ownership tracking.
+    [[nodiscard]] bool ReadMemorySnapshot(
+        VAddr device_addr, void* output, u64 size,
+        SrtSnapshotCompositionReceiptRequest* receipt_request = nullptr);
+
+    /// Only the owner-side stage-selection phase may share raw GPU overlays. CPU composition
+    /// and each SRT reader's mapping/epoch checks remain independent on every use.
+    [[nodiscard]] SrtOverlayReuseCache::SelectionScope BeginSrtOverlayReuseSelection() {
+        return srt_overlay_reuse.BeginSelection();
+    }
+
+    void InvalidateSrtOverlayReuse() noexcept {
+        srt_overlay_reuse.InvalidateSelection();
+    }
 
     /// Acquires host vertex buffers without recording command-buffer-local state.
     [[nodiscard]] PreparedVertexBuffers PrepareVertexBuffers(
         const Vulkan::GraphicsPipeline& pipeline,
         boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
+    /// Resolves every cache-backed vertex endpoint after all command acquisitions finish.
+    [[nodiscard]] bool FinalizeVertexBuffers(PreparedVertexBuffers& prepared,
+                                             BufferBindingBatch& binding_batch);
+
     /// Records prepared vertex buffer state on the current command buffer.
     void BindVertexBuffers(const PreparedVertexBuffers& prepared);
 
     /// Acquires the host index buffer without recording command-buffer-local state.
-    [[nodiscard]] PreparedIndexBuffer PrepareIndexBuffer(
-        u32 index_offset,
-        boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+    [[nodiscard]] std::optional<PreparedIndexBuffer> PrepareIndexBuffer(
+        u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers,
+        bool indirect);
+
+    /// Resolves the cache-backed index endpoint after all command acquisitions finish.
+    [[nodiscard]] bool FinalizeIndexBuffer(PreparedIndexBuffer& prepared,
+                                           BufferBindingBatch& binding_batch);
 
     /// Records prepared index buffer state on the current command buffer.
     void BindIndexBuffer(const PreparedIndexBuffer& prepared);
@@ -152,7 +227,24 @@ public:
     /// Obtains a buffer for the specified region.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
-                                                       BufferId buffer_id = {});
+                                                       BufferId buffer_id = {},
+                                                       bool allow_stream_buffer = true);
+
+    /// Acquires a logical range while retaining only stable stream state or a cache lookup token.
+    [[nodiscard]] PreparedBufferBinding PrepareBufferBinding(VAddr gpu_addr, u32 size,
+                                                             bool is_written,
+                                                             bool is_texel_buffer = false,
+                                                             BufferId buffer_id = {});
+
+    /// Resolves a prepared range from the final cache allocation and records its actual use.
+    [[nodiscard]] std::optional<BufferBindingEndpoint> FinalizeBufferBinding(
+        const PreparedBufferBinding& prepared, vk::AccessFlags2 access,
+        vk::PipelineStageFlags2 stage, BufferBindingBatch& binding_batch);
+
+    /// Atomically publishes the aggregate access plan after every logical binding resolves.
+    void CommitBufferBindings(
+        BufferBindingBatch& binding_batch,
+        boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBufferForImage(VAddr gpu_addr, u32 size);
@@ -166,11 +258,17 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// Return true when the exact byte range has been written by the GPU.
+    [[nodiscard]] bool IsRegionGpuModifiedExact(VAddr addr, size_t size) const;
+
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
 
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
+
+    /// Applies completed fault records at an outer GPU-owner command boundary.
+    void DrainReadyFaults();
 
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
@@ -184,19 +282,24 @@ public:
 private:
     template <typename Func>
     void ForEachBufferInRange(VAddr device_addr, u64 size, Func&& func) {
-        buffer_ranges.ForEachInRange(device_addr, size,
-                                     [&](u64 page_start, u64 page_end, BufferId id) {
-                                         Buffer& buffer = slot_buffers[id];
-                                         func(id, buffer);
-                                     });
+        buffer_ranges.OwnerForEachInRange(device_addr, size,
+                                          [&](u64 page_start, u64 page_end, BufferId id) {
+                                              Buffer& buffer = slot_buffers[id];
+                                              func(id, buffer);
+                                          });
     }
 
     inline bool IsBufferInvalid(BufferId buffer_id) const {
         return !buffer_id || slot_buffers[buffer_id].is_deleted;
     }
 
-    template <bool async>
+    template <bool async, bool exact = false>
     void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
+
+    [[nodiscard]] bool DownloadBufferMemorySnapshot(
+        VAddr device_addr, void* output, u64 size,
+        SrtSnapshotCompositionReceiptRequest* receipt_request,
+        SrtSnapshotTimingSample* timing_sample);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 
@@ -223,6 +326,11 @@ private:
 
     void TouchBuffer(const Buffer& buffer);
 
+    void RemoveGpuModifiedRanges(BufferId owner);
+
+    [[nodiscard]] GpuModifiedRangeOwner NewGpuModifiedRangeOwner(BufferId buffer_id) noexcept;
+    void AssignGpuModifiedRange(VAddr address, u64 size, BufferId buffer_id);
+
     void DeleteBuffer(BufferId buffer_id);
 
     const Vulkan::Instance& instance;
@@ -239,6 +347,8 @@ private:
     Buffer gds_buffer;
     Buffer bda_pagetable_buffer;
     CpuPageWriteTracker cpu_page_write_tracker;
+    SrtSnapshotTiming srt_snapshot_timing;
+    SrtOverlayReuseCache srt_overlay_reuse;
     DmaDirtyRangeTracker dma_dirty_ranges;
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
@@ -246,8 +356,12 @@ private:
     u64 critical_gc_memory = 0;
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<BufferId, u64> lru_cache;
-    RangeSet gpu_modified_ranges;
-    SplitRangeMap<BufferId> buffer_ranges;
+    // Keep the allocation that produced each GPU-dirty interval. A guest virtual address can be
+    // rebound to a replacement Buffer while an older readback is still pending; retaining the
+    // owner prevents a later snapshot from copying unrelated bytes from that new incarnation.
+    RangeMap<GpuModifiedRangeOwner> gpu_modified_ranges;
+    u64 next_gpu_modified_generation{1};
+    BufferRegistrationIndex<BufferId> buffer_ranges;
     PageTable page_table;
 };
 
