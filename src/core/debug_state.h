@@ -5,15 +5,16 @@
 
 #include <atomic>
 #include <mutex>
+#include <queue>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
-#include <queue>
 
 #include "common/types.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/shader_capture_provenance.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -161,6 +162,8 @@ class DebugStateImpl {
     std::vector<FrameDump> frame_dump_list{};
 
     std::vector<ShaderDump> shader_dump_list{};
+    mutable std::mutex shader_capture_provenance_mutex;
+    VideoCore::ShaderCaptureProvenanceRecorder shader_capture_provenance;
 
 public:
     float Framerate = 1.0f / 60.0f;
@@ -262,6 +265,12 @@ public:
                        vk::ShaderModule module, std::span<const u32> spv,
                        std::span<const u32> raw_code, std::span<const u32> patch_spv,
                        bool is_patched);
+
+    [[nodiscard]] std::optional<std::string> CollectShaderCaptureProvenance(
+        u64 program_hash, u32 stage, bool succeeded,
+        const VideoCore::SrtCaptureProvenance& capture);
+
+    [[nodiscard]] VideoCore::ShaderCaptureProvenanceStore GetShaderCaptureProvenance() const;
 
 private:
     std::optional<RegDump*> GetRegDump(uintptr_t base_addr, uintptr_t header_addr);

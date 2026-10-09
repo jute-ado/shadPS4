@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -26,9 +27,14 @@ public:
     };
 
     using Compiler = std::function<Result(Job)>;
+    using CompletionNotifier = std::function<void()>;
 
-    explicit AsyncCompilationQueue(Compiler compiler_)
-        : compiler{std::move(compiler_)}, worker{[this] { WorkerLoop(); }} {}
+    explicit AsyncCompilationQueue(
+        Compiler compiler_, size_t max_outstanding_ = std::numeric_limits<size_t>::max(),
+        CompletionNotifier completion_notifier_ = {})
+        : compiler{std::move(compiler_)}, max_outstanding{max_outstanding_},
+          completion_notifier{std::move(completion_notifier_)},
+          worker{[this] { WorkerLoop(); }} {}
 
     ~AsyncCompilationQueue() {
         Shutdown();
@@ -39,12 +45,18 @@ public:
 
     bool Submit(const Key& key, Job job) {
         std::scoped_lock lock{mutex};
-        if (stopped || !in_flight.emplace(key).second) {
+        if (stopped || in_flight.contains(key) || in_flight.size() >= max_outstanding) {
             return false;
         }
+        in_flight.emplace(key);
         jobs.emplace_back(key, std::move(job));
         work_ready.notify_one();
         return true;
+    }
+
+    [[nodiscard]] bool CanAccept() {
+        std::scoped_lock lock{mutex};
+        return !stopped && in_flight.size() < max_outstanding;
     }
 
     std::optional<Completion> TryTake() {
@@ -113,10 +125,15 @@ private:
                 completed.push_back({std::move(work.first), std::move(result)});
             }
             completion_ready.notify_one();
+            if (completion_notifier) {
+                completion_notifier();
+            }
         }
     }
 
     Compiler compiler;
+    size_t max_outstanding;
+    CompletionNotifier completion_notifier;
     std::mutex mutex;
     std::condition_variable work_ready;
     std::condition_variable completion_ready;

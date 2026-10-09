@@ -26,4 +26,11 @@ vk::ShaderModule Compile(std::string_view code, vk::ShaderStageFlagBits stage, v
  */
 vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device);
 
+/**
+ * @brief Creates an owned Vulkan shader module from SPIR-V bytecode.
+ * @param code The SPIR-V bytecode data.
+ * @param device The Vulkan device handle.
+ */
+vk::UniqueShaderModule CompileSPVUnique(std::span<const u32> code, vk::Device device);
+
 } // namespace Vulkan

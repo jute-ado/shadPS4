@@ -919,7 +919,7 @@ void Translator::SetDst1(const InstOperand& operand, const IR::U1& value) {
         ir.SetVcc(value);
         break;
     case OperandField::ScalarGPR:
-        ir.SetThreadBitScalarReg(IR::ScalarReg(operand.code), value);
+        ir.SetThreadBitScalarRegPair(IR::ScalarReg(operand.code), value);
         break;
     case OperandField::ExecLo:
         ir.SetExec(value);
@@ -1097,29 +1097,18 @@ template void Translator::SetDstPk<IR::F32, false>(const InstOperand& operand,
 void Translator::EmitFetch(const GcnInst& inst) {
     const auto code_sgpr_base = inst.src[0].code;
 
-#if 0
-    // Translate fetch shader inline using regular buffer bindings; useful for debugging.
-    const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-    GcnCodeSlice slice(code, code + std::numeric_limits<u32>::max());
-    GcnDecodeContext decoder;
-
-    // Decode and save instructions
-    while (!slice.atEnd()) {
-        const auto sub_inst = decoder.decodeInstruction(slice);
-        if (sub_inst.opcode == Opcode::S_SETPC_B64) {
-            // Assume we're swapping back to the main shader.
-            break;
-        }
-        TranslateInstruction(sub_inst);
-    }
-    return;
-#endif
-
     info.has_fetch_shader = true;
     info.fetch_shader_sgpr_base = code_sgpr_base;
 
     const auto fetch_data = ParseFetchShader(info);
-    ASSERT(fetch_data.has_value());
+    if (!fetch_data) {
+        if (!info.compile_guest_memory_reader.Valid()) {
+            return;
+        }
+        ASSERT_MSG(false, "Failed to parse a readable fetch shader");
+        info.translation_failed = true;
+        return;
+    }
 
     if (EmulatorSettings.IsDumpShaders()) {
         using namespace Common::FS;
@@ -1129,8 +1118,16 @@ void Translator::EmitFetch(const GcnInst& inst) {
         }
         const auto filename = fmt::format("vs_{:#018x}.fetch.bin", info.pgm_hash);
         const auto file = IOFile{dump_dir / filename, FileAccessMode::Create};
-        const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-        file.WriteRaw<u8>(code, fetch_data->size);
+        const auto code = ReadFetchShaderProgram(info, code_sgpr_base, fetch_data->size);
+        if (!code) {
+            if (!info.compile_guest_memory_reader.Valid()) {
+                return;
+            }
+            ASSERT_MSG(false, "Failed to capture a readable fetch shader for dumping");
+            info.translation_failed = true;
+            return;
+        }
+        file.WriteRaw<u8>(code->data(), code->size());
     }
 
     for (const auto& attrib : fetch_data->attributes) {

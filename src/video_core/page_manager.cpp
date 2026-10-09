@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <boost/container/small_vector.hpp>
+#include <mutex>
+#include <thread>
+#include <utility>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -11,6 +14,7 @@
 #include "core/signals.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/srt_snapshot_epoch_coordinator.h"
 
 #ifndef _WIN64
 #include <sys/mman.h>
@@ -355,6 +359,47 @@ struct PageManager::Impl {
         release_pending();
     }
 
+    [[nodiscard]] u64 BeginSnapshotEpoch() {
+        return snapshot_coordinator.BeginEpoch();
+    }
+
+    [[nodiscard]] bool BeginSnapshotPage(u64 id, VAddr address, u64 size) {
+        return snapshot_coordinator.BeginPageCopy(id, address, size,
+                                                  [this](VAddr watcher_address, u64 watcher_size) {
+                                                      UpdatePageWatchers<true, false>(
+                                                          watcher_address, watcher_size);
+                                                  });
+    }
+
+    [[nodiscard]] bool EndSnapshotPage(u64 id, VAddr address, u64 size, bool copied) {
+        return snapshot_coordinator.EndPageCopy(id, address, size, copied);
+    }
+
+    void InvalidateSnapshotEpoch(u64 id) {
+        snapshot_coordinator.InvalidateEpoch(id, [this](VAddr address, u64 size) {
+            UpdatePageWatchers<false, false>(address, size);
+        });
+    }
+
+    [[nodiscard]] bool IsSnapshotEpochValid(u64 id) const {
+        return snapshot_coordinator.IsEpochValid(id);
+    }
+
+    [[nodiscard]] bool SealSnapshotEpoch(u64 id) {
+        return snapshot_coordinator.SealEpoch(id, [this](VAddr address, u64 size) {
+            UpdatePageWatchers<false, false>(address, size);
+        });
+    }
+
+    void InvalidateSnapshotRange(VAddr address, u64 size) {
+        snapshot_coordinator.InvalidateRangeAndWait(address, size,
+                                                    [this](VAddr watcher_address,
+                                                           u64 watcher_size) {
+                                                        UpdatePageWatchers<false, false>(
+                                                            watcher_address, watcher_size);
+                                                    });
+    }
+
     std::array<PageState, NUM_ADDRESS_PAGES> cached_pages{};
 #ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
     using LockType = Common::AdaptiveMutex;
@@ -362,12 +407,70 @@ struct PageManager::Impl {
     using LockType = Common::SpinLock;
 #endif
     std::array<LockType, NUM_ADDRESS_LOCKS> locks{};
+    SrtSnapshotEpochCoordinator snapshot_coordinator;
 };
 
 PageManager::PageManager(Vulkan::Rasterizer* rasterizer_)
     : impl{std::make_unique<Impl>(rasterizer_)} {}
 
 PageManager::~PageManager() = default;
+
+PageManager::SnapshotEpoch::SnapshotEpoch(SnapshotEpoch&& other) noexcept
+    : manager{std::exchange(other.manager, nullptr)}, id{std::exchange(other.id, 0)},
+      result{other.result} {}
+
+PageManager::SnapshotEpoch& PageManager::SnapshotEpoch::operator=(SnapshotEpoch&& other) noexcept {
+    if (this != &other) {
+        (void)Seal();
+        manager = std::exchange(other.manager, nullptr);
+        id = std::exchange(other.id, 0);
+        result = other.result;
+    }
+    return *this;
+}
+
+PageManager::SnapshotEpoch::~SnapshotEpoch() {
+    (void)Seal();
+}
+
+bool PageManager::SnapshotEpoch::BeginPageCopy(VAddr address, u64 size) {
+    return manager && manager->BeginSnapshotPage(id, address, size);
+}
+
+bool PageManager::SnapshotEpoch::EndPageCopy(VAddr address, u64 size, bool copied) {
+    return manager && manager->EndSnapshotPage(id, address, size, copied);
+}
+
+void PageManager::SnapshotEpoch::Invalidate() {
+    if (manager) {
+        manager->InvalidateSnapshotEpoch(id);
+    }
+}
+
+bool PageManager::SnapshotEpoch::Valid() const {
+    return manager ? manager->IsSnapshotEpochValid(id) : result;
+}
+
+bool PageManager::SnapshotEpoch::Seal() {
+    if (manager) {
+        result = manager->SealSnapshotEpoch(id);
+        manager = nullptr;
+        id = 0;
+    }
+    return result;
+}
+
+PageManager::SnapshotEpoch PageManager::BeginSnapshotEpoch() {
+    return SnapshotEpoch{this, impl->BeginSnapshotEpoch()};
+}
+
+void PageManager::NotifyCpuWrite(VAddr address, u64 size) {
+    impl->InvalidateSnapshotRange(address, size);
+}
+
+void PageManager::PrepareForGpuUnmap(VAddr address, u64 size) {
+    impl->InvalidateSnapshotRange(address, size);
+}
 
 void PageManager::OnGpuMap(VAddr address, size_t size) {
     impl->OnMap(address, size);
@@ -377,8 +480,34 @@ void PageManager::OnGpuUnmap(VAddr address, size_t size) {
     impl->OnUnmap(address, size);
 }
 
+bool PageManager::BeginSnapshotPage(u64 id, VAddr address, u64 size) {
+    return id != 0 && impl->BeginSnapshotPage(id, address, size);
+}
+
+bool PageManager::EndSnapshotPage(u64 id, VAddr address, u64 size, bool copied) {
+    return id != 0 && impl->EndSnapshotPage(id, address, size, copied);
+}
+
+void PageManager::InvalidateSnapshotEpoch(u64 id) {
+    if (id != 0) {
+        impl->InvalidateSnapshotEpoch(id);
+    }
+}
+
+bool PageManager::IsSnapshotEpochValid(u64 id) const {
+    return id != 0 && impl->IsSnapshotEpochValid(id);
+}
+
+bool PageManager::SealSnapshotEpoch(u64 id) {
+    return id != 0 && impl->SealSnapshotEpoch(id);
+}
+
 bool PageManager::IsGpuMapped(VAddr address, size_t size) const {
     return impl->rasterizer->IsMapped(address, size);
+}
+
+u64 PageManager::GetGpuMappingToken(VAddr address, size_t size) const {
+    return impl->rasterizer->GetMappingToken(address, size);
 }
 
 template <bool track>

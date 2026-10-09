@@ -215,3 +215,15 @@ void DebugStateImpl::CollectShader(const std::string& name, Shader::LogicalStage
                                   std::vector<u32>{raw_code.begin(), raw_code.end()},
                                   std::vector<u32>{patch_spv.begin(), patch_spv.end()}, is_patched);
 }
+
+std::optional<std::string> DebugStateImpl::CollectShaderCaptureProvenance(
+    u64 program_hash, u32 stage, bool succeeded,
+    const VideoCore::SrtCaptureProvenance& capture) {
+    std::scoped_lock lock{shader_capture_provenance_mutex};
+    return shader_capture_provenance.Record(true, program_hash, stage, succeeded, capture);
+}
+
+VideoCore::ShaderCaptureProvenanceStore DebugStateImpl::GetShaderCaptureProvenance() const {
+    std::scoped_lock lock{shader_capture_provenance_mutex};
+    return shader_capture_provenance.Store();
+}

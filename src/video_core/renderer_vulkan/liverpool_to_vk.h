@@ -61,6 +61,8 @@ struct SurfaceFormatInfo {
 };
 std::span<const SurfaceFormatInfo> SurfaceFormats();
 
+bool IsSurfaceFormatSupported(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
+
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
 
 struct DepthFormatInfo {

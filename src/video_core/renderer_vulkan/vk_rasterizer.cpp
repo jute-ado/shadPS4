@@ -11,6 +11,7 @@
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/fault_range.h"
 #include "video_core/buffer_cache/memory_tracker.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/renderer_vulkan/depth_stencil_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -44,7 +45,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       buffer_cache{instance, scheduler, liverpool_, texture_cache, page_manager},
       texture_cache{instance, scheduler, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
-      pipeline_cache{instance, scheduler, liverpool} {
+      pipeline_cache{instance, scheduler, liverpool, page_manager, buffer_cache} {
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -236,6 +237,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
     const auto state = BeginRendering(pipeline);
+    RefreshImageDescriptorLayouts();
 
     VideoCore::PrepareDrawBuffersThenBindCommandState(
         [&] { return buffer_cache.PrepareVertexBuffers(*pipeline, buffer_barriers); },
@@ -296,6 +298,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
     const auto state = BeginRendering(pipeline);
+    RefreshImageDescriptorLayouts();
 
     VideoCore::Buffer* buffer{};
     u32 base{};
@@ -374,6 +377,7 @@ void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
+    pipeline_cache.BeginComputeDispatchTrace();
 
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
@@ -395,6 +399,18 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+    if (!AreComputeBufferBindingsCurrent(
+            std::span<const ComputeBufferBindingSelection>{
+                compute_buffer_binding_selections.data(),
+                compute_buffer_binding_selections.size()},
+            [this](VAddr address, u64 size) { return GetMappingToken(address, size); })) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping compute dispatch because a guest buffer mapping changed while "
+                    "resources were being bound");
+        ResetBindings();
+        return;
+    }
+    RecordPotentialShaderWrites(cs);
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
 
@@ -405,6 +421,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
+    pipeline_cache.BeginComputeDispatchTrace();
 
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
@@ -428,6 +445,20 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindPipeline(PipelineBindPoint::Compute, pipeline->Handle());
+    if (!AreComputeBufferBindingsCurrent(
+            std::span<const ComputeBufferBindingSelection>{
+                compute_buffer_binding_selections.data(),
+                compute_buffer_binding_selections.size()},
+            [this](VAddr binding_address, u64 binding_size) {
+                return GetMappingToken(binding_address, binding_size);
+            })) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping indirect compute dispatch because a guest buffer mapping changed "
+                    "while resources were being bound");
+        ResetBindings();
+        return;
+    }
+    RecordPotentialShaderWrites(pipeline->GetStage(Shader::LogicalStage::Compute));
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
 
@@ -466,6 +497,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    descriptor_image_layout_bindings.clear();
+    compute_buffer_binding_selections.clear();
 
     size_t required_buffer_infos{};
     size_t required_image_infos{};
@@ -497,7 +530,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                           stage->samplers.size());
         stage->PushUd(binding, push_data);
         PrepareAddr64PointerResidency(*stage);
-        BindBuffers(*stage, binding, push_data);
+        if (!BindBuffers(*stage, binding, push_data)) {
+            ResetBindings();
+            return false;
+        }
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
     }
@@ -698,7 +734,31 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
-void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
+void Rasterizer::RecordPotentialShaderWrites(const Shader::Info& stage) {
+    const bool enabled = EmulatorSettings.IsShaderCollect();
+    if (!enabled) {
+        return;
+    }
+    for (u32 descriptor_index = 0; descriptor_index < stage.buffers.size();
+         ++descriptor_index) {
+        const auto& desc = stage.buffers[descriptor_index];
+        if (!desc.is_written || desc.IsSpecial()) {
+            continue;
+        }
+        const auto sharp = desc.GetSharp(stage);
+        if (sharp.base_address == 0 || sharp.GetSize() == 0) {
+            continue;
+        }
+        const u64 size = memory->ClampRangeSize(sharp.base_address, desc.GetBindingSize(sharp));
+        const u64 mapping_token = GetMappingToken(sharp.base_address, size);
+        buffer_cache.RecordPotentialShaderWrite(enabled, stage.pgm_hash,
+                                                static_cast<u32>(stage.stage),
+                                                descriptor_index, mapping_token,
+                                                sharp.base_address, size);
+    }
+}
+
+bool Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
 
@@ -706,9 +766,26 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         const auto vsharp = desc.GetSharp(stage);
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
             const u64 binding_size = desc.GetBindingSize(vsharp);
-            const u64 size = memory->ClampRangeSize(vsharp.base_address, binding_size);
-            const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
-            buffer_bindings.emplace_back(buffer_id, vsharp, size);
+            const auto binding_range = ClampComputeBufferBindingRange(
+                vsharp.base_address, binding_size,
+                [this](VAddr address, u64 size) { return memory->ClampRangeSize(address, size); });
+            if (stage.stage == Shader::Stage::Compute) {
+                const auto selection = SelectComputeBufferBinding(
+                    binding_range,
+                    [this](VAddr address, u64 size) { return GetMappingToken(address, size); });
+                if (!selection) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Skipping compute dispatch with unmapped or mixed-generation "
+                                "guest buffer range address={:#x}, declared_size={:#x}, "
+                                "clamped_size={:#x}",
+                                binding_range.address, binding_size, binding_range.size);
+                    return false;
+                }
+                compute_buffer_binding_selections.emplace_back(*selection);
+            }
+            const auto buffer_id =
+                buffer_cache.FindBuffer(binding_range.address, binding_range.size);
+            buffer_bindings.emplace_back(buffer_id, vsharp, binding_range.size);
         } else {
             buffer_bindings.emplace_back(VideoCore::BufferId{}, vsharp, 0);
         }
@@ -799,6 +876,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
     }
+    return true;
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
@@ -811,40 +889,52 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
     boost::container::small_vector<std::pair<bool, bool>, 8> image_native_extent_requirements;
-    const auto append_invalid_image_binding = [&] {
-        image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
-        image_descriptor_array_sizes.push_back(1);
+    const auto append_invalid_image_slot = [&](bool is_storage) {
+        auto& [_, desc] =
+            image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+        desc.type = is_storage ? VideoCore::TextureCache::BindingType::Storage
+                               : VideoCore::TextureCache::BindingType::Texture;
         image_native_extent_requirements.emplace_back(false, false);
     };
-
     for (const auto& image_desc : stage.images) {
-        const auto tsharp = image_desc.GetSharp(stage);
-        if (texture_cache.IsMeta(tsharp.Address())) {
-            LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
-        }
-
-        const auto data_fmt = tsharp.GetDataFmt();
-        const auto num_fmt = tsharp.GetNumberFmt();
-        if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            append_invalid_image_binding();
-            continue;
-        }
-
-        if (!memory->IsValidGpuMapping(tsharp.Address(), 0) || tsharp.pitch < tsharp.width ||
-            !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt)) {
-            LOG_WARNING(Render_Vulkan,
-                        "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
-                        "data_format={}, num_format={}",
-                        tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
-                        static_cast<u32>(num_fmt));
-            append_invalid_image_binding();
-            continue;
-        }
-
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
+        const bool is_dynamic_descriptor_table = image_desc.dynamic_descriptor_count != 0;
+        ASSERT_MSG(!is_dynamic_descriptor_table ||
+                       mip_fallback_mode != Shader::MipStorageFallbackMode::DynamicIndex,
+                   "Dynamic image tables cannot also use mip descriptor arrays");
 
-        for (auto i = 0; i < num_bindings; i++) {
+        for (u32 i = 0; i < num_bindings; ++i) {
+            const u32 table_index = is_dynamic_descriptor_table ? i : 0;
+            if (is_dynamic_descriptor_table &&
+                !image_desc.IsTableEntryCompatible(stage, table_index)) {
+                append_invalid_image_slot(image_desc.is_written);
+                continue;
+            }
+            const auto tsharp = image_desc.GetSharp(stage, table_index);
+            if (texture_cache.IsMeta(tsharp.Address())) {
+                LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
+            }
+
+            const auto data_fmt = tsharp.GetDataFmt();
+            const auto num_fmt = tsharp.GetNumberFmt();
+            if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
+                append_invalid_image_slot(image_desc.is_written);
+                continue;
+            }
+
+            if (!memory->IsValidGpuMapping(tsharp.Address(), 0) || tsharp.pitch < tsharp.width ||
+                !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
+                !LiverpoolToVK::IsSurfaceFormatSupported(data_fmt, num_fmt)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
+                            "data_format={}, num_format={}",
+                            tsharp.Address(), tsharp.pitch, tsharp.width,
+                            static_cast<u32>(data_fmt), static_cast<u32>(num_fmt));
+                append_invalid_image_slot(image_desc.is_written);
+                continue;
+            }
+
             auto& [image_id, desc] = image_bindings.emplace_back(
                 std::piecewise_construct, std::tuple{}, std::tuple{tsharp, image_desc});
             image_native_extent_requirements.emplace_back(image_desc.uses_integer_coordinates,
@@ -939,6 +1029,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
+            descriptor_image_layout_bindings.emplace_back(
+                static_cast<u32>(image_infos.size() - 1), image_id.index);
         }
     }
 
@@ -949,7 +1041,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
-        set_write.dstBinding = binding.unified;
+        set_write.dstBinding = VideoCore::ConsumeDescriptorBinding(binding.unified);
         set_write.dstArrayElement = 0;
         set_write.descriptorCount = array_size;
         set_write.descriptorType =
@@ -958,7 +1050,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         image_info_idx += array_size;
         image_binding_idx += array_size;
-        binding.unified += array_size;
     }
 
     for (const auto& sampler : stage.samplers) {
@@ -979,6 +1070,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
     }
+}
+
+void Rasterizer::RefreshImageDescriptorLayouts() {
+    RefreshDescriptorImageLayouts(
+        image_infos, descriptor_image_layout_bindings, [this](const u32 image_index) {
+            return texture_cache.GetImage(VideoCore::ImageId{image_index}).backing->state.layout;
+        });
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
@@ -1231,11 +1329,16 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
     return value;
 }
 
+void Rasterizer::NotifyGuestBackingWrite(VAddr addr, u64 size) {
+    page_manager.NotifyCpuWrite(addr, size);
+}
+
 bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
+    page_manager.NotifyCpuWrite(addr, size);
     buffer_cache.InvalidateMemory(addr, size);
     texture_cache.InvalidateMemory(addr, size);
     return true;
@@ -1269,28 +1372,56 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
     return boost::icl::contains(mapped_ranges, range);
 }
 
+u64 Rasterizer::GetMappingToken(VAddr addr, u64 size) {
+    if (size == 0 || static_cast<u64>(addr) > std::numeric_limits<u64>::max() - size) {
+        return 0;
+    }
+    const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+
+    Common::RecursiveSharedLock lock{mapped_ranges_mutex};
+    if (!boost::icl::contains(mapped_ranges, range)) {
+        return 0;
+    }
+    const auto token = mapping_tokens.find(addr);
+    if (token == mapping_tokens.end() || token->first.lower() > addr ||
+        token->first.upper() < addr + size) {
+        return 0;
+    }
+    return token->second;
+}
+
 void Rasterizer::MapMemory(VAddr addr, u64 size) {
     {
         std::scoped_lock lock{mapped_ranges_mutex};
-        mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        mapped_ranges += range;
+        mapping_tokens.set(std::make_pair(range, next_mapping_token));
+        if (++next_mapping_token == 0) {
+            ++next_mapping_token;
+        }
     }
     page_manager.OnGpuMap(addr, size);
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    // Snapshot watchers must be invalidated and any in-progress copy must finish before buffer
+    // invalidation can read or publish guest backing. Keep the mapping registered until all cache
+    // invalidation that relies on it has completed.
+    page_manager.PrepareForGpuUnmap(addr, size);
+
     // Buffer invalidation may read the guest backing, so it must finish before the VMM removes it.
     buffer_cache.InvalidateMemory(addr, size);
 
     // Images may still be referenced by commands being recorded on the GPU thread. Queue their
     // eviction in the same command stream so it cannot race resource lookup or recording. This
     // must remain non-blocking: guest VMM threads are allowed to unmap while GPU work runs.
-    liverpool->SendCommand<false>([this, addr, size] {
-        texture_cache.UnmapMemory(addr, size);
-    });
+    liverpool->SendCommand<false>([this, addr, size] { texture_cache.UnmapMemory(addr, size); });
     page_manager.OnGpuUnmap(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};
-        mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        mapped_ranges -= range;
+        mapping_tokens.erase(range);
     }
 }
 

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -162,6 +164,57 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
         dest += copy_size;
         ++vma;
     }
+}
+
+bool MemoryManager::TryReadBacking(const void* address, void* data, u64 size) {
+    if (size == 0) {
+        return true;
+    }
+    if (!address || !data) {
+        return false;
+    }
+
+    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    std::shared_lock lk{mutex};
+    if (!Detail::IsCompleteReadableBackingRange(vma_map, virtual_addr, size)) {
+        return false;
+    }
+
+    std::memcpy(data, address, size);
+    return true;
+}
+
+bool MemoryManager::CanWriteBacking(std::span<const GuestMemoryRange> ranges) {
+    std::shared_lock lk{mutex};
+    return Detail::AreCompleteWritableBackingRanges(vma_map, ranges);
+}
+
+bool MemoryManager::TryClearBacking(std::span<const GuestMemoryRange> ranges) {
+    std::shared_lock lk{mutex};
+    if (!Detail::AreCompleteWritableBackingRanges(vma_map, ranges)) {
+        return false;
+    }
+
+    for (const auto& range : ranges) {
+        if (range.size != 0) {
+            std::memset(reinterpret_cast<void*>(range.address), 0, range.size);
+        }
+    }
+    return true;
+}
+
+bool MemoryManager::TryWriteGuest(std::span<const GuestMemoryWrite> writes) {
+    std::shared_lock lk{mutex};
+    if (!Detail::AreCompleteWritableGuestWrites(vma_map, writes)) {
+        return false;
+    }
+
+    for (const auto& write : writes) {
+        if (write.size != 0) {
+            std::memcpy(reinterpret_cast<void*>(write.address), write.data, write.size);
+        }
+    }
+    return true;
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
@@ -896,6 +949,31 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
     // TRACK_FREE(virtual_addr, "VMEM");
 
     return ORBIS_OK;
+}
+
+bool MemoryManager::RequiresSubmissionBoundaryBeforeUnmapping(VAddr virtual_addr, u64 size) {
+    if (size == 0) {
+        return false;
+    }
+
+    virtual_addr = Common::AlignDown(virtual_addr, 16_KB);
+    size = Common::AlignUp(size, 16_KB);
+
+    std::shared_lock lock{mutex};
+    if (!IsValidMapping(virtual_addr, size)) {
+        return false;
+    }
+
+    u64 checked_size = 0;
+    while (checked_size < size) {
+        const VAddr current_addr = virtual_addr + checked_size;
+        const auto& vma = FindVMA(current_addr)->second;
+        if (Core::RequiresSubmissionBoundaryBeforeUnmapping(vma.prot)) {
+            return true;
+        }
+        checked_size += std::min(vma.base + vma.size - current_addr, size - checked_size);
+    }
+    return false;
 }
 
 s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {

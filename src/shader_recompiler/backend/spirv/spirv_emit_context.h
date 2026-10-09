@@ -297,9 +297,12 @@ public:
         Id id;
         Id sampled_type;
         Id image_type;
+        Id element_pointer_type;
         AmdGpu::ImageType view_type;
+        u32 descriptor_count{};
         bool is_integer = false;
         bool is_storage = false;
+        bool is_dynamic_descriptor_table = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
 

@@ -90,9 +90,10 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     const u32 shared_memory_size = cs_info.shared_memory_size;
     const u32 threadgroup_size =
         cs_info.workgroup_size[0] * cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
-    // The compiler can only omit barriers when the local workgroup size is the same as the HW
-    // subgroup.
-    if (shared_memory_size == 0 || threadgroup_size != GcnSubgroupSize ||
+    // A guest compiler may omit explicit barriers when the entire threadgroup fits in one
+    // wave64. A narrower host subgroup does not preserve that implicit LDS ordering, so restore
+    // barriers for every one-wave guest threadgroup, including groups smaller than 64 threads.
+    if (shared_memory_size == 0 || threadgroup_size > GcnSubgroupSize ||
         !profile.needs_lds_barriers) {
         return;
     }

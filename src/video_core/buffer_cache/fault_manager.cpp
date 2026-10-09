@@ -161,7 +161,13 @@ void FaultManager::ProcessFaultBuffer() {
     scheduler.DeferOperation([this, mapped, area = current_area] {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
-        const u32 fault_count = fault_buf[0];
+        const u64 reported_fault_count = fault_buf[0];
+        const u32 fault_count = BoundDmaFaultCount(reported_fault_count, PageFaultAreaSize);
+        if (reported_fault_count > fault_count) {
+            LOG_WARNING(Render_Vulkan,
+                        "Truncated GPU fault list from {} to {} stored page address(es)",
+                        reported_fault_count, fault_count);
+        }
         const VAddr address_space_size = caching_num_pages * caching_pagesize;
         u32 invalid_fault_count = 0;
         VAddr first_invalid_fault = 0;

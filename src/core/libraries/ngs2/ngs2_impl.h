@@ -3,11 +3,16 @@
 
 #pragma once
 
+#include <optional>
+
 #include "core/libraries/kernel/threads/pthread.h"
 
 namespace Libraries::Ngs2 {
 
 struct OrbisNgs2RackOption;
+struct OrbisNgs2BufferAllocator;
+struct OrbisNgs2RenderBufferInfo;
+struct OrbisNgs2VoiceParamHeader;
 
 static const int ORBIS_NGS2_SYSTEM_NAME_LENGTH = 16;
 static const int ORBIS_NGS2_RACK_NAME_LENGTH = 16;
@@ -32,9 +37,23 @@ struct OrbisNgs2SystemOption {
     u32 aReserved[6];
 };
 
+constexpr u32 OrbisNgs2DefaultMaxGrainSamples = 512;
+constexpr u32 OrbisNgs2DefaultNumGrainSamples = 256;
+constexpr u32 OrbisNgs2DefaultSampleRate = 48000;
+constexpr size_t MaxDestroyedHandleTombstones = 256;
+
+struct SystemRuntimeSnapshot {
+    u32 max_grain_samples{};
+    u32 num_grain_samples{};
+    u32 sample_rate{};
+    u64 generation{};
+};
+
 using OrbisNgs2BufferAllocHandler =
     s32 PS4_SYSV_ABI (*)(OrbisNgs2ContextBufferInfo* io_buffer_info);
 using OrbisNgs2BufferFreeHandler = s32 PS4_SYSV_ABI (*)(OrbisNgs2ContextBufferInfo* io_buffer_info);
+using OrbisNgs2RuntimeReadHandler = bool (*)(uintptr_t address, void* destination, size_t size,
+                                             void* context);
 
 struct OrbisNgs2SystemInfo {
     char name[ORBIS_NGS2_SYSTEM_NAME_LENGTH]; // 0
@@ -177,7 +196,33 @@ void* MemoryClear(void* buffer, size_t size);
 s32 SystemCleanup(OrbisNgs2Handle systemHandle, OrbisNgs2ContextBufferInfo* outInfo);
 s32 SystemSetup(const OrbisNgs2SystemOption* option, OrbisNgs2ContextBufferInfo* hostBufferInfo,
                 OrbisNgs2BufferFreeHandler hostFree, OrbisNgs2Handle* outHandle);
+s32 SystemCreateWithAllocator(const OrbisNgs2SystemOption* option,
+                              const OrbisNgs2BufferAllocator* allocator,
+                              OrbisNgs2Handle* outHandle);
+s32 RackCreate(OrbisNgs2Handle systemHandle, u32 rackId, const OrbisNgs2RackOption* option,
+               const OrbisNgs2ContextBufferInfo* bufferInfo, OrbisNgs2BufferFreeHandler hostFree,
+               OrbisNgs2Handle* outHandle);
+s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u32 rackId,
+                            const OrbisNgs2RackOption* option,
+                            const OrbisNgs2BufferAllocator* allocator,
+                            OrbisNgs2Handle* outHandle);
+s32 RackDestroy(OrbisNgs2Handle rackHandle, OrbisNgs2ContextBufferInfo* outBufferInfo);
+s32 RackGetVoiceHandle(OrbisNgs2Handle rackHandle, u32 voiceIndex, OrbisNgs2Handle* outHandle);
+s32 RackQueryBufferSize(u32 rackId, const OrbisNgs2RackOption* option,
+                        OrbisNgs2ContextBufferInfo* outBufferInfo);
 s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
                         OrbisNgs2ContextBufferInfo* outBufferInfo);
+s32 SystemRender(OrbisNgs2Handle systemHandle, const OrbisNgs2RenderBufferInfo* bufferInfo,
+                 u32 numBufferInfo);
+s32 VoiceControl(OrbisNgs2Handle voiceHandle, const OrbisNgs2VoiceParamHeader* paramList,
+                 OrbisNgs2RuntimeReadHandler readHandler, void* readContext);
+s32 VoiceGetState(OrbisNgs2Handle voiceHandle, void* outState, size_t stateSize);
+s32 VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* outStateFlags);
+[[nodiscard]] std::optional<SystemRuntimeSnapshot> SnapshotSystemRuntime(
+    OrbisNgs2Handle systemHandle);
+[[nodiscard]] std::optional<SystemRuntimeSnapshot> SnapshotSystemRuntime(
+    OrbisNgs2Handle systemHandle, u64 expectedGeneration);
+
+void ResetRuntimeForTesting();
 
 } // namespace Libraries::Ngs2

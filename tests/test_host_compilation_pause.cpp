@@ -118,10 +118,53 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
 
 TEST(PersistentShaderCache, BackendSemanticChangesInvalidateStoredSpirv) {
     const auto source = ReadSource(SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH);
+    const auto graphics_serialization =
+        ReadSource(SHADPS4_GRAPHICS_PIPELINE_SERIALIZATION_SOURCE_PATH);
+    const auto specialization = ReadSource(SHADPS4_SPECIALIZATION_SERIALIZATION_SOURCE_PATH);
 
     ASSERT_FALSE(source.empty());
-    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 4u;"),
+    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 7u;"),
+               std::string::npos);
+    EXPECT_NE(source.find("static constexpr u32 ShaderMetaVersion = 11u;"),
+               std::string::npos);
+    EXPECT_NE(source.find("static constexpr u32 PipelineKeyVersion = 5u;"),
               std::string::npos);
+    EXPECT_NE(graphics_serialization.find("sdata.Write(fragment)"), std::string::npos);
+    EXPECT_NE(graphics_serialization.find("sdata.Read(fragment)"), std::string::npos);
+    const auto serialize = specialization.find("void StageSpecialization::Serialize");
+    const auto deserialize = specialization.find("bool StageSpecialization::Deserialize", serialize);
+    ASSERT_NE(serialize, std::string::npos);
+    ASSERT_NE(deserialize, std::string::npos);
+    EXPECT_NE(specialization.substr(serialize, deserialize - serialize).find("spec.Write(user_data_mask)"),
+              std::string::npos);
+    EXPECT_NE(specialization.substr(serialize, deserialize - serialize).find("spec.Write(images)"),
+              std::string::npos);
+    EXPECT_NE(specialization.substr(deserialize).find("spec.Read(user_data_mask)"), std::string::npos);
+    EXPECT_NE(specialization.substr(deserialize).find("spec.Read(images)"), std::string::npos);
+}
+
+TEST(GraphicsPipelineLifetime, OwnsAuxiliaryShaderModulesThroughPipelineCreation) {
+    const auto source = ReadSource(SHADPS4_GRAPHICS_PIPELINE_SOURCE_PATH);
+
+    const auto owned_modules = source.find("auxiliary_shader_modules");
+    const auto compile_owned = source.find("CompileSPVUnique(code");
+    const auto compile_tcs = source.find("compile_auxiliary_spv(sdata.tcs");
+    const auto compile_tes = source.find("compile_auxiliary_spv(sdata.tes");
+    const auto compile_fragment = source.find("compile_auxiliary_spv(sdata.fragment");
+    const auto create_pipeline = source.find("createGraphicsPipelineUnique");
+
+    ASSERT_NE(owned_modules, std::string::npos);
+    ASSERT_NE(compile_owned, std::string::npos);
+    ASSERT_NE(compile_tcs, std::string::npos);
+    ASSERT_NE(compile_tes, std::string::npos);
+    ASSERT_NE(compile_fragment, std::string::npos);
+    ASSERT_NE(create_pipeline, std::string::npos);
+    EXPECT_LT(owned_modules, compile_tcs);
+    EXPECT_LT(owned_modules, compile_owned);
+    EXPECT_LT(compile_tcs, create_pipeline);
+    EXPECT_LT(compile_tes, create_pipeline);
+    EXPECT_LT(compile_fragment, create_pipeline);
+    EXPECT_EQ(source.find(".module = CompileSPV(sdata."), std::string::npos);
 }
 
 } // namespace

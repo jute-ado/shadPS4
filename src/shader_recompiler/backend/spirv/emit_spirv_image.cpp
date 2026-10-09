@@ -105,6 +105,53 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
+Id EmitImageSampleExplicitLodDynamic(EmitContext& ctx, IR::Inst* inst, u32 handle,
+                                     Id descriptor_index, Id coords, Id lod,
+                                     const IR::Value& offset) {
+    const auto& texture = ctx.images[handle & 0xFFFF];
+    ASSERT(texture.is_dynamic_descriptor_table && texture.descriptor_count != 0);
+
+    const Id in_bounds_label = ctx.OpLabel();
+    const Id out_of_bounds_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    const Id in_bounds =
+        ctx.OpULessThan(ctx.U1[1], descriptor_index, ctx.ConstU32(texture.descriptor_count));
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(in_bounds, in_bounds_label, out_of_bounds_label);
+
+    // In-range descriptor access. Keep a unique SSA index for this use so NonUniform cannot
+    // accidentally contaminate another access that happens to share the guest value.
+    ctx.AddLabel(in_bounds_label);
+    const Id nonuniform_index =
+        ctx.OpIAdd(ctx.U32[1], descriptor_index, ctx.u32_zero_value);
+    ctx.Decorate(nonuniform_index, spv::Decoration::NonUniform);
+    const Id image_pointer =
+        ctx.OpAccessChain(texture.element_pointer_type, texture.id, nonuniform_index);
+    ctx.Decorate(image_pointer, spv::Decoration::NonUniform);
+    const Id image = ctx.OpLoad(texture.image_type, image_pointer);
+    ctx.Decorate(image, spv::Decoration::NonUniform);
+    const Id result_type = texture.data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
+    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    ImageOperands operands;
+    operands.Add(spv::ImageOperandsMask::Lod, lod);
+    operands.AddOffset(ctx, offset);
+    const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
+                                                    operands.mask, operands.operands);
+    const Id typed_sample = texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+    ctx.OpBranch(merge_label);
+
+    // Do not form an OpAccessChain for an unsupported guest index. Returning zero is explicit,
+    // deterministic partial emulation and cannot turn the supported host window into a guessed
+    // guest-table length.
+    ctx.AddLabel(out_of_bounds_label);
+    const Id zero = ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f);
+    ctx.OpBranch(merge_label);
+
+    ctx.AddLabel(merge_label);
+    return ctx.OpPhi(ctx.F32[4], typed_sample, in_bounds_label, zero, out_of_bounds_label);
+}
+
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id bias, const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
