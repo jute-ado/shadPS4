@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <bit>
 #include <limits>
 
 #include "common/types.h"
@@ -24,8 +26,20 @@ constexpr bool IsProcessableDmaFaultRange(VAddr start, VAddr end, VAddr address_
 }
 
 template <typename BufferCache>
-void MakeDmaFaultRangeResident(BufferCache& buffer_cache, VAddr start, u32 size) {
-    buffer_cache.FindBuffer(start, size);
+void MakeDmaFaultRangeResident(BufferCache& buffer_cache, VAddr start, u32 size,
+                               u64 cache_page_size = 16_KB) {
+    if (cache_page_size == 0 || !std::has_single_bit(cache_page_size)) {
+        return;
+    }
+    VAddr segment_start = start;
+    u32 remaining = size;
+    while (remaining != 0) {
+        const u64 page_remaining = cache_page_size - (segment_start & (cache_page_size - 1));
+        const u32 segment_size = static_cast<u32>(std::min<u64>(remaining, page_remaining));
+        buffer_cache.FindBuffer(segment_start, segment_size);
+        segment_start += segment_size;
+        remaining -= segment_size;
+    }
     buffer_cache.SynchronizeBuffersInRange(start, size);
 }
 

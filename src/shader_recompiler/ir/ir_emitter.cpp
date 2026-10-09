@@ -994,8 +994,17 @@ U32 IREmitter::Pack10_11_11(const AmdGpu::NumberFormat number_format, const Valu
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst<U32>(Opcode::PackUfloat10_11_11, vector);
+    case AmdGpu::NumberFormat::Uint:
+    case AmdGpu::NumberFormat::Sint: {
+        const auto x = BitCast<U32>(F32{CompositeExtract(vector, 0)});
+        const auto y = BitCast<U32>(F32{CompositeExtract(vector, 1)});
+        const auto z = BitCast<U32>(F32{CompositeExtract(vector, 2)});
+        auto packed = BitFieldInsert(Imm32(0u), x, Imm32(0), Imm32(11));
+        packed = BitFieldInsert(packed, y, Imm32(11), Imm32(11));
+        return BitFieldInsert(packed, z, Imm32(22), Imm32(10));
+    }
     default:
-        UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
+        UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", static_cast<u32>(number_format));
     }
 }
 
@@ -1033,8 +1042,16 @@ Value IREmitter::Unpack10_11_11(const AmdGpu::NumberFormat number_format, const 
     switch (number_format) {
     case AmdGpu::NumberFormat::Float:
         return Inst(Opcode::UnpackUfloat10_11_11, value);
+    case AmdGpu::NumberFormat::Uint:
+    case AmdGpu::NumberFormat::Sint: {
+        const bool is_signed = number_format == AmdGpu::NumberFormat::Sint;
+        const auto x = BitFieldExtract(value, Imm32(0), Imm32(11), is_signed);
+        const auto y = BitFieldExtract(value, Imm32(11), Imm32(11), is_signed);
+        const auto z = BitFieldExtract(value, Imm32(22), Imm32(10), is_signed);
+        return CompositeConstruct(BitCast<F32>(x), BitCast<F32>(y), BitCast<F32>(z));
+    }
     default:
-        UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
+        UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", static_cast<u32>(number_format));
     }
 }
 

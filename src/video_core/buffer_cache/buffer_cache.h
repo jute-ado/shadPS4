@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <boost/container/small_vector.hpp>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
@@ -12,6 +14,7 @@
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/buffer_cache/readback_prefetch.h"
 #include "video_core/multi_level_page_table.h"
 
 namespace AmdGpu {
@@ -157,6 +160,9 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// Submits bounded readbacks for recently fault-hot Relaxed-mode windows.
+    void PrefetchHotReadbacks();
+
 private:
     template <typename Func>
     void ForEachBufferInRange(VAddr device_addr, u64 size, Func&& func) {
@@ -201,6 +207,38 @@ private:
 
     void DeleteBuffer(BufferId buffer_id);
 
+    void MarkGpuModifiedRange(VAddr address, u64 size);
+
+    enum class ReadbackPrefetchSubmitDisposition : u8 {
+        Submitted,
+        NoWork,
+        Retry,
+    };
+
+    ReadbackPrefetchSubmitDisposition SubmitReadbackPrefetch(const ReadbackPrefetchPlan& plan);
+
+    void FinalizeReadbackPrefetch(u64 token);
+
+    void FinalizeCompletedReadbackPrefetches();
+
+    static constexpr u32 MaxReadbackPrefetchCopies = 64;
+
+    struct PendingReadbackPrefetchCopy {
+        VAddr guest_address{};
+        u64 download_offset{};
+        u64 size{};
+    };
+
+    struct PendingReadbackPrefetch {
+        bool occupied{};
+        ReadbackPrefetchPlan plan{};
+        u8* download{};
+        u64 download_offset{};
+        u64 submission_tick{};
+        std::array<PendingReadbackPrefetchCopy, MaxReadbackPrefetchCopies> copies{};
+        u32 copy_count{};
+    };
+
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
     AmdGpu::Liverpool* liverpool;
@@ -223,6 +261,9 @@ private:
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<BufferId, u64> lru_cache;
     RangeSet gpu_modified_ranges;
+    RelaxedReadbackPrefetchTracker readback_prefetch_tracker;
+    bool readback_prefetch_active{};
+    std::array<PendingReadbackPrefetch, MaxReadbackPrefetchHotWindows> pending_readback_prefetches{};
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
 };

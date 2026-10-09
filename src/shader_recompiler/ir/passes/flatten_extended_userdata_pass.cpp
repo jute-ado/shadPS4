@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <xbyak/xbyak.h>
@@ -22,16 +25,27 @@
 #include "shader_recompiler/ir/srt_gvn_table.h"
 #include "shader_recompiler/ir/value.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #ifdef ARCH_X86_64
 
 using namespace Xbyak::util;
 
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
 static const u8* g_srt_codegen_start = nullptr;
+static std::mutex g_srt_codegen_mutex;
+
+namespace {
+void EnsureSrtWalkerSignalHandlerRegistered();
+}
 
 namespace Shader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+    EnsureSrtWalkerSignalHandlerRegistered();
+    std::lock_guard lock{g_srt_codegen_mutex};
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
@@ -67,13 +81,36 @@ static void DumpSrtProgram(const Shader::Info& info, const u8* code, size_t code
     }
 }
 
+static bool SrtWalkerPatchAlreadyApplied(const u8* code) {
+    static constexpr std::array<u8, 3> ZeroRdi{0x48, 0x31, 0xFF};
+    static constexpr std::array<u8, 3> ZeroR10d{0x45, 0x31, 0xD2};
+    return std::equal(ZeroRdi.begin(), ZeroRdi.end(), code) ||
+           std::equal(ZeroR10d.begin(), ZeroR10d.end(), code);
+}
+
+static void FlushSrtWalkerInstructionCache(u8* code, size_t size) {
+#ifdef _WIN32
+    ::FlushInstructionCache(::GetCurrentProcess(), code, size);
+#else
+    __builtin___clear_cache(reinterpret_cast<char*>(code), reinterpret_cast<char*>(code + size));
+#endif
+}
+
 static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
+    std::lock_guard lock{g_srt_codegen_mutex};
     // Only handle if the fault address is within the SRT code range
     const u8* code_start = g_srt_codegen_start;
     const u8* code_end = code_start + g_srt_codegen.getSize();
     const void* code = Common::GetRip(context);
     if (code < code_start || code >= code_end) {
         return false; // Not in SRT code range
+    }
+
+    // Another worker may already have patched the same faulting instruction while this exception
+    // was waiting for the code-generator lock. Resuming at the idempotent zeroing instruction is
+    // sufficient; trying to decode it as the original load would trip the invariant below.
+    if (SrtWalkerPatchAlreadyApplied(reinterpret_cast<const u8*>(code))) {
+        return true;
     }
 
     // Patch instruction to zero register
@@ -112,11 +149,23 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
 
     // Fill nops
     memset(code_patch + patch_size, 0x90, len - patch_size);
+    FlushSrtWalkerInstructionCache(code_patch, len);
 
     LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}", code,
                 fault_address);
 
     return true;
+}
+
+void EnsureSrtWalkerSignalHandlerRegistered() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        g_srt_codegen_start = g_srt_codegen.getCurr();
+        auto* signals = Core::Signals::Instance();
+        // Run after the memory invalidation handler.
+        constexpr u32 priority = 1;
+        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
+    });
 }
 
 using namespace Shader;
@@ -206,14 +255,8 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
         return;
     }
 
-    // Register the signal handler for SRT walker, if not already registered
-    if (g_srt_codegen_start == nullptr) {
-        g_srt_codegen_start = c.getCurr();
-        auto* signals = Core::Signals::Instance();
-        // Call after the memory invalidation handler
-        constexpr u32 priority = 1;
-        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
-    }
+    EnsureSrtWalkerSignalHandlerRegistered();
+    std::lock_guard lock{g_srt_codegen_mutex};
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;

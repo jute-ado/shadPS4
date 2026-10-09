@@ -64,6 +64,24 @@ target_compile_features(shadps4_renderdoc_capture_state_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_renderdoc_capture_state_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_renderdoc_capture_state_test)
 
+add_executable(shadps4_pixel_format_test
+    test_pixel_format.cpp
+)
+target_include_directories(shadps4_pixel_format_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pixel_format_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_pixel_format_test PRIVATE
+    SHADPS4_PIXEL_FORMAT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/amdgpu/pixel_format.cpp"
+    SHADPS4_IMAGE_INFO_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image_info.cpp"
+)
+target_link_libraries(shadps4_pixel_format_test PRIVATE
+    GTest::gtest_main
+    fmt::fmt
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_pixel_format_test)
+
 add_executable(shadps4_ipc_capabilities_test
     test_ipc_capabilities.cpp
 )
@@ -71,6 +89,10 @@ target_include_directories(shadps4_ipc_capabilities_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_ipc_capabilities_test PRIVATE
+    SHADPS4_IPC_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/ipc/ipc.cpp"
+    SHADPS4_PRESENTER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_presenter.cpp"
+)
 target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
 
@@ -240,6 +262,7 @@ target_compile_definitions(shadps4_host_compilation_pause_test PRIVATE
     SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
     SHADPS4_PIPELINE_CACHE_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.h"
     SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp"
+    SHADPS4_LIVERPOOL_TO_VK_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/liverpool_to_vk.cpp"
     SHADPS4_EMULATOR_SETTINGS_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/core/emulator_settings.h"
     SHADPS4_EMULATOR_SETTINGS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp"
 )
@@ -300,6 +323,11 @@ target_include_directories(shadps4_buffer_residency_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_buffer_residency_test PRIVATE
+    SHADPS4_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+    SHADPS4_LIVERPOOL_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/amdgpu/liverpool.cpp"
+    SHADPS4_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+)
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
 
@@ -310,6 +338,15 @@ target_include_directories(shadps4_buffer_access_range_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_buffer_access_range_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_buffer_access_range_test PRIVATE
+    SHADPS4_RESOURCE_TRACKING_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/resource_tracking_pass.cpp"
+    SHADPS4_FLATTEN_USERDATA_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp"
+    SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp"
+    SHADPS4_LOWER_BUFFER_FORMAT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/lower_buffer_format_to_raw.cpp"
+    SHADPS4_IR_EMITTER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/ir_emitter.cpp"
+    SHADPS4_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    SHADPS4_SPIRV_CONTEXT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp"
+)
 target_link_libraries(shadps4_buffer_access_range_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_access_range_test)
 

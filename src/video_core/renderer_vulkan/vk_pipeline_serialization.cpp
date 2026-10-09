@@ -115,6 +115,13 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
 
+    // SRT walkers contain host machine code and are not portable across process lifetimes. The
+    // serialized bytes are consumed by PersistentSrtInfo::Deserialize, but shaders that used a
+    // walker must be recompiled so a fresh walker is generated for this process.
+    if (info.srt_info.walker_func_size != 0) {
+        return false;
+    }
+
     fetch_shader_data = spec.fetch_shader_data;
     return true;
 }
@@ -438,7 +445,9 @@ bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
     srt.Read(this, sizeof(*this));
 
     if (walker_func_size) {
-        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        // Persisted walkers are host machine code. Do not copy them into executable memory; the
+        // shader metadata loader rejects this entry and recompiles it from guest code instead.
+        walker_func = nullptr;
         ar.Advance(walker_func_size);
     }
 

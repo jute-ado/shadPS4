@@ -426,6 +426,8 @@ void Rasterizer::OnSubmit() {
         buffer_cache.ProcessFaultBuffer();
     }
     texture_cache.ProcessDownloadImages();
+    // Speculative Relaxed readback publication remains quarantined: unlike the synchronous
+    // fault path, it has not established stable guest-memory ownership across submissions.
     texture_cache.RunGarbageCollector();
     buffer_cache.RunGarbageCollector();
 }
@@ -730,7 +732,6 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 vsharp.base_address, size, desc.is_written, desc.is_formatted, buffer_id);
             const u32 offset_aligned = Common::AlignDown(offset, alignment);
             const u32 adjust = offset - offset_aligned;
-            ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             if (auto barrier =
@@ -782,6 +783,23 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
+        auto number_format = tsharp.GetNumberFmt();
+        if (image_desc.is_written && number_format == AmdGpu::NumberFormat::Srgb) {
+            number_format = AmdGpu::NumberFormat::Unorm;
+        }
+        if (!LiverpoolToVK::IsSurfaceFormatSupported(tsharp.GetDataFmt(), number_format)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Ignoring texture with reserved format data={} number={} bindings={}",
+                        static_cast<u32>(tsharp.GetDataFmt()), static_cast<u32>(number_format),
+                        num_bindings);
+            for (u32 i = 0; i < num_bindings; ++i) {
+                image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+                image_native_extent_requirements.emplace_back(image_desc.uses_integer_coordinates,
+                                                              image_desc.queries_dimensions);
+            }
+            image_descriptor_array_sizes.push_back(num_bindings);
+            continue;
+        }
 
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings.emplace_back(

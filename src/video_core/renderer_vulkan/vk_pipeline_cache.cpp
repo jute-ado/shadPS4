@@ -323,8 +323,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 
     if (EmulatorSettings.IsAsyncGraphicsPipelineCompilation()) {
-        async_graphics_compiler = std::make_unique<AsyncGraphicsPipelineQueue>(
-            [this](AsyncGraphicsPipelineJob job) {
+        async_graphics_compiler =
+            std::make_unique<AsyncGraphicsPipelineQueue>([this](AsyncGraphicsPipelineJob job) {
                 return CompileGraphicsPipelineAsync(std::move(job));
             });
     }
@@ -545,10 +545,19 @@ bool PipelineCache::RefreshGraphicsKey() {
             continue;
         }
 
+        const auto data_format = col_buf.GetDataFmt();
+        const auto number_format = col_buf.GetNumberFmt();
+        if (!LiverpoolToVK::IsSurfaceFormatSupported(data_format, number_format)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Skipping draw with unsupported color format data={} number={}",
+                        static_cast<u32>(data_format), static_cast<u32>(number_format));
+            return false;
+        }
+
         // Fill color target information
         auto& color_buffer = key.color_buffers[cb];
-        color_buffer.data_format = col_buf.GetDataFmt();
-        color_buffer.num_format = col_buf.GetNumberFmt();
+        color_buffer.data_format = data_format;
+        color_buffer.num_format = number_format;
         color_buffer.num_conversion = col_buf.GetNumberConversion();
         color_buffer.export_format = regs.color_export_format.GetFormat(cb);
         color_buffer.swizzle = col_buf.Swizzle();
@@ -717,8 +726,16 @@ bool PipelineCache::RefreshGraphicsStages() {
             ASSERT_MSG(vertex_binding < MaxVertexBufferCount,
                        "Vertex attribute binding count exceeded limit: {} >= {}", vertex_binding,
                        MaxVertexBufferCount);
+            const auto data_format = buffer.GetDataFmt();
+            const auto number_format = buffer.GetNumberFmt();
+            if (!Vulkan::LiverpoolToVK::IsSurfaceFormatSupported(data_format, number_format)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Skipping draw with unsupported vertex format data={} number={}",
+                            static_cast<u32>(data_format), static_cast<u32>(number_format));
+                return false;
+            }
             key.vertex_buffer_formats[vertex_binding++] =
-                Vulkan::LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+                Vulkan::LiverpoolToVK::SurfaceFormat(data_format, number_format);
         }
     }
 
@@ -737,12 +754,15 @@ bool PipelineCache::RefreshComputeKey() {
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
                                               Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{DebugState};
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
-    DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
+    ScopedHostCompilationGuestPause pause{DebugState,
+                                          !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
+    const std::vector<u32> code_snapshot{code.begin(), code.end()};
+    DumpShader(code_snapshot, info.pgm_hash, info.stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    const auto ir_program =
+        Shader::TranslateProgram(code_snapshot, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
@@ -762,7 +782,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
-        DebugState.CollectShader(name, info.l_stage, module, spv, code,
+        DebugState.CollectShader(name, info.l_stage, module, spv, code_snapshot,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
     return module;
