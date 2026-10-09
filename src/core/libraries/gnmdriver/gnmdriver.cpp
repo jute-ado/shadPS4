@@ -2296,6 +2296,7 @@ int PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     auto complete_boundary = submission_gate.BeginBoundary();
     liverpool->SubmitDone(std::move(complete_boundary));
+    submission_gate.WaitUntilOpen();
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
