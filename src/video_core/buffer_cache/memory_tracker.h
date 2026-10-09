@@ -65,10 +65,13 @@ public:
     }
 
     /// Removes all protection from a page while preserving GPU-owned bytes before CPU mutation.
-    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush, auto&& on_preserve) noexcept {
+    [[nodiscard]] bool InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush,
+                                        auto&& on_preserve) noexcept {
+        bool tracked = false;
         IteratePages<false>(
             cpu_addr, size,
-            [&on_flush, &on_preserve](RegionManager* manager, u64 offset, size_t size) {
+            [&tracked, &on_flush, &on_preserve](RegionManager* manager, u64 offset, size_t size) {
+                tracked = true;
                 const bool should_flush = [&] {
                     // Perform both the GPU modification check and CPU state change with the lock
                     // in case we are racing with GPU thread trying to mark the page as GPU
@@ -110,6 +113,7 @@ public:
                     on_flush();
                 }
             });
+        return tracked;
     }
 
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
