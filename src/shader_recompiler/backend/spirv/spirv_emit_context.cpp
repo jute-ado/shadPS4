@@ -310,7 +310,9 @@ void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (l_stage == LogicalStage::Fragment) {
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -1022,7 +1024,8 @@ void EmitContext::DefineSharedMemory() {
         return;
     }
     ASSERT(info.stage == Stage::Compute);
-    const u32 shared_memory_size = runtime_info.cs_info.shared_memory_size;
+    const u32 shared_memory_size =
+        runtime_info.cs_info.shared_memory_size + info.workgroup_scratch_memory_size;
 
     const auto make_type = [&](IR::Type type, Id element_type, u32 element_size,
                                std::string_view name) {
