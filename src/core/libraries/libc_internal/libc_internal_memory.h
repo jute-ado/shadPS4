@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include "common/types.h"
 
 namespace Core::Loader {
@@ -10,5 +11,6 @@ class SymbolsResolver;
 }
 
 namespace Libraries::LibcInternal {
+void* PS4_SYSV_ABI internal_memmove(void* dest, const void* src, size_t n);
 void RegisterlibSceLibcInternalMemory(Core::Loader::SymbolsResolver* sym);
 } // namespace Libraries::LibcInternal

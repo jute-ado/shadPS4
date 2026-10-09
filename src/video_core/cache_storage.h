@@ -20,6 +20,41 @@ enum class BlobType : u32 {
     ShaderProfile,
 };
 
+[[nodiscard]] constexpr size_t MaxCacheBlobBytes(BlobType type) noexcept {
+    switch (type) {
+    case BlobType::ShaderBinary:
+        return 4U << 20;
+    case BlobType::ShaderMeta:
+    case BlobType::PipelineKey:
+        return 16U << 20;
+    case BlobType::ShaderProfile:
+        return 1U << 20;
+    }
+    return 0;
+}
+
+[[nodiscard]] constexpr bool IsCacheBlobSizeValid(BlobType type, u64 byte_size,
+                                                  size_t element_size) noexcept {
+    return element_size != 0 && byte_size <= MaxCacheBlobBytes(type) &&
+           byte_size % element_size == 0;
+}
+
+template <typename T>
+[[nodiscard]] bool PrepareCacheBlobBuffer(BlobType type, u64 byte_size,
+                                          std::vector<T>& output) noexcept {
+    output.clear();
+    if (!IsCacheBlobSizeValid(type, byte_size, sizeof(T))) {
+        return false;
+    }
+    try {
+        output.resize(static_cast<size_t>(byte_size / sizeof(T)));
+    } catch (...) {
+        output.clear();
+        return false;
+    }
+    return true;
+}
+
 class DataBase {
 public:
     static DataBase& Instance() {
