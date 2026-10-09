@@ -53,7 +53,10 @@ public:
 
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
     [[nodiscard]] U1 GetThreadBitScalarReg(IR::ScalarReg reg);
+    [[nodiscard]] U1 GetStoredThreadBitScalarReg(IR::ScalarReg reg);
+    [[nodiscard]] U1 IsThreadBitScalarRegLow(IR::ScalarReg reg);
     void SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value);
+    void SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value);
 
     template <typename T = U32>
     [[nodiscard]] T GetScalarReg(IR::ScalarReg reg);
@@ -70,6 +73,7 @@ public:
 
     [[nodiscard]] U1 GetMaskLaneVariable(IR::VectorReg vgpr, u32 lane);
     void SetMaskLaneVariable(IR::VectorReg vgpr, u32 lane, const U1& value);
+    void SetMaskLaneVariable(IR::VectorReg vgpr, u32 lane, const U1& value, const U1& provenance);
 
     [[nodiscard]] U1 GetScc();
     [[nodiscard]] U1 GetExec();
