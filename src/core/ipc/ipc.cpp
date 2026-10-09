@@ -2,6 +2,7 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "ipc.h"
+#include "ipc_capabilities.h"
 
 #include <iostream>
 #include <string>
@@ -16,9 +17,12 @@
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
 #include "core/libraries/audio/audioout.h"
+#include "input/controller_axis.h"
+#include "input/controller_button.h"
 #include "input/input_handler.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
+#include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -49,6 +53,9 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  * - CAPABILITIES:
  *   - ENABLE_MEMORY_PATCH: enables PATCH_MEMORY command
  *   - ENABLE_EMU_CONTROL: enables PAUSE, RESUME, STOP, TOGGLE_FULLSCREEN commands
+ *   - ENABLE_SCREENSHOT: enables SCREENSHOT and SCREENSHOT_WITH_OVERLAYS commands
+ *   - ENABLE_RENDERDOC_CAPTURE: enables the RenderDoc capture command
+ *   - ENABLE_GAMEPAD
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -61,6 +68,12 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - RESUME: resume the game execution
  *   - STOP: stop and quit the emulator
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
+ *   - SCREENSHOT: capture the next game-only frame
+ *   - SCREENSHOT_WITH_OVERLAYS: capture the next presented frame, including overlays
+ *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc when loaded
+ *   - GAMEPAD_BUTTON
+ *     - button: player-one button name
+ *     - pressed: 1 to press, 0 to release
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -72,6 +85,11 @@ void IPC::Init() {
         return;
     }
 
+    // The IPC handshake must describe capabilities available in this process,
+    // not merely features compiled into the binary. Explicitly injected or
+    // configured RenderDoc runtimes can be loaded before settings exist.
+    VideoCore::LoadRenderDoc(false);
+
     EmulatorState::GetInstance()->SetAutoPatchesLoadEnabled(false);
 
     input_thread = std::jthread([this] {
@@ -80,8 +98,9 @@ void IPC::Init() {
     });
 
     std::cerr << ";#IPC_ENABLED\n";
-    std::cerr << ";ENABLE_MEMORY_PATCH\n";
-    std::cerr << ";ENABLE_EMU_CONTROL\n";
+    for (const auto capability : Core::Ipc::IpcCapabilities(VideoCore::IsRenderDocLoaded())) {
+        std::cerr << ';' << capability << '\n';
+    }
     std::cerr << ";#IPC_END\n";
     std::cerr.flush();
 
@@ -150,6 +169,44 @@ void IPC::InputLoop() {
             SDL_Event event;
             SDL_memset(&event, 0, sizeof(event));
             event.type = SDL_EVENT_TOGGLE_FULLSCREEN;
+            SDL_PushEvent(&event);
+        } else if (cmd == "SCREENSHOT") {
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly,
+                                         VideoCore::ScreenshotRequestOrigin::Automation);
+        } else if (cmd == "SCREENSHOT_WITH_OVERLAYS") {
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays,
+                                         VideoCore::ScreenshotRequestOrigin::Automation);
+        } else if (cmd == "RENDERDOC_CAPTURE") {
+            VideoCore::TriggerCapture();
+        } else if (cmd == "GAMEPAD_BUTTON") {
+            const std::string name = next_str();
+            const auto button = Input::ParseControllerButton(name);
+            const bool pressed = next_u64() != 0;
+            if (!button) {
+                std::cerr << ";INVALID GAMEPAD BUTTON: " << name << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_BUTTON;
+            event.user.code = static_cast<Sint32>(*button);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(pressed));
+            SDL_PushEvent(&event);
+        } else if (cmd == "GAMEPAD_AXIS") {
+            const std::string name = next_str();
+            const auto axis = Input::ParseControllerAxis(name);
+            const u64 value = next_u64();
+            if (!axis || value > 255) {
+                std::cerr << ";INVALID GAMEPAD AXIS: " << name << ' ' << value << '\n';
+                std::cerr.flush();
+                continue;
+            }
+            SDL_Event event;
+            SDL_memset(&event, 0, sizeof(event));
+            event.type = SDL_EVENT_INJECT_GAMEPAD_AXIS;
+            event.user.code = static_cast<Sint32>(*axis);
+            event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(value));
             SDL_PushEvent(&event);
         } else if (cmd == "ADJUST_VOLUME") {
             int value = static_cast<int>(next_u64());

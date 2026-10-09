@@ -300,6 +300,8 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioout.h
               src/core/libraries/audio/audioout_backend.h
               src/core/libraries/audio/audioout_error.h
+              src/core/libraries/audio/test_lab_audio_capture.cpp
+              src/core/libraries/audio/test_lab_audio_capture.h
               src/core/libraries/audio/sdl_audio_out.cpp
               src/core/libraries/audio/openal_audio_out.cpp
               src/core/libraries/audio/openal_manager.h
@@ -891,6 +893,9 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/file_sys/backends/zarchive_fs.h
          src/core/ipc/ipc.cpp
          src/core/ipc/ipc.h
+         src/core/ipc/ipc_capabilities.h
+         src/core/test_lab_probe.cpp
+         src/core/test_lab_probe.h
          src/core/loader/dwarf.cpp
          src/core/loader/dwarf.h
          src/core/loader/elf.cpp
@@ -958,7 +963,8 @@ if (ARCHITECTURE STREQUAL "x86_64")
              ${FIBER_LIB})
 endif()
 
-set(SHADER_RECOMPILER src/shader_recompiler/profile.h
+set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
+                      src/shader_recompiler/profile.h
                       src/shader_recompiler/recompiler.cpp
                       src/shader_recompiler/recompiler.h
                       src/shader_recompiler/resource.h
@@ -1015,6 +1021,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/frontend/opcodes.h
                       src/shader_recompiler/frontend/structured_control_flow.cpp
                       src/shader_recompiler/frontend/structured_control_flow.h
+                      src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
                       src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
                       src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
                       src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
@@ -1111,6 +1118,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_pipeline_serialization.h
                src/video_core/renderer_vulkan/vk_platform.cpp
                src/video_core/renderer_vulkan/vk_platform.h
+               src/video_core/renderer_vulkan/presented_frame_timing_trace.h
                src/video_core/renderer_vulkan/vk_presenter.cpp
                src/video_core/renderer_vulkan/vk_presenter.h
                src/video_core/renderer_vulkan/vk_rasterizer.cpp
@@ -1153,6 +1161,9 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/multi_level_page_table.h
                src/video_core/renderdoc.cpp
                src/video_core/renderdoc.h
+               src/video_core/renderdoc_capture_state.h
+               src/video_core/renderdoc_path.cpp
+               src/video_core/renderdoc_path.h
 )
 
 set(IMGUI src/imgui/imgui_config.h
@@ -1196,6 +1207,13 @@ set(IMGUI src/imgui/imgui_config.h
 set(INPUT src/input/controller.cpp
           src/input/controller.h
           src/input/controller_state.cpp
+          src/input/controller_axis.cpp
+          src/input/controller_axis.h
+          src/input/controller_button.cpp
+          src/input/controller_button.h
+          src/input/controller_connection.h
+          src/input/controller_trace.cpp
+          src/input/controller_trace.h
           src/input/input_handler.cpp
           src/input/input_handler.h
           src/input/input_mouse.cpp
