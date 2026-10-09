@@ -1116,7 +1116,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     }
 
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    info.AddWait(swapchain.GetImageAcquiredSemaphore(), 1,
+                 vk::PipelineStageFlagBits::eColorAttachmentOutput);
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
