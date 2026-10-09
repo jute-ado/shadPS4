@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/spirv_composite_extract.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/patch.h"
@@ -15,6 +17,19 @@ namespace Shader::Backend::SPIRV {
 
 using PointerType = EmitContext::PointerType;
 using PointerSize = EmitContext::PointerSize;
+
+static Id EmitCheckedCompositeExtract(EmitContext& ctx, Id type, Id composite, u32 vector_components,
+                                      u32 index, Id fallback) {
+    if (!IsValidCompositeExtractIndex(vector_components, index)) {
+        ctx.info.translation_failed = true;
+        LOG_WARNING(Render_Recompiler,
+                    "Skipping out-of-range SPIR-V composite extract index {} from vector of {} "
+                    "components for shader {:#x}",
+                    index, vector_components, ctx.info.pgm_hash);
+        return fallback;
+    }
+    return ctx.OpCompositeExtract(type, composite, index);
+}
 
 static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribute attr) {
     if (IR::IsParam(attr)) {
@@ -119,11 +134,19 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
         const u32 param_index{u32(attr) - u32(IR::Attribute::Param0)};
         const auto& param{ctx.input_params.at(param_index)};
         const Id value = [&] {
+            const Id zero = param.is_integer ? ctx.u32_zero_value : ctx.f32_zero_value;
+            if (!IsValidCompositeExtractIndex(param.num_components, comp)) {
+                return zero;
+            }
             if (param.is_array) {
                 ASSERT(param.num_components > 1);
+                if (index >= param.id_array.size()) {
+                    return zero;
+                }
                 if (param.is_loaded) {
-                    return ctx.OpCompositeExtract(param.component_type, param.id_array[index],
-                                                  comp);
+                    return EmitCheckedCompositeExtract(ctx, param.component_type,
+                                                       param.id_array[index], param.num_components,
+                                                       comp, zero);
                 } else {
                     return ctx.OpLoad(param.component_type,
                                       ctx.OpAccessChain(param.pointer_type, param.id,
@@ -172,36 +195,57 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
                           ctx.OpAccessChain(ctx.input_f32, ctx.tess_coord, ctx.ConstU32(1U)));
     case IR::Attribute::BaryCoordSmooth:
         if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
+            if (!IsValidCompositeExtractIndex(2, comp)) {
+                return ctx.f32_zero_value;
+            }
             return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth,
                                                             ctx.ConstU32(comp)));
         } else {
-            return ctx.OpCompositeExtract(ctx.F32[1], ctx.OpLoad(ctx.F32[3], ctx.bary_coord), comp);
+            return EmitCheckedCompositeExtract(ctx, ctx.F32[1],
+                                                ctx.OpLoad(ctx.F32[3], ctx.bary_coord), 3, comp,
+                                                ctx.f32_zero_value);
         }
     case IR::Attribute::BaryCoordSmoothCentroid:
         if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
+            if (!IsValidCompositeExtractIndex(2, comp)) {
+                return ctx.f32_zero_value;
+            }
             return ctx.OpLoad(ctx.F32[1],
                               ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth_centroid,
                                                 ctx.ConstU32(comp)));
         } else {
-            return ctx.OpCompositeExtract(
-                ctx.F32[1], ctx.OpInterpolateAtCentroid(ctx.F32[3], ctx.bary_coord), comp);
+            return EmitCheckedCompositeExtract(
+                ctx, ctx.F32[1],
+                ctx.OpInterpolateAtCentroid(ctx.F32[3], ctx.bary_coord), 3, comp,
+                ctx.f32_zero_value);
         }
     case IR::Attribute::BaryCoordSmoothSample:
         if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
+            if (!IsValidCompositeExtractIndex(2, comp)) {
+                return ctx.f32_zero_value;
+            }
             return ctx.OpLoad(
                 ctx.F32[1],
                 ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth_sample, ctx.ConstU32(comp)));
         } else {
-            return ctx.OpCompositeExtract(
-                ctx.F32[1],
+            return EmitCheckedCompositeExtract(
+                ctx, ctx.F32[1],
                 ctx.OpInterpolateAtSample(ctx.F32[3], ctx.bary_coord,
                                           ctx.OpLoad(ctx.U32[1], ctx.sample_index)),
-                comp);
+                3, comp, ctx.f32_zero_value);
         }
     case IR::Attribute::BaryCoordNoPersp:
+        if (ctx.profile.supports_amd_shader_explicit_vertex_parameter &&
+            !IsValidCompositeExtractIndex(2, comp)) {
+            return ctx.f32_zero_value;
+        }
         return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_nopersp,
                                                         ctx.ConstU32(comp)));
     case IR::Attribute::BaryCoordNoPerspSample:
+        if (ctx.profile.supports_amd_shader_explicit_vertex_parameter &&
+            !IsValidCompositeExtractIndex(2, comp)) {
+            return ctx.f32_zero_value;
+        }
         return ctx.OpLoad(
             ctx.F32[1],
             ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_nopersp_sample, ctx.ConstU32(comp)));
@@ -212,17 +256,37 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
 
 Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
     switch (attr) {
-    case IR::Attribute::VertexId:
-        return ctx.OpLoad(ctx.U32[1], ctx.vertex_index);
+    case IR::Attribute::VertexId: {
+        const Id index = ctx.OpLoad(ctx.U32[1], ctx.vertex_index);
+        if (ctx.info.stage == Stage::Vertex && ctx.runtime_info.stage == Stage::Vertex &&
+            ctx.runtime_info.vs_info.draw_user_data.base_vertex != DrawUserDataLocations::Disabled) {
+            // The CP-written base is now supplied separately to the guest shader. Preserve the
+            // existing direct/fetch convention outside this explicitly mapped mode.
+            return ctx.OpISub(ctx.U32[1], index, ctx.OpLoad(ctx.U32[1], ctx.base_vertex));
+        }
+        return index;
+    }
     case IR::Attribute::InstanceId:
-        return ctx.OpLoad(ctx.U32[1], ctx.instance_id);
+        // GCN's instance VGPR is relative to the draw. Vulkan InstanceIndex already includes
+        // firstInstance, which remains on the host draw for optimized instance attribute fetch.
+        return ctx.OpISub(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.instance_id),
+                          ctx.OpLoad(ctx.U32[1], ctx.base_instance));
+    case IR::Attribute::BaseVertex:
+        return ctx.OpLoad(ctx.U32[1], ctx.base_vertex);
+    case IR::Attribute::BaseInstance:
+        return ctx.OpLoad(ctx.U32[1], ctx.base_instance);
+    case IR::Attribute::DrawIndex:
+        return ctx.OpLoad(ctx.U32[1], ctx.draw_index);
     case IR::Attribute::WorkgroupIndex:
         return ctx.workgroup_index_id;
     case IR::Attribute::WorkgroupId:
-        return ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), comp);
+        return EmitCheckedCompositeExtract(ctx, ctx.U32[1],
+                                            ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 3, comp,
+                                            ctx.u32_zero_value);
     case IR::Attribute::LocalInvocationId:
-        return ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id),
-                                      comp);
+        return EmitCheckedCompositeExtract(
+            ctx, ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id), 3, comp,
+            ctx.u32_zero_value);
     case IR::Attribute::IsFrontFace:
         return ctx.OpSelect(ctx.U32[1], ctx.OpLoad(ctx.U1[1], ctx.front_facing), ctx.u32_one_value,
                             ctx.u32_zero_value);
@@ -289,6 +353,11 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     if (IR::IsMrt(attr)) {
         const u32 index{u32(attr) - u32(IR::Attribute::RenderTarget0)};
         const auto& info{ctx.frag_outputs.at(index)};
+        if (element < 3 && ctx.runtime_info.fs_info.color_buffers[index].blend_self_scale) {
+            // GCN applies SrcColor/DstColor before min/max; Vulkan ignores those factors. Keep the
+            // attachment in the squared domain so min/max(src*src, dst*dst) is preserved.
+            value = ctx.OpFMul(ctx.F32[1], value, value);
+        }
         if (info.num_components == 1) {
             return op_store(info.id);
         } else {
@@ -487,7 +556,12 @@ static void EmitStoreBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, I
     for (u32 i = 0; i < N; i++) {
         const Id index_i = i == 0 ? address : ctx.OpIAdd(ctx.U32[1], address, ctx.ConstU32(i));
         const Id ptr_i = ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, index_i);
-        const Id value_i = N == 1 ? value : ctx.OpCompositeExtract(data_types[1], value, i);
+        const Id value_i = N == 1
+                               ? value
+                               : EmitCheckedCompositeExtract(
+                                     ctx, data_types[1], value, GetVectorComponentCount(inst->Arg(2).Type()),
+                                     i, alias == PointerType::U32 ? ctx.u32_zero_value
+                                                                    : ctx.f32_zero_value);
         ctx.OpStore(ptr_i, value_i);
     }
 }

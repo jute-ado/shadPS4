@@ -4,6 +4,8 @@
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_result_retry.h"
 
 #include "common/assert.h"
 
@@ -34,6 +36,9 @@ void MasterSemaphore::Refresh() {
     do {
         this_tick = gpu_tick.load(std::memory_order_acquire);
         auto [counter_result, cntr] = instance.GetDevice().getSemaphoreCounterValue(*semaphore);
+        if (counter_result != vk::Result::eSuccess) {
+            instance.LogDeviceMemoryBudget("semaphore_counter", counter_result);
+        }
         ASSERT_MSG(counter_result == vk::Result::eSuccess,
                    "Failed to get master semaphore value: {}", vk::to_string(counter_result));
         counter = cntr;
@@ -62,8 +67,13 @@ void MasterSemaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
+    const auto result = RetryOnTimeout([&] {
+        return instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT);
+    });
+    if (result != vk::Result::eSuccess) {
+        instance.LogDeviceMemoryBudget("semaphore_wait", result);
     }
+    Check<"wait for master semaphore">(result);
     Refresh();
 }
 
