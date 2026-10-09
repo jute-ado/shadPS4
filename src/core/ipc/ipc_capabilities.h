@@ -18,6 +18,7 @@ inline constexpr std::array BaseCapabilities{
     std::string_view{"ENABLE_PRESENTED_FRAME_SCREENSHOT"},
 };
 
+// The capture command targets recorded guest draw/dispatch submissions, not presenter frames.
 inline constexpr std::array RenderDocCapability{
     std::string_view{"ENABLE_MEMORY_PATCH"}, std::string_view{"ENABLE_EMU_CONTROL"},
     std::string_view{"ENABLE_SCREENSHOT"},   std::string_view{"ENABLE_RENDERDOC_CAPTURE"},
