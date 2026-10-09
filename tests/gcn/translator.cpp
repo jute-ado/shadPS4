@@ -4,6 +4,7 @@
 #include "translator.hpp"
 
 #include <iostream>
+#include <limits>
 
 #include "common/io_file.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -16,6 +17,7 @@
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
+#include "video_core/buffer_cache/buffer_cache.h"
 
 using namespace Shader;
 
@@ -27,7 +29,8 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
     return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1});
 }
 
-std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
+static std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts,
+                                        bool force_dma_helpers) {
     std::array<u32, 2> store{
         0xe0700000,
         0x80000000 // buffer_store_dword v0, v0, s[0:3], 0
@@ -99,9 +102,33 @@ std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::CollectShaderInfoPass(program, profile);
 
+    if (force_dma_helpers && !program.info.uses_dma) {
+        program.info.uses_dma = true;
+        program.info.buffers.push_back({
+            .used_types = IR::Type::U64,
+            .inline_cbuf = AmdGpu::Buffer::Placeholder(VideoCore::BufferCache::BDA_PAGETABLE_SIZE),
+            .buffer_type = BufferType::BdaPagetable,
+            .is_written = true,
+        });
+        program.info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            .inline_cbuf = AmdGpu::Buffer::Placeholder(std::numeric_limits<u32>::max()),
+            .buffer_type = BufferType::FaultBuffer,
+            .is_written = true,
+        });
+    }
+
     Backend::Bindings bindings{};
 
     const auto spirv = Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 
     return spirv;
+}
+
+std::vector<u32> TranslateToSpirv(std::span<const u64> raw_gcn_insts) {
+    return TranslateToSpirv(raw_gcn_insts, false);
+}
+
+std::vector<u32> TranslateToSpirvWithDmaHelpers(u64 raw_gcn_inst) {
+    return TranslateToSpirv(std::span<const u64>{&raw_gcn_inst, 1}, true);
 }
