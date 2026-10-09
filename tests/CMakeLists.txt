@@ -9,11 +9,69 @@ include(FetchContent)
 )
 FetchContent_MakeAvailable(googletest)
 
+# GoogleTest 1.17 enables /WX for its own targets under clang-cl. Clang 22 diagnoses a
+# char8_t-to-char32_t conversion in gtest-printers.h, so keep the third-party target buildable
+# without weakening warnings for shadPS4's test targets.
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    foreach(googletest_target gtest gtest_main gmock gmock_main)
+        target_compile_options(${googletest_target} PRIVATE -Wno-character-conversion)
+    endforeach()
+endif()
+
 set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
+    shadps4_aliasing_test
 )
+
+add_executable(shadps4_controller_button_test
+    ${CMAKE_SOURCE_DIR}/src/input/controller_button.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/controller_trace.cpp
+    test_controller_button.cpp
+    test_controller_trace.cpp
+)
+target_include_directories(shadps4_controller_button_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_controller_button_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_controller_button_test PRIVATE
+    GTest::gtest_main
+    SDL3::SDL3
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_controller_button_test)
+
+add_executable(shadps4_renderdoc_path_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
+    test_renderdoc_path.cpp
+)
+target_include_directories(shadps4_renderdoc_path_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_renderdoc_path_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
+
+add_executable(shadps4_renderdoc_capture_state_test
+    test_renderdoc_capture_state.cpp
+)
+target_include_directories(shadps4_renderdoc_capture_state_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_renderdoc_capture_state_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_renderdoc_capture_state_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_renderdoc_capture_state_test)
+
+add_executable(shadps4_ipc_capabilities_test
+    test_ipc_capabilities.cpp
+)
+target_include_directories(shadps4_ipc_capabilities_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_ipc_capabilities_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_ipc_capabilities_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_ipc_capabilities_test)
 
 set(SETTINGS_TEST_SOURCES
     # Under test
@@ -59,6 +117,11 @@ set(NGS2_TEST_SOURCES
 
     # Tests
     test_ngs2.cpp
+)
+set(ALIASING_TEST_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/aliasing.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/host_compatibility.cpp
+    test_aliasing.cpp
 )
 set(GCN_TEST_SOURCES
     # Under test
@@ -158,6 +221,7 @@ set(GCN_TEST_SOURCES
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+add_executable(shadps4_aliasing_test ${ALIASING_TEST_SOURCES})
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE
@@ -196,6 +260,11 @@ target_link_libraries(shadps4_gcn_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
     half::half
+)
+target_link_libraries(shadps4_aliasing_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+    spdlog::spdlog
 )
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
@@ -238,6 +307,57 @@ foreach(t ${TEST_TARGETS})
         DISCOVERY_TIMEOUT 60
     )
 endforeach()
+
+# The capability probe stays self-contained so the upstream adapter does not
+# pull emulator runtime dependencies into this contract test.
+add_executable(shadps4_test_lab_probe_test
+    ${CMAKE_SOURCE_DIR}/src/core/test_lab_probe.cpp
+    test_test_lab_probe.cpp
+)
+target_include_directories(shadps4_test_lab_probe_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_probe_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_probe_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(shadps4_test_lab_probe_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
+add_executable(shadps4_presented_frame_timing_trace_test
+    test_presented_frame_timing_trace.cpp
+)
+target_include_directories(shadps4_presented_frame_timing_trace_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_presented_frame_timing_trace_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_presented_frame_timing_trace_test PRIVATE
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(shadps4_presented_frame_timing_trace_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
+
+add_executable(shadps4_test_lab_audio_capture_test
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/audio/test_lab_audio_capture.cpp
+    test_test_lab_audio_capture.cpp
+)
+target_include_directories(shadps4_test_lab_audio_capture_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_test_lab_audio_capture_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_audio_capture_test PRIVATE
+    GTest::gtest_main
+)
+gtest_discover_tests(shadps4_test_lab_audio_capture_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
 
 # ===========================================================================
 # HTTP tests (libSceHttp - URI helpers and status-line parsing)

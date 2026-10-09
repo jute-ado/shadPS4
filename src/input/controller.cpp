@@ -16,6 +16,7 @@
 #include "core/libraries/system/userservice.h"
 #include "core/user_settings.h"
 #include "input/controller.h"
+#include "input/controller_trace.h"
 
 namespace Input {
 
@@ -58,7 +59,8 @@ void CalculateOrientation(const Libraries::Pad::OrbisFVector3& angular_velocity,
 
 } // namespace
 
-GameController::GameController() : m_states_queue(64) {}
+GameController::GameController(bool record_test_lab_input)
+    : m_states_queue(64), m_record_test_lab_input{record_test_lab_input} {}
 
 State GameController::ReadState() {
     std::lock_guard lock{m_state_mutex};
@@ -210,6 +212,9 @@ void GameController::PushStateLocked(u64 timestamp) {
     m_state.touch_time_since_held_down =
         m_touch_down_timestamp == 0 ? 0 : timestamp - m_touch_down_timestamp;
     m_states_queue.Push(m_state);
+    if (m_record_test_lab_input) {
+        RecordPrimaryControllerState(m_state);
+    }
 }
 
 void GameController::SetLightBarRGB(u8 const r, u8 const g, u8 const b) {
