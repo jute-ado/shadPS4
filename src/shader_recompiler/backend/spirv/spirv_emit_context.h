@@ -280,7 +280,6 @@ public:
     Id shared_memory_u16{};
     Id shared_memory_u32{};
     Id shared_memory_u64{};
-
     Id shared_memory_u16_type{};
     Id shared_memory_u32_type{};
     Id shared_memory_u64_type{};

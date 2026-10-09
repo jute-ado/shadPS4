@@ -362,6 +362,10 @@ public:
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish();
 
+    /// Rolls over to a fresh command buffer when a pending RenderDoc capture has reached prepared
+    /// graphics work. This keeps transfer-only SRT readbacks out of the bounded capture prefix.
+    void BeginPreparedGuestWorkCapture();
+
     /// Waits for the given tick to trigger on the GPU.
     void Wait(u64 tick);
 

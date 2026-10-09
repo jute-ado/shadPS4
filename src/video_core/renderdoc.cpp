@@ -125,22 +125,36 @@ void TriggerCapture() {
     (void)capture_state.Trigger();
 }
 
-bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
+bool ArmGuestFrameCaptureForPreparedGuestWork() {
+    return rdoc_api && capture_state.ArmForPreparedGuestWork();
+}
+
+bool BeginGuestFrameCapture(void* vulkan_instance) {
+    if (!rdoc_api || !capture_state.ConsumeGuestFrameTrigger()) {
         return false;
     }
 
     const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    rdoc_api->StartFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
+    rdoc_api->StartFrameCapture(device, nullptr);
+    LOG_WARNING(Common, "RenderDoc capture started before guest command-buffer recording");
     return true;
 }
 
-void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    ASSERT(rdoc_api);
+bool IsGuestFrameCaptureActive() {
+    return capture_state.IsCapturing();
+}
+
+bool ShouldEndGuestFrameCapture() {
+    return capture_state.ShouldFinishAfterGuestSubmission();
+}
+
+void EndGuestFrameCapture(void* vulkan_instance) {
+    if (!rdoc_api || !capture_state.FinishPresentedFrameCapture()) {
+        return;
+    }
     const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
+    const u32 result = rdoc_api->EndFrameCapture(device, nullptr);
+    LOG_WARNING(Common, "RenderDoc guest-frame capture end result: {}", result);
 }
 
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix) {

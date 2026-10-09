@@ -5,10 +5,82 @@
 #include "common/debug.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
+#include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
+#include <cstddef>
+#include <vector>
+
 namespace Vulkan {
+
+namespace {
+
+void LogDeviceFaultInfo(const Instance& instance) {
+    if (!instance.IsDeviceFaultSupported()) {
+        LOG_CRITICAL(Render_Vulkan, "VK_EXT_device_fault is unavailable");
+        return;
+    }
+
+    vk::DeviceFaultCountsEXT counts{};
+    auto result = instance.GetDevice().getFaultInfoEXT(&counts, nullptr);
+    if (result != vk::Result::eSuccess && result != vk::Result::eIncomplete) {
+        LOG_CRITICAL(Render_Vulkan, "Unable to query device-fault counts: {}",
+                     vk::to_string(result));
+        return;
+    }
+
+    std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<vk::DeviceFaultVendorInfoEXT> vendor_infos(counts.vendorInfoCount);
+    std::vector<std::byte> vendor_binary(counts.vendorBinarySize);
+    vk::DeviceFaultInfoEXT info{
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor_infos.data(),
+        .pVendorBinaryData = vendor_binary.data(),
+    };
+    result = instance.GetDevice().getFaultInfoEXT(&counts, &info);
+    if (result != vk::Result::eSuccess && result != vk::Result::eIncomplete) {
+        LOG_CRITICAL(Render_Vulkan, "Unable to query device-fault details: {}",
+                     vk::to_string(result));
+        return;
+    }
+
+    LOG_CRITICAL(Render_Vulkan, "Device fault: {}", info.description.data());
+    for (const auto& address : addresses) {
+        LOG_CRITICAL(Render_Vulkan, "Device fault address: type={} address={:#x} precision={:#x}",
+                     vk::to_string(address.addressType), address.reportedAddress,
+                     address.addressPrecision);
+    }
+    for (const auto& vendor : vendor_infos) {
+        LOG_CRITICAL(Render_Vulkan, "Device fault vendor: {} code={:#x} data={:#x}",
+                     vendor.description.data(), vendor.vendorFaultCode, vendor.vendorFaultData);
+    }
+
+    if (!instance.SupportsDiagnosticCheckpoints()) {
+        return;
+    }
+    for (const auto& checkpoint : instance.GetGraphicsQueue().getCheckpointDataNV()) {
+        const auto command = FindCommandCheckpoint(checkpoint.pCheckpointMarker);
+        if (!command) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "GPU submit checkpoint: stage={} marker={:#x} (history expired)",
+                         vk::to_string(checkpoint.stage),
+                         reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker));
+            continue;
+        }
+        LOG_CRITICAL(Render_Vulkan,
+                     "GPU submit checkpoint: stage={} sequence={} type={} pipeline={:#x} "
+                     "shader={:#x} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+                     vk::to_string(checkpoint.stage), command->sequence,
+                     static_cast<u64>(command->type), command->pipeline_hash,
+                     command->shader_hashes[0], command->arguments[0], command->arguments[1],
+                     command->arguments[2], command->arguments[3], command->arguments[4],
+                     command->arguments[5]);
+    }
+}
+
+} // namespace
 
 std::mutex Scheduler::submit_mutex;
 
@@ -127,11 +199,20 @@ void Scheduler::PopPendingOperations() {
     }
 }
 
+void Scheduler::BeginPreparedGuestWorkCapture() {
+    if (VideoCore::ArmGuestFrameCaptureForPreparedGuestWork()) {
+        Flush();
+    }
+}
+
 void Scheduler::AllocateWorkerCommandBuffers() {
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
 
+    const auto vulkan_instance =
+        reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
+    (void)VideoCore::BeginGuestFrameCapture(vulkan_instance);
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
 
@@ -192,7 +273,19 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        LogDeviceFaultInfo(instance);
+    }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+
+    // A capture starts before recording fresh guest work and closes after a bounded submission
+    // batch. Tying the end to presentation is unreliable because guest GPU work can run ahead of
+    // video-out and the process may terminate before another present arrives.
+    if (VideoCore::ShouldEndGuestFrameCapture()) {
+        const auto vulkan_instance =
+            reinterpret_cast<void*>(static_cast<VkInstance>(instance.GetInstance()));
+        VideoCore::EndGuestFrameCapture(vulkan_instance);
+    }
 
     master_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
