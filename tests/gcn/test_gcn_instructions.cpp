@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +26,26 @@ struct F32x2 {
     float a;
     float b;
 };
+
+bool HasFloat32Select(std::span<const u32> spirv) {
+    u32 float32_type = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u32 word_count = instruction >> 16;
+        const auto opcode = static_cast<spv::Op>(instruction & 0xffff);
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if (opcode == spv::OpTypeFloat && word_count >= 3 && spirv[offset + 2] == 32) {
+            float32_type = spirv[offset + 1];
+        } else if (opcode == spv::OpSelect && word_count >= 2 &&
+                   spirv[offset + 1] == float32_type) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
 
 // Example
 // TEST_F(GcnTest, test_name) {
@@ -69,6 +90,13 @@ TEST_F(GcnTest, add_i32_carry_feeds_addc_u32) {
     const auto no_overflow = runner->run<u32>(spirv, std::array{2U, 1U, 7U, 0U});
     ASSERT_TRUE(no_overflow.has_value());
     EXPECT_EQ(*no_overflow, 7U);
+}
+
+TEST_F(GcnTest, cndmask_b32_selects_raw_bits) {
+    const auto spirv = TranslateToSpirv(
+        VOP2(OpcodeVOP2::V_CNDMASK_B32, VOperand8::V0, SOperand9::S0, VOperand8::V1).Get());
+
+    EXPECT_FALSE(HasFloat32Select(spirv));
 }
 
 TEST_F(GcnTest, add_nan) {

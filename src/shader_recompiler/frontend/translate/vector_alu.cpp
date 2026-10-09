@@ -536,7 +536,7 @@ void Translator::V_CNDMASK_B32(const GcnInst& inst) {
                             ? ir.GetThreadBitScalarReg(flag_reg)
                             : ir.GetVcc();
     const IR::Value result =
-        ir.Select(flag, GetSrc<IR::F32>(inst.src[1]), GetSrc<IR::F32>(inst.src[0]));
+        ir.Select(flag, GetSrc<IR::U32>(inst.src[1]), GetSrc<IR::U32>(inst.src[0]));
     SetDst(inst.dst[0], IR::U32F32{result});
 }
 
