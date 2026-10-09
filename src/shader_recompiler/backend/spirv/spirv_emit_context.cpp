@@ -67,9 +67,10 @@ void Name(EmitContext& ctx, Id object, std::string_view format_str, Args&&... ar
 } // Anonymous namespace
 
 EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_info_, Info& info_,
-                         Bindings& binding_)
+                         Bindings& binding_, SrtMemoryReader reader)
     : Sirit::Module(profile_.supported_spirv), info{info_}, runtime_info{runtime_info_},
-      profile{profile_}, stage{info.stage}, l_stage{info.l_stage}, binding{binding_} {
+      guest_memory_reader{reader}, profile{profile_}, stage{info.stage}, l_stage{info.l_stage},
+      binding{binding_} {
     if (info.uses_dma) {
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
     } else {
@@ -310,7 +311,9 @@ void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (l_stage == LogicalStage::Fragment) {
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -318,13 +321,13 @@ void EmitContext::DefineInputs() {
         base_vertex = DefineVariable(U32[1], spv::BuiltIn::BaseVertex, spv::StorageClass::Input);
         instance_id = DefineVariable(U32[1], spv::BuiltIn::InstanceIndex, spv::StorageClass::Input);
 
-        const auto fetch_shader = Gcn::ParseFetchShader(info);
+        const auto fetch_shader = Gcn::ParseFetchShader(info, guest_memory_reader);
         if (!fetch_shader) {
             break;
         }
         for (const auto& attrib : fetch_shader->attributes) {
             ASSERT(attrib.semantic < IR::NumParams);
-            const auto sharp = attrib.GetSharp(info);
+            const auto sharp = attrib.GetSharp(info, guest_memory_reader);
             const Id type{GetAttributeType(*this, sharp.GetNumberFmt())[4]};
             Id id{DefineInput(type, attrib.semantic)};
             if (attrib.GetStepRate() != Gcn::VertexAttribute::InstanceIdType::None) {
@@ -761,8 +764,9 @@ void EmitContext::DefinePushDataBlock() {
     interfaces.push_back(push_data_block);
 }
 
-EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_written, u32 elem_shift,
-                                                 BufferType buffer_type, Id data_type) {
+EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_written, bool is_coherent,
+                                                 u32 elem_shift, BufferType buffer_type,
+                                                 Id data_type, u32 descriptor_binding) {
     // Define array type.
     const Id max_num_items = ConstU32(u32(profile.max_ubo_size) >> elem_shift);
     const Id record_array_type{is_storage ? TypeRuntimeArray(data_type)
@@ -783,10 +787,14 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_writte
     const Id struct_pointer_type{TypePointer(storage_class, struct_type)};
     const Id pointer_type = TypePointer(storage_class, data_type);
     const Id id{AddGlobalVariable(struct_pointer_type, storage_class)};
-    Decorate(id, spv::Decoration::Binding, binding.unified);
+    Decorate(id, spv::Decoration::Binding, descriptor_binding);
     Decorate(id, spv::Decoration::DescriptorSet, 0U);
     if (is_storage && !is_written) {
         Decorate(id, spv::Decoration::NonWritable);
+    } else if (is_storage && is_coherent) {
+        // Preserve coherent access across shader invocations on every typed alias. This does
+        // not replace the shader's barriers or the host's submission synchronization.
+        Decorate(id, spv::Decoration::Coherent);
     }
     switch (buffer_type) {
     case BufferType::GdsBuffer:
@@ -819,6 +827,7 @@ void EmitContext::DefineBuffers() {
     for (const auto& desc : info.buffers) {
         const auto buf_sharp = desc.GetSharp(info);
         const bool is_storage = desc.IsStorage(buf_sharp);
+        const bool is_coherent = desc.IsCoherent(buf_sharp);
 
         // Set indexes for special buffers.
         if (desc.buffer_type == BufferType::Flatbuf) {
@@ -830,28 +839,35 @@ void EmitContext::DefineBuffers() {
         }
 
         // Define aliases depending on the shader usage.
-        auto& spv_buffer = buffers.emplace_back(binding.buffer++, desc.buffer_type);
+        const u32 buffer_index = binding.buffer;
+        const auto descriptor_binding = binding.TryAddBufferBinding();
+        ASSERT_MSG(descriptor_binding.has_value(), "Descriptor binding index overflow");
+        auto& spv_buffer = buffers.emplace_back(buffer_index, desc.buffer_type);
         if (True(desc.used_types & IR::Type::U64)) {
             spv_buffer.Alias(PointerType::U64) =
-                DefineBuffer(is_storage, desc.is_written, 3, desc.buffer_type, U64);
+                DefineBuffer(is_storage, desc.is_written, is_coherent, 3, desc.buffer_type, U64,
+                             *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::U32)) {
             spv_buffer.Alias(PointerType::U32) =
-                DefineBuffer(is_storage, desc.is_written, 2, desc.buffer_type, U32[1]);
+                DefineBuffer(is_storage, desc.is_written, is_coherent, 2, desc.buffer_type, U32[1],
+                             *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::F32)) {
             spv_buffer.Alias(PointerType::F32) =
-                DefineBuffer(is_storage, desc.is_written, 2, desc.buffer_type, F32[1]);
+                DefineBuffer(is_storage, desc.is_written, is_coherent, 2, desc.buffer_type, F32[1],
+                             *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::U16)) {
             spv_buffer.Alias(PointerType::U16) =
-                DefineBuffer(is_storage, desc.is_written, 1, desc.buffer_type, U16);
+                DefineBuffer(is_storage, desc.is_written, is_coherent, 1, desc.buffer_type, U16,
+                             *descriptor_binding);
         }
         if (True(desc.used_types & IR::Type::U8)) {
             spv_buffer.Alias(PointerType::U8) =
-                DefineBuffer(is_storage, desc.is_written, 0, desc.buffer_type, U8);
+                DefineBuffer(is_storage, desc.is_written, is_coherent, 0, desc.buffer_type, U8,
+                             *descriptor_binding);
         }
-        ++binding.unified;
     }
 }
 
@@ -957,6 +973,12 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
 }
 
 void EmitContext::DefineImagesAndSamplers() {
+    if (std::ranges::any_of(info.images, [](const ImageResource& image) {
+            return image.dynamic_descriptor_count != 0;
+        })) {
+        AddCapability(spv::Capability::ShaderNonUniform);
+        AddCapability(spv::Capability::SampledImageArrayNonUniformIndexing);
+    }
     for (const auto& image_desc : info.images) {
         const auto sharp = image_desc.GetSharp(info);
         const auto nfmt = sharp.GetNumberFmt();
@@ -968,15 +990,26 @@ void EmitContext::DefineImagesAndSamplers() {
         const Id image_type{ImageType(*this, image_desc, sampled_type)};
 
         const u32 num_bindings = image_desc.NumBindings(info);
+        const bool is_dynamic_descriptor_table = image_desc.dynamic_descriptor_count != 0;
+        ASSERT_MSG(!is_dynamic_descriptor_table ||
+                       (profile.supports_sampled_image_array_nonuniform_indexing &&
+                        image_desc.HasValidDynamicRange(info) && !image_desc.is_depth &&
+                        !image_desc.is_atomic && !is_storage &&
+                        mip_fallback_mode == MipStorageFallbackMode::None),
+                   "Malformed dynamic sampled-image table reached the SPIR-V backend");
         Id pointee_type = image_type;
-        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
+        if (is_dynamic_descriptor_table ||
+            mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
             pointee_type = TypeArray(pointee_type, ConstU32(num_bindings));
         }
 
+        const Id element_pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
-        Decorate(id, spv::Decoration::Binding, binding.unified);
-        binding.unified += num_bindings;
+        const auto descriptor_binding = binding.TryAddImageBinding(num_bindings);
+        ASSERT_MSG(descriptor_binding.has_value(),
+                   "Invalid descriptor count or binding index overflow");
+        Decorate(id, spv::Decoration::Binding, *descriptor_binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         // TODO better naming for resources (flattened sharp_idx is not informative)
         Name(id, fmt::format("{}_{}{}", stage, "img", image_desc.sharp_idx));
@@ -985,9 +1018,12 @@ void EmitContext::DefineImagesAndSamplers() {
             .id = id,
             .sampled_type = is_storage ? sampled_type : TypeSampledImage(image_type),
             .image_type = image_type,
+            .element_pointer_type = element_pointer_type,
             .view_type = sharp.GetViewType(image_desc.is_array),
+            .descriptor_count = num_bindings,
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .is_dynamic_descriptor_table = is_dynamic_descriptor_table,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
@@ -1003,7 +1039,9 @@ void EmitContext::DefineImagesAndSamplers() {
     sampler_pointer_type = TypePointer(spv::StorageClass::UniformConstant, sampler_type);
     for (const auto& samp_desc : info.samplers) {
         const Id id{AddGlobalVariable(sampler_pointer_type, spv::StorageClass::UniformConstant)};
-        Decorate(id, spv::Decoration::Binding, binding.unified++);
+        const auto descriptor_binding = binding.TryAddSamplerBinding();
+        ASSERT_MSG(descriptor_binding.has_value(), "Descriptor binding index overflow");
+        Decorate(id, spv::Decoration::Binding, *descriptor_binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         const auto sharp_desc =
             samp_desc.is_inline_sampler
@@ -1022,7 +1060,8 @@ void EmitContext::DefineSharedMemory() {
         return;
     }
     ASSERT(info.stage == Stage::Compute);
-    const u32 shared_memory_size = runtime_info.cs_info.shared_memory_size;
+    const u32 shared_memory_size =
+        runtime_info.cs_info.shared_memory_size + info.workgroup_scratch_memory_size;
 
     const auto make_type = [&](IR::Type type, Id element_type, u32 element_size,
                                std::string_view name) {
@@ -1175,6 +1214,18 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Get page BDA
     const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
+    // Check the full-width guest page before narrowing or indexing either GPU table.
+    // In particular, high address bits must not wrap onto an unrelated cached page.
+    const auto lookup_label{OpLabel()};
+    const auto invalid_label{OpLabel()};
+    const auto in_range{
+        OpULessThan(U1[1], page, Constant(U64, VideoCore::BufferCache::CACHING_NUMPAGES))};
+    OpSelectionMerge(lookup_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(in_range, lookup_label, invalid_label);
+    AddLabel(invalid_label);
+    OpReturnValue(u64_zero_value);
+    AddLabel(lookup_label);
+
     const auto page32{OpUConvert(U32[1], page)};
     const auto& bda_buffer{buffers[bda_pagetable_index]};
     const auto [bda_buffer_id, bda_pointer_type] = bda_buffer.Alias(PointerType::U64);
@@ -1186,7 +1237,7 @@ Id EmitContext::DefineGetBdaPointer() {
     OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
     OpBranchConditional(is_fault, fault_label, available_label);
 
-    // First time acces, mark as fault
+    // Concurrent invocations may fault different pages in the same bitmap word.
     AddLabel(fault_label);
     const auto& fault_buffer{buffers[fault_buffer_index]};
     const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
@@ -1195,9 +1246,8 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
     const auto fault_ptr{
         OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, page_div32)};
-    const auto fault_value{OpLoad(U32[1], fault_ptr)};
-    const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
-    OpStore(fault_ptr, fault_value_masked);
+    OpAtomicOr(U32[1], fault_ptr, ConstU32(static_cast<u32>(spv::Scope::Device)), u32_zero_value,
+               page_mask);
 
     // Return null pointer
     const auto fallback_result{u64_zero_value};
