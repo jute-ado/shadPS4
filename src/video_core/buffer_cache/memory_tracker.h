@@ -11,7 +11,7 @@
 
 #include "common/debug.h"
 #include "common/types.h"
-#include "core/emulator_settings.h"
+#include "video_core/buffer_cache/memory_tracker_policy.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -64,7 +64,7 @@ public:
                             });
     }
 
-    /// Removes all protection from a page and ensures GPU data has been flushed if requested
+    /// Removes write protection from a page, preserving any GPU-owned bytes before CPU mutation.
     void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
         IteratePages<false>(
             cpu_addr, size, [&on_flush](RegionManager* manager, u64 offset, size_t size) {
@@ -72,10 +72,11 @@ public:
                     // Perform both the GPU modification check and CPU state change with the lock
                     // in case we are racing with GPU thread trying to mark the page as GPU
                     // modified. If we need to flush the flush function is going to perform CPU
-                    // state change.
+                    // state change. Readback settings may control CPU reads, but a CPU write must
+                    // never discard GPU-owned bytes elsewhere on the tracked page.
                     std::scoped_lock lk{manager->lock};
-                    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled &&
-                        manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                    if (ShouldFlushGpuModifiedPageOnCpuWrite(
+                            manager->template IsRegionModified<Type::GPU>(offset, size))) {
                         return true;
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
