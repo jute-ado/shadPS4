@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string_view>
 
 #include "common/types.h"
@@ -58,6 +59,15 @@ enum class MacroTileMode : u32 {
     Mode_1x1_2_Dup3 = 15,
 };
 
+/// Returns whether a value can be used to index one of the exhaustive macro-tile lookup
+/// tables.  Image descriptors are guest-controlled, and the arithmetic in
+/// CalculateMacrotileMode can underflow for sub-64-byte tiles (for example a packed/BC format),
+/// yielding an enum value outside the hardware table.  Admission callers must check this before
+/// dispatching to a lookup that intentionally asserts on unknown modes.
+[[nodiscard]] constexpr bool IsValidMacroTileMode(const MacroTileMode mode) noexcept {
+    return static_cast<u32>(mode) <= static_cast<u32>(MacroTileMode::Mode_1x1_2_Dup3);
+}
+
 enum class ArrayMode : u32 {
     ArrayLinearGeneral = 0,
     ArrayLinearAligned = 1,
@@ -105,10 +115,21 @@ enum class TileMode : u32 {
     Thick3DThickPrt = 24,
     Thick2DXThick = 25,
     Thick3DXThick = 26,
+    // Rotated entries in the GFX8/Tonga tile-mode table. Mode 30 is
+    // profile-dependent (for example, rotated PRT on some GFX8 parts), so it
+    // remains unknown until the GPU profile is carried through layout decode.
+    Rotated1DThin = 27,
+    Rotated2DThin = 28,
+    RotatedThinPrt = 29,
     DisplayLinearGeneral = 31,
 };
 
 std::string_view NameOf(TileMode tile_mode);
+
+/// Returns the array layout represented by a guest tile mode, or no value for reserved/unknown
+/// five-bit encodings.  Guest descriptors are untrusted; callers at an admission boundary must
+/// use this form instead of calling GetArrayMode directly.
+[[nodiscard]] std::optional<ArrayMode> TryGetArrayMode(TileMode tile_mode);
 
 ArrayMode GetArrayMode(TileMode tile_mode);
 

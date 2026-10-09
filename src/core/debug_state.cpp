@@ -173,13 +173,15 @@ void DebugStateImpl::PushRegsDump(uintptr_t base_addr, uintptr_t header_addr,
             auto stage = (*dump)->regs.ProgramForStage(i);
             if (stage->address) {
                 const auto params = AmdGpu::GetParams(*stage);
-                (*dump)->stages[i] = PipelineShaderProgramDump{
-                    .name = Vulkan::PipelineCache::GetShaderName(Shader::StageFromIndex(i),
-                                                                 params.hash),
-                    .hash = params.hash,
-                    .user_data = *stage,
-                    .code = std::vector<u32>{params.code.begin(), params.code.end()},
-                };
+                if (params) {
+                    (*dump)->stages[i] = PipelineShaderProgramDump{
+                        .name = Vulkan::PipelineCache::GetShaderName(Shader::StageFromIndex(i),
+                                                                     params->hash),
+                        .hash = params->hash,
+                        .user_data = *stage,
+                        .code = std::vector<u32>{params->code.begin(), params->code.end()},
+                    };
+                }
             }
         }
     }
@@ -199,11 +201,14 @@ void DebugStateImpl::PushRegsDumpCompute(uintptr_t base_addr, uintptr_t header_a
     cs = cs_state;
 
     const auto params = AmdGpu::GetParams(cs);
+    if (!params) {
+        return;
+    }
     (*dump)->cs_data = PipelineComputerProgramDump{
-        .name = Vulkan::PipelineCache::GetShaderName(Shader::Stage::Compute, params.hash),
-        .hash = params.hash,
+        .name = Vulkan::PipelineCache::GetShaderName(Shader::Stage::Compute, params->hash),
+        .hash = params->hash,
         .cs_program = cs,
-        .code = std::vector<u32>{params.code.begin(), params.code.end()},
+        .code = std::vector<u32>{params->code.begin(), params->code.end()},
     };
 }
 

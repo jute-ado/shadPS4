@@ -53,6 +53,26 @@ TEST(GnmSubmissionGate, PendingBoundaryBlocksGpuVisibleMappingWork) {
     EXPECT_TRUE(mapping.get());
 }
 
+TEST(GnmSubmissionGate, GpuVisibleAddressChangeExcludesLaterSubmissions) {
+    SubmissionGate gate;
+    auto admission = gate.WaitForBoundaryAndEnter();
+    std::promise<void> entrant_started;
+    auto started = entrant_started.get_future();
+
+    auto entrant = std::async(std::launch::async, [&] {
+        entrant_started.set_value();
+        auto submission = gate.Enter();
+        return true;
+    });
+    ASSERT_EQ(started.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(entrant.wait_for(20ms), std::future_status::timeout);
+
+    admission.unlock();
+
+    EXPECT_EQ(entrant.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(entrant.get());
+}
+
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
     SubmissionGate gate;
     auto submission = gate.Enter();

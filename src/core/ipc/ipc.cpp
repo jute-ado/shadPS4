@@ -74,7 +74,7 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - SCREENSHOT_WITH_OVERLAYS: capture the next presented frame, including overlays
  *   - SCREENSHOT_WITH_OVERLAYS_AT_PRESENTED_FRAME
  *     - presented frame: positive frame number, up to 50000000
- *   - RENDERDOC_CAPTURE: capture the next frame with RenderDoc when loaded
+ *   - RENDERDOC_CAPTURE: capture the next recorded guest-work submission when loaded
  *   - GAMEPAD_BUTTON
  *     - button: player-one button name
  *     - pressed: 1 to press, 0 to release
