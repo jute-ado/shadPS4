@@ -395,7 +395,11 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
-        const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
+        const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
+        memory_tracker->ForEachUploadRange(
+            device_addr, size, false, [](VAddr, u64) {},
+            [&] { memory->CopySparseMemory(device_addr, data, size); });
+        stream_buffer.Commit();
         return {&stream_buffer, offset};
     }
     if (IsBufferInvalid(buffer_id)) {
