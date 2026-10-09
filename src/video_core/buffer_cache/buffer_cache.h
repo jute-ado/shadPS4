@@ -8,6 +8,7 @@
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/buffer_registration_index.h"
 #include "video_core/buffer_cache/cpu_page_write_snapshot.h"
 #include "video_core/buffer_cache/dma_dirty_ranges.h"
 #include "video_core/buffer_cache/fault_manager.h"
@@ -127,6 +128,13 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
+    /// Flushes exactly the requested GPU-modified range from an existing containing buffer.
+    [[nodiscard]] bool ReadMemoryExact(VAddr device_addr, u64 size);
+
+    /// Reads authoritative bytes into caller-owned memory without publishing them into mutable
+    /// guest memory or changing GPU/CPU ownership tracking.
+    [[nodiscard]] bool ReadMemorySnapshot(VAddr device_addr, void* output, u64 size);
+
     /// Acquires host vertex buffers without recording command-buffer-local state.
     [[nodiscard]] PreparedVertexBuffers PrepareVertexBuffers(
         const Vulkan::GraphicsPipeline& pipeline,
@@ -137,8 +145,7 @@ public:
 
     /// Acquires the host index buffer without recording command-buffer-local state.
     [[nodiscard]] PreparedIndexBuffer PrepareIndexBuffer(
-        u32 index_offset,
-        boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+        u32 index_offset, boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
     /// Records prepared index buffer state on the current command buffer.
     void BindIndexBuffer(const PreparedIndexBuffer& prepared);
@@ -166,11 +173,17 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// Return true when the exact byte range has been written by the GPU.
+    [[nodiscard]] bool IsRegionGpuModifiedExact(VAddr addr, size_t size) const;
+
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
 
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
+
+    /// Applies completed fault records at an outer GPU-owner command boundary.
+    void DrainReadyFaults();
 
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
@@ -184,19 +197,21 @@ public:
 private:
     template <typename Func>
     void ForEachBufferInRange(VAddr device_addr, u64 size, Func&& func) {
-        buffer_ranges.ForEachInRange(device_addr, size,
-                                     [&](u64 page_start, u64 page_end, BufferId id) {
-                                         Buffer& buffer = slot_buffers[id];
-                                         func(id, buffer);
-                                     });
+        buffer_ranges.OwnerForEachInRange(device_addr, size,
+                                         [&](u64 page_start, u64 page_end, BufferId id) {
+                                             Buffer& buffer = slot_buffers[id];
+                                             func(id, buffer);
+                                         });
     }
 
     inline bool IsBufferInvalid(BufferId buffer_id) const {
         return !buffer_id || slot_buffers[buffer_id].is_deleted;
     }
 
-    template <bool async>
+    template <bool async, bool exact = false>
     void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
+
+    [[nodiscard]] bool DownloadBufferMemorySnapshot(VAddr device_addr, void* output, u64 size);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 
@@ -247,7 +262,7 @@ private:
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<BufferId, u64> lru_cache;
     RangeSet gpu_modified_ranges;
-    SplitRangeMap<BufferId> buffer_ranges;
+    BufferRegistrationIndex<BufferId> buffer_ranges;
     PageTable page_table;
 };
 

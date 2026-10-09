@@ -5,6 +5,8 @@
 
 #include <utility>
 
+#include "common/unique_function.h"
+
 namespace AmdGpu {
 
 template <typename Packet, typename WriteMemory, typename SignalInterrupt,
@@ -14,6 +16,23 @@ void PublishEop(Packet packet, WriteMemory&& write_memory, SignalInterrupt&& sig
     packet.SignalFence(std::forward<WriteMemory>(write_memory),
                        std::forward<SignalInterrupt>(signal_interrupt));
     std::forward<NotifyCompletion>(notify_completion)();
+}
+
+template <typename Packet, typename DeferCompletion, typename WriteMemory, typename SignalInterrupt,
+          typename NotifyCompletion>
+void DeferEopUntilGpuCompletion(Packet packet, DeferCompletion&& defer_completion,
+                                WriteMemory&& write_memory, SignalInterrupt&& signal_interrupt,
+                                NotifyCompletion&& notify_completion) {
+    // Own both packet and callbacks. The parser's PM4 span may already be gone
+    // when this fence and its write-confirm interrupt become eligible.
+    auto completion =
+        [packet = std::move(packet), write_memory = std::forward<WriteMemory>(write_memory),
+         signal_interrupt = std::forward<SignalInterrupt>(signal_interrupt),
+         notify_completion = std::forward<NotifyCompletion>(notify_completion)]() mutable {
+            PublishEop(std::move(packet), write_memory, signal_interrupt, notify_completion);
+        };
+    std::forward<DeferCompletion>(defer_completion)(
+        Common::UniqueFunction<void>{std::move(completion)});
 }
 
 } // namespace AmdGpu
