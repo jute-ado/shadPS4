@@ -324,6 +324,10 @@ void Rasterizer::DispatchDirect() {
     }
 
     const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+    // Diagnostic only: isolate the compute dispatch identified by prior device-loss checkpoints.
+    if (cs.pgm_hash == 0x0a57ac2f) {
+        return;
+    }
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         return;
     }
