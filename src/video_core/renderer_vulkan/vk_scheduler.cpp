@@ -5,10 +5,93 @@
 #include "common/debug.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
+#include "video_core/renderer_vulkan/vk_diagnostic_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
+
+namespace {
+
+void LogDeviceFault(const Instance& instance) {
+    if (!instance.SupportsDeviceFault()) {
+        return;
+    }
+
+    VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult result = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(
+        static_cast<VkDevice>(instance.GetDevice()), &counts, nullptr);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+        LOG_ERROR(Render_Vulkan, "Device-fault count query failed: {}",
+                  vk::to_string(vk::Result{result}));
+        return;
+    }
+
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+    std::vector<std::byte> vendor_binary(counts.vendorBinarySize);
+    VkDeviceFaultInfoEXT fault_info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendors.data(),
+        .pVendorBinaryData = vendor_binary.data(),
+    };
+    result = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(
+        static_cast<VkDevice>(instance.GetDevice()), &counts, &fault_info);
+    LOG_ERROR(Render_Vulkan,
+              "Device fault result={} description='{}' addresses={} vendors={} binary={}",
+              vk::to_string(vk::Result{result}), fault_info.description, counts.addressInfoCount,
+              counts.vendorInfoCount, counts.vendorBinarySize);
+    for (const auto& address : addresses) {
+        LOG_ERROR(Render_Vulkan, "Device fault address type={} address={:#x} precision={:#x}",
+                  vk::to_string(vk::DeviceFaultAddressTypeEXT{address.addressType}),
+                  address.reportedAddress, address.addressPrecision);
+    }
+    for (const auto& vendor : vendors) {
+        LOG_ERROR(Render_Vulkan,
+                  "Device fault vendor description='{}' code={:#x} data={:#x}",
+                  vendor.description, vendor.vendorFaultCode, vendor.vendorFaultData);
+    }
+}
+
+void LogDiagnosticCheckpoint(const Instance& instance) {
+    if (!instance.SupportsDiagnosticCheckpoints()) {
+        return;
+    }
+
+    u32 checkpoint_count{};
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV(
+        static_cast<VkQueue>(instance.GetGraphicsQueue()), &checkpoint_count, nullptr);
+    std::vector<VkCheckpointDataNV> checkpoints(
+        checkpoint_count, VkCheckpointDataNV{VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV(
+        static_cast<VkQueue>(instance.GetGraphicsQueue()), &checkpoint_count, checkpoints.data());
+    LOG_ERROR(Render_Vulkan, "Device-lost checkpoint count={}", checkpoint_count);
+    for (const auto& checkpoint : checkpoints) {
+        const auto* marker =
+            static_cast<const DiagnosticCheckpointMarker*>(checkpoint.pCheckpointMarker);
+        if (!marker || marker->magic != DiagnosticCheckpointMarker::Magic) {
+            LOG_ERROR(Render_Vulkan, "Device-lost checkpoint stage={:#x} marker={}",
+                      static_cast<u32>(checkpoint.stage), checkpoint.pCheckpointMarker);
+        } else if (marker->kind == DiagnosticCheckpointKind::Graphics) {
+            LOG_ERROR(Render_Vulkan,
+                      "Device-lost checkpoint stage={:#x} phase={} vertex_shader={:#x} "
+                      "fragment_shader={:#x} runtime={}/{}/{}",
+                      static_cast<u32>(checkpoint.stage), static_cast<u32>(marker->phase),
+                      marker->first_hash, marker->second_hash, marker->runtime[0],
+                      marker->runtime[1], marker->runtime[2]);
+        } else {
+            LOG_ERROR(Render_Vulkan,
+                      "Device-lost checkpoint stage={:#x} phase={} compute_shader={:#x} "
+                      "dispatch={}x{}x{}",
+                      static_cast<u32>(checkpoint.stage), static_cast<u32>(marker->phase),
+                      marker->first_hash, marker->runtime[0], marker->runtime[1],
+                      marker->runtime[2]);
+        }
+    }
+}
+
+} // namespace
 
 std::mutex Scheduler::submit_mutex;
 
@@ -26,6 +109,11 @@ Scheduler::~Scheduler() {
 #if TRACY_GPU_ENABLED
     std::free(profiler_scope);
 #endif
+}
+
+void Scheduler::LogDeviceLossDiagnostics() const {
+    LogDeviceFault(instance);
+    LogDiagnosticCheckpoint(instance);
 }
 
 void Scheduler::BeginRendering(const RenderState& new_state) {
@@ -192,6 +280,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        LogDeviceLossDiagnostics();
+    }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     master_semaphore.Refresh();
@@ -380,9 +471,7 @@ void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmd
     }
     if (dirty_state.feedback_loop_enabled && instance.IsAttachmentFeedbackLoopLayoutSupported()) {
         dirty_state.feedback_loop_enabled = false;
-        cmdbuf.setAttachmentFeedbackLoopEnableEXT(feedback_loop_enabled
-                                                      ? vk::ImageAspectFlagBits::eColor
-                                                      : vk::ImageAspectFlagBits::eNone);
+        cmdbuf.setAttachmentFeedbackLoopEnableEXT(feedback_loop_aspects);
     }
 }
 

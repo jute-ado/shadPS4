@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string_view>
+
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -812,6 +815,37 @@ void TextureCache::RegisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
+    static const bool log_texture_gc = [] {
+        const char* value = std::getenv("SHADPS4_DIAGNOSTIC_TEXTURE_GC");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    if (log_texture_gc && slot_images.size() >= 140) {
+        size_t overlap_count = 0;
+        size_t exact_address_count = 0;
+        size_t exact_range_count = 0;
+        ForEachImageInRegion(image.info.guest_address, image.info.guest_size,
+                             [&](ImageId, Image& cached) {
+                                 ++overlap_count;
+                                 exact_address_count +=
+                                     cached.info.guest_address == image.info.guest_address;
+                                 exact_range_count +=
+                                     cached.info.guest_address == image.info.guest_address &&
+                                     cached.info.guest_size == image.info.guest_size;
+                             });
+        LOG_INFO(Render_Vulkan,
+                 "Texture image register tick={} count={} addr=0x{:x} guest_size={} "
+                 "extent={}x{}x{} pitch={} levels={} layers={} bits={} samples={} "
+                 "format={} type={} tile_mode={} array_mode={} block={} tiled={} "
+                 "overlaps={} exact_addresses={} exact_ranges={}",
+                 gc_tick, slot_images.size(), image.info.guest_address, image.info.guest_size,
+                 image.info.size.width, image.info.size.height, image.info.size.depth,
+                 image.info.pitch, image.info.resources.levels, image.info.resources.layers,
+                 image.info.num_bits, image.info.num_samples, static_cast<u32>(image.info.pixel_format),
+                 static_cast<u64>(image.info.type), static_cast<u32>(image.info.tile_mode),
+                 static_cast<u32>(image.info.array_mode), static_cast<u32>(image.info.props.is_block),
+                 static_cast<u32>(image.info.props.is_tiled), overlap_count, exact_address_count,
+                 exact_range_count);
+    }
     image.flags |= ImageFlagBits::Registered;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
@@ -954,6 +988,16 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
+    static const bool log_texture_gc = [] {
+        const char* value = std::getenv("SHADPS4_DIAGNOSTIC_TEXTURE_GC");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    if (log_texture_gc && gc_tick % 30 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Texture GC tick={} used={} images={} trigger={} pressure={} critical={}",
+                 gc_tick, total_used_memory, slot_images.size(), trigger_gc_memory,
+                 pressure_gc_memory, critical_gc_memory);
+    }
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
@@ -1063,7 +1107,8 @@ void TextureCache::RunGarbageCollector() {
     GarbageCollectSamplers();
 }
 
-void TextureCache::TouchImage(const Image& image) {
+void TextureCache::TouchImage(Image& image) {
+    image.tick_accessed_last = scheduler.CurrentTick();
     lru_cache.Touch(image.lru_id, gc_tick);
 }
 
@@ -1091,16 +1136,23 @@ void TextureCache::DeleteImage(ImageId image_id) {
         }
     }
 
-    // Reclaim image and any image views it references.
-    scheduler.DeferOperation([this, image_id] {
-        Image& image = slot_images[image_id];
-        for (auto& backing : image.backing_images) {
-            for (const ImageViewId image_view_id : backing.image_view_ids) {
-                slot_image_views.erase(image_view_id);
-            }
+    // Reclaim image and any image views it references only after its latest recorded use.
+    scheduler.DeferOperationAfterNextSubmit([this, image_id] { RetireImage(image_id); });
+}
+
+void TextureCache::RetireImage(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    if (!Vulkan::ResourceUseHasRetired(image.tick_accessed_last,
+                                       scheduler.GetMasterSemaphore()->KnownGpuTick())) {
+        scheduler.DeferOperationAfterNextSubmit([this, image_id] { RetireImage(image_id); });
+        return;
+    }
+    for (auto& backing : image.backing_images) {
+        for (const ImageViewId image_view_id : backing.image_view_ids) {
+            slot_image_views.erase(image_view_id);
         }
-        slot_images.erase(image_id);
-    });
+    }
+    slot_images.erase(image_id);
 }
 
 } // namespace VideoCore

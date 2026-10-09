@@ -101,9 +101,13 @@ private:
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
+    void RefreshGuestBufferBindings();
     void PrepareAddr64PointerResidency(const Shader::Info& stage);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void RecordDiagnosticCheckpoint(bool is_compute, u64 first_hash, u64 second_hash = 0,
+                                    bool after = false,
+                                    const std::array<u32, 3>& runtime = {});
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {
@@ -142,12 +146,20 @@ private:
     Pipeline::BufferBarriers buffer_barriers;
     Shader::PushData push_data;
 
-    using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
+    struct BufferBindingInfo {
+        VideoCore::BufferId buffer_id;
+        const Shader::Info* stage;
+        u32 descriptor_index;
+        AmdGpu::Buffer vsharp;
+        u64 size;
+        u32 buffer_info_index;
+        u32 push_binding;
+    };
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
-    bool attachment_feedback_loop{};
+    vk::ImageAspectFlags attachment_feedback_loop{};
     u32 prepared_host_scale{1};
     u32 current_host_scale{1};
 };

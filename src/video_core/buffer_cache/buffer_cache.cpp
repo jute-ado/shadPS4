@@ -9,6 +9,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/download_readback_policy.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -105,12 +106,147 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
     });
 }
 
-template <bool async>
+bool BufferCache::ReadMemoryExact(VAddr device_addr, u64 size) {
+    const std::array ranges{SrtReadbackRange{device_addr, size}};
+    return ReadMemoryExactRanges(ranges);
+}
+
+bool BufferCache::ReadMemoryExactRanges(std::span<const SrtReadbackRange> ranges) {
+    struct PendingCopy {
+        vk::Buffer source;
+        VAddr buffer_cpu_address;
+        VAddr device_address;
+        u64 size;
+        vk::BufferCopy region;
+    };
+
+    boost::container::small_vector<SrtReadbackRange, 16> requested_ranges{ranges.begin(),
+                                                                         ranges.end()};
+    bool readback_completed = false;
+    liverpool->SendCommand<true>(
+        [this, requested_ranges = std::move(requested_ranges), &readback_completed] {
+            boost::container::small_vector<PendingCopy, 16> pending_copies;
+            boost::container::small_vector<SrtReadbackRange, 16> accepted_ranges;
+            u64 total_size_bytes{};
+            bool all_ranges_valid = true;
+
+            for (const auto& requested : requested_ranges) {
+                ASSERT_MSG(requested.size <= std::numeric_limits<u32>::max(),
+                           "Exact readback range is too large: {}", requested.size);
+                const BufferId buffer_id = page_table[requested.address >> CACHING_PAGEBITS].buffer_id;
+                if (IsBufferInvalid(buffer_id)) {
+                    all_ranges_valid = false;
+                    continue;
+                }
+                Buffer& buffer = slot_buffers[buffer_id];
+                if (!buffer.IsInBounds(requested.address, requested.size)) {
+                    all_ranges_valid = false;
+                    continue;
+                }
+                accepted_ranges.push_back(requested);
+                memory_tracker->ForEachDownloadRange<false>(
+                    requested.address, requested.size, [&](u64 address, u64 size) {
+                        const auto clipped = ClipDownloadRange(address, size, requested.address,
+                                                               requested.size);
+                        if (!clipped) {
+                            return;
+                        }
+                        const auto add_download = [&](VAddr start, VAddr end) {
+                            const u64 copy_size = end - start;
+                            pending_copies.push_back(PendingCopy{
+                                .source = buffer.buffer,
+                                .buffer_cpu_address = buffer.CpuAddr(),
+                                .device_address = start,
+                                .size = copy_size,
+                                .region = vk::BufferCopy{
+                                    .srcOffset = start - buffer.CpuAddr(),
+                                    .dstOffset = total_size_bytes,
+                                    .size = copy_size,
+                                },
+                            });
+                            total_size_bytes = Common::AlignUp(total_size_bytes + copy_size, 64ULL);
+                        };
+                        gpu_modified_ranges.ForEachInRange(clipped->address, clipped->size,
+                                                          add_download);
+                        gpu_modified_ranges.Subtract(clipped->address, clipped->size);
+                    });
+            }
+
+            if (pending_copies.empty()) {
+                readback_completed = all_ranges_valid;
+                return;
+            }
+
+            const auto [download, offset] = download_buffer.Map(total_size_bytes);
+            for (auto& copy : pending_copies) {
+                copy.region.dstOffset += offset;
+            }
+            download_buffer.Commit();
+            scheduler.EndRendering();
+            const auto cmdbuf = scheduler.CommandBuffer();
+            const vk::MemoryBarrier2 pre_barrier = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &pre_barrier,
+            });
+            for (const auto& copy : pending_copies) {
+                const std::array region{copy.region};
+                cmdbuf.copyBuffer(copy.source, download_buffer.Handle(), region);
+            }
+            const vk::BufferMemoryBarrier2 host_barrier = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+                .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+                .buffer = download_buffer.Handle(),
+                .offset = offset,
+                .size = total_size_bytes,
+            };
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &host_barrier,
+            });
+            scheduler.Finish();
+            ASSERT_MSG(download_buffer.InvalidateMappedRange(offset, total_size_bytes),
+                       "Failed to invalidate batched download range {:#x}:{:#x}", offset,
+                       total_size_bytes);
+
+            auto* memory = Core::Memory::Instance();
+            for (const auto& copy : pending_copies) {
+                const u64 download_offset = copy.region.dstOffset - offset;
+                memory->TryWriteBacking(std::bit_cast<u8*>(copy.device_address),
+                                        download + download_offset, copy.size);
+            }
+            for (const auto& requested : accepted_ranges) {
+                cpu_page_write_tracker.Discard(requested.address, requested.size);
+                memory_tracker->UnmarkRegionAsGpuModified(requested.address, requested.size);
+            }
+            readback_completed = all_ranges_valid;
+        }
+    );
+    return readback_completed;
+}
+
+template <bool async, bool exact>
 void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     memory_tracker->ForEachDownloadRange<false>(
         device_addr, size, [&](u64 device_addr_out, u64 range_size) {
+            if constexpr (exact) {
+                const auto clipped =
+                    ClipDownloadRange(device_addr_out, range_size, device_addr, size);
+                if (!clipped) {
+                    return;
+                }
+                device_addr_out = clipped->address;
+                range_size = clipped->size;
+            }
             const VAddr buffer_addr = buffer.CpuAddr();
             const auto add_download = [&](VAddr start, VAddr end) {
                 const u64 new_offset = start - buffer_addr;
@@ -155,11 +291,26 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         .pBufferMemoryBarriers = &pre_barrier,
     });
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
-    const auto write_data = [&]() {
+    const vk::BufferMemoryBarrier2 host_barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        .buffer = download_buffer.Handle(),
+        .offset = offset,
+        .size = total_size_bytes,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &host_barrier,
+    });
+
+    const auto write_data = [this, device_addr, size, copies, offset, download,
+                             buffer_cpu_addr = buffer.CpuAddr()]() {
         auto* memory = Core::Memory::Instance();
         cpu_page_write_tracker.Discard(device_addr, size);
         for (const auto& copy : copies) {
-            const VAddr copy_device_addr = buffer.CpuAddr() + copy.srcOffset;
+            const VAddr copy_device_addr = buffer_cpu_addr + copy.srcOffset;
             const u64 dst_offset = copy.dstOffset - offset;
             memory->TryWriteBacking(std::bit_cast<u8*>(copy_device_addr), download + dst_offset,
                                     copy.size);
@@ -167,10 +318,21 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
     };
     if constexpr (async) {
-        scheduler.DeferOperation(write_data);
+        scheduler.DeferOperation([this, write_data, offset, total_size_bytes] {
+            ASSERT_MSG(download_buffer.InvalidateMappedRange(offset, total_size_bytes),
+                       "Failed to invalidate asynchronous download range {:#x}:{:#x}", offset,
+                       total_size_bytes);
+            write_data();
+        });
     } else {
-        scheduler.Finish();
-        write_data();
+        const bool completed = CompleteDownloadReadback(
+            [this] { scheduler.Finish(); },
+            [this, offset, total_size_bytes] {
+                return download_buffer.InvalidateMappedRange(offset, total_size_bytes);
+            },
+            write_data);
+        ASSERT_MSG(completed, "Failed to invalidate download range {:#x}:{:#x}", offset,
+                   total_size_bytes);
     }
 }
 
@@ -471,6 +633,10 @@ bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionGpuModified(addr, size);
+}
+
+bool BufferCache::IsRegionGpuModifiedExact(VAddr addr, size_t size) const {
+    return gpu_modified_ranges.Intersects(addr, size);
 }
 
 BufferId BufferCache::FindBuffer(VAddr device_addr, u32 size) {
@@ -976,7 +1142,7 @@ void BufferCache::TouchBuffer(const Buffer& buffer) {
 void BufferCache::DeleteBuffer(BufferId buffer_id) {
     Buffer& buffer = slot_buffers[buffer_id];
     Unregister(buffer_id);
-    scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
+    scheduler.DeferOperationAfterNextSubmit([this, buffer_id] { slot_buffers.erase(buffer_id); });
     buffer.is_deleted = true;
 }
 

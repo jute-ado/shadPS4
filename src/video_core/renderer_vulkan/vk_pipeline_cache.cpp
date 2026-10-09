@@ -13,7 +13,11 @@
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer_binding_policy.h"
+#include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/srt_memory_sync.h"
 #include "video_core/cache_storage.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -28,6 +32,12 @@ using Shader::Output;
 using Shader::Stage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
+
+struct SrtSyncSession {
+    VideoCore::PageManager& page_manager;
+    VideoCore::BufferCache& buffer_cache;
+    boost::container::small_vector<VideoCore::SrtReadbackRange, 16> pending_ranges;
+};
 
 constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
@@ -255,8 +265,10 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
-                             AmdGpu::Liverpool* liverpool_)
+                             AmdGpu::Liverpool* liverpool_, VideoCore::PageManager& page_manager_,
+                             VideoCore::BufferCache& buffer_cache_)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
+      page_manager{page_manager_}, buffer_cache{buffer_cache_},
       desc_heap{instance, scheduler.GetMasterSemaphore(), DescriptorHeapSizes} {
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -323,8 +335,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 
     if (EmulatorSettings.IsAsyncGraphicsPipelineCompilation()) {
-        async_graphics_compiler = std::make_unique<AsyncGraphicsPipelineQueue>(
-            [this](AsyncGraphicsPipelineJob job) {
+        async_graphics_compiler =
+            std::make_unique<AsyncGraphicsPipelineQueue>([this](AsyncGraphicsPipelineJob job) {
                 return CompileGraphicsPipelineAsync(std::move(job));
             });
     }
@@ -737,13 +749,14 @@ bool PipelineCache::RefreshComputeKey() {
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
                                               Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{
-        DebugState, !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
+    ScopedHostCompilationGuestPause pause{DebugState,
+                                          !EmulatorSettings.IsAsyncGraphicsPipelineCompilation()};
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile,
+                                                     GetSrtMemorySynchronizer());
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
@@ -773,6 +786,19 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(stage, l_stage);
+    const auto canonicalize_guest_buffers = [this](Shader::StageSpecialization& spec,
+                                                   const Shader::Info& info) {
+        spec.CanonicalizeUnusableGuestBuffers([&, this](u32, const auto& desc) {
+            const auto sharp = desc.GetSharp(info);
+            if (!sharp) {
+                return false;
+            }
+            return VideoCore::IsGuestBufferBindingUsable(
+                sharp.base_address, desc.GetBindingSize(sharp), [this](VAddr address, u64 size) {
+                    return page_manager.IsGpuMapped(address, size);
+                });
+        });
+    };
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
         it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
@@ -780,6 +806,7 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         auto start = binding;
         const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        canonicalize_guest_buffers(spec, program->info);
         const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
@@ -792,8 +819,9 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
-    info.RefreshFlatBuf();
+    info.RefreshFlatBuf(GetSrtMemorySynchronizer());
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    canonicalize_guest_buffers(spec, info);
 
     size_t perm_idx = program->modules.size();
     u64 perm_hash = HashCombine(params.hash, perm_idx);
@@ -802,19 +830,51 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
-        auto new_info = Shader::Info(stage, l_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        auto new_info = std::make_unique<Shader::Info>(stage, l_stage, params);
+        module = CompileModule(*new_info, runtime_info, params.code, perm_idx, binding);
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
+        RegisterShaderMeta(*new_info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        program->AddPermut(module, std::move(spec), std::move(new_info));
     } else {
-        info.AddBindings(binding);
+        auto& selected_info = it->info ? *it->info : info;
+        selected_info.pgm_base = params.Base();
+        selected_info.user_data = params.user_data;
+        selected_info.RefreshFlatBuf(GetSrtMemorySynchronizer());
+        selected_info.AddBindings(binding);
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
     }
-    return std::make_tuple(&program->info, module,
+    auto& selected_info = program->modules[perm_idx].info ? *program->modules[perm_idx].info
+                                                          : program->info;
+    return std::make_tuple(&selected_info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+}
+
+Shader::SrtMemorySynchronizer PipelineCache::GetSrtMemorySynchronizer() {
+    auto session = std::make_shared<SrtSyncSession>(page_manager, buffer_cache);
+    return {
+        .callback = &SynchronizeSrtRange,
+        .context = session.get(),
+        .flush = &FlushSrtRanges,
+        .context_owner = std::move(session),
+    };
+}
+
+bool PS4_SYSV_ABI PipelineCache::SynchronizeSrtRange(void* context, VAddr address, u64 size) {
+    auto& session = *static_cast<SrtSyncSession*>(context);
+    return VideoCore::QueueSrtMemoryRange(session.page_manager, session.buffer_cache,
+                                          session.pending_ranges, address, size);
+}
+
+bool PipelineCache::FlushSrtRanges(void* context) {
+    auto& session = *static_cast<SrtSyncSession*>(context);
+    if (session.pending_ranges.empty()) {
+        return false;
+    }
+    const bool completed = session.buffer_cache.ReadMemoryExactRanges(session.pending_ranges);
+    session.pending_ranges.clear();
+    return completed;
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

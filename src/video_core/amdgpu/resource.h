@@ -45,7 +45,8 @@ struct Buffer {
     }
 
     bool Valid() const {
-        return type == 0u;
+        return type == 0u &&
+               IsNumberConversionSupported(NumberFormat(num_format), DataFormat(data_format));
     }
 
     operator bool() const noexcept {
@@ -196,7 +197,8 @@ struct Image {
     }
 
     bool Valid() const {
-        return (type & 0x8u) != 0;
+        return (type & 0x8u) != 0 &&
+               IsNumberConversionSupported(NumberFormat(num_format), DataFormat(data_format));
     }
 
     VAddr Address() const {
@@ -465,7 +467,10 @@ struct Sampler {
     }
 
     bool Valid() const {
-        return true;
+        return static_cast<u64>(max_aniso.Value()) <= static_cast<u64>(AnisoRatio::Sixteen) &&
+               static_cast<u64>(filter_mode.Value()) <= static_cast<u64>(FilterMode::Max) &&
+               static_cast<u64>(mip_filter.Value()) <= static_cast<u64>(MipFilter::Linear) &&
+               min_lod.Value() <= max_lod.Value();
     }
 
     bool operator==(const Sampler& other) const noexcept {

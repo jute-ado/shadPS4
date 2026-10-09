@@ -439,6 +439,14 @@ public:
         return supports_memory_budget;
     }
 
+    bool SupportsDeviceFault() const {
+        return device_fault;
+    }
+
+    bool SupportsDiagnosticCheckpoints() const {
+        return diagnostic_checkpoints;
+    }
+
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
@@ -521,6 +529,8 @@ private:
     bool image_view_min_lod{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
+    bool diagnostic_checkpoints{};
+    bool device_fault{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
 };

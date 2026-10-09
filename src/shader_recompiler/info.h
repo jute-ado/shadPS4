@@ -192,13 +192,28 @@ struct Info : InfoPersistent {
         bnd.user_data += ud_mask.NumRegs();
     }
 
-    void RefreshFlatBuf() {
-        flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
-        ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
-        std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
-        if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+    void RefreshFlatBuf(SrtMemorySynchronizer synchronizer = {}) {
+        const auto run_walker = [&] {
+            flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+            ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
+            std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+            srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), synchronizer.callback,
+                                 synchronizer.context);
+        };
+        if (!srt_info.walker_func) {
+            flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+            ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
+            std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+            return;
         }
+        for (u32 flush = 0; flush < MaxSrtSyncFlushes; ++flush) {
+            run_walker();
+            if (!synchronizer.flush || !synchronizer.flush(synchronizer.context)) {
+                return;
+            }
+        }
+        // Publish the data made visible by the final bounded flush.
+        run_walker();
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {

@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <optional>
+
 #include "common/object_pool.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/ir/ir_emitter.h"
@@ -104,6 +106,42 @@ bool HasBuiltIn(const std::vector<u32>& spirv, spv::BuiltIn builtin) {
     return false;
 }
 
+bool PushConstantAccessChainsUsePushConstantPointers(const std::vector<u32>& spirv) {
+    const u32 id_bound = spirv.at(3);
+    std::vector<std::optional<spv::StorageClass>> pointer_storage(id_bound);
+    std::vector<std::optional<spv::StorageClass>> variable_storage(id_bound);
+
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        const auto opcode = static_cast<spv::Op>(word & 0xffff);
+        if (opcode == spv::OpTypePointer && words >= 4) {
+            pointer_storage.at(spirv[offset + 1]) =
+                static_cast<spv::StorageClass>(spirv[offset + 2]);
+        } else if (opcode == spv::OpVariable && words >= 4) {
+            variable_storage.at(spirv[offset + 2]) =
+                static_cast<spv::StorageClass>(spirv[offset + 3]);
+        }
+        offset += words;
+    }
+
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        const auto opcode = static_cast<spv::Op>(word & 0xffff);
+        if (opcode == spv::OpAccessChain && words >= 4) {
+            const u32 result_type = spirv[offset + 1];
+            const u32 base = spirv[offset + 3];
+            if (variable_storage.at(base) == spv::StorageClassPushConstant &&
+                pointer_storage.at(result_type) != spv::StorageClassPushConstant) {
+                return false;
+            }
+        }
+        offset += words;
+    }
+    return true;
+}
+
 TEST(BarycentricSpirv, NonAmdSmoothUsesKhrInputDirectly) {
     const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::BaryCoordSmooth);
 
@@ -130,6 +168,12 @@ TEST(BarycentricSpirv, NonAmdSampleUsesSampleIdAndSampleRateShading) {
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInBaryCoordKHR));
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSampleId));
     EXPECT_EQ(CountGlslExtInst(spirv, GLSLstd450InterpolateAtSample), 1u);
+}
+
+TEST(FragmentCoordinateSpirv, PushDataAccessUsesPushConstantPointer) {
+    const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::FragCoord);
+
+    EXPECT_TRUE(PushConstantAccessChainsUsePushConstantPointers(spirv));
 }
 
 } // namespace

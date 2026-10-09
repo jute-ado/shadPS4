@@ -37,4 +37,21 @@ void PrepareDrawBuffersThenBindCommandState(PrepareVertexBuffers&& prepare_verte
     bind_index_buffer(prepared_index_state);
 }
 
+template <typename PrepareFixedBuffers, typename RefreshResourceBuffers,
+          typename PublishResourceBuffers, typename PublishFixedBuffers>
+void RefreshDrawBufferStateBeforePublication(PrepareFixedBuffers&& prepare_fixed_buffers,
+                                             RefreshResourceBuffers&& refresh_resource_buffers,
+                                             PublishResourceBuffers&& publish_resource_buffers,
+                                             PublishFixedBuffers&& publish_fixed_buffers) {
+    // Resource and fixed-function ranges can overlap. Acquire both sets before resolving their
+    // Vulkan handles, then prepare the fixed-function state once more after resource refresh. The
+    // second fixed pass operates on already-known ranges, so neither published set can refer to a
+    // buffer replaced by a later topology-changing acquisition.
+    prepare_fixed_buffers();
+    refresh_resource_buffers();
+    prepare_fixed_buffers();
+    publish_resource_buffers();
+    publish_fixed_buffers();
+}
+
 } // namespace VideoCore

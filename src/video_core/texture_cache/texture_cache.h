@@ -308,10 +308,19 @@ private:
     /// Removes the image and any views/surface metas that reference it.
     void DeleteImage(ImageId image_id);
 
+    /// Reclaims an unpublished image once its latest recorded GPU use has completed.
+    void RetireImage(ImageId image_id);
+
     /// Touch the image in the LRU cache.
-    void TouchImage(const Image& image);
+    void TouchImage(Image& image);
 
     void FreeImage(ImageId image_id) {
+        // Cached attachment and descriptor bindings can outlive cache registration. Force them to
+        // resolve a replacement before the retired Vulkan image is reclaimed.
+        auto& image = slot_images[image_id];
+        if (image.binding.is_bound || image.binding.is_target) {
+            image.binding.needs_rebind = 1u;
+        }
         UntrackImage(image_id);
         UnregisterImage(image_id);
         DeleteImage(image_id);

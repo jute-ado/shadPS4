@@ -32,6 +32,11 @@ namespace Shader {
 struct Info;
 }
 
+namespace VideoCore {
+class BufferCache;
+class PageManager;
+} // namespace VideoCore
+
 namespace Vulkan {
 
 class Instance;
@@ -42,6 +47,9 @@ struct Program {
     struct Module {
         vk::ShaderModule module;
         Shader::StageSpecialization spec;
+        // Resource tracking can produce a different descriptor layout for a permutation.
+        // Keep that layout next to the SPIR-V module that was compiled from it.
+        std::unique_ptr<Shader::Info> info{};
     };
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
@@ -53,14 +61,15 @@ struct Program {
     Program(Shader::Stage stage, Shader::LogicalStage l_stage, Shader::ShaderParams params)
         : info{stage, l_stage, params} {}
 
-    void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec) {
-        modules.emplace_back(module, std::move(spec));
+    void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec,
+                   std::unique_ptr<Shader::Info> info = {}) {
+        modules.emplace_back(module, std::move(spec), std::move(info));
     }
 
     void InsertPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec,
                       size_t perm_idx) {
         modules.resize(std::max(modules.size(), perm_idx + 1)); // <-- beware of realloc
-        modules[perm_idx] = {module, std::move(spec)};
+        modules[perm_idx] = {module, std::move(spec), {}};
     }
 };
 
@@ -88,7 +97,8 @@ struct AsyncGraphicsPipelineResult {
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
-                           AmdGpu::Liverpool* liverpool);
+                           AmdGpu::Liverpool* liverpool, VideoCore::PageManager& page_manager,
+                           VideoCore::BufferCache& buffer_cache);
     ~PipelineCache();
 
     void WarmUp();
@@ -138,6 +148,9 @@ private:
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
                                    Shader::Backend::Bindings& binding);
+    [[nodiscard]] Shader::SrtMemorySynchronizer GetSrtMemorySynchronizer();
+    static bool PS4_SYSV_ABI SynchronizeSrtRange(void* context, VAddr address, u64 size);
+    static bool FlushSrtRanges(void* context);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::Stage stage, Shader::LogicalStage l_stage);
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
@@ -148,6 +161,8 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     AmdGpu::Liverpool* liverpool;
+    VideoCore::PageManager& page_manager;
+    VideoCore::BufferCache& buffer_cache;
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;

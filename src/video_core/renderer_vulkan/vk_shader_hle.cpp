@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shader_recompiler/info.h"
+#include "core/memory.h"
+#include "video_core/renderer_vulkan/repeat_copy_shader.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -11,6 +13,41 @@ extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 namespace Vulkan {
 
 static constexpr u64 COPY_SHADER_HASH = 0xfefebf9f;
+static constexpr u64 REPEAT_COPY_SHADER_HASH = 0x50784801;
+
+static bool ExecuteRepeatCopyShaderHLE(const Shader::Info& info,
+                                       const AmdGpu::ComputeProgram& cs_program,
+                                       Rasterizer& rasterizer) {
+    if (info.buffers.size() != 3 || info.user_data.size() <= 6 ||
+        cs_program.num_thread_x.full != 64 || cs_program.dim_y != 1 || cs_program.dim_z != 1) {
+        return false;
+    }
+
+    const auto control = info.buffers[0].GetSharp(info);
+    const auto destination = info.buffers[2].GetSharp(info);
+    if (!control.Valid() || !destination.Valid() || control.GetSize() < 8 ||
+        destination.GetStride() != sizeof(u32)) {
+        return false;
+    }
+
+    auto& buffer_cache = rasterizer.GetBufferCache();
+    const bool control_gpu_owned =
+        buffer_cache.IsRegionGpuModifiedExact(control.base_address, sizeof(u32) * 2);
+    if (control_gpu_owned ||
+        !Core::Memory::Instance()->IsValidMapping(control.base_address, sizeof(u32) * 2)) {
+        return false;
+    }
+    std::array<u32, 2> control_words{};
+    std::memcpy(control_words.data(), std::bit_cast<const void*>(control.base_address),
+                sizeof(control_words));
+
+    const u64 dispatch_capacity_64 = static_cast<u64>(cs_program.dim_x) * 64;
+    if (dispatch_capacity_64 > std::numeric_limits<u32>::max()) {
+        return false;
+    }
+    return CanSkipRepeatCopyDispatch(control_words[0], info.user_data[6],
+                                     static_cast<u32>(dispatch_capacity_64), control_gpu_owned);
+}
 
 static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer) {
@@ -123,6 +160,8 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
+    case REPEAT_COPY_SHADER_HASH:
+        return ExecuteRepeatCopyShaderHLE(info, cs_program, rasterizer);
     case COPY_SHADER_HASH:
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
     default:
