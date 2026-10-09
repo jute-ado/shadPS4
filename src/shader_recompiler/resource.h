@@ -38,6 +38,10 @@ struct BufferResource {
     u8 instance_attrib{};
     bool is_written{};
     bool is_formatted{};
+    // True only when every formatted access supplies its format in the instruction. Raw
+    // accesses do not require a descriptor conversion. Default false is conservative for
+    // descriptors constructed by callers without instruction provenance.
+    bool is_instruction_formatted_only{};
     BufferAccessRange access_range{};
 
     bool IsSpecial() const noexcept {
@@ -80,8 +84,24 @@ using BufferResourceList = boost::container::static_vector<BufferResource, NUM_B
 
 enum class MipStorageFallbackMode : u32 { None, DynamicIndex, ConstantIndex };
 
+[[nodiscard]] inline bool IsSupportedDynamicImageModel(const AmdGpu::Image& model,
+                                                       bool is_array) noexcept {
+    if (!model.Valid() || AmdGpu::IsFmask(model.GetDataFmt()) ||
+        !AmdGpu::TryMapNumberConversion(AmdGpu::NumberFormat(model.num_format),
+                                         AmdGpu::DataFormat(model.data_format))) {
+        return false;
+    }
+    const auto view_type = model.GetViewType(is_array);
+    return view_type != AmdGpu::ImageType::Color2DMsaa &&
+           view_type != AmdGpu::ImageType::Color2DMsaaArray;
+}
+
 struct ImageResource {
     u32 sharp_idx;
+    // A non-zero count describes one sampled-image descriptor-array binding backed by the
+    // flattened SRT snapshot. It is a host-supported window, not the guest allocation length.
+    u32 dynamic_descriptor_count{};
+    u32 dynamic_descriptor_stride_dw{};
     bool is_depth{};
     bool is_atomic{};
     bool is_array{};
@@ -89,18 +109,49 @@ struct ImageResource {
     bool uses_integer_coordinates{};
     bool queries_dimensions{};
     bool is_r128{};
+    bool requires_dynamic_oob_guard{};
     MipStorageFallbackMode mip_fallback_mode{};
     u32 constant_mip_index{};
 
-    constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
+    [[nodiscard]] constexpr bool HasValidDynamicRange(const auto& info) const noexcept {
+        if (dynamic_descriptor_count == 0) {
+            return true;
+        }
+        if (dynamic_descriptor_count > NUM_IMAGES || dynamic_descriptor_stride_dw == 0) {
+            return false;
+        }
+        const u32 descriptor_dw = is_r128 ? 4U : 8U;
+        if (dynamic_descriptor_stride_dw < descriptor_dw) {
+            return false;
+        }
+        const u64 end_dw = u64{sharp_idx} +
+                           u64{dynamic_descriptor_count - 1U} * dynamic_descriptor_stride_dw +
+                           descriptor_dw;
+        return end_dw <= info.flattened_ud_buf.size();
+    }
+
+    constexpr AmdGpu::Image ReadSharpUnchecked(const auto& info,
+                                               u32 descriptor_index = 0) const noexcept {
+        const u32 descriptor_offset =
+            dynamic_descriptor_count != 0 ? descriptor_index * dynamic_descriptor_stride_dw : 0;
+        const u32 descriptor_sharp_idx = sharp_idx + descriptor_offset;
         AmdGpu::Image image{};
         if (!is_r128) {
-            image = info.template ReadUdSharp<AmdGpu::Image>(sharp_idx);
+            image = info.template ReadUdSharp<AmdGpu::Image>(descriptor_sharp_idx);
         } else {
-            const auto raw = info.template ReadUdSharp<u128>(sharp_idx);
+            const auto raw = info.template ReadUdSharp<u128>(descriptor_sharp_idx);
             std::memcpy(&image, &raw, sizeof(raw));
             image.pitch = image.width;
         }
+        return image;
+    }
+
+    constexpr AmdGpu::Image GetSharp(const auto& info, u32 descriptor_index = 0) const noexcept {
+        if (dynamic_descriptor_count != 0 &&
+            (!HasValidDynamicRange(info) || descriptor_index >= dynamic_descriptor_count)) {
+            return AmdGpu::Image::Null(is_depth);
+        }
+        AmdGpu::Image image = ReadSharpUnchecked(info, descriptor_index);
         if (!image.Valid()) {
             LOG_DEBUG(Render_Vulkan, "Encountered invalid image sharp");
             image = AmdGpu::Image::Null(is_depth);
@@ -116,20 +167,63 @@ struct ImageResource {
         return image;
     }
 
+    bool IsTableEntryCompatible(const auto& info, u32 descriptor_index) const noexcept {
+        if (dynamic_descriptor_count == 0 || !HasValidDynamicRange(info) ||
+            descriptor_index >= dynamic_descriptor_count) {
+            return false;
+        }
+        const auto model = ReadSharpUnchecked(info, 0);
+        const auto candidate = ReadSharpUnchecked(info, descriptor_index);
+        return IsSupportedDynamicImageModel(model, is_array) &&
+               IsSupportedDynamicImageModel(candidate, is_array) &&
+               model.GetViewType(is_array) == candidate.GetViewType(is_array) &&
+               model.IsCube() == candidate.IsCube() &&
+               AmdGpu::GetNumberClass(model.GetNumberFmt()) ==
+                   AmdGpu::GetNumberClass(candidate.GetNumberFmt()) &&
+               AmdGpu::TryMapNumberConversion(AmdGpu::NumberFormat(model.num_format),
+                                               AmdGpu::DataFormat(model.data_format)) ==
+                   AmdGpu::TryMapNumberConversion(AmdGpu::NumberFormat(candidate.num_format),
+                                                   AmdGpu::DataFormat(candidate.data_format)) &&
+               (model.GetNumberFmt() == AmdGpu::NumberFormat::Srgb) ==
+                   (candidate.GetNumberFmt() == AmdGpu::NumberFormat::Srgb);
+    }
+
+    bool HasSupportedDynamicModel(const auto& info) const noexcept {
+        return dynamic_descriptor_count == 0 ||
+               (HasValidDynamicRange(info) &&
+                IsSupportedDynamicImageModel(ReadSharpUnchecked(info, 0), is_array));
+    }
+
     u32 NumBindings(const auto& info) const {
+        if (dynamic_descriptor_count != 0) {
+            return HasValidDynamicRange(info) ? dynamic_descriptor_count : 1U;
+        }
         const AmdGpu::Image tsharp = GetSharp(info);
         return (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex)
                    ? (tsharp.last_level - tsharp.base_level + 1)
                    : 1;
     }
 };
+
+[[nodiscard]] constexpr bool CanAliasImageResources(const ImageResource& lhs,
+                                                    const ImageResource& rhs) noexcept {
+    return lhs.sharp_idx == rhs.sharp_idx &&
+           lhs.dynamic_descriptor_count == rhs.dynamic_descriptor_count &&
+           lhs.dynamic_descriptor_stride_dw == rhs.dynamic_descriptor_stride_dw &&
+           lhs.is_depth == rhs.is_depth && lhs.is_array == rhs.is_array &&
+           lhs.is_r128 == rhs.is_r128 &&
+           lhs.requires_dynamic_oob_guard == rhs.requires_dynamic_oob_guard &&
+           lhs.mip_fallback_mode == rhs.mip_fallback_mode &&
+           lhs.constant_mip_index == rhs.constant_mip_index;
+}
+
 using ImageResourceList = boost::container::static_vector<ImageResource, NUM_IMAGES>;
 
 struct SamplerResource {
     u32 sharp_idx;
     AmdGpu::Sampler inline_sampler;
     u32 is_inline_sampler : 1;
-    u32 associated_image : 4;
+    u32 associated_image : 6;
     u32 disable_aniso : 1;
 
     constexpr AmdGpu::Sampler GetSharp(const auto& info) const noexcept {
@@ -137,6 +231,14 @@ struct SamplerResource {
                                  : info.template ReadUdSharp<AmdGpu::Sampler>(sharp_idx);
     }
 };
+
+[[nodiscard]] constexpr bool CanAliasSamplerResources(const SamplerResource& lhs,
+                                                      const SamplerResource& rhs) noexcept {
+    return lhs.sharp_idx == rhs.sharp_idx && lhs.is_inline_sampler == rhs.is_inline_sampler &&
+           lhs.inline_sampler == rhs.inline_sampler && lhs.disable_aniso == rhs.disable_aniso &&
+           (!lhs.disable_aniso || lhs.associated_image == rhs.associated_image);
+}
+
 using SamplerResourceList = boost::container::static_vector<SamplerResource, NUM_SAMPLERS>;
 
 struct FMaskResource {

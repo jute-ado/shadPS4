@@ -26,3 +26,17 @@ TEST(ControllerConnectionState, PhysicalDisconnectPreservesVirtualInput) {
     EXPECT_TRUE(connection.IsConnected());
     EXPECT_EQ(connection.ConnectedCount(), 1);
 }
+
+TEST(ControllerConnectionState, RepeatedPhysicalReconnectDoesNotDuplicateVirtualConnection) {
+    Input::ControllerConnectionState connection;
+    connection.ConnectVirtual();
+    connection.ConnectPhysical();
+    connection.ConnectPhysical();
+
+    EXPECT_TRUE(connection.IsConnected());
+    EXPECT_EQ(connection.ConnectedCount(), 1);
+
+    connection.DisconnectPhysical();
+    EXPECT_TRUE(connection.IsConnected());
+    EXPECT_EQ(connection.ConnectedCount(), 1);
+}
