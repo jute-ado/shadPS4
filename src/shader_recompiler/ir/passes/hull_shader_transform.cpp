@@ -145,10 +145,11 @@ using namespace Shader::Optimiation::PatternMatching;
 
 static void InitTessConstants(IR::ScalarReg sharp_ptr_base, s32 sharp_dword_offset,
                               Shader::Info& info, Shader::RuntimeInfo& runtime_info,
-                              TessellationDataConstantBuffer& tess_constants) {
+                              TessellationDataConstantBuffer& tess_constants,
+                              SrtMemoryReader reader) {
     info.tess_consts_ptr_base = sharp_ptr_base;
     info.tess_consts_dword_offset = sharp_dword_offset;
-    info.ReadTessConstantBuffer(tess_constants);
+    info.ReadTessConstantBuffer(tess_constants, reader);
     runtime_info.InitFromTessConstants(tess_constants);
     return;
 }
@@ -610,7 +611,8 @@ void DomainShaderTransform(const IR::Program& program, const RuntimeInfo& runtim
 }
 
 // Run before either hull or domain transform
-void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info) {
+void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info,
+                            SrtMemoryReader reader) {
     TessellationDataConstantBuffer tess_constants;
     Shader::Info& info = program.info;
     // Find the TessellationDataConstantBuffer V#
@@ -645,7 +647,7 @@ void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info) {
                             }
                             InitTessConstants(sharp_location->ptr_base,
                                               static_cast<s32>(sharp_location->dword_off), info,
-                                              runtime_info, tess_constants);
+                                              runtime_info, tess_constants, reader);
                             return true;
                         }
                         UNREACHABLE_MSG("Failed to match tess constant sharp");
