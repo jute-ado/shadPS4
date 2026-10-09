@@ -6,8 +6,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <set>
 
+#include "common/polyfill_thread.h"
 #include "common/unique_function.h"
 
 namespace Libraries::GnmDriver {
@@ -56,6 +58,35 @@ public:
         boundary_completed.wait(lock, [this, boundary] { return completed_boundary >= boundary; });
     }
 
+    [[nodiscard]] bool WaitForBoundary(std::stop_token stop) {
+        Guard lock{mutex};
+        const auto boundary = current_boundary;
+        Common::CondvarWait(boundary_completed, lock, stop,
+                            [this, boundary] { return completed_boundary >= boundary; });
+        return !stop.stop_requested();
+    }
+
+    // Unlike the ordinary captured-boundary wait, retirement may retain this guard only when
+    // every currently published callback has acknowledged. Otherwise that callback could block
+    // the GPU owner on our mutex while retirement synchronously requests owner readback/Finish.
+    [[nodiscard]] std::optional<Guard> TryEnterRetirement() {
+        Guard lock{mutex, std::try_to_lock};
+        if (!lock || completed_boundary != current_boundary) {
+            return std::nullopt;
+        }
+        return lock;
+    }
+
+    /// Waits for every boundary published before this call, then retains submission admission.
+    /// The caller may safely complete a GPU-visible address-space change before releasing the
+    /// returned guard; no later guest submission can overtake that change.
+    [[nodiscard]] Guard WaitForBoundaryAndEnter() {
+        Guard lock{mutex};
+        const auto boundary = current_boundary;
+        boundary_completed.wait(lock, [this, boundary] { return completed_boundary >= boundary; });
+        return lock;
+    }
+
 private:
     void CompleteBoundary(std::uint64_t boundary) {
         {
@@ -72,7 +103,7 @@ private:
     }
 
     mutable std::mutex mutex;
-    std::condition_variable boundary_completed;
+    std::condition_variable_any boundary_completed;
     std::uint64_t current_boundary{};
     std::uint64_t completed_boundary{};
     std::set<std::uint64_t> completed_out_of_order;

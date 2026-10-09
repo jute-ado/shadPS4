@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "common/bit_field.h"
 #include "core/libraries/kernel/threads.h"
@@ -117,14 +118,36 @@ struct AudioFormatInfo {
     }
 };
 
+// Failure is tracked by AudioOut rather than Kernel::Thread. The generic
+// thread wrapper has users with unrelated lifecycle and recovery contracts;
+// an AudioOut worker can instead publish one bounded receipt and wake guest
+// producers before its native thread is joined by sceAudioOutClose.
+enum class AudioWorkerFailureStage {
+    CaptureSetup,
+    Processing,
+    Backend,
+    Unknown,
+};
+
+struct AudioWorkerFailureReceipt {
+    AudioWorkerFailureStage stage = AudioWorkerFailureStage::Unknown;
+};
+
 struct PortOut {
     std::mutex mutex;
+    // Serializes backend calls independently from the guest mailbox state.
+    // The output worker must be able to release `mutex` while a backend
+    // applies timing, conversion, or device I/O; volume updates still need
+    // to remain mutually exclusive with that backend call.
+    std::mutex backend_mutex;
     std::unique_ptr<PortBackend> impl{};
 
     void* output_buffer = nullptr;
     std::condition_variable_any output_cv;
     bool output_ready = false;
     bool closing = false;
+    bool worker_failed = false;
+    std::optional<AudioWorkerFailureReceipt> worker_failure;
     Kernel::Thread output_thread{};
 
     OrbisAudioOutPort type;
