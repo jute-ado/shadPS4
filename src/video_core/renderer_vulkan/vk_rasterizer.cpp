@@ -1325,9 +1325,7 @@ void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
                    regs.primitive_restart_index == 0xFFFFFFFF,
                "Primitive restart index other than -1 is not supported yet");
 
-    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
-                               ? LiverpoolToVK::CullMode(regs.polygon_control.CullingMode())
-                               : vk::CullModeFlagBits::eNone;
+    const auto cull_mode = vk::CullModeFlagBits::eNone;
     const auto front_face = LiverpoolToVK::FrontFace(regs.polygon_control.front_face);
 
     dynamic_state.SetPrimitiveRestartEnabled(prim_restart);
