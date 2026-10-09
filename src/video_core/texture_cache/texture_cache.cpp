@@ -540,6 +540,66 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         image_id = cache_id;
     }
 
+    if (image_id) {
+        static u32 overlap_diagnostic_count{};
+        for (const auto& cache_id : image_ids) {
+            if (cache_id == image_id || overlap_diagnostic_count >= 64) {
+                continue;
+            }
+            const auto& candidate = slot_images[cache_id];
+            if (candidate.info.guest_address >= info.guest_address ||
+                candidate.info.size.width <= info.size.width ||
+                candidate.info.size.height <= info.size.height ||
+                info.size.width < 128 || info.size.height < 128 ||
+                candidate.info.resources.levels <= 1 || !info.IsCompatible(candidate.info)) {
+                continue;
+            }
+
+            s32 addressed_mip{-1};
+            for (u32 level = 1; level < candidate.info.resources.levels; ++level) {
+                if (info.guest_address ==
+                    candidate.info.guest_address + candidate.info.mips_layout[level].offset) {
+                    addressed_mip = static_cast<s32>(level);
+                    break;
+                }
+            }
+            if (addressed_mip < 0) {
+                continue;
+            }
+
+            const s32 mip = info.MipOf(candidate.info);
+            const s32 slice = mip >= 0 ? info.SliceOf(candidate.info, mip) : -1;
+            ++overlap_diagnostic_count;
+            LOG_INFO(
+                Render_Vulkan,
+                "ExactOverlap exact={} addr={:#x} size={:#x} extent={}x{} pitch={} format={} "
+                "type={} array={} tile={} levels={} layers={} bits={} samples={} parent={} "
+                "addr={:#x} size={:#x} extent={}x{} pitch={} format={} type={} array={} tile={} "
+                "levels={} layers={} bits={} samples={} addressed_mip={} mip={} slice={}",
+                image_id.index, info.guest_address, info.guest_size, info.size.width,
+                info.size.height, info.pitch, vk::to_string(info.pixel_format),
+                static_cast<u32>(info.type), static_cast<u32>(info.array_mode),
+                static_cast<u32>(info.tile_mode), info.resources.levels, info.resources.layers,
+                info.num_bits, info.num_samples, cache_id.index, candidate.info.guest_address,
+                candidate.info.guest_size, candidate.info.size.width, candidate.info.size.height,
+                candidate.info.pitch, vk::to_string(candidate.info.pixel_format),
+                static_cast<u32>(candidate.info.type),
+                static_cast<u32>(candidate.info.array_mode),
+                static_cast<u32>(candidate.info.tile_mode), candidate.info.resources.levels,
+                candidate.info.resources.layers, candidate.info.num_bits,
+                candidate.info.num_samples, addressed_mip, mip, slice);
+            for (u32 level = 0; level < candidate.info.resources.levels; ++level) {
+                const auto& layout = candidate.info.mips_layout[level];
+                LOG_INFO(Render_Vulkan,
+                         "ExactOverlapParentLayout parent={} level={} addr={:#x} offset={:#x} "
+                         "size={:#x} pitch={} height={}",
+                         cache_id.index, level,
+                         candidate.info.guest_address + layout.offset, layout.offset, layout.size,
+                         layout.pitch, layout.height);
+            }
+        }
+    }
+
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
