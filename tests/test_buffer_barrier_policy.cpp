@@ -20,3 +20,34 @@ TEST(BufferBarrierPolicy, AliasedReadAndWriteBindingsMergeAccess) {
 
     EXPECT_EQ(access, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
 }
+
+TEST(BufferBarrierPolicy, RepeatedShaderWritesStillRequireABarrier) {
+    constexpr auto access =
+        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
+
+    EXPECT_TRUE(Vulkan::NeedsBufferBarrier(access, vk::PipelineStageFlagBits2::eAllCommands,
+                                           access, vk::PipelineStageFlagBits2::eAllCommands));
+}
+
+TEST(BufferBarrierPolicy, RepeatedReadsDoNotRequireARedundantBarrier) {
+    constexpr auto access = vk::AccessFlagBits2::eShaderRead;
+
+    EXPECT_FALSE(Vulkan::NeedsBufferBarrier(access, vk::PipelineStageFlagBits2::eAllCommands,
+                                            access, vk::PipelineStageFlagBits2::eAllCommands));
+}
+
+TEST(BufferBarrierPolicy, RepeatedTransferWritesStillRequireABarrier) {
+    constexpr auto access = vk::AccessFlagBits2::eTransferWrite;
+
+    EXPECT_TRUE(Vulkan::NeedsBufferBarrier(access, vk::PipelineStageFlagBits2::eTransfer, access,
+                                           vk::PipelineStageFlagBits2::eTransfer));
+}
+
+TEST(BufferBarrierPolicy, AccessOrStageChangesRequireABarrier) {
+    EXPECT_TRUE(Vulkan::NeedsBufferBarrier(
+        vk::AccessFlagBits2::eShaderRead, vk::PipelineStageFlagBits2::eComputeShader,
+        vk::AccessFlagBits2::eTransferRead, vk::PipelineStageFlagBits2::eComputeShader));
+    EXPECT_TRUE(Vulkan::NeedsBufferBarrier(
+        vk::AccessFlagBits2::eShaderRead, vk::PipelineStageFlagBits2::eComputeShader,
+        vk::AccessFlagBits2::eShaderRead, vk::PipelineStageFlagBits2::eFragmentShader));
+}
