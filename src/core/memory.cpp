@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <shared_mutex>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -14,6 +16,14 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace Core {
+
+bool MemoryManager::IsGpuMapped(VAddr virtual_addr, u64 size) const {
+    // IsValidGpuMapping only checks the guest address width. Consult the rasterizer's page
+    // manager as well so a fresh or CPU-only VMA is not mistaken for a previously registered GPU
+    // range during destructive address-space operations.
+    return rasterizer != nullptr && IsValidGpuMapping(virtual_addr, size) &&
+           rasterizer->IsMapped(virtual_addr, size);
+}
 
 MemoryManager::MemoryManager() {
     LOG_INFO(Kernel_Vmm, "Virtual memory space initialized with regions:");
@@ -132,36 +142,34 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 void MemoryManager::SetPrtArea(u32 id, VAddr address, u64 size) {
     PrtArea& area = prt_areas[id];
     if (area.mapped) {
-        rasterizer->UnmapMemory(area.start, area.end - area.start);
+        rasterizer->UnmapMemory(area.start, area.end - area.start,
+                                VideoCore::GpuMappingKind::SparsePlaceholder);
     }
 
     area.start = address;
     area.end = address + size;
-    area.mapped = true;
+    area.mapped = size != 0;
+    if (!area.mapped) {
+        return;
+    }
 
     // Pretend the entire PRT area is mapped to avoid GPU tracking errors.
     // The caches will use CopySparseMemory to fetch data which avoids unmapped areas.
-    rasterizer->MapMemory(address, size);
+    rasterizer->MapMemory(address, size, VideoCore::GpuMappingKind::SparsePlaceholder);
 }
 
 void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr), "Attempted to access invalid address {:#x}",
-               virtual_addr);
-
-    auto vma = FindVMA(virtual_addr);
-    while (size) {
-        u64 copy_size = std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
-        if (vma->second.HasReadableBacking()) {
-            std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
-        } else {
-            std::memset(dest, 0, copy_size);
-        }
-        size -= copy_size;
-        virtual_addr += copy_size;
-        dest += copy_size;
-        ++vma;
-    }
+    const bool copied = ForEachSparseMemorySegment(
+        vma_map, virtual_addr, size, [&dest](VAddr address, u64 segment_size, bool readable) {
+            if (readable) {
+                std::memcpy(dest, std::bit_cast<const u8*>(address), segment_size);
+            } else {
+                std::memset(dest, 0, segment_size);
+            }
+            dest += segment_size;
+        });
+    ASSERT_MSG(copied, "Invalid sparse memory range {:#x} size {:#x}", virtual_addr, size);
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
@@ -898,7 +906,8 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
     return ORBIS_OK;
 }
 
-s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
+s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size,
+                               AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
     if (size == 0) {
         return ORBIS_OK;
     }
@@ -907,14 +916,25 @@ s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
     // Align address and size appropriately
     virtual_addr = Common::AlignDown(virtual_addr, 16_KB);
     size = Common::AlignUp(size, 16_KB);
-    if (!IsValidMapping(virtual_addr, size)) {
-        LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map", virtual_addr,
-                  size);
-        return ORBIS_KERNEL_ERROR_EINVAL;
+    {
+        std::shared_lock lk2{mutex};
+        if (!IsValidMapping(virtual_addr, size)) {
+            LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map",
+                      virtual_addr, size);
+            return ORBIS_KERNEL_ERROR_EINVAL;
+        }
+    }
+    const bool gpu_mapped = IsGpuMapped(virtual_addr, size);
+    SubmissionBoundaryToken submission_admission;
+    if (gpu_mapped && acquire_gpu_address_space_guard) {
+        // Retain unmap_mutex across admission and revocation so another mapping operation cannot
+        // replace the classified VMA while the GPU-visible range is being retired. The provider
+        // intentionally admits without waiting for a global GPU completion fence.
+        submission_admission = acquire_gpu_address_space_guard();
     }
 
-    // If the requested range has GPU access, unmap from GPU.
-    if (IsValidGpuMapping(virtual_addr, size)) {
+    // If the requested range has an existing GPU mapping, unmap it before revoking backing.
+    if (gpu_mapped) {
         rasterizer->UnmapMemory(virtual_addr, size);
     }
 

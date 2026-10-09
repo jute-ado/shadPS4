@@ -53,6 +53,52 @@ TEST(GnmSubmissionGate, PendingBoundaryBlocksGpuVisibleMappingWork) {
     EXPECT_TRUE(mapping.get());
 }
 
+TEST(GnmSubmissionGate, GpuVisibleAddressChangeExcludesLaterSubmissions) {
+    SubmissionGate gate;
+    auto admission = gate.WaitForBoundaryAndEnter();
+    std::promise<void> entrant_started;
+    auto started = entrant_started.get_future();
+
+    auto entrant = std::async(std::launch::async, [&] {
+        entrant_started.set_value();
+        auto submission = gate.Enter();
+        return true;
+    });
+    ASSERT_EQ(started.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(entrant.wait_for(20ms), std::future_status::timeout);
+
+    admission.unlock();
+
+    EXPECT_EQ(entrant.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(entrant.get());
+}
+
+TEST(GnmSubmissionGate, CompletionCanAcknowledgeWhileAdmissionIsRetained) {
+    SubmissionGate gate;
+    auto boundary = gate.BeginGuardedBoundary();
+    boundary.issuance.unlock();
+
+    // Model a GPU-visible unmap holding submission admission while a synchronous owner-side
+    // readback waits for the worker to run the already-published SubmitDone callback.
+    auto admission = gate.Enter();
+    auto completion = std::async(std::launch::async, [&] {
+        boundary.complete();
+        return gate.IsBoundaryOpen();
+    });
+
+    const auto status = completion.wait_for(1s);
+    // Always release the modeled unmap admission before returning, even when the regression is
+    // present, so a failing implementation cannot strand the async worker in future destruction.
+    if (status != std::future_status::ready) {
+        admission.unlock();
+    }
+    ASSERT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(completion.get());
+    if (admission.owns_lock()) {
+        admission.unlock();
+    }
+}
+
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
     SubmissionGate gate;
     auto submission = gate.Enter();
