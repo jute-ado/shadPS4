@@ -61,8 +61,10 @@ static IR::VectorReg IterateBarycentrics(const RuntimeInfo& runtime_info, auto&&
     return IR::VectorReg(dst_vreg);
 }
 
-Translator::Translator(Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_)
+Translator::Translator(Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_,
+                       SrtMemoryReader reader)
     : info{info_}, runtime_info{runtime_info_}, profile{profile_},
+      guest_memory_reader{reader},
       next_vgpr_num{runtime_info.num_allocated_vgprs} {
     IterateBarycentrics(runtime_info, [this](u32 vreg, IR::Attribute attrib, u32) {
         vgpr_to_interp[vreg] = attrib;
@@ -1118,8 +1120,15 @@ void Translator::EmitFetch(const GcnInst& inst) {
     info.has_fetch_shader = true;
     info.fetch_shader_sgpr_base = code_sgpr_base;
 
-    const auto fetch_data = ParseFetchShader(info);
-    ASSERT(fetch_data.has_value());
+    const auto fetch_data = ParseFetchShader(info, guest_memory_reader);
+    if (!fetch_data) {
+        if (!guest_memory_reader.Valid()) {
+            return;
+        }
+        ASSERT_MSG(false, "Failed to parse a readable fetch shader");
+        info.translation_failed = true;
+        return;
+    }
 
     if (EmulatorSettings.IsDumpShaders()) {
         using namespace Common::FS;
@@ -1129,8 +1138,17 @@ void Translator::EmitFetch(const GcnInst& inst) {
         }
         const auto filename = fmt::format("vs_{:#018x}.fetch.bin", info.pgm_hash);
         const auto file = IOFile{dump_dir / filename, FileAccessMode::Create};
-        const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-        file.WriteRaw<u8>(code, fetch_data->size);
+        const auto code =
+            ReadFetchShaderProgram(info, guest_memory_reader, code_sgpr_base, fetch_data->size);
+        if (!code) {
+            if (!guest_memory_reader.Valid()) {
+                return;
+            }
+            ASSERT_MSG(false, "Failed to capture a readable fetch shader for dumping");
+            info.translation_failed = true;
+            return;
+        }
+        file.WriteRaw<u8>(code->data(), code->size());
     }
 
     for (const auto& attrib : fetch_data->attributes) {
@@ -1138,7 +1156,11 @@ void Translator::EmitFetch(const GcnInst& inst) {
         IR::VectorReg dst_reg{attrib.dest_vgpr};
 
         // Read the V# of the attribute to figure out component number and type.
-        const auto buffer = attrib.GetSharp(info);
+        const auto buffer = attrib.GetSharp(info, guest_memory_reader);
+        if (!guest_memory_reader.Valid()) {
+            info.translation_failed = true;
+            return;
+        }
         const auto values =
             ir.CompositeConstruct(ir.GetAttribute(attr, 0), ir.GetAttribute(attr, 1),
                                   ir.GetAttribute(attr, 2), ir.GetAttribute(attr, 3));

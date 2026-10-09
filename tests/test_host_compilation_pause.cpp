@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "common/types.h"
+#include "shader_recompiler/specialization_serialization.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
 
 namespace Vulkan {
@@ -117,11 +118,7 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
 }
 
 TEST(PersistentShaderCache, BackendSemanticChangesInvalidateStoredSpirv) {
-    const auto source = ReadSource(SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH);
-
-    ASSERT_FALSE(source.empty());
-    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 4u;"),
-              std::string::npos);
+    EXPECT_EQ(Shader::ShaderBinaryVersion, 6U);
 }
 
 } // namespace
