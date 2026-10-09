@@ -228,14 +228,6 @@ s32 PS4_SYSV_ABI scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo*
     return ORBIS_OK;
 }
 
-int scePlayGoConvertLanguage(int systemLang) {
-    if (systemLang >= 0 && systemLang < 48) {
-        return (1 << (64 - systemLang - 1));
-    } else {
-        return 0;
-    }
-}
-
 s32 PS4_SYSV_ABI scePlayGoInitialize(OrbisPlayGoInitParams* param) {
     LOG_INFO(Lib_PlayGo, "called, bufSize = {}", param->bufSize);
     if (param->bufAddr == nullptr) {
@@ -260,7 +252,7 @@ s32 PS4_SYSV_ABI scePlayGoInitialize(OrbisPlayGoInitParams* param) {
 
     s32 system_lang = 0;
     sceSystemServiceParamGetInt(OrbisSystemServiceParamId::Lang, &system_lang);
-    playgo->langMask = scePlayGoConvertLanguage(system_lang);
+    playgo->langMask = ConvertLanguageToMask(system_lang);
 
     return ORBIS_OK;
 }
