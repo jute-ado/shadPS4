@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/bit_field.h"
@@ -475,6 +477,17 @@ struct Sampler {
 
     float MaxLod() const noexcept {
         return static_cast<float>(max_lod.Value()) / 256.0f;
+    }
+
+    float EffectiveMinLod() const noexcept {
+        return mip_filter.Value() == MipFilter::None ? 0.0f : MinLod();
+    }
+
+    float EffectiveMaxLod() const noexcept {
+        if (mip_filter.Value() == MipFilter::None) {
+            return 0.0f;
+        }
+        return std::max(MinLod(), MaxLod());
     }
 
     float MaxAniso() const {
