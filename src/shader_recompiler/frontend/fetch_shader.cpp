@@ -7,6 +7,15 @@
 
 namespace Shader::Gcn {
 
+namespace {
+
+// Fetch shaders are generated from at most 32 vertex inputs and are normally
+// only a few hundred bytes.  Keep malformed guest code from making parsing
+// walk arbitrary memory or run indefinitely.
+constexpr u32 MaxFetchShaderDwords = 1024;
+
+} // namespace
+
 /**
  * s_load_dwordx4 s[8:11], s[2:3], 0x00
  * s_load_dwordx4 s[12:15], s[2:3], 0x04
@@ -52,7 +61,7 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
 
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
     FetchShaderData data{};
-    GcnCodeSlice code_slice(code, code + std::numeric_limits<u32>::max());
+    GcnCodeSlice code_slice(code, code + MaxFetchShaderDwords);
     GcnDecodeContext decoder;
 
     struct VsharpLoad {
@@ -71,6 +80,9 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         }
 
         if (inst.inst_class == InstClass::ScalarMemRd) {
+            if (inst.dst[0].code >= loads.size() || inst.src[0].code >= loads.size()) {
+                return std::nullopt;
+            }
             loads[inst.dst[0].code] = VsharpLoad{inst.control.smrd.offset, inst.src[0].code * 2};
             continue;
         }
@@ -93,6 +105,9 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         if (inst.inst_class == InstClass::VectorMemBufFmt) {
             // SRSRC is in units of 4 SPGRs while SBASE is in pairs of SGPRs
             const u32 base_sgpr = inst.src[2].code * 4;
+            if (base_sgpr >= loads.size() || semantic_index >= IR::NumParams) {
+                return std::nullopt;
+            }
             auto& attrib = data.attributes.emplace_back();
             attrib.semantic = semantic_index++;
             attrib.dest_vgpr = inst.src[1].code;
