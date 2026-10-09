@@ -4,6 +4,7 @@
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/decoder.h"
+#include "common/logging/compilation_timing.h"
 #include "common/signal_context.h"
 #include "core/cpu_patches.h" // Windows static guest red-zone protection
 #include "core/libraries/kernel/kernel.h"
@@ -145,6 +146,7 @@ static std::intptr_t SignalHandlerBody(void* opaque) noexcept {
     const bool report_unhandled = WindowsException::ShouldReportUnhandledException(
         code, use_static_windows_guest_red_zone_protection, static_protection_exception);
     if (report_unhandled) { // Windows static guest red-zone protection
+        Common::Log::ReportCompilationTraceTerminal(code);
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
