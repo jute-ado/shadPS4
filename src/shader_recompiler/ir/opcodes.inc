@@ -419,6 +419,7 @@ OPCODE(ConvertS32S16,                                       U32,            U16,
 OPCODE(ImageSampleRaw,                                      F32x4,          Opaque,         Opaque,         F32x4,          F32x4,          F32x4,          F32,           )
 OPCODE(ImageSampleImplicitLod,                              F32x4,          Opaque,         F32x4,          F32,            Opaque,                         )
 OPCODE(ImageSampleExplicitLod,                              F32x4,          Opaque,         Opaque,         F32,            Opaque,                         )
+OPCODE(ImageSampleExplicitLodDynamic,                       F32x4,          Opaque,         U32,            Opaque,         F32,            Opaque,         )
 OPCODE(ImageSampleDrefImplicitLod,                          F32x4,          Opaque,         Opaque,         F32,            F32,            Opaque,         )
 OPCODE(ImageSampleDrefExplicitLod,                          F32x4,          Opaque,         Opaque,         F32,            F32,            Opaque,         )
 OPCODE(ImageGather,                                         F32x4,          Opaque,         Opaque,         Opaque,                                         )
