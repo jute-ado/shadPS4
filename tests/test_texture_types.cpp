@@ -81,14 +81,19 @@ TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
     const auto helper_end = body.find("};", helper_begin);
     ASSERT_NE(helper_end, std::string::npos);
     const auto helper = body.substr(helper_begin, helper_end - helper_begin);
+    EXPECT_NE(helper.find("bool is_storage"), std::string::npos);
     EXPECT_NE(helper.find("image_bindings.emplace_back"), std::string::npos);
+    EXPECT_NE(helper.find("desc.type = is_storage ?"), std::string::npos);
+    EXPECT_NE(helper.find("BindingType::Storage"), std::string::npos);
+    EXPECT_NE(helper.find("BindingType::Texture"), std::string::npos);
     EXPECT_NE(helper.find("image_descriptor_array_sizes.push_back(1)"), std::string::npos);
     EXPECT_NE(helper.find("image_native_extent_requirements.emplace_back(false, false)"),
               std::string::npos);
 
     size_t call_count = 0;
     size_t call = helper_end;
-    while ((call = body.find("append_invalid_image_binding();", call)) != std::string::npos) {
+    while ((call = body.find("append_invalid_image_binding(image_desc.is_written);", call)) !=
+           std::string::npos) {
         ++call_count;
         ++call;
     }

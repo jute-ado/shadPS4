@@ -811,8 +811,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
     boost::container::small_vector<std::pair<bool, bool>, 8> image_native_extent_requirements;
-    const auto append_invalid_image_binding = [&] {
-        image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+    const auto append_invalid_image_binding = [&](bool is_storage) {
+        auto& [_, desc] =
+            image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+        desc.type = is_storage ? VideoCore::TextureCache::BindingType::Storage
+                               : VideoCore::TextureCache::BindingType::Texture;
         image_descriptor_array_sizes.push_back(1);
         image_native_extent_requirements.emplace_back(false, false);
     };
@@ -826,7 +829,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            append_invalid_image_binding();
+            append_invalid_image_binding(image_desc.is_written);
             continue;
         }
 
@@ -837,7 +840,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         "data_format={}, num_format={}",
                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                         static_cast<u32>(num_fmt));
-            append_invalid_image_binding();
+            append_invalid_image_binding(image_desc.is_written);
             continue;
         }
 
