@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -9,6 +11,9 @@
 #include <gtest/gtest.h>
 
 #include "common/types.h"
+#include "shader_recompiler/specialization_serialization.h"
+#include "video_core/renderer_vulkan/async_compilation_completion.h"
+#include "video_core/renderer_vulkan/async_compilation_queue.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
 
 namespace Vulkan {
@@ -85,6 +90,35 @@ TEST(HostCompilationPause, AsyncShaderCompilationDoesNotPauseGuestThreads) {
     EXPECT_EQ(controller.resume_calls, 0u);
 }
 
+TEST(HostCompilationPause, AsyncComputePipelineCompilationDoesNotPauseGuestThreads) {
+    const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+    ASSERT_FALSE(source.empty());
+
+    const auto begin = source.find("PipelineCache::GetComputePipeline()");
+    const auto end = source.find("PipelineCache::RefreshGraphicsKey()", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    const auto compute = source.substr(begin, end - begin);
+    const auto pause = compute.find("ScopedHostCompilationGuestPause pause{");
+    ASSERT_NE(pause, std::string::npos);
+    const auto pause_end = compute.find("};", pause);
+    ASSERT_NE(pause_end, std::string::npos);
+    EXPECT_NE(compute.substr(pause, pause_end - pause)
+                  .find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
+              std::string::npos);
+
+    // Compute dispatch still waits for the pipeline; async mode changes guest pause policy,
+    // not the dispatch dependency or pipeline publication ordering.
+    const auto construct = compute.find("std::make_unique<ComputePipeline>");
+    const auto publish = compute.find("RegisterPipelineData", construct);
+    const auto result = compute.find("return it->second.get()", publish);
+    ASSERT_NE(construct, std::string::npos);
+    ASSERT_NE(publish, std::string::npos);
+    ASSERT_NE(result, std::string::npos);
+    EXPECT_LT(construct, publish);
+    EXPECT_LT(publish, result);
+}
+
 TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) {
     const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
 
@@ -117,11 +151,82 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
 }
 
 TEST(PersistentShaderCache, BackendSemanticChangesInvalidateStoredSpirv) {
-    const auto source = ReadSource(SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH);
+    EXPECT_EQ(Shader::ShaderBinaryVersion, 10U);
+}
 
+struct CompiledPipelineFixture {
+    bool valid{};
+    bool IsValid() const {
+        return valid;
+    }
+};
+
+TEST(GraphicsPipelineAdmission, InvalidWorkerPipelineUsesTheQueueFailureChannelAndCanRetry) {
+    AsyncCompilationQueue<int, int, bool> queue{[](bool valid) {
+        auto pipeline = std::make_unique<CompiledPipelineFixture>(CompiledPipelineFixture{valid});
+        RequireValidCompiledPipeline(pipeline);
+        return 7;
+    }};
+    ASSERT_TRUE(queue.Submit(1, false));
+    auto failed = queue.WaitTake();
+    ASSERT_TRUE(failed);
+    EXPECT_FALSE(failed->result);
+    ASSERT_TRUE(queue.Submit(1, true));
+    auto success = queue.WaitTake();
+    ASSERT_TRUE(success);
+    ASSERT_TRUE(success->result);
+    EXPECT_EQ(*success->result, 7);
+}
+
+TEST(GraphicsPipelineAdmission, DrainingRejectedWorkerResultRetainsRequestedFailure) {
+    using Queue = AsyncCompilationQueue<int, int, bool>;
+    Queue worker{[](bool) {
+        std::unique_ptr<CompiledPipelineFixture> pipeline;
+        RequireValidCompiledPipeline(pipeline);
+        return 7;
+    }};
+    ASSERT_TRUE(worker.Submit(4, false));
+    struct CompletedQueue {
+        std::optional<Queue::Completion> completion;
+        auto TryTake() {
+            return std::exchange(completion, std::nullopt);
+        }
+    } completed{worker.WaitTake()};
+    ASSERT_TRUE(completed.completion);
+    const int requested = 4;
+    u32 published{};
+    const bool failed = DrainAsyncCompilationResults(
+        completed, &requested, [&](auto result) { published += result.result.has_value(); });
+    EXPECT_TRUE(failed);
+    EXPECT_EQ(published, 0U);
+    EXPECT_FALSE(completed.TryTake());
+}
+
+TEST(GraphicsPipelineAdmission, ProductionWorkerAndBothPublicationPathsRejectInvalidPipelines) {
+    const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+    EXPECT_TRUE(ContainsBetween(source, "PipelineCache::CompileGraphicsPipelineAsync",
+                                "PipelineCache::PublishAsyncGraphicsPipeline",
+                                "RequireValidCompiledPipeline(pipeline)"));
+    EXPECT_TRUE(ContainsBetween(source, "PipelineCache::PublishAsyncGraphicsPipeline(",
+                                "graphics_pipelines.try_emplace", "pipeline->IsValid()"));
+    EXPECT_TRUE(ContainsBetween(source, "Compiling graphics pipeline", "RegisterPipelineData",
+                                "it.value()->IsValid()"));
+    EXPECT_TRUE(ContainsBetween(source, "Compiling graphics pipeline", "RegisterPipelineData",
+                                "graphics_pipelines.erase(it)"));
+}
+
+TEST(GraphicsPipelineAdmission, ActualLayoutIsValidatedBeforeAnyVulkanDescriptorCreation) {
+    const auto path = std::filesystem::path{SHADPS4_PIPELINE_CACHE_SOURCE_PATH}.parent_path() /
+                      "vk_graphics_pipeline.cpp";
+    const auto source = ReadSource(path.string().c_str());
     ASSERT_FALSE(source.empty());
-    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 4u;"),
-              std::string::npos);
+    EXPECT_TRUE(ContainsBetween(source, "GraphicsPipeline::BuildDescSetLayout",
+                                "createDescriptorSetLayoutUnique",
+                                "ValidateGraphicsDescriptorLayout"));
+    EXPECT_TRUE(ContainsBetween(source, "GraphicsPipeline::BuildDescSetLayout",
+                                "createDescriptorSetLayoutUnique", "desc_heap.PoolSizes()"));
+    EXPECT_TRUE(ContainsBetween(source, "GraphicsPipeline::BuildDescSetLayout",
+                                "createDescriptorSetLayoutUnique", "key.num_color_attachments"));
 }
 
 } // namespace
