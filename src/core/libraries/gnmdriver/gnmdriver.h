@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "common/unique_function.h"
 #include "common/types.h"
 #include "core/libraries/kernel/equeue.h"
 
@@ -14,7 +15,9 @@ namespace Libraries::GnmDriver {
 
 using namespace Kernel;
 
-void WaitForSubmissionBoundary();
+// Holds GNM submission admission while one GPU-visible guest mapping is revoked. This deliberately
+// does not wait for a parser boundary or force a global GPU completion fence.
+Common::UniqueFunction<void> AcquireGpuAddressSpaceGuard();
 
 s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata);
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed();

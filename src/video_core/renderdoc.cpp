@@ -6,6 +6,7 @@
 #include "core/emulator_settings.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderdoc_capture_state.h"
+#include "video_core/renderdoc_shader_selector.h"
 #include "video_core/renderdoc_path.h"
 
 #include <cstdlib>
@@ -25,6 +26,38 @@ static RenderDocCaptureState capture_state;
 static ScreenshotRequestQueue screenshot_requests;
 
 RENDERDOC_API_1_6_0* rdoc_api{};
+
+static const RenderDocShaderSelector& GetShaderCaptureSelector() noexcept {
+    // Read the launch environment once. Selection never changes the command stream or submission
+    // order, and must not change midway through recording an eligible command buffer.
+    static const auto selector = [] {
+        const char* compute = std::getenv("SHADPS4_RENDERDOC_COMPUTE_HASH");
+        const char* vertex = std::getenv("SHADPS4_RENDERDOC_VERTEX_HASH");
+        const char* color = std::getenv("SHADPS4_RENDERDOC_COLOR_DRAW");
+        const char* skip = std::getenv("SHADPS4_RENDERDOC_MATCH_SKIP");
+        return RenderDocShaderSelector::Parse(
+            compute ? std::optional<std::string_view>{compute} : std::nullopt,
+            vertex ? std::optional<std::string_view>{vertex} : std::nullopt,
+            color ? std::optional<std::string_view>{color} : std::nullopt,
+            skip ? std::optional<std::string_view>{skip} : std::nullopt);
+    }();
+    return selector;
+}
+
+bool IsGuestWorkCaptureEligible(std::optional<u64> compute_shader_hash,
+                                std::optional<u64> vertex_shader_hash,
+                                bool has_color_attachment) noexcept {
+    const auto& selector = GetShaderCaptureSelector();
+    const bool matches = selector.Allows(compute_shader_hash, vertex_shader_hash,
+                                         has_color_attachment);
+    // Default selection remains eligible before arming, preserving existing submission behavior.
+    // Ordinal selection is request-owned and counts only commands emitted after the trigger.
+    return selector.MatchSkip() == 0 ? matches : capture_state.SelectEligibleCommand(matches);
+}
+
+bool GuestWorkCaptureRequiresColorAttachment() noexcept {
+    return GetShaderCaptureSelector().RequiresColorAttachment();
+}
 
 void LoadRenderDoc(const bool allow_offline_loading) {
     if (rdoc_api) {
@@ -122,25 +155,56 @@ void LoadRenderDoc(const bool allow_offline_loading) {
 }
 
 void TriggerCapture() {
-    (void)capture_state.Trigger();
-}
-
-bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
-        return false;
+    if (!GetShaderCaptureSelector().Valid()) {
+        static std::atomic_flag reported;
+        if (!reported.test_and_set(std::memory_order_relaxed)) {
+            LOG_ERROR(Common,
+                      "Invalid or ambiguous SHADPS4_RENDERDOC_COMPUTE_HASH/"
+                      "SHADPS4_RENDERDOC_VERTEX_HASH/SHADPS4_RENDERDOC_COLOR_DRAW/"
+                      "SHADPS4_RENDERDOC_MATCH_SKIP; "
+                      "capture request refused");
+        }
+        return;
     }
-
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    rdoc_api->StartFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
-    return true;
+    (void)capture_state.Trigger(GetShaderCaptureSelector().MatchSkip());
 }
 
-void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    ASSERT(rdoc_api);
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
+GuestSubmissionCapture BeginGuestWorkCapture(void* vulkan_instance, const bool has_guest_work) {
+    RenderDocCaptureApi api{};
+    if (rdoc_api) {
+        api = {
+            .context = vulkan_instance,
+            .is_capturing = [](void*) { return rdoc_api->IsFrameCapturing() != 0; },
+            .start =
+                [](void* instance) {
+                    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(instance);
+                    // An app-controlled Vulkan capture need not contain a window presentation.
+                    rdoc_api->StartFrameCapture(device, nullptr);
+                },
+            .end =
+                [](void* instance) {
+                    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(instance);
+                    return rdoc_api->EndFrameCapture(device, nullptr) != 0;
+                },
+            .discard =
+                [](void* instance) {
+                    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(instance);
+                    return rdoc_api->DiscardFrameCapture(device, nullptr) != 0;
+                },
+        };
+    }
+    return GuestSubmissionCapture{capture_state, api, has_guest_work};
+}
+
+void CompleteGuestWorkCapture(GuestSubmissionCapture& capture, const bool submission_succeeded,
+                              bool& pending_guest_work) {
+    const auto result = capture.CompleteSubmission(submission_succeeded, pending_guest_work);
+    if (result == GuestCaptureResult::Captured) {
+        LOG_WARNING(Common, "RenderDoc guest-work submission capture completed");
+    } else if (result != GuestCaptureResult::NotRequested) {
+        LOG_ERROR(Common, "RenderDoc guest-work capture failed: reason={}, cleanup_failed={}",
+                  static_cast<u32>(result), capture.CleanupFailed());
+    }
 }
 
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix) {

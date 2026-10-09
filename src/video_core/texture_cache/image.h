@@ -8,6 +8,7 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/host_image_scaling.h"
+#include "video_core/texture_cache/image_binding_state.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
 
@@ -59,7 +60,14 @@ struct UniqueImage {
         return *this;
     }
 
-    void Create(const vk::ImageCreateInfo& image_ci);
+    /// Attempts to create the backing image without asserting on a Vulkan allocation failure.
+    /// Texture-cache guest descriptors must be able to fail closed when the host budget is
+    /// exhausted; internal render targets may still use Create() when failure is fatal.
+    [[nodiscard]] vk::Result TryCreate(const vk::ImageCreateInfo& image_ci,
+                                       const Vulkan::Instance* diagnostic_instance = nullptr);
+
+    void Create(const vk::ImageCreateInfo& image_ci,
+                const Vulkan::Instance* diagnostic_instance = nullptr);
 
     void Destroy();
 
@@ -100,11 +108,17 @@ struct Image {
     }
 
     vk::Image GetImage() const {
-        return backing->image.image;
+        return IsValid() ? backing->image.image : vk::Image{};
     }
 
     vk::Extent3D GetHostExtent() const {
-        return backing->image.image_ci.extent;
+        return IsValid() ? backing->image.image_ci.extent : vk::Extent3D{};
+    }
+
+    /// Whether the host image was created successfully.  Unsupported guest descriptors are
+    /// represented as an unregistered, backing-less cache candidate and must not be bound.
+    bool IsValid() const noexcept {
+        return backing != nullptr && static_cast<bool>(backing->image);
     }
 
     u32 GetHostScale() const {
@@ -134,6 +148,11 @@ struct Image {
 
     ImageView& FindView(const ImageViewInfo& view_info, bool ensure_guest_samples = true);
 
+    /// Resolve the actual layout of every subresource exposed by a descriptor view.
+    /// A mixed-layout view cannot be described by a single Vulkan imageLayout value.
+    [[nodiscard]] std::optional<vk::ImageLayout> GetSubresourceLayout(
+        const SubresourceRange& range) const;
+
     using Barriers = boost::container::small_vector<vk::ImageMemoryBarrier2, 32>;
     Barriers GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                          vk::PipelineStageFlags2 dst_stage,
@@ -145,7 +164,8 @@ struct Image {
                   u64 offset, u64 download_size);
 
     void CopyImage(Image& src_image);
-    void CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset);
+    void CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset,
+                             u64 buffer_size);
     void CopyMip(Image& src_image, u32 mip, u32 slice);
 
     void Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
@@ -202,12 +222,7 @@ public:
         u32 vo_surface : 1;
     } usage{};
 
-    struct {
-        u32 is_bound : 1;
-        u32 is_target : 1;
-        u32 needs_rebind : 1;
-        u32 force_general : 1;
-    } binding{};
+    ImageBindingState binding{};
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;
