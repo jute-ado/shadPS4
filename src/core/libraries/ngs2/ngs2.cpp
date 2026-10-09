@@ -1,18 +1,68 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <limits>
+#include <new>
+#include <span>
+#include <vector>
+
 #include "common/logging/log.h"
+#include "core/libraries/audio/audio_pipeline_metadata_trace.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/ngs2/ngs2.h"
 #include "core/libraries/ngs2/ngs2_custom.h"
 #include "core/libraries/ngs2/ngs2_error.h"
 #include "core/libraries/ngs2/ngs2_geom.h"
+#include "core/libraries/ngs2/ngs2_guest_io.h"
 #include "core/libraries/ngs2/ngs2_impl.h"
 #include "core/libraries/ngs2/ngs2_pan.h"
 #include "core/libraries/ngs2/ngs2_report.h"
+#include "core/memory.h"
 
 namespace Libraries::Ngs2 {
+
+namespace {
+
+bool ReadGuestVoiceControl(uintptr_t address, void* destination, size_t size, void*) {
+    if (!destination || size == 0 || address > std::numeric_limits<uintptr_t>::max() - size) {
+        return false;
+    }
+    auto* const memory = Core::Memory::Instance();
+    if (!memory) {
+        return false;
+    }
+    return memory->TryReadBacking(reinterpret_cast<const void*>(address), destination, size);
+}
+
+s32 SnapshotErrorToResult(GuestIo::SnapshotError error) {
+    switch (error) {
+    case GuestIo::SnapshotError::None:
+        return ORBIS_OK;
+    case GuestIo::SnapshotError::InvalidDescriptorList:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO;
+    case GuestIo::SnapshotError::InvalidOutputAddress:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+    case GuestIo::SnapshotError::InvalidOutputSize:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE;
+    case GuestIo::SnapshotError::AllocationFailed:
+        return ORBIS_NGS2_ERROR_FAIL;
+    }
+    return ORBIS_NGS2_ERROR_FAIL;
+}
+
+bool CanWriteGuestBytes(Core::MemoryManager* memory, void* address, size_t size) {
+    const Core::GuestMemoryRange range{reinterpret_cast<VAddr>(address), size};
+    return memory && memory->CanWriteBacking(std::span<const Core::GuestMemoryRange>{&range, 1});
+}
+
+bool TryWriteGuestBytes(Core::MemoryManager* memory, void* address, const void* data, size_t size) {
+    const Core::GuestMemoryWrite write{reinterpret_cast<VAddr>(address), data, size};
+    return memory && memory->TryWriteGuest(std::span<const Core::GuestMemoryWrite>{&write, 1});
+}
+
+} // namespace
 
 // Ngs2
 
@@ -51,30 +101,36 @@ s32 PS4_SYSV_ABI sceNgs2RackCreate(OrbisNgs2Handle systemHandle, u32 rackId,
                                    const OrbisNgs2RackOption* option,
                                    const OrbisNgs2ContextBufferInfo* bufferInfo,
                                    OrbisNgs2Handle* outHandle) {
-    LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
-    if (!systemHandle) {
-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    }
-    return ORBIS_OK;
+    LOG_INFO(Lib_Ngs2, "rackId = {}", rackId);
+    return RackCreate(systemHandle, rackId, option, bufferInfo, nullptr, outHandle);
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u32 rackId,
                                                 const OrbisNgs2RackOption* option,
                                                 const OrbisNgs2BufferAllocator* allocator,
                                                 OrbisNgs2Handle* outHandle) {
-    LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
-    if (!systemHandle) {
-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    }
-    return ORBIS_OK;
+    LOG_INFO(Lib_Ngs2, "rackId = {}", rackId);
+    return RackCreateWithAllocator(systemHandle, rackId, option, allocator, outHandle);
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackDestroy(OrbisNgs2Handle rackHandle,
                                     OrbisNgs2ContextBufferInfo* outBufferInfo) {
-    LOG_ERROR(Lib_Ngs2, "called");
-    return ORBIS_OK;
+    LOG_INFO(Lib_Ngs2, "called");
+    if (!outBufferInfo) {
+        return RackDestroy(rackHandle, nullptr);
+    }
+
+    auto* const memory = Core::Memory::Instance();
+    if (!CanWriteGuestBytes(memory, outBufferInfo, sizeof(*outBufferInfo))) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+    OrbisNgs2ContextBufferInfo local_info{};
+    const s32 result = RackDestroy(rackHandle, &local_info);
+    if (local_info.hostBuffer &&
+        !TryWriteGuestBytes(memory, outBufferInfo, &local_info, sizeof(local_info))) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackGetInfo(OrbisNgs2Handle rackHandle, OrbisNgs2RackInfo* outInfo,
@@ -90,8 +146,8 @@ s32 PS4_SYSV_ABI sceNgs2RackGetUserData(OrbisNgs2Handle rackHandle, uintptr_t* o
 
 s32 PS4_SYSV_ABI sceNgs2RackGetVoiceHandle(OrbisNgs2Handle rackHandle, u32 voiceIndex,
                                            OrbisNgs2Handle* outHandle) {
-    LOG_DEBUG(Lib_Ngs2, "(STUBBED) voiceIndex = {}", voiceIndex);
-    return ORBIS_OK;
+    LOG_DEBUG(Lib_Ngs2, "voiceIndex = {}", voiceIndex);
+    return RackGetVoiceHandle(rackHandle, voiceIndex, outHandle);
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackLock(OrbisNgs2Handle rackHandle) {
@@ -101,8 +157,8 @@ s32 PS4_SYSV_ABI sceNgs2RackLock(OrbisNgs2Handle rackHandle) {
 
 s32 PS4_SYSV_ABI sceNgs2RackQueryBufferSize(u32 rackId, const OrbisNgs2RackOption* option,
                                             OrbisNgs2ContextBufferInfo* outBufferInfo) {
-    LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
-    return RackQueryBufferSize(option, outBufferInfo);
+    LOG_INFO(Lib_Ngs2, "rackId = {}", rackId);
+    return RackQueryBufferSize(rackId, option, outBufferInfo);
 }
 
 s32 PS4_SYSV_ABI sceNgs2RackSetUserData(OrbisNgs2Handle rackHandle, uintptr_t userData) {
@@ -151,33 +207,40 @@ s32 PS4_SYSV_ABI sceNgs2SystemCreate(const OrbisNgs2SystemOption* option,
 s32 PS4_SYSV_ABI sceNgs2SystemCreateWithAllocator(const OrbisNgs2SystemOption* option,
                                                   const OrbisNgs2BufferAllocator* allocator,
                                                   OrbisNgs2Handle* outHandle) {
-    s32 result;
-    if (allocator && allocator->allocHandler != 0) {
-        OrbisNgs2BufferAllocHandler hostAlloc = allocator->allocHandler;
-        if (outHandle) {
-            OrbisNgs2BufferFreeHandler hostFree = allocator->freeHandler;
-            OrbisNgs2ContextBufferInfo bufferInfo;
-            result = SystemSetup(option, &bufferInfo, 0, 0);
-            if (result >= 0) {
-                uintptr_t sysUserData = allocator->userData;
-                result = hostAlloc(&bufferInfo);
-                if (result >= 0) {
-                    OrbisNgs2Handle* handleCopy = outHandle;
-                    result = SystemSetup(option, &bufferInfo, hostFree, handleCopy);
-                    if (result < 0) {
-                        if (hostFree) {
-                            hostFree(&bufferInfo);
-                        }
-                    }
-                }
-            }
-        } else {
-            result = ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
-            LOG_ERROR(Lib_Ngs2, "Invalid system handle address {}", (void*)outHandle);
-        }
-    } else {
-        result = ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR;
+    auto* const memory = Core::Memory::Instance();
+    if (!outHandle || !CanWriteGuestBytes(memory, outHandle, sizeof(*outHandle))) {
+        LOG_ERROR(Lib_Ngs2, "Invalid system handle address {}", (void*)outHandle);
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+
+    OrbisNgs2BufferAllocator allocator_copy{};
+    if (!allocator || !memory ||
+        !memory->TryReadBacking(allocator, &allocator_copy, sizeof(allocator_copy)) ||
+        !allocator_copy.allocHandler) {
         LOG_ERROR(Lib_Ngs2, "Invalid system buffer allocator {}", (void*)allocator);
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR;
+    }
+
+    OrbisNgs2SystemOption option_copy{};
+    const OrbisNgs2SystemOption* stable_option = nullptr;
+    if (option) {
+        if (!memory->TryReadBacking(option, &option_copy, sizeof(option_copy))) {
+            LOG_ERROR(Lib_Ngs2, "Invalid system option address {}", (void*)option);
+            return ORBIS_NGS2_ERROR_INVALID_OPTION_ADDRESS;
+        }
+        stable_option = &option_copy;
+    }
+
+    OrbisNgs2Handle local_handle = 0;
+    const s32 result = SystemCreateWithAllocator(stable_option, &allocator_copy, &local_handle);
+    if (result < 0) {
+        LOG_INFO(Lib_Ngs2, "called");
+        return result;
+    }
+    if (!TryWriteGuestBytes(memory, outHandle, &local_handle, sizeof(local_handle))) {
+        SystemCleanup(local_handle, nullptr);
+        LOG_ERROR(Lib_Ngs2, "System handle address changed during allocation {}", (void*)outHandle);
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
     }
     LOG_INFO(Lib_Ngs2, "called");
     return result;
@@ -185,12 +248,22 @@ s32 PS4_SYSV_ABI sceNgs2SystemCreateWithAllocator(const OrbisNgs2SystemOption* o
 
 s32 PS4_SYSV_ABI sceNgs2SystemDestroy(OrbisNgs2Handle systemHandle,
                                       OrbisNgs2ContextBufferInfo* outBufferInfo) {
-    if (!systemHandle) {
-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    }
     LOG_INFO(Lib_Ngs2, "called");
-    return ORBIS_OK;
+    if (!outBufferInfo) {
+        return SystemCleanup(systemHandle, nullptr);
+    }
+
+    auto* const memory = Core::Memory::Instance();
+    if (!CanWriteGuestBytes(memory, outBufferInfo, sizeof(*outBufferInfo))) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+    OrbisNgs2ContextBufferInfo local_info{};
+    const s32 result = SystemCleanup(systemHandle, &local_info);
+    if (local_info.hostBuffer &&
+        !TryWriteGuestBytes(memory, outBufferInfo, &local_info, sizeof(local_info))) {
+        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceNgs2SystemEnumHandles(OrbisNgs2Handle* aOutHandle, u32 maxHandles) {
@@ -249,17 +322,96 @@ s32 PS4_SYSV_ABI sceNgs2SystemQueryBufferSize(const OrbisNgs2SystemOption* optio
 s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                                      const OrbisNgs2RenderBufferInfo* aBufferInfo,
                                      u32 numBufferInfo) {
-    LOG_DEBUG(Lib_Ngs2, "(STUBBED) numBufferInfo = {}", numBufferInfo);
-    if (!systemHandle) {
-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    LOG_DEBUG(Lib_Ngs2, "numBufferInfo = {}", numBufferInfo);
+    auto* const memory = Core::Memory::Instance();
+    if (!memory) {
+        return ORBIS_NGS2_ERROR_FAIL;
+    }
+
+    GuestIo::RenderBufferSnapshot snapshot;
+    const auto snapshot_error = GuestIo::SnapshotRenderBuffers(
+        aBufferInfo, numBufferInfo,
+        [&](const void* source, void* destination, size_t size) {
+            return memory->TryReadBacking(source, destination, size);
+        },
+        [&](std::span<const Core::GuestMemoryRange> ranges) {
+            return memory->CanWriteBacking(ranges);
+        },
+        &snapshot);
+    if (snapshot_error != GuestIo::SnapshotError::None) {
+        AudioPipelineTrace::RecordSystemRender({
+            .buffer_count = numBufferInfo,
+            .traced_buffer_count = 0,
+            .buffer_metadata_complete = numBufferInfo == 0,
+            .output_bytes = 0,
+            .staged = false,
+            .render_succeeded = false,
+            .commit_succeeded = false,
+        });
+        return SnapshotErrorToResult(snapshot_error);
+    }
+
+    const auto render_buffer_trace_plan = AudioPipelineTrace::PlanRenderBufferTrace(numBufferInfo);
+    if (AudioPipelineTrace::IsEnabled()) {
+        for (u32 output_index = 0; output_index < render_buffer_trace_plan.traced_buffer_count;
+             ++output_index) {
+            const auto& descriptor = snapshot.descriptors[output_index];
+            AudioPipelineTrace::RecordRenderBuffer({
+                .output_index = output_index,
+                .waveform_type = descriptor.waveformType,
+                .channels = descriptor.numChannels,
+                .buffer_bytes = static_cast<u64>(descriptor.bufferSize),
+            });
+        }
+    }
+
+    const auto* descriptors = snapshot.descriptors.empty() ? nullptr : snapshot.descriptors.data();
+    const auto publication = GuestIo::RenderPreparedBuffers(
+        snapshot,
+        [&](SystemRenderPublishHandler publish, void* context) {
+            return SystemRender(systemHandle, descriptors, numBufferInfo, ReadGuestVoiceControl,
+                                nullptr, publish, context);
+        },
+        [&](std::span<const Core::GuestMemoryWrite> writes) {
+            return memory->TryWriteGuest(writes);
+        });
+    const s32 result = publication.result;
+    if (result < 0) {
+        AudioPipelineTrace::RecordSystemRender({
+            .buffer_count = numBufferInfo,
+            .traced_buffer_count = render_buffer_trace_plan.traced_buffer_count,
+            .buffer_metadata_complete = render_buffer_trace_plan.metadata_complete,
+            .output_bytes = snapshot.staging.size(),
+            .staged = true,
+            .render_succeeded = false,
+            .commit_succeeded = publication.succeeded,
+        });
+        return result;
+    }
+    const bool committed = publication.succeeded;
+    AudioPipelineTrace::RecordSystemRender({
+        .buffer_count = numBufferInfo,
+        .traced_buffer_count = render_buffer_trace_plan.traced_buffer_count,
+        .buffer_metadata_complete = render_buffer_trace_plan.metadata_complete,
+        .output_bytes = snapshot.staging.size(),
+        .staged = true,
+        .render_succeeded = true,
+        .commit_succeeded = committed,
+    });
+    if (!committed) {
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
     }
     return ORBIS_OK;
 }
 
 static s32 PS4_SYSV_ABI sceNgs2SystemResetOption(OrbisNgs2SystemOption* outOption) {
-    static const OrbisNgs2SystemOption option = {
-        sizeof(OrbisNgs2SystemOption), "", 0, 512, 256, 48000, {0}};
+    static const OrbisNgs2SystemOption option = {sizeof(OrbisNgs2SystemOption),
+                                                 "",
+                                                 0,
+                                                 OrbisNgs2DefaultMaxGrainSamples,
+                                                 OrbisNgs2DefaultNumGrainSamples,
+                                                 OrbisNgs2DefaultSampleRate,
+                                                 {0}};
 
     if (!outOption) {
         LOG_ERROR(Lib_Ngs2, "Invalid system option address {}", (void*)outOption);
@@ -309,8 +461,8 @@ s32 PS4_SYSV_ABI sceNgs2SystemUnlock(OrbisNgs2Handle systemHandle) {
 
 s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                                      const OrbisNgs2VoiceParamHeader* paramList) {
-    LOG_ERROR(Lib_Ngs2, "called");
-    return ORBIS_OK;
+    LOG_DEBUG(Lib_Ngs2, "called");
+    return VoiceControl(voiceHandle, paramList, ReadGuestVoiceControl, nullptr);
 }
 
 s32 PS4_SYSV_ABI sceNgs2VoiceGetMatrixInfo(OrbisNgs2Handle voiceHandle, u32 matrixId,
@@ -333,13 +485,45 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetPortInfo(OrbisNgs2Handle voiceHandle, u32 port,
 
 s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2VoiceState* outState,
                                       size_t stateSize) {
-    LOG_ERROR(Lib_Ngs2, "stateSize = {}", stateSize);
-    return ORBIS_OK;
+    LOG_DEBUG(Lib_Ngs2, "stateSize = {}", stateSize);
+    if (!outState) {
+        return VoiceGetState(voiceHandle, nullptr, stateSize);
+    }
+    constexpr size_t MaxVoiceStateBytes = 64 * 1024;
+    if (stateSize > MaxVoiceStateBytes) {
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_STATE_SIZE;
+    }
+
+    std::vector<u8> local_state;
+    try {
+        local_state.resize(std::max<size_t>(stateSize, 1));
+    } catch (const std::bad_alloc&) {
+        return ORBIS_NGS2_ERROR_FAIL;
+    }
+    const s32 result = VoiceGetState(voiceHandle, local_state.data(), stateSize);
+    if (result < 0) {
+        return result;
+    }
+    auto* const memory = Core::Memory::Instance();
+    return TryWriteGuestBytes(memory, outState, local_state.data(), stateSize)
+               ? ORBIS_OK
+               : ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
 }
 
 s32 PS4_SYSV_ABI sceNgs2VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* outStateFlags) {
-    LOG_ERROR(Lib_Ngs2, "called");
-    return ORBIS_OK;
+    LOG_DEBUG(Lib_Ngs2, "called");
+    if (!outStateFlags) {
+        return VoiceGetStateFlags(voiceHandle, nullptr);
+    }
+    u32 local_flags = 0;
+    const s32 result = VoiceGetStateFlags(voiceHandle, &local_flags);
+    if (result < 0) {
+        return result;
+    }
+    auto* const memory = Core::Memory::Instance();
+    return TryWriteGuestBytes(memory, outStateFlags, &local_flags, sizeof(local_flags))
+               ? ORBIS_OK
+               : ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
 }
 
 // Ngs2Custom

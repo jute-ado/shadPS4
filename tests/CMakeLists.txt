@@ -31,6 +31,7 @@ add_executable(shadps4_controller_trace_test
     test_controller_axis.cpp
     test_controller_button.cpp
     test_controller_connection.cpp
+    test_controller_lightbar.cpp
     test_controller_trace.cpp
 )
 target_include_directories(shadps4_controller_trace_test PRIVATE
@@ -42,6 +43,16 @@ target_link_libraries(shadps4_controller_trace_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
 )
+
+add_executable(shadps4_shadnet_client_version_test
+    test_shadnet_client_version.cpp
+)
+target_include_directories(shadps4_shadnet_client_version_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_shadnet_client_version_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_shadnet_client_version_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_shadnet_client_version_test)
 
 add_executable(shadps4_renderdoc_path_test
     ${CMAKE_SOURCE_DIR}/src/video_core/renderdoc_path.cpp
@@ -489,7 +500,12 @@ set(SETTINGS_TEST_SOURCES
 
 set(NGS2_TEST_SOURCES
     # Under test
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/audio/atrac9_codec_lock.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/audio/audio_pipeline_metadata_trace.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/ngs2/ngs2_atrac9.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/ngs2/ngs2_decode.cpp
     ${CMAKE_SOURCE_DIR}/src/core/libraries/ngs2/ngs2_impl.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/libraries/ngs2/ngs2_render.cpp
 
     # Minimal common and kernel support
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
@@ -510,6 +526,11 @@ set(NGS2_TEST_SOURCES
     stubs/sdl_stub.cpp
 
     # Tests
+    test_audio_pipeline_metadata_trace.cpp
+    test_ngs2_atrac9.cpp
+    test_ngs2_decode.cpp
+    test_ngs2_guest_io.cpp
+    test_ngs2_render.cpp
     test_ngs2.cpp
 )
 set(GCN_TEST_SOURCES
@@ -639,11 +660,13 @@ target_link_libraries(shadps4_settings_test PRIVATE
 )
 target_link_libraries(shadps4_ngs2_test PRIVATE
     GTest::gtest_main
+    Boost::headers
     fmt::fmt
     nlohmann_json::nlohmann_json
     toml11::toml11
     SDL3::SDL3
     spdlog::spdlog
+    LibAtrac9
 )
 target_link_libraries(shadps4_gcn_test PRIVATE
     GTest::gtest_main
