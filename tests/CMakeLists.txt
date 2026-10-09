@@ -112,6 +112,29 @@ target_compile_features(shadps4_image_descriptor_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_image_descriptor_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_image_descriptor_test)
 
+add_executable(shadps4_gnm_submission_gate_test
+    test_gnm_submission_gate.cpp
+)
+target_include_directories(shadps4_gnm_submission_gate_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_gnm_submission_gate_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_gnm_submission_gate_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_gnm_submission_gate_test)
+
+add_executable(shadps4_gpu_mapping_admission_test
+    test_gpu_mapping_admission.cpp
+)
+target_include_directories(shadps4_gpu_mapping_admission_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_gpu_mapping_admission_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_gpu_mapping_admission_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+)
+list(APPEND TEST_TARGETS shadps4_gpu_mapping_admission_test)
+
 set(SETTINGS_TEST_SOURCES
     # Under test
     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
