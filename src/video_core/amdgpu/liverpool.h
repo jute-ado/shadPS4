@@ -18,6 +18,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/eop_completion_batch.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -186,6 +187,7 @@ private:
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     void ProcessCommands();
+    bool SubmitPendingEopCompletions();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -204,6 +206,7 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    EopCompletionBatch eop_completion_batch;
 
     struct ConstantEngine {
         void Reset() {

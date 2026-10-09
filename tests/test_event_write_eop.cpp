@@ -8,6 +8,7 @@
 
 #include "common/types.h"
 #include "video_core/amdgpu/eop_completion.h"
+#include "video_core/amdgpu/eop_completion_batch.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
 
 namespace {
@@ -68,6 +69,56 @@ TEST(EventWriteEop, RetainsEveryFlipAssociatedWithTheSameEop) {
     EXPECT_TRUE(flips.empty());
     complete_eop();
     EXPECT_EQ(flips, (std::vector<int>{1, 2}));
+}
+
+TEST(EventWriteEop, KeepsInterruptPromptAndDefersFenceWithFlipCompletion) {
+    std::vector<std::string> operations;
+    Common::UniqueFunction<void> gpu_completion;
+
+    AmdGpu::PublishEopWithDeferredFenceAndCompletion(
+        TestEopPacket{.data = 1}, true,
+        [&](u32) { operations.emplace_back("fence"); },
+        [&] { operations.emplace_back("interrupt"); },
+        [&](Common::UniqueFunction<void>&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::move(completion);
+        },
+        [&] { operations.emplace_back("flip"); });
+
+    EXPECT_EQ(operations, (std::vector<std::string>{"interrupt", "defer"}));
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"interrupt", "defer", "fence", "flip"}));
+}
+
+TEST(EventWriteEop, BatchesOrderedFenceAndFlipCompletionsIntoOneGpuSubmission) {
+    std::vector<std::string> operations;
+    Common::UniqueFunction<void> gpu_completion;
+    AmdGpu::EopCompletionBatch batch;
+
+    batch.Add([&] {
+        operations.emplace_back("fence-1");
+        operations.emplace_back("flip-1");
+    });
+    batch.Add([&] {
+        operations.emplace_back("fence-2");
+        operations.emplace_back("flip-2");
+    });
+
+    EXPECT_TRUE(batch.Submit(
+        [&](Common::UniqueFunction<void>&& completion) {
+            operations.emplace_back("defer");
+            gpu_completion = std::move(completion);
+        },
+        [&] { operations.emplace_back("submit"); }));
+    EXPECT_EQ(operations, (std::vector<std::string>{"defer", "submit"}));
+
+    ASSERT_TRUE(gpu_completion);
+    gpu_completion();
+    EXPECT_EQ(operations,
+              (std::vector<std::string>{"defer", "submit", "fence-1", "flip-1",
+                                        "fence-2", "flip-2"}));
 }
 
 } // namespace
