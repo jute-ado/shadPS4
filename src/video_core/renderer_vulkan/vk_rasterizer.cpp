@@ -196,6 +196,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
+    if (regs.primitive_type == AmdGpu::PrimitiveType::QuadList) {
+        return;
+    }
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
