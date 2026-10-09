@@ -87,6 +87,18 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
     liverpool->SendCommand<true>([this, device_addr, size, is_write] {
+        if (is_write && EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Relaxed) {
+            const auto pending = readback_prefetch_tracker.ClassifyFault(device_addr, size);
+            if (pending.disposition == ReadbackPrefetchFaultDisposition::PendingExact) {
+                scheduler.Wait(pending.submission_tick);
+                FinalizeReadbackPrefetch(pending.token);
+                if (!memory_tracker->IsRegionGpuModified(device_addr, size)) {
+                    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                    readback_prefetch_tracker.ObserveSynchronousFault(device_addr, size);
+                    return;
+                }
+            }
+        }
         Buffer& buffer = slot_buffers[FindBuffer(device_addr, size)];
         // GPU-modified ranges come as many small scattered islands, so the download
         // is widened to a window around the request
@@ -100,8 +112,217 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
         DownloadBufferMemory<false>(buffer, window_start, window_end - window_start);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Relaxed) {
+                readback_prefetch_tracker.ObserveSynchronousWindow(window_start,
+                                                                   window_end - window_start);
+            }
         }
     });
+}
+
+void BufferCache::MarkGpuModifiedRange(VAddr address, u64 size) {
+    gpu_modified_ranges.Add(address, size);
+    if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Relaxed) {
+        readback_prefetch_tracker.ObserveGpuWrite(address, size);
+    }
+}
+
+BufferCache::ReadbackPrefetchSubmitDisposition BufferCache::SubmitReadbackPrefetch(
+    const ReadbackPrefetchPlan& plan) {
+    if (plan.size > std::numeric_limits<u32>::max()) {
+        return ReadbackPrefetchSubmitDisposition::Retry;
+    }
+
+    struct SourceCopy {
+        BufferId buffer_id{};
+        VAddr guest_address{};
+        u64 source_offset{};
+        u64 download_offset{};
+        u64 size{};
+    };
+    std::array<SourceCopy, MaxReadbackPrefetchCopies> source_copies{};
+    u32 copy_count = 0;
+    u64 total_size_bytes = 0;
+    bool overflow = false;
+    const bool valid_slices = ForEachReadbackPrefetchCacheSlice(
+        plan.address, plan.size, CACHING_PAGESIZE, [&](VAddr slice_address, u64 slice_size) {
+            if (overflow || slice_size > std::numeric_limits<u32>::max()) {
+                overflow = true;
+                return;
+            }
+            const BufferId buffer_id = FindBuffer(slice_address, static_cast<u32>(slice_size));
+            const Buffer& buffer = slot_buffers[buffer_id];
+            if (!buffer.IsInBounds(slice_address, slice_size)) {
+                overflow = true;
+                return;
+            }
+            memory_tracker->ForEachDownloadRange<false>(
+                slice_address, slice_size, [&](VAddr dirty_address, u64 dirty_size) {
+                    gpu_modified_ranges.ForEachInRange(
+                        dirty_address, dirty_size, [&](VAddr start, VAddr end) {
+                            if (overflow) {
+                                return;
+                            }
+                            if (copy_count == source_copies.size() || end <= start ||
+                                end - start > std::numeric_limits<u64>::max() - total_size_bytes) {
+                                overflow = true;
+                                return;
+                            }
+                            source_copies[copy_count++] = SourceCopy{
+                                .buffer_id = buffer_id,
+                                .guest_address = start,
+                                .source_offset = start - buffer.CpuAddr(),
+                                .download_offset = total_size_bytes,
+                                .size = end - start,
+                            };
+                            total_size_bytes =
+                                Common::AlignUp(total_size_bytes + end - start, 64ULL);
+                        });
+                });
+        });
+    if (!valid_slices) {
+        return ReadbackPrefetchSubmitDisposition::Retry;
+    }
+    if (overflow) {
+        return ReadbackPrefetchSubmitDisposition::Retry;
+    }
+    if (copy_count == 0 || total_size_bytes == 0) {
+        return ReadbackPrefetchSubmitDisposition::NoWork;
+    }
+
+    PendingReadbackPrefetch* pending = nullptr;
+    for (auto& candidate : pending_readback_prefetches) {
+        if (!candidate.occupied) {
+            pending = &candidate;
+            break;
+        }
+    }
+    if (pending == nullptr) {
+        return ReadbackPrefetchSubmitDisposition::Retry;
+    }
+
+    const auto [download, offset] = download_buffer.Map(total_size_bytes);
+    download_buffer.Commit();
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    for (u32 index = 0; index < copy_count; ++index) {
+        const auto& source = source_copies[index];
+        Buffer& buffer = slot_buffers[source.buffer_id];
+        if (const auto barrier = buffer.GetBarrier(vk::AccessFlagBits2::eTransferRead,
+                                                   vk::PipelineStageFlagBits2::eTransfer)) {
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &*barrier,
+            });
+        }
+        const vk::BufferCopy copy{
+            .srcOffset = source.source_offset,
+            .dstOffset = offset + source.download_offset,
+            .size = source.size,
+        };
+        cmdbuf.copyBuffer(buffer.Handle(), download_buffer.Handle(), copy);
+    }
+
+    const u64 submission_tick = scheduler.CurrentTick();
+    if (!readback_prefetch_tracker.CommitSubmitted(plan, submission_tick)) {
+        return ReadbackPrefetchSubmitDisposition::Retry;
+    }
+    *pending = PendingReadbackPrefetch{
+        .occupied = true,
+        .plan = plan,
+        .download = download,
+        .download_offset = offset,
+        .submission_tick = submission_tick,
+        .copy_count = copy_count,
+    };
+    for (u32 index = 0; index < copy_count; ++index) {
+        const auto& source = source_copies[index];
+        pending->copies[index] = PendingReadbackPrefetchCopy{
+            .guest_address = source.guest_address,
+            .download_offset = source.download_offset,
+            .size = source.size,
+        };
+    }
+    scheduler.DeferOperation([this, token = plan.token] { FinalizeReadbackPrefetch(token); });
+    return ReadbackPrefetchSubmitDisposition::Submitted;
+}
+
+void BufferCache::FinalizeReadbackPrefetch(u64 token) {
+    PendingReadbackPrefetch* pending = nullptr;
+    for (auto& candidate : pending_readback_prefetches) {
+        if (candidate.occupied && candidate.plan.token == token) {
+            pending = &candidate;
+            break;
+        }
+    }
+    if (pending == nullptr) {
+        return;
+    }
+
+    bool publication_succeeded =
+        readback_prefetch_tracker.CanPublish(token, pending->plan.generation);
+    if (publication_succeeded) {
+        for (u32 index = 0; index < pending->copy_count; ++index) {
+            const auto& copy = pending->copies[index];
+            publication_succeeded &= memory->TryWriteBacking(
+                std::bit_cast<u8*>(copy.guest_address), pending->download + copy.download_offset,
+                copy.size);
+        }
+    }
+    const auto disposition = readback_prefetch_tracker.Complete(
+        token, pending->plan.generation, publication_succeeded);
+    if (disposition == ReadbackPrefetchCompletionDisposition::Publish) {
+        cpu_page_write_tracker.Discard(pending->plan.address, pending->plan.size);
+        for (u32 index = 0; index < pending->copy_count; ++index) {
+            const auto& copy = pending->copies[index];
+            gpu_modified_ranges.Subtract(copy.guest_address, copy.size);
+        }
+        const VAddr end = pending->plan.address + pending->plan.size;
+        for (VAddr page = pending->plan.address & ~(TRACKER_BYTES_PER_PAGE - 1ULL); page < end;
+             page += TRACKER_BYTES_PER_PAGE) {
+            if (!gpu_modified_ranges.Intersects(page, TRACKER_BYTES_PER_PAGE)) {
+                memory_tracker->UnmarkRegionAsGpuModified(page, TRACKER_BYTES_PER_PAGE);
+            }
+        }
+    }
+    *pending = {};
+}
+
+void BufferCache::FinalizeCompletedReadbackPrefetches() {
+    std::array<u64, MaxReadbackPrefetchHotWindows> completed{};
+    u32 count = 0;
+    for (const auto& pending : pending_readback_prefetches) {
+        if (pending.occupied && scheduler.IsFree(pending.submission_tick)) {
+            completed[count++] = pending.plan.token;
+        }
+    }
+    for (u32 index = 0; index < count; ++index) {
+        FinalizeReadbackPrefetch(completed[index]);
+    }
+}
+
+void BufferCache::PrefetchHotReadbacks() {
+    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Relaxed) {
+        if (readback_prefetch_active) {
+            readback_prefetch_tracker.Reset();
+            readback_prefetch_active = false;
+        }
+        return;
+    }
+    readback_prefetch_active = true;
+    FinalizeCompletedReadbackPrefetches();
+    const auto batch = readback_prefetch_tracker.PlanSubmit();
+    for (u32 index = 0; index < batch.count; ++index) {
+        const auto disposition = SubmitReadbackPrefetch(batch.plans[index]);
+        if (disposition == ReadbackPrefetchSubmitDisposition::NoWork) {
+            if (!readback_prefetch_tracker.CompleteNoWork(batch.plans[index])) {
+                readback_prefetch_tracker.Abandon(batch.plans[index]);
+            }
+        } else if (disposition == ReadbackPrefetchSubmitDisposition::Retry) {
+            readback_prefetch_tracker.Abandon(batch.plans[index]);
+        }
+    }
 }
 
 template <bool async>
@@ -337,7 +558,7 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         const auto buffer_id = FindBuffer(dst, num_bytes);
         auto& buffer = slot_buffers[buffer_id];
         SynchronizeBuffer(buffer, dst, num_bytes, true, true);
-        gpu_modified_ranges.Add(dst, num_bytes);
+        MarkGpuModifiedRange(dst, num_bytes);
         return buffer;
     }();
     const vk::BufferCopy region = {
@@ -413,7 +634,7 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     Buffer& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
     if (is_written) {
-        gpu_modified_ranges.Add(device_addr, size);
+        MarkGpuModifiedRange(device_addr, size);
     }
     return {&buffer, buffer.Offset(device_addr)};
 }

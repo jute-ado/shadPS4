@@ -14,12 +14,13 @@ inline constexpr std::array BaseCapabilities{
     std::string_view{"ENABLE_EMU_CONTROL"},
     std::string_view{"ENABLE_SCREENSHOT"},
     std::string_view{"ENABLE_GAMEPAD"},
+    std::string_view{"ENABLE_PRESENTED_FRAME_GAMEPAD"},
 };
 
 inline constexpr std::array RenderDocCapability{
     std::string_view{"ENABLE_MEMORY_PATCH"}, std::string_view{"ENABLE_EMU_CONTROL"},
     std::string_view{"ENABLE_SCREENSHOT"},   std::string_view{"ENABLE_RENDERDOC_CAPTURE"},
-    std::string_view{"ENABLE_GAMEPAD"},
+    std::string_view{"ENABLE_GAMEPAD"}, std::string_view{"ENABLE_PRESENTED_FRAME_GAMEPAD"},
 };
 
 [[nodiscard]] constexpr std::span<const std::string_view> IpcCapabilities(

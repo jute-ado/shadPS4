@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/logging/log.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/ir_emitter.h"
@@ -17,6 +18,36 @@ struct FormatInfo {
     AmdGpu::NumberConversion num_conversion;
     u32 num_components;
 };
+
+static bool IsBufferFormatNumberSupported(const AmdGpu::DataFormat data_format,
+                                          const AmdGpu::NumberFormat num_format) {
+    using DF = AmdGpu::DataFormat;
+    using NF = AmdGpu::NumberFormat;
+    switch (data_format) {
+    case DF::FormatInvalid:
+        return true;
+    case DF::Format8:
+    case DF::Format8_8:
+    case DF::Format8_8_8_8:
+    case DF::Format2_10_10_10:
+        return num_format == NF::Unorm || num_format == NF::Snorm || num_format == NF::Uint ||
+               num_format == NF::Sint;
+    case DF::Format16:
+    case DF::Format16_16:
+    case DF::Format16_16_16_16:
+        return num_format == NF::Unorm || num_format == NF::Snorm || num_format == NF::Uint ||
+               num_format == NF::Sint || num_format == NF::Float;
+    case DF::Format10_11_11:
+        return num_format == NF::Float || num_format == NF::Uint || num_format == NF::Sint;
+    case DF::Format32:
+    case DF::Format32_32:
+    case DF::Format32_32_32:
+    case DF::Format32_32_32_32:
+        return num_format == NF::Uint || num_format == NF::Sint || num_format == NF::Float;
+    default:
+        return false;
+    }
+}
 
 static bool IsBufferFormatLoad(const IR::Inst& inst) {
     return inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32;
@@ -211,6 +242,19 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
                                         : buffer.GetNumberConversion(),
         .num_components = AmdGpu::NumComponents(data_format),
     };
+
+    if (!IsBufferFormatNumberSupported(format_info.data_format, format_info.num_format)) {
+        LOG_WARNING(Render_Recompiler, "Ignoring invalid buffer format pair data={} number={}",
+                    static_cast<u32>(format_info.data_format),
+                    static_cast<u32>(format_info.num_format));
+        if (IsBufferFormatLoad(inst)) {
+            const auto zero = ir.Imm32(0.f);
+            inst.ReplaceUsesWithAndRemove(ir.CompositeConstruct(zero, zero, zero, zero));
+        } else {
+            inst.Invalidate();
+        }
+        return;
+    }
 
     if (IsBufferFormatLoad(inst)) {
         const auto interpreted =

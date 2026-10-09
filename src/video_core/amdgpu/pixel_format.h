@@ -356,7 +356,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // SNORM_NZ has special conversion rules only for 8- and 16-bit
+            // components. Other descriptor pairings require no additional
+            // conversion and must not abort shader compilation.
+            return NumberConversion::None;
         }
     }
     default:

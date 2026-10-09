@@ -53,15 +53,12 @@ TEST(WindowsExceptionPolicy, BreakpointRemainsOwnedByAssertPath) {
 }
 
 TEST(WindowsExceptionPolicy, StaticProtectionReportsOnlyItsOwnAccessViolations) {
-    EXPECT_FALSE(Core::WindowsException::ShouldReportUnhandledException(
-        0xc0000005, true, false));
-    EXPECT_TRUE(Core::WindowsException::ShouldReportUnhandledException(
-        0xc0000005, true, true));
+    EXPECT_FALSE(Core::WindowsException::ShouldReportUnhandledException(0xc0000005, true, false));
+    EXPECT_TRUE(Core::WindowsException::ShouldReportUnhandledException(0xc0000005, true, true));
 }
 
 TEST(WindowsExceptionPolicy, LegacyProtectionStillReportsUnhandledAccessViolations) {
-    EXPECT_TRUE(Core::WindowsException::ShouldReportUnhandledException(
-        0xc0000005, false, false));
+    EXPECT_TRUE(Core::WindowsException::ShouldReportUnhandledException(0xc0000005, false, false));
 }
 
 TEST(WindowsExceptionPolicy, CppExceptionsRemainOwnedByTheLanguageRuntime) {
@@ -85,6 +82,21 @@ TEST(WindowsExceptionPolicy, SignalDispatcherDestructionOwnsHandlerRemoval) {
 
     ASSERT_FALSE(destructor.empty());
     EXPECT_NE(destructor.find("RemoveHandlers("), std::string::npos);
+}
+
+TEST(WindowsExceptionPolicy, UnhandledAccessViolationReportsFaultTargetAndInstruction) {
+    const auto source = ReadSource(SHADPS4_SIGNALS_SOURCE_PATH);
+    const auto handler = FunctionBody(source, "static LONG WINAPI SignalHandler");
+
+    ASSERT_FALSE(handler.empty());
+    const auto report = handler.find("if (report_unhandled)");
+    ASSERT_NE(report, std::string::npos);
+    const auto diagnostics = handler.substr(report);
+    EXPECT_NE(diagnostics.find("ExceptionInformation[0]"), std::string::npos);
+    EXPECT_NE(diagnostics.find("ExceptionInformation[1]"), std::string::npos);
+    EXPECT_NE(diagnostics.find("DisassembleInstruction(address)"), std::string::npos);
+    EXPECT_NE(diagnostics.find("ContextRecord->Rbx"), std::string::npos);
+    EXPECT_NE(diagnostics.find("ContextRecord->Rcx"), std::string::npos);
 }
 
 TEST(WindowsExceptionPolicy, AssertPathRemovesHandlersImmediatelyBeforeBreakpointCrash) {

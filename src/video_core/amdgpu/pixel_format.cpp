@@ -73,6 +73,46 @@ std::string_view NameOf(DataFormat fmt) {
         return "FormatBc6";
     case DataFormat::FormatBc7:
         return "FormatBc7";
+    case DataFormat::FormatFmask8_S2_F1:
+        return "FormatFmask8_S2_F1";
+    case DataFormat::FormatFmask8_S4_F1:
+        return "FormatFmask8_S4_F1";
+    case DataFormat::FormatFmask8_S8_F1:
+        return "FormatFmask8_S8_F1";
+    case DataFormat::FormatFmask8_S2_F2:
+        return "FormatFmask8_S2_F2";
+    case DataFormat::FormatFmask8_S4_F2:
+        return "FormatFmask8_S4_F2";
+    case DataFormat::FormatFmask8_S4_F4:
+        return "FormatFmask8_S4_F4";
+    case DataFormat::FormatFmask16_S16_F1:
+        return "FormatFmask16_S16_F1";
+    case DataFormat::FormatFmask16_S8_F2:
+        return "FormatFmask16_S8_F2";
+    case DataFormat::FormatFmask32_S16_F2:
+        return "FormatFmask32_S16_F2";
+    case DataFormat::FormatFmask32_S8_F4:
+        return "FormatFmask32_S8_F4";
+    case DataFormat::FormatFmask32_S8_F8:
+        return "FormatFmask32_S8_F8";
+    case DataFormat::FormatFmask64_S16_F4:
+        return "FormatFmask64_S16_F4";
+    case DataFormat::FormatFmask64_S16_F8:
+        return "FormatFmask64_S16_F8";
+    case DataFormat::Format4_4:
+        return "Format4_4";
+    case DataFormat::Format6_5_5:
+        return "Format6_5_5";
+    case DataFormat::Format1:
+        return "Format1";
+    case DataFormat::Format1_Reversed:
+        return "Format1_Reversed";
+    case DataFormat::Format32_As_8:
+        return "Format32_As_8";
+    case DataFormat::Format32_As_8_8:
+        return "Format32_As_8_8";
+    case DataFormat::Format32_As_32_32_32_32:
+        return "Format32_As_32_32_32_32";
     default:
         UNREACHABLE();
     }

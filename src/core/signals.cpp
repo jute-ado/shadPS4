@@ -25,6 +25,19 @@ static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 
 namespace Core {
 
+static std::string DisassembleInstruction(void* code_address) {
+#ifdef ARCH_X86_64
+    ZydisDecodedInstruction instruction;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+    if (ZYAN_SUCCESS(
+            Common::Decoder::Instance()->decodeInstruction(instruction, operands, code_address))) {
+        return Common::Decoder::Instance()->disassembleInst(instruction, operands,
+                                                            reinterpret_cast<u64>(code_address));
+    }
+#endif
+    return "<unable to decode>";
+}
+
 #if defined(_WIN32)
 
 static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
@@ -141,7 +154,21 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const bool report_unhandled = WindowsException::ShouldReportUnhandledException(
         code, use_static_windows_guest_red_zone_protection, static_protection_exception);
     if (report_unhandled) { // Windows static guest red-zone protection
-        LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        if (code == EXCEPTION_ACCESS_VIOLATION && pExp->ExceptionRecord->NumberParameters >= 2) {
+            const auto operation = pExp->ExceptionRecord->ExceptionInformation[0];
+            const auto fault_address =
+                reinterpret_cast<void*>(pExp->ExceptionRecord->ExceptionInformation[1]);
+            LOG_CRITICAL(Debug,
+                         "Unhandled Exception code {:#x} at {} access={} target={} instruction={} "
+                         "rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",
+                         code, address, operation, fault_address, DisassembleInstruction(address),
+                         pExp->ContextRecord->Rax, pExp->ContextRecord->Rbx,
+                         pExp->ContextRecord->Rcx, pExp->ContextRecord->Rdx,
+                         pExp->ContextRecord->Rsi, pExp->ContextRecord->Rdi);
+        } else {
+            LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {} instruction={}", code,
+                         address, DisassembleInstruction(address));
+        }
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 
@@ -149,26 +176,6 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 }
 
 #else
-
-static std::string DisassembleInstruction(void* code_address) {
-    char buffer[256] = "<unable to decode>";
-
-#ifdef ARCH_X86_64
-    ZydisDecodedInstruction instruction;
-    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    const auto status =
-        Common::Decoder::Instance()->decodeInstruction(instruction, operands, code_address);
-    if (ZYAN_SUCCESS(status)) {
-        ZydisFormatter formatter;
-        ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
-        ZydisFormatterFormatInstruction(&formatter, &instruction, operands,
-                                        instruction.operand_count_visible, buffer, sizeof(buffer),
-                                        reinterpret_cast<u64>(code_address), ZYAN_NULL);
-    }
-#endif
-
-    return buffer;
-}
 
 static s32 NativeSiCodeToGuest(s32 sig, s32 code) {
     using namespace Libraries::Kernel;
