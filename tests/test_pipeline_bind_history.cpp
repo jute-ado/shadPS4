@@ -123,9 +123,9 @@ TEST(PipelineBindHistory, ReturnsUniquePipelinesNewestFirst) {
         .shader_hashes = {0x50},
     };
 
-    history.Record(graphics);
-    history.Record(compute);
-    history.Record(graphics);
+    (void)history.Record(graphics);
+    (void)history.Record(compute);
+    (void)history.Record(graphics);
 
     const auto recent = history.RecentUnique();
     ASSERT_EQ(recent.size(), 2u);
@@ -133,10 +133,71 @@ TEST(PipelineBindHistory, ReturnsUniquePipelinesNewestFirst) {
     EXPECT_EQ(recent[1], compute);
 }
 
+TEST(PipelineBindHistory, AssignsResolvableIdsToEveryRecordedCommand) {
+    PipelineBindHistory history;
+    const PipelineBindRecord first{
+        .type = PipelineBindType::Graphics,
+        .pipeline_hash = 0x10,
+        .command = {.type = PipelineCommandType::Draw, .arguments = {3, 1, 0}},
+    };
+    const PipelineBindRecord second{
+        .type = PipelineBindType::Graphics,
+        .pipeline_hash = 0x10,
+        .command = {.type = PipelineCommandType::Draw, .arguments = {6, 1, 0}},
+    };
+
+    const auto first_id = history.Record(first);
+    const auto second_id = history.Record(second);
+
+    EXPECT_NE(first_id, 0u);
+    EXPECT_EQ(second_id, first_id + 1);
+    ASSERT_TRUE(history.Find(first_id));
+    ASSERT_TRUE(history.Find(second_id));
+    EXPECT_EQ(history.Find(first_id)->command.arguments[0], 3u);
+    EXPECT_EQ(history.Find(second_id)->command.arguments[0], 6u);
+}
+
+TEST(PipelineBindHistory, ExpiresIdsAfterTheBoundedHistoryWindow) {
+    PipelineBindHistory history;
+    const auto first_id = history.Record(PipelineBindRecord{
+        .type = PipelineBindType::Compute,
+        .pipeline_hash = 1,
+    });
+
+    for (size_t index = 0; index < PipelineBindHistory::Capacity; ++index) {
+        (void)history.Record(PipelineBindRecord{
+            .type = PipelineBindType::Compute,
+            .pipeline_hash = static_cast<u64>(index + 2),
+        });
+    }
+
+    EXPECT_FALSE(history.Find(first_id));
+}
+
+TEST(PipelineBindHistory, RecentUniqueRetainsCommandIdsForRepeatedPipelines) {
+    PipelineBindHistory history;
+    const auto first_id = history.Record(PipelineBindRecord{
+        .type = PipelineBindType::Graphics,
+        .pipeline_hash = 0x10,
+        .command = {.type = PipelineCommandType::Draw, .arguments = {3, 1, 0}},
+    });
+    const auto second_id = history.Record(PipelineBindRecord{
+        .type = PipelineBindType::Graphics,
+        .pipeline_hash = 0x10,
+        .command = {.type = PipelineCommandType::Draw, .arguments = {6, 1, 0}},
+    });
+
+    const auto recent = history.RecentUniqueWithIds();
+    ASSERT_EQ(recent.size(), 1u);
+    EXPECT_EQ(recent.front().command_id, second_id);
+    EXPECT_NE(recent.front().command_id, first_id);
+    EXPECT_EQ(recent.front().record.command.arguments[0], 6u);
+}
+
 TEST(PipelineBindHistory, RetainsOnlyTheNewestFixedCapacityWindow) {
     PipelineBindHistory history;
     for (u64 hash = 1; hash <= PipelineBindHistory::Capacity + 3; ++hash) {
-        history.Record(PipelineBindRecord{
+        (void)history.Record(PipelineBindRecord{
             .type = PipelineBindType::Compute,
             .pipeline_hash = hash,
             .shader_hashes = {hash + 100},

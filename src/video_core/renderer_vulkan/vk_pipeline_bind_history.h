@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -107,6 +108,13 @@ struct PipelineBindRecord {
     bool operator==(const PipelineBindRecord&) const = default;
 };
 
+using PipelineCommandId = u64;
+
+struct PipelineBindSnapshot {
+    PipelineCommandId command_id{};
+    PipelineBindRecord record{};
+};
+
 inline PipelineBindRecord MakePipelineBindRecord(PipelineBindType type, u64 pipeline_hash,
                                                  std::span<const u64> shader_hashes,
                                                  PipelineCommandInfo command = {},
@@ -131,27 +139,57 @@ class PipelineBindHistory {
 public:
     static constexpr size_t Capacity = 64;
 
-    void Record(const PipelineBindRecord& record) {
+    [[nodiscard]] PipelineCommandId Record(const PipelineBindRecord& record) {
         std::scoped_lock lock{mutex};
+        const PipelineCommandId command_id = next_command_id++;
         records[next] = record;
+        command_ids[next] = command_id;
         next = (next + 1) % Capacity;
         count = std::min(count + 1, Capacity);
+        return command_id;
     }
 
-    [[nodiscard]] std::vector<PipelineBindRecord> RecentUnique() const {
+    [[nodiscard]] std::optional<PipelineBindRecord> Find(PipelineCommandId command_id) const {
+        if (command_id == 0) {
+            return std::nullopt;
+        }
+
         std::scoped_lock lock{mutex};
-        std::vector<PipelineBindRecord> result;
+        for (size_t index = 0; index < Capacity; ++index) {
+            if (command_ids[index] == command_id) {
+                return records[index];
+            }
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::vector<PipelineBindSnapshot> RecentUniqueWithIds() const {
+        std::scoped_lock lock{mutex};
+        std::vector<PipelineBindSnapshot> result;
         result.reserve(count);
         for (size_t offset = 0; offset < count; ++offset) {
             const size_t index = (next + Capacity - 1 - offset) % Capacity;
             const auto& candidate = records[index];
             const bool already_present = std::ranges::any_of(result, [&](const auto& existing) {
-                return existing.type == candidate.type &&
-                       existing.pipeline_hash == candidate.pipeline_hash;
+                return existing.record.type == candidate.type &&
+                       existing.record.pipeline_hash == candidate.pipeline_hash;
             });
             if (!already_present) {
-                result.push_back(candidate);
+                result.push_back(PipelineBindSnapshot{
+                    .command_id = command_ids[index],
+                    .record = candidate,
+                });
             }
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<PipelineBindRecord> RecentUnique() const {
+        const auto snapshots = RecentUniqueWithIds();
+        std::vector<PipelineBindRecord> result;
+        result.reserve(snapshots.size());
+        for (const auto& snapshot : snapshots) {
+            result.push_back(snapshot.record);
         }
         return result;
     }
@@ -159,8 +197,10 @@ public:
 private:
     mutable std::mutex mutex;
     std::array<PipelineBindRecord, Capacity> records{};
+    std::array<PipelineCommandId, Capacity> command_ids{};
     size_t next{};
     size_t count{};
+    PipelineCommandId next_command_id{1};
 };
 
 inline PipelineBindHistory& GetPipelineBindHistory() {

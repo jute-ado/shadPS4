@@ -25,6 +25,26 @@ TEST(VulkanDiagnosticCheckpoint, PipelineHashRoundTripsThroughOpaqueMarker) {
     EXPECT_EQ(Vulkan::DecodeDiagnosticCheckpoint(marker), pipeline_hash);
 }
 
+TEST(VulkanDiagnosticCheckpoint, PipelineBindIdentityIsOptIn) {
+    EXPECT_FALSE(Vulkan::ShouldRecordPipelineBindDiagnostics(false, false));
+    EXPECT_TRUE(Vulkan::ShouldRecordPipelineBindDiagnostics(true, false));
+    EXPECT_TRUE(Vulkan::ShouldRecordPipelineBindDiagnostics(false, true));
+}
+
+TEST(VulkanDiagnosticCheckpoint, CommandIdRoundTripsThroughOpaqueMarker) {
+    constexpr u64 command_id = 0x123456789abcdef0ull;
+
+    const void* marker = Vulkan::EncodeDiagnosticCommandId(command_id);
+
+    EXPECT_EQ(Vulkan::DecodeDiagnosticCommandId(marker), command_id);
+}
+
+TEST(VulkanDiagnosticCheckpoint, ZeroCommandIdRemainsAnUnresolvedMarker) {
+    const void* marker = Vulkan::EncodeDiagnosticCommandId(0);
+
+    EXPECT_EQ(Vulkan::DecodeDiagnosticCommandId(marker), 0u);
+}
+
 TEST(VulkanDiagnosticCheckpoint, ReportsCheckpointsForEveryDeviceLossSource) {
     EXPECT_TRUE(Vulkan::ShouldReportDiagnosticCheckpoints(
         Vulkan::DeviceLossSource::Presentation, true));

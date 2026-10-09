@@ -31,8 +31,9 @@ static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbu
                                const GraphicsPipeline& pipeline, PipelineCommandInfo command,
                                std::span<const PipelineBufferInfo> buffers,
                                std::span<const PipelineImageInfo> images) {
-    if (!EmulatorSettings.IsVkCrashDiagnosticEnabled() &&
-        !EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints()) {
+    if (!ShouldRecordPipelineBindDiagnostics(
+            EmulatorSettings.IsVkCrashDiagnosticEnabled(),
+            EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints())) {
         return;
     }
     const u64 pipeline_hash = std::hash<GraphicsPipelineKey>{}(pipeline.GetGraphicsKey());
@@ -43,11 +44,11 @@ static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbu
             program_hashes[index] = stages[index]->pgm_hash;
         }
     }
-    GetPipelineBindHistory().Record(MakePipelineBindRecord(PipelineBindType::Graphics,
-                                                           pipeline_hash, program_hashes, command,
-                                                           buffers, images));
+    const auto command_id = GetPipelineBindHistory().Record(
+        MakePipelineBindRecord(PipelineBindType::Graphics, pipeline_hash, program_hashes, command,
+                               buffers, images));
     if (instance.SupportsDiagnosticCheckpoints()) {
-        cmdbuf.setCheckpointNV(EncodeDiagnosticCheckpoint(pipeline_hash));
+        cmdbuf.setCheckpointNV(EncodeDiagnosticCommandId(command_id));
     }
 }
 
@@ -55,18 +56,19 @@ static void RecordPipelineBind(const Instance& instance, vk::CommandBuffer cmdbu
                                const ComputePipeline& pipeline, PipelineCommandInfo command,
                                std::span<const PipelineBufferInfo> buffers,
                                std::span<const PipelineImageInfo> images) {
-    if (!EmulatorSettings.IsVkCrashDiagnosticEnabled() &&
-        !EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints()) {
+    if (!ShouldRecordPipelineBindDiagnostics(
+            EmulatorSettings.IsVkCrashDiagnosticEnabled(),
+            EmulatorSettings.IsVkCrashDiagnosticNativeCheckpoints())) {
         return;
     }
     const u64 pipeline_hash = std::hash<ComputePipelineKey>{}(pipeline.GetComputeKey());
     const auto& compute = pipeline.GetStage(Shader::LogicalStage::Compute);
     const std::array program_hashes{compute.pgm_hash};
-    GetPipelineBindHistory().Record(MakePipelineBindRecord(PipelineBindType::Compute, pipeline_hash,
-                                                           program_hashes, command, buffers,
-                                                           images));
+    const auto command_id = GetPipelineBindHistory().Record(
+        MakePipelineBindRecord(PipelineBindType::Compute, pipeline_hash, program_hashes, command,
+                               buffers, images));
     if (instance.SupportsDiagnosticCheckpoints()) {
-        cmdbuf.setCheckpointNV(EncodeDiagnosticCheckpoint(pipeline_hash));
+        cmdbuf.setCheckpointNV(EncodeDiagnosticCommandId(command_id));
     }
 }
 
