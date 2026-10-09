@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "common/types.h"
+#include "shader_recompiler/specialization_serialization.h"
 #include "video_core/renderer_vulkan/host_compilation_pause.h"
 
 namespace Vulkan {
@@ -85,6 +86,35 @@ TEST(HostCompilationPause, AsyncShaderCompilationDoesNotPauseGuestThreads) {
     EXPECT_EQ(controller.resume_calls, 0u);
 }
 
+TEST(HostCompilationPause, AsyncComputePipelineCompilationDoesNotPauseGuestThreads) {
+    const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
+    ASSERT_FALSE(source.empty());
+
+    const auto begin = source.find("PipelineCache::GetComputePipeline()");
+    const auto end = source.find("PipelineCache::RefreshGraphicsKey()", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    const auto compute = source.substr(begin, end - begin);
+    const auto pause = compute.find("ScopedHostCompilationGuestPause pause{");
+    ASSERT_NE(pause, std::string::npos);
+    const auto pause_end = compute.find("};", pause);
+    ASSERT_NE(pause_end, std::string::npos);
+    EXPECT_NE(compute.substr(pause, pause_end - pause)
+                  .find("!EmulatorSettings.IsAsyncGraphicsPipelineCompilation()"),
+              std::string::npos);
+
+    // Compute dispatch still waits for the pipeline; async mode changes guest pause policy,
+    // not the dispatch dependency or pipeline publication ordering.
+    const auto construct = compute.find("std::make_unique<ComputePipeline>");
+    const auto publish = compute.find("RegisterPipelineData", construct);
+    const auto result = compute.find("return it->second.get()", publish);
+    ASSERT_NE(construct, std::string::npos);
+    ASSERT_NE(publish, std::string::npos);
+    ASSERT_NE(result, std::string::npos);
+    EXPECT_LT(construct, publish);
+    EXPECT_LT(publish, result);
+}
+
 TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) {
     const auto source = ReadSource(SHADPS4_PIPELINE_CACHE_SOURCE_PATH);
 
@@ -117,11 +147,7 @@ TEST(HostCompilationPause, SynchronousHostWorkStopsGuestFrameLifecycleProgress) 
 }
 
 TEST(PersistentShaderCache, BackendSemanticChangesInvalidateStoredSpirv) {
-    const auto source = ReadSource(SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH);
-
-    ASSERT_FALSE(source.empty());
-    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 4u;"),
-              std::string::npos);
+    EXPECT_EQ(Shader::ShaderBinaryVersion, 8U);
 }
 
 } // namespace
