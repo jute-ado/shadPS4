@@ -3,8 +3,9 @@
 
 #include "common/div_ceil.h"
 #include "video_core/buffer_cache/buffer_cache.h"
-#include "video_core/buffer_cache/fault_range.h"
+#include "video_core/buffer_cache/fault_download.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/buffer_cache/fault_range.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -15,14 +16,12 @@
 
 namespace VideoCore {
 
-static constexpr size_t MaxPageFaults = 1024;
-static constexpr size_t PageFaultAreaSize = MaxPageFaults * sizeof(u64);
+static constexpr size_t PageFaultAreaSize = FaultDownloadSlotCount * sizeof(u64);
 
 FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
                            BufferCache& buffer_cache_, PageManager& page_manager_,
                            u32 caching_pagebits, u64 caching_num_pages_)
-    : scheduler{scheduler_}, buffer_cache{buffer_cache_},
-      page_manager{page_manager_},
+    : scheduler{scheduler_}, buffer_cache{buffer_cache_}, page_manager{page_manager_},
       caching_pagesize{1ULL << caching_pagebits}, caching_num_pages{caching_num_pages_},
       fault_buffer_size{caching_num_pages_ / 8},
       fault_buffer{instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, fault_buffer_size},
@@ -54,7 +53,7 @@ FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& 
         Vulkan::Check(device.createDescriptorSetLayoutUnique(desc_layout_ci));
 
     std::vector<std::string> defines{{fmt::format("CACHING_PAGEBITS={}", caching_pagebits),
-                                      fmt::format("MAX_PAGE_FAULTS={}", MaxPageFaults)}};
+                                      fmt::format("MAX_PAGE_FAULTS={}", FaultDownloadSlotCount)}};
     const auto module = Vulkan::Compile(HostShaders::FAULT_BUFFER_PROCESS_COMP,
                                         vk::ShaderStageFlagBits::eCompute, device, defines);
     Vulkan::SetObjectName(device, module, "Fault Buffer Parser");
@@ -86,6 +85,7 @@ void FaultManager::ProcessFaultBuffer() {
         scheduler.Wait(wait_tick);
         scheduler.PopPendingOperations();
     }
+    fault_epochs[current_area].Reset();
 
     const u32 offset = current_area * PageFaultAreaSize;
     u8* mapped = download_buffer.mapped_data.data() + offset;
@@ -161,16 +161,25 @@ void FaultManager::ProcessFaultBuffer() {
     scheduler.DeferOperation([this, mapped, area = current_area] {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
-        const u32 fault_count = fault_buf[0];
+        const u32 reported_fault_count = fault_buf[0];
+        const auto fault_count =
+            BoundFaultDownloadCount(reported_fault_count, FaultDownloadSlotCount);
+        if (fault_count.overflowed) {
+            LOG_WARNING(Render_Vulkan,
+                        "GPU fault download overflow: reported {} page(s), retained first {} "
+                        "address slot(s)",
+                        reported_fault_count, fault_count.address_count);
+        }
         const VAddr address_space_size = caching_num_pages * caching_pagesize;
         u32 invalid_fault_count = 0;
         VAddr first_invalid_fault = 0;
-        for (u32 i = 1; i <= fault_count; ++i) {
+        for (size_t i = 1; i <= fault_count.address_count; ++i) {
             const VAddr start = fault_buf[i];
             const VAddr end = start + caching_pagesize;
             const bool is_processable = IsProcessableDmaFaultRange(
-                start, end, address_space_size,
-                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+                start, end, address_space_size, [this](VAddr address, u64 size) {
+                    return page_manager.IsGpuMapped(address, size);
+                });
             if (!is_processable) {
                 if (invalid_fault_count++ == 0) {
                     first_invalid_fault = start;
@@ -185,14 +194,16 @@ void FaultManager::ProcessFaultBuffer() {
                         "Ignored {} invalid or unmapped GPU fault page(s), first at {:#x}",
                         invalid_fault_count, first_invalid_fault);
         }
+        fault_epochs[area].Complete(ClassifyDmaFaultEpoch(fault_count, invalid_fault_count));
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
             const bool is_processable = IsProcessableDmaFaultRange(
-                start, end, address_space_size,
-                [this](VAddr address, u64 size) { return page_manager.IsGpuMapped(address, size); });
+                start, end, address_space_size, [this](VAddr address, u64 size) {
+                    return page_manager.IsGpuMapped(address, size);
+                });
             if (!is_processable) {
                 LOG_WARNING(Render_Vulkan,
-                            "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}", start,
-                            end);
+                            "Ignoring invalid or unmapped merged GPU fault range {:#x}-{:#x}",
+                            start, end);
                 return;
             }
             MakeDmaFaultRangeResident(buffer_cache, start, static_cast<u32>(end - start));
@@ -202,6 +213,17 @@ void FaultManager::ProcessFaultBuffer() {
 
     fault_areas[current_area++] = scheduler.CurrentTick();
     current_area %= MaxPendingFaults;
+}
+
+DmaFaultEpoch FaultManager::ProcessFaultBufferSynchronous() {
+    const u32 area = current_area;
+    ProcessFaultBuffer();
+    scheduler.Finish();
+    scheduler.PopPendingOperations();
+    if (!fault_epochs[area].IsComplete()) {
+        LOG_ERROR(Render_Vulkan, "Synchronous DMA fault epoch did not complete");
+    }
+    return fault_epochs[area].ValueOrInvalid();
 }
 
 } // namespace VideoCore

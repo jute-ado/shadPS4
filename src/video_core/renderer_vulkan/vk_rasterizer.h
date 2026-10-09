@@ -7,6 +7,7 @@
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/dma_discovery_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -84,8 +85,12 @@ public:
     }
 
 private:
+    bool RecordDirectDrawAttempt(const GraphicsPipeline* pipeline, bool is_indexed,
+                                 u32 index_offset, VideoCore::DmaAttachmentMode attachment_mode,
+                                 VideoCore::DmaDiscoveryMode discovery_mode);
     void PrepareRenderState(const GraphicsPipeline* pipeline);
-    RenderState BeginRendering(const GraphicsPipeline* pipeline);
+    RenderState BeginRendering(const GraphicsPipeline* pipeline,
+                               VideoCore::DmaAttachmentMode attachment_mode);
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
@@ -146,6 +151,8 @@ private:
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
+    u64 dma_binding_generation{};
+    VideoCore::DmaDiscoveryBindingCache dma_discovery_cache;
     bool attachment_feedback_loop{};
     u32 prepared_host_scale{1};
     u32 current_host_scale{1};

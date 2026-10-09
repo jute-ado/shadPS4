@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/debug.h"
+#include "common/scope_exit.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -32,6 +33,71 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     push_data.yoffset = regs.viewport_control.yoffset_enable ? regs.viewports[0].yoffset : 0.f;
     push_data.yscale = regs.viewport_control.yscale_enable ? regs.viewports[0].yscale : 1.f;
     return push_data;
+}
+
+static VideoCore::DmaWorkTraits GetDmaWorkTraits(const Pipeline* pipeline) {
+    VideoCore::DmaWorkTraits traits{};
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+
+        if (stage->uses_dma) {
+            switch (stage->l_stage) {
+            case Shader::LogicalStage::Vertex:
+                traits.vertex_dma_reads = true;
+                traits.vertex_dynamic_dma_reads |=
+                    True(stage->readconst_types & Shader::Info::ReadConstType::Dynamic);
+                break;
+            case Shader::LogicalStage::Fragment:
+                traits.fragment_dma_reads = true;
+                traits.fragment_dynamic_dma_reads |=
+                    True(stage->readconst_types & Shader::Info::ReadConstType::Dynamic);
+                break;
+            default:
+                traits.unsupported_stage_dma_reads = true;
+                break;
+            }
+        }
+
+        for (const auto& buffer : stage->buffers) {
+            if (buffer.is_written && (buffer.buffer_type == Shader::BufferType::Guest ||
+                                      buffer.buffer_type == Shader::BufferType::GdsBuffer)) {
+                traits.guest_or_gds_writes = true;
+            }
+        }
+        for (const auto& image : stage->images) {
+            traits.atomics |= image.is_atomic;
+            traits.storage_image_writes |= image.is_written;
+        }
+    }
+    return traits;
+}
+
+static VideoCore::DmaDiscoveryBindingKey GetDmaDiscoveryBindingKey(const Pipeline* pipeline) {
+    constexpr u64 FnvOffset = 14695981039346656037ULL;
+    constexpr u64 FnvPrime = 1099511628211ULL;
+    const auto append = [](u64 hash, u64 value) { return (hash ^ value) * FnvPrime; };
+
+    u64 pipeline_hash = FnvOffset;
+    u64 binding_hash = FnvOffset;
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage || !stage->uses_dma ||
+            !True(stage->readconst_types & Shader::Info::ReadConstType::Dynamic)) {
+            continue;
+        }
+        pipeline_hash = append(pipeline_hash, stage->pgm_hash);
+        pipeline_hash = append(pipeline_hash, static_cast<u64>(stage->l_stage));
+        for (const auto& desc : stage->buffers) {
+            if (desc.buffer_type != Shader::BufferType::Guest) {
+                continue;
+            }
+            const auto words = std::bit_cast<std::array<u64, 2>>(desc.GetSharp(*stage));
+            binding_hash = append(binding_hash, words[0]);
+            binding_hash = append(binding_hash, words[1]);
+        }
+    }
+    return {.pipeline = pipeline_hash, .bindings = binding_hash};
 }
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
@@ -221,17 +287,74 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    const auto& regs = liverpool->regs;
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
     }
 
-    PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    const auto dma_traits = GetDmaWorkTraits(pipeline);
+    const auto discovery_mode = VideoCore::ClassifyDmaDiscovery(
+        dma_traits, instance.IsDynamicColorWriteMaskSupported());
+    const auto discovery_key = GetDmaDiscoveryBindingKey(pipeline);
+    const auto record_attempt = [&](VideoCore::DmaAttachmentMode attachment_mode,
+                                    VideoCore::DmaDiscoveryMode mode) {
+        return RecordDirectDrawAttempt(pipeline, is_indexed, index_offset, attachment_mode,
+                                       mode);
+    };
+    if (discovery_mode == VideoCore::DmaDiscoveryMode::None ||
+        !dma_discovery_cache.NeedsDiscovery(discovery_key) ||
+        liverpool->regs.clipper_control.dx_rasterization_kill) {
+        record_attempt(VideoCore::DmaAttachmentMode::Publication,
+                       VideoCore::DmaDiscoveryMode::None);
         return;
     }
-    const auto state = BeginRendering(pipeline);
+
+    // Do not let faults from earlier work authorize or reject this draw's publication.
+    if (fault_process_pending) {
+        static_cast<void>(buffer_cache.ProcessFaultBufferSynchronous());
+        fault_process_pending = false;
+    }
+
+    const u64 binding_generation = ++dma_binding_generation;
+    VideoCore::DmaPublicationGate gate{VideoCore::DmaPublicationGate::Config{
+        .maximum_attempts = 3,
+        .binding_generation = binding_generation,
+    }};
+    const auto execution = VideoCore::ExecuteDmaPublicationGate(
+        gate, binding_generation,
+        [&](u32) {
+            if (!record_attempt(VideoCore::DmaAttachmentMode::Discovery, discovery_mode)) {
+                return VideoCore::DmaFaultEpoch::Invalid();
+            }
+            const auto epoch = buffer_cache.ProcessFaultBufferSynchronous();
+            fault_process_pending = false;
+            return epoch;
+        },
+        [&] {
+            return record_attempt(VideoCore::DmaAttachmentMode::Publication,
+                                  VideoCore::DmaDiscoveryMode::None);
+        });
+    if (execution == VideoCore::DmaExecutionResult::Aborted) {
+        LOG_WARNING(Render_Vulkan, "Aborted DMA draw publication after {} discovery attempt(s)",
+                    gate.AttemptCount());
+    } else {
+        dma_discovery_cache.MarkClean(discovery_key);
+    }
+}
+
+bool Rasterizer::RecordDirectDrawAttempt(const GraphicsPipeline* pipeline, bool is_indexed,
+                                         u32 index_offset,
+                                         VideoCore::DmaAttachmentMode attachment_mode,
+                                         VideoCore::DmaDiscoveryMode discovery_mode) {
+    const auto& regs = liverpool->regs;
+    PrepareRenderState(pipeline);
+    SCOPE_EXIT {
+        ResetBindings();
+    };
+    if (!BindResources(pipeline)) {
+        return false;
+    }
+    const auto state = BeginRendering(pipeline, attachment_mode);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -240,6 +363,16 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
+    auto& dynamic_state = scheduler.GetDynamicState();
+    if (discovery_mode == VideoCore::DmaDiscoveryMode::RasterizerDiscard) {
+        dynamic_state.SetRasterizerDiscardEnabled(true);
+        dynamic_state.Commit(instance, scheduler.CommandBuffer());
+    } else if (discovery_mode == VideoCore::DmaDiscoveryMode::SuppressAttachmentWrites) {
+        dynamic_state.SetColorWriteMasks({});
+        dynamic_state.SetDepthWriteEnabled(false);
+        dynamic_state.SetStencilWriteMasks(0, 0);
+        dynamic_state.Commit(instance, scheduler.CommandBuffer());
+    }
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
@@ -258,7 +391,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     DebugState.IncDrawCall();
 
-    ResetBindings();
+    return true;
 }
 
 void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 stride,
@@ -280,7 +413,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!BindResources(pipeline)) {
         return;
     }
-    const auto state = BeginRendering(pipeline);
+    const auto state = BeginRendering(pipeline, VideoCore::DmaAttachmentMode::Publication);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
@@ -888,7 +1021,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 }
 
-RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline,
+                                       VideoCore::DmaAttachmentMode attachment_mode) {
     attachment_feedback_loop = false;
     const auto& regs = liverpool->regs;
     const auto& key = pipeline->GetGraphicsKey();
@@ -937,7 +1071,11 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 
         const auto& col_buf = regs.color_buffers[cb];
         const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
-        texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        const auto attachment_policy =
+            VideoCore::ResolveDmaAttachmentPolicy(is_clear, attachment_mode);
+        if (attachment_policy.consume_metadata) {
+            texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        }
 
         if (image->binding.is_bound) {
             ASSERT_MSG(!image->binding.force_general,
@@ -960,13 +1098,14 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         observe_scale(*image);
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
-        const auto clear_value =
-            is_clear ? LiverpoolToVK::ColorBufferClearValue(col_buf) : vk::ClearValue{};
+        const auto clear_value = attachment_policy.load_clear
+                                     ? LiverpoolToVK::ColorBufferClearValue(col_buf)
+                                     : vk::ClearValue{};
         auto& attachment = state.color_attachments[cb];
         attachment.image_view = *image_view.image_view;
         attachment.image_layout = image->backing->state.layout;
         attachment.clear_value = clear_value.color.uint32;
-        attachment.is_clear = is_clear;
+        attachment.is_clear = attachment_policy.load_clear;
 
         image->usage.render_target = 1u;
     }
@@ -990,7 +1129,13 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             regs.depth_control.depth_write_enable,
             texture_cache.IsMetaCleared(htile_address, slice));
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
-        texture_cache.TouchMeta(htile_address, slice, false);
+        const auto depth_policy =
+            VideoCore::ResolveDmaAttachmentPolicy(is_depth_clear, attachment_mode);
+        const auto stencil_policy =
+            VideoCore::ResolveDmaAttachmentPolicy(is_stencil_clear, attachment_mode);
+        if (depth_policy.consume_metadata || stencil_policy.consume_metadata) {
+            texture_cache.TouchMeta(htile_address, slice, false);
+        }
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);
 
         const bool has_stencil = image.info.props.has_stencil;
@@ -1021,14 +1166,15 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         attachment.clear_value = {};
 
         if (regs.depth_buffer.DepthValid()) {
-            attachment.clear_value[0] = is_depth_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
+            attachment.clear_value[0] =
+                depth_policy.load_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
             attachment.has_depth = true;
-            attachment.depth_clear = is_depth_clear;
+            attachment.depth_clear = depth_policy.load_clear;
         }
         if (regs.depth_buffer.StencilValid()) {
-            attachment.clear_value[1] = is_stencil_clear ? regs.stencil_clear : 0u;
+            attachment.clear_value[1] = stencil_policy.load_clear ? regs.stencil_clear : 0u;
             attachment.has_stencil = true;
-            attachment.stencil_clear = is_stencil_clear;
+            attachment.stencil_clear = stencil_policy.load_clear;
         }
 
         image.usage.depth_target = true;
@@ -1182,12 +1328,14 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
     }
     page_manager.OnGpuMap(addr, size);
+    dma_discovery_cache.Clear();
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     buffer_cache.InvalidateMemory(addr, size);
     texture_cache.UnmapMemory(addr, size);
     page_manager.OnGpuUnmap(addr, size);
+    dma_discovery_cache.Clear();
     {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
