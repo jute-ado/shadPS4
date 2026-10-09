@@ -332,6 +332,20 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    if (cs.pgm_hash == 0x0a57ac2f && !buffer_bindings.empty()) {
+        const auto& [buffer_id, vsharp, size] = buffer_bindings.front();
+        std::array<u32, 20> words{};
+        if (vsharp.base_address != 0 && size >= sizeof(words)) {
+            std::memcpy(words.data(), reinterpret_cast<const void*>(vsharp.base_address),
+                        sizeof(words));
+        }
+        LOG_WARNING(Render_Vulkan,
+                    "Diagnostic compute 0a57 buffer addr={:#x} size={:#x} stride={:#x} "
+                    "records={:#x} counts=[{:#x},{:#x},{:#x}] radius={:#x}",
+                    vsharp.base_address, size, vsharp.stride, vsharp.num_records, words[16],
+                    words[17], words[18], words[19]);
+    }
+
     scheduler.EndRendering();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
