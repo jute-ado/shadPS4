@@ -14,6 +14,7 @@
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/audio/audioout_error.h"
+#include "core/libraries/audio/test_lab_audio_capture.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
 
@@ -177,6 +178,14 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
             }
 
             if (port->output_ready) {
+                CaptureTestLabMainPortAudio(
+                    port->output_buffer, port->buffer_frames,
+                    TestLabAudioFormat{
+                        .is_float = port->format_info.is_float,
+                        .num_channels = port->format_info.num_channels,
+                        .channel_layout = port->format_info.channel_layout,
+                    },
+                    port->type == OrbisAudioOutPort::Main);
                 port->impl->Output(port->output_buffer);
                 port->output_ready = false;
                 port->last_output_time =
