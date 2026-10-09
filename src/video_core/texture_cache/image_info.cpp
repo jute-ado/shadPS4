@@ -7,6 +7,7 @@
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_layout_policy.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/tile.h"
 
@@ -158,13 +159,15 @@ void ImageInfo::UpdateSize() {
         u32 mip_w = pitch >> mip;
         u32 mip_h = size.height >> mip;
         if (props.is_block) {
-            mip_w = (mip_w + 3) / 4;
-            mip_h = (mip_h + 3) / 4;
+            const auto blocks = ToBlockCompressedMipGeometry(mip_w, mip_h);
+            mip_w = blocks.pitch;
+            mip_h = blocks.height;
         }
         mip_w = std::max(mip_w, 1u);
         mip_h = std::max(mip_h, 1u);
         u32 mip_d = std::max(size.depth >> mip, 1u);
-        u32 thickness = 1;
+        const ImageArrayLayout layout = ClassifyImageArrayLayout(array_mode);
+        const u32 thickness = layout.thickness;
 
         if (props.is_pow2) {
             mip_w = std::bit_ceil(mip_w);
@@ -173,38 +176,33 @@ void ImageInfo::UpdateSize() {
         }
 
         auto& mip_info = mips_layout[mip];
-        switch (array_mode) {
-        case AmdGpu::ArrayMode::ArrayLinearAligned: {
+        switch (layout.kind) {
+        case ImageArrayLayoutKind::Linear: {
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
                 ImageSizeLinearAligned(mip_w, mip_h, num_bits, num_samples);
             break;
         }
-        case AmdGpu::ArrayMode::Array1DTiledThick:
-            thickness = 4;
+        case ImageArrayLayoutKind::MicroTiled: {
             mip_d += (-mip_d) & (thickness - 1);
-            [[fallthrough]];
-        case AmdGpu::ArrayMode::Array1DTiledThin1: {
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
                 ImageSizeMicroTiled(mip_w, mip_h, thickness, num_bits, num_samples);
             break;
         }
-        case AmdGpu::ArrayMode::Array2DTiledThick:
-            thickness = 4;
+        case ImageArrayLayoutKind::MacroTiled: {
             mip_d += (-mip_d) & (thickness - 1);
-            [[fallthrough]];
-        case AmdGpu::ArrayMode::Array2DTiledThin1: {
-            ASSERT(!props.is_block);
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
                 mip_w, mip_h, thickness, num_bits, num_samples, tile_mode, mip, alt_tile);
             break;
         }
-        default: {
+        case ImageArrayLayoutKind::Invalid: {
             UNREACHABLE_MSG("Unknown array mode {}", magic_enum::enum_name(array_mode));
         }
         }
         if (props.is_block) {
-            mip_info.pitch = std::max(mip_info.pitch * 4, 32u);
-            mip_info.height = std::max(mip_info.height * 4, 32u);
+            const auto texels =
+                FromBlockCompressedMipGeometry(mip_info.pitch, mip_info.height);
+            mip_info.pitch = texels.pitch;
+            mip_info.height = texels.height;
         }
         mip_info.size *= mip_d * resources.layers;
         mip_info.offset = guest_size;

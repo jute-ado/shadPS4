@@ -7,6 +7,7 @@
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
+#include "shader_recompiler/ir/passes/buffer_address_policy.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
@@ -612,7 +613,8 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
         case IR::Opcode::ImageSampleRaw: {
             IR::F32 fmaskx = ir.BitCast<IR::F32>(ir.Imm32(0x76543210));
             IR::F32 fmasky = ir.BitCast<IR::F32>(ir.Imm32(0xfedcba98));
-            inst.ReplaceUsesWith(ir.CompositeConstruct(fmaskx, fmasky));
+            inst.ReplaceUsesWith(
+                ir.CompositeConstruct(fmaskx, fmasky, ir.Imm32(0.0f), ir.Imm32(0.0f)));
             return;
         }
         case IR::Opcode::ImageQueryLod:
@@ -806,9 +808,8 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         const IR::U32 vgpr_index = IR::GetBufferIndexArg(&inst);
         index = ir.IAdd(index, vgpr_index);
     }
-    if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.l_stage == LogicalStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
+    if (ShouldApplyBufferThreadId(buffer.add_tid_enable,
+                                  info.l_stage == LogicalStage::Compute)) {
         const IR::U32 thread_id{ir.LaneId()};
         index = ir.IAdd(index, thread_id);
     }
@@ -1030,7 +1031,8 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             return ir.CompositeConstruct(get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
                                          get_coord(addr_reg - 1, 2));
         default:
-            UNREACHABLE();
+            UNREACHABLE_MSG("Invalid sampled image view type {} in shader {:#x}", view_type,
+                            info.pgm_hash);
         }
     }();
 

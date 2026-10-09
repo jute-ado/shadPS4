@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <xbyak/xbyak.h>
@@ -160,42 +161,120 @@ namespace Shader::Optimization {
 namespace {
 
 static inline void PushPtr(Xbyak::CodeGenerator& c, u32 off_dw) {
-    c.push(rdi);
+    // Keep the stack aligned for the optional range-sync callback at every tree depth.
+    c.sub(rsp, 16);
+    c.mov(ptr[rsp], rdi);
     c.mov(rdi, ptr[rdi + (off_dw << 2)]);
     c.mov(r10, 0xFFFFFFFFFFFFULL);
     c.and_(rdi, r10);
 }
 
 static inline void PopPtr(Xbyak::CodeGenerator& c) {
-    c.pop(rdi);
+    c.mov(rdi, ptr[rsp]);
+    c.add(rsp, 16);
 };
+
+struct SrtSourceRange {
+    u64 begin_dw;
+    u64 end_dw;
+};
+
+static boost::container::small_vector<SrtSourceRange, 4> GetSourceRanges(
+    PassInfo::PtrUserList& use_list, PassInfo& pass_info) {
+    boost::container::small_vector<SrtSourceRange, 4> ranges;
+    for (const auto [src_off_dw, use] : use_list) {
+        const u64 begin_dw = src_off_dw;
+        // A nested SRT pointer consumes both address dwords. Synchronizing both prevents a torn
+        // low/high pointer load across a tracking-page boundary.
+        const u64 end_dw = begin_dw + (pass_info.GetUsesAsPointer(use) ? 2U : 1U);
+        if (!ranges.empty() && begin_dw <= ranges.back().end_dw) {
+            ranges.back().end_dw = std::max(ranges.back().end_dw, end_dw);
+        } else {
+            ranges.push_back({begin_dw, end_dw});
+        }
+    }
+    return ranges;
+}
+
+static void EmitRangeSync(Xbyak::CodeGenerator& c, const SrtSourceRange& range) {
+    Xbyak::Label skip;
+    c.mov(eax, 1);
+    c.test(r14, r14);
+    c.jz(skip);
+
+    // The callback follows the PS4 SysV ABI: context, guest address, byte size.
+    c.sub(rsp, 16);
+    c.mov(ptr[rsp], rdi);
+    c.lea(rsi, ptr[rdi + range.begin_dw * sizeof(u32)]);
+    c.mov(rdx, (range.end_dw - range.begin_dw) * sizeof(u32));
+    c.mov(rdi, r15);
+    c.call(r14);
+    c.mov(rdi, ptr[rsp]);
+    c.add(rsp, 16);
+    c.mov(rsi, r13);
+
+    c.L(skip);
+}
+
+static void VisitNode(IR::Inst* subtree, PassInfo& pass_info, Xbyak::CodeGenerator& c) {
+    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
+    ASSERT(use_list);
+
+    struct SrtCopy {
+        u32 src_off_dw;
+        u32 dst_off_dw;
+    };
+    boost::container::small_vector<SrtCopy, 8> copies;
+    for (const auto [src_off_dw, use] : *use_list) {
+        const u32 dst_off_dw = pass_info.dst_off_dw++;
+        use->SetFlags<u32>(dst_off_dw);
+        copies.push_back({src_off_dw, dst_off_dw});
+    }
+
+    // A refused range is unsafe to dereference. Zero only its flattened destinations, leaving
+    // the generated walker immutable so a later valid invocation can recover.
+    for (const auto& range : GetSourceRanges(*use_list, pass_info)) {
+        Xbyak::Label readable;
+        Xbyak::Label finished;
+        EmitRangeSync(c, range);
+        c.test(al, al);
+        c.jnz(readable, Xbyak::CodeGenerator::T_NEAR);
+        for (const auto [src_off_dw, dst_off_dw] : copies) {
+            if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                c.mov(dword[rsi + (dst_off_dw << 2)], 0);
+            }
+        }
+        c.jmp(finished, Xbyak::CodeGenerator::T_NEAR);
+        c.L(readable);
+        for (const auto [src_off_dw, dst_off_dw] : copies) {
+            if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
+                c.mov(ptr[rsi + (dst_off_dw << 2)], r10d);
+            }
+        }
+        c.L(finished);
+    }
+
+    // Follow the validated flattened pointer. If its range was refused, it is zero and the child
+    // synchronizer receives derived addresses without a raw guest-memory dereference.
+    for (const auto [src_off_dw, use] : *use_list) {
+        if (pass_info.GetUsesAsPointer(use)) {
+            c.sub(rsp, 16);
+            c.mov(ptr[rsp], rdi);
+            c.mov(rdi, ptr[r13 + (use->Flags<u32>() << 2)]);
+            c.mov(r10, 0xFFFFFFFFFFFFULL);
+            c.and_(rdi, r10);
+            VisitNode(use, pass_info, c);
+            c.mov(rdi, ptr[rsp]);
+            c.add(rsp, 16);
+        }
+    }
+}
 
 static void VisitPointer(u32 off_dw, IR::Inst* subtree, PassInfo& pass_info,
                          Xbyak::CodeGenerator& c) {
     PushPtr(c, off_dw);
-    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
-    ASSERT(use_list);
-
-    // First copy all the src data from this tree level
-    // That way, all data that was contiguous in the guest SRT is also contiguous in the
-    // flattened buffer.
-    // TODO src and dst are contiguous. Optimize with wider loads/stores
-    // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
-    for (auto [src_off_dw, use] : *use_list) {
-        c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
-        c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
-
-        use->SetFlags<u32>(pass_info.dst_off_dw);
-        pass_info.dst_off_dw++;
-    }
-
-    // Then visit any children used as pointers
-    for (const auto [src_off_dw, use] : *use_list) {
-        if (pass_info.GetUsesAsPointer(use)) {
-            VisitPointer(src_off_dw, use, pass_info, c);
-        }
-    }
-
+    VisitNode(subtree, pass_info, c);
     PopPtr(c);
 }
 
@@ -219,10 +298,29 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
 
+    // SysV arguments arrive in rdi/rsi/rdx/rcx. Retain them in callee-saved registers and align
+    // the stack once because generated walkers can now call the optional synchronizer.
+    c.push(r12);
+    c.push(r13);
+    c.push(r14);
+    c.push(r15);
+    c.sub(rsp, 8);
+    c.mov(r12, rdi);
+    c.mov(r13, rsi);
+    c.mov(r14, rdx);
+    c.mov(r15, rcx);
+
     for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
+        c.mov(rdi, r12);
+        c.mov(rsi, r13);
         VisitPointer(static_cast<u32>(sgpr_base), root, pass_info, c);
     }
 
+    c.add(rsp, 8);
+    c.pop(r15);
+    c.pop(r14);
+    c.pop(r13);
+    c.pop(r12);
     c.ret();
     c.ready();
 
@@ -239,7 +337,7 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
 }; // namespace
 
-void FlattenExtendedUserdataPass(IR::Program& program) {
+void FlattenExtendedUserdataPass(IR::Program& program, SrtMemorySynchronizer synchronizer) {
     Shader::Info& info = program.info;
     PassInfo pass_info;
 
@@ -307,7 +405,7 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         readconst->SetFlags<u32>(original->Flags<u32>());
     }
 
-    info.RefreshFlatBuf();
+    info.RefreshFlatBuf(synchronizer);
 }
 
 } // namespace Shader::Optimization
@@ -322,7 +420,7 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
 
 namespace Optimization {
 
-void FlattenExtendedUserdataPass(IR::Program& program) {
+void FlattenExtendedUserdataPass(IR::Program& program, SrtMemorySynchronizer) {
     UNREACHABLE_MSG("FlattenExtendedUserdataPass unimplemented for target architecture.");
 }
 

@@ -156,7 +156,9 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
             ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.frag_coord, ctx.ConstU32(comp)));
         if (comp < 2) {
             const Id host_inv_scale = ctx.OpLoad(
-                ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.push_data_block,
+                ctx.F32[1], ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant,
+                                                             ctx.F32[1]),
+                                              ctx.push_data_block,
                                               ctx.ConstU32(PushData::HostInvScaleIndex)));
             return ctx.OpFMul(ctx.F32[1], coordinate, host_inv_scale);
         }

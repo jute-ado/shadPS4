@@ -13,6 +13,7 @@
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/pipeline_bind_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_resource_retirement.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 
 namespace tracy {
@@ -161,7 +162,7 @@ struct DynamicState {
     std::array<float, 4> blend_constants{};
     ColorWriteMasks color_write_masks{};
     float line_width{};
-    bool feedback_loop_enabled{};
+    vk::ImageAspectFlags feedback_loop_aspects{};
 
     /// Commits the dynamic state to the provided command buffer.
     void Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf);
@@ -338,9 +339,9 @@ struct DynamicState {
         }
     }
 
-    void SetAttachmentFeedbackLoopEnabled(const bool enabled) {
-        if (feedback_loop_enabled != enabled) {
-            feedback_loop_enabled = enabled;
+    void SetAttachmentFeedbackLoopAspects(const vk::ImageAspectFlags aspects) {
+        if (feedback_loop_aspects != aspects) {
+            feedback_loop_aspects = aspects;
             dirty_state.feedback_loop_enabled = true;
         }
     }
@@ -425,6 +426,12 @@ public:
         pending_ops.emplace(std::move(func), CurrentTick());
     }
 
+    /// Defers destruction through the command buffer that may already have retained the resource.
+    void DeferOperationAfterNextSubmit(Common::UniqueFunction<void>&& func) {
+        std::unique_lock lk(pending_ops_mutex);
+        pending_ops.emplace(std::move(func), NextSubmissionRetirementTick(CurrentTick()));
+    }
+
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
@@ -434,6 +441,9 @@ public:
         }
         priority_pending_ops_cv.notify_one();
     }
+
+    /// Reports extension-provided fault data and the last queue checkpoints after device loss.
+    void LogDeviceLossDiagnostics() const;
 
     static std::mutex submit_mutex;
 

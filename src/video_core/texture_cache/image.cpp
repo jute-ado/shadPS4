@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -24,13 +25,13 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
                                 vk::ImageUsageFlagBits::eTransferDst |
                                 vk::ImageUsageFlagBits::eSampled;
     if (!info.props.is_block) {
+        if (instance->IsAttachmentFeedbackLoopLayoutSupported()) {
+            usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
+        }
         if (info.props.is_depth) {
             usage |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
         } else {
             usage |= vk::ImageUsageFlagBits::eColorAttachment;
-            if (instance->IsAttachmentFeedbackLoopLayoutSupported()) {
-                usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
-            }
             // Always create images with storage flag to avoid needing re-creation in case of e.g
             // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
             // flag is also used.
@@ -114,6 +115,28 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VkImage unsafe_image{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_info, &unsafe_image,
                                      &allocation, nullptr);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR(Render_Vulkan,
+                  "Image allocation failed result={} extent={}x{}x{} levels={} layers={} "
+                  "format={} usage={:#x} flags={:#x} samples={:#x}",
+                  vk::to_string(vk::Result{result}), image_ci.extent.width, image_ci.extent.height,
+                  image_ci.extent.depth, image_ci.mipLevels, image_ci.arrayLayers,
+                  vk::to_string(image_ci.format), static_cast<u32>(image_ci.usage),
+                  static_cast<u32>(image_ci.flags), static_cast<u32>(image_ci.samples));
+        std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+        vmaGetHeapBudgets(allocator, budgets.data());
+        for (u32 heap = 0; heap < budgets.size(); ++heap) {
+            const auto& budget = budgets[heap];
+            if (budget.usage == 0 && budget.budget == 0) {
+                continue;
+            }
+            LOG_ERROR(Render_Vulkan,
+                      "Image allocation heap={} usage={} budget={} allocation_bytes={} "
+                      "allocation_count={}",
+                      heap, budget.usage, budget.budget, budget.statistics.allocationBytes,
+                      budget.statistics.allocationCount);
+        }
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};

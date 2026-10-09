@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -9,6 +10,7 @@
 
 #include "common/assert.h"
 #include "common/func_traits.h"
+#include "shader_recompiler/backend/spirv/diagnostic_loop_policy.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
@@ -142,7 +144,37 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
 }
 
 void Traverse(EmitContext& ctx, const IR::Program& program) {
+    struct LoopGuard {
+        IR::Block* header{};
+        IR::Block* merge{};
+        u32 limit{};
+        Id counter{};
+    };
+
+    const auto diagnostic_budget = ParseDiagnosticLoopBudget(
+        std::getenv("SHADPS4_DIAGNOSTIC_LOOP_SHADER_HASH"),
+        std::getenv("SHADPS4_DIAGNOSTIC_LOOP_INDEX"),
+        std::getenv("SHADPS4_DIAGNOSTIC_LOOP_ITERATION_LIMIT"));
+    std::vector<LoopGuard> loop_guards;
+    u32 loop_index{};
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        if (node.type != IR::AbstractSyntaxNode::Type::Repeat) {
+            continue;
+        }
+        const u32 limit = DiagnosticLoopLimitForShader(diagnostic_budget, program.info.pgm_hash,
+                                                       loop_index++);
+        if (limit != 0) {
+            loop_guards.push_back({.header = node.data.repeat.loop_header,
+                                   .merge = node.data.repeat.merge,
+                                   .limit = limit});
+            LOG_WARNING(Render_Vulkan,
+                        "Diagnostic loop budget enabled for shader {:#x}, loop {}, limit {}",
+                        program.info.pgm_hash, loop_index - 1, limit);
+        }
+    }
+
     IR::Block* current_block{};
+    bool loop_counters_defined = false;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block: {
@@ -152,8 +184,20 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             }
             current_block = node.data.block;
             ctx.AddLabel(label);
+            if (!loop_counters_defined && !loop_guards.empty()) {
+                for (LoopGuard& guard : loop_guards) {
+                    guard.counter = ctx.DefineVar<false>(ctx.U32[1], spv::StorageClass::Function,
+                                                         ctx.ConstU32(0u));
+                }
+                loop_counters_defined = true;
+            }
             for (IR::Inst& inst : node.data.block->Instructions()) {
                 EmitInst(ctx, &inst);
+            }
+            for (const LoopGuard& guard : loop_guards) {
+                if (guard.merge == current_block) {
+                    ctx.OpStore(guard.counter, ctx.ConstU32(0u));
+                }
             }
             ctx.first_to_last_label_map[label.value] = ctx.last_label;
             break;
@@ -189,6 +233,19 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             Id cond{ctx.Def(node.data.repeat.cond)};
             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
             const Id merge_label{node.data.repeat.merge->Definition<Id>()};
+            for (const LoopGuard& guard : loop_guards) {
+                if (guard.header != node.data.repeat.loop_header ||
+                    guard.merge != node.data.repeat.merge) {
+                    continue;
+                }
+                const Id count{ctx.OpLoad(ctx.U32[1], guard.counter)};
+                const Id next_count{ctx.OpIAdd(ctx.U32[1], count, ctx.ConstU32(1u))};
+                ctx.OpStore(guard.counter, next_count);
+                const Id within_limit{
+                    ctx.OpULessThan(ctx.U1[1], next_count, ctx.ConstU32(guard.limit))};
+                cond = ctx.OpLogicalAnd(ctx.U1[1], cond, within_limit);
+                break;
+            }
             ctx.OpBranchConditional(cond, loop_header_label, merge_label);
             break;
         }
@@ -268,6 +325,17 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
         ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
         ctx.AddCapability(spv::Capability::StorageImageReadWithoutFormat);
         ctx.AddCapability(spv::Capability::StorageImageWriteWithoutFormat);
+        const bool has_multisampled_storage_image = std::ranges::any_of(info.images, [&](const auto& desc) {
+            if (!desc.is_written) {
+                return false;
+            }
+            const auto view_type = desc.GetSharp(info).GetViewType(desc.is_array);
+            return view_type == AmdGpu::ImageType::Color2DMsaa ||
+                   view_type == AmdGpu::ImageType::Color2DMsaaArray;
+        });
+        if (has_multisampled_storage_image) {
+            ctx.AddCapability(spv::Capability::StorageImageMultisample);
+        }
         if (profile.supports_image_load_store_lod) {
             ctx.AddExtension("SPV_AMD_shader_image_load_store_lod");
             ctx.AddCapability(spv::Capability::ImageReadWriteLodAMD);

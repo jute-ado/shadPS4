@@ -190,6 +190,22 @@ struct StageSpecialization {
         }
     }
 
+    template <typename IsUsable>
+    void CanonicalizeUnusableGuestBuffers(IsUsable&& is_usable) {
+        for (u32 index = 0; index < info->buffers.size(); ++index) {
+            const auto& desc = info->buffers[index];
+            if (desc.IsSpecial()) {
+                continue;
+            }
+            if (!is_usable(index, desc)) {
+                // Runtime binding uses a null descriptor. Unusable guest words must not create
+                // shader permutations or reach format specialization.
+                bitset.reset(index);
+                buffers[index] = {};
+            }
+        }
+    }
+
     [[nodiscard]] bool Valid() const {
         return info != nullptr;
     }

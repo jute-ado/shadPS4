@@ -212,6 +212,14 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
         .num_components = AmdGpu::NumComponents(data_format),
     };
 
+    // An invalid formatted store has no defined component payload. Treat it as a no-op before
+    // constructing the value vector; otherwise a null/invalid descriptor reaches
+    // CompositeConstruct with zero elements and aborts shader permutation compilation.
+    if (IsBufferFormatStore(inst) && format_info.num_components == 0) {
+        inst.Invalidate();
+        return;
+    }
+
     if (IsBufferFormatLoad(inst)) {
         const auto interpreted =
             LoadBufferFormat(ir, inst.Arg(0), IR::U32{inst.Arg(1)}, flags, format_info);

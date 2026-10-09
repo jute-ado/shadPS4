@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <boost/container/set.hpp>
 #include <boost/container/small_vector.hpp>
 #include "common/types.h"
@@ -13,7 +14,21 @@ struct Archive;
 
 namespace Shader {
 
-using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
+using PFN_SrtRangeSync = bool PS4_SYSV_ABI (*)(void* /*context*/, VAddr /*address*/, u64 /*size*/);
+using PFN_SrtRangeFlush = bool (*)(void* /*context*/);
+
+struct SrtMemorySynchronizer {
+    PFN_SrtRangeSync callback{};
+    void* context{};
+    PFN_SrtRangeFlush flush{};
+    std::shared_ptr<void> context_owner{};
+};
+
+inline constexpr u32 MaxSrtSyncFlushes = 8;
+
+using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/,
+                                            PFN_SrtRangeSync /*sync_callback*/,
+                                            void* /*sync_context*/);
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
 struct PersistentSrtInfo {

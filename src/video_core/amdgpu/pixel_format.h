@@ -97,6 +97,20 @@ enum class CompSwizzle : u8 {
     Alpha = 7,
 };
 
+constexpr bool IsValidCompSwizzle(const CompSwizzle swizzle) {
+    switch (swizzle) {
+    case CompSwizzle::Zero:
+    case CompSwizzle::One:
+    case CompSwizzle::Red:
+    case CompSwizzle::Green:
+    case CompSwizzle::Blue:
+    case CompSwizzle::Alpha:
+        return true;
+    default:
+        return false;
+    }
+}
+
 enum class NumberConversion : u32 {
     None = 0,
     UintToUscaled = 1,
@@ -108,6 +122,24 @@ enum class NumberConversion : u32 {
     SrgbToNorm = 7,
 };
 
+constexpr bool IsNumberConversionSupported(const NumberFormat num_fmt,
+                                           const DataFormat data_fmt) noexcept {
+    if (num_fmt != NumberFormat::SnormNz) {
+        return true;
+    }
+    switch (data_fmt) {
+    case DataFormat::Format8:
+    case DataFormat::Format8_8:
+    case DataFormat::Format8_8_8_8:
+    case DataFormat::Format16:
+    case DataFormat::Format16_16:
+    case DataFormat::Format16_16_16_16:
+        return true;
+    default:
+        return false;
+    }
+}
+
 union CompMapping {
     struct {
         CompSwizzle r;
@@ -116,6 +148,15 @@ union CompMapping {
         CompSwizzle a;
     };
     std::array<CompSwizzle, 4> array;
+
+    constexpr bool Valid() const {
+        for (const auto component : array) {
+            if (!IsValidCompSwizzle(component)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     bool operator==(const CompMapping& other) const {
         return array == other.array;
@@ -356,7 +397,7 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            return NumberConversion::None;
         }
     }
     default:
