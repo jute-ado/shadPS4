@@ -5,8 +5,10 @@
 #include "common/logging/formatter.h"
 #include "core/emulator_settings.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderdoc_capture_state.h"
+#include "video_core/renderdoc_path.h"
 
-#include <atomic>
+#include <cstdlib>
 #include <renderdoc_app.h>
 
 #ifdef _WIN32
@@ -19,23 +21,29 @@
 
 namespace VideoCore {
 
-enum class CaptureState {
-    Idle,
-    Triggered,
-    InProgress,
-};
-static CaptureState capture_state{CaptureState::Idle};
-static std::atomic<u32> screenshot_game_only_count{0};
-static std::atomic<u32> screenshot_with_overlays_count{0};
+static RenderDocCaptureState capture_state;
+static ScreenshotRequestQueue screenshot_requests;
 
 RENDERDOC_API_1_6_0* rdoc_api{};
 
-void LoadRenderDoc() {
-#ifdef WIN32
+void LoadRenderDoc(const bool allow_offline_loading) {
+    if (rdoc_api) {
+        return;
+    }
+
+    const char* configured_path = std::getenv("SHADPS4_RENDERDOC_PATH");
+#ifdef _WIN32
 
     // Check if we are running by RDoc GUI
     HMODULE mod = GetModuleHandleA("renderdoc.dll");
-    if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
+    if (!mod && configured_path) {
+        if (const auto path = ResolveRenderDocModulePath(configured_path)) {
+            mod = LoadLibraryW(path->c_str());
+        } else {
+            LOG_ERROR(Render, "SHADPS4_RENDERDOC_PATH does not contain a RenderDoc library");
+        }
+    }
+    if (!mod && allow_offline_loading && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
         HKEY h_reg_key;
         LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
@@ -60,6 +68,10 @@ void LoadRenderDoc() {
     if (mod) {
         const auto RENDERDOC_GetAPI =
             reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+        if (!RENDERDOC_GetAPI) {
+            LOG_ERROR(Render, "Loaded RenderDoc library does not export RENDERDOC_GetAPI");
+            return;
+        }
         const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
         ASSERT(ret == 1);
     }
@@ -71,16 +83,32 @@ void LoadRenderDoc() {
 #endif
     // Check if we are running by RDoc GUI
     void* mod = dlopen(RENDERDOC_LIB, RTLD_NOW | RTLD_NOLOAD);
-    if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
-        // If enabled in config, try to load RDoc runtime in offline mode
-        if ((mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
-            const auto RENDERDOC_GetAPI =
-                reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
-            const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
-            ASSERT(ret == 1);
+    if (!mod && configured_path) {
+        if (const auto path = ResolveRenderDocModulePath(configured_path)) {
+            mod = dlopen(path->c_str(), RTLD_NOW);
+            if (!mod) {
+                LOG_ERROR(Render, "Cannot load RenderDoc from SHADPS4_RENDERDOC_PATH: {}",
+                          dlerror());
+            }
         } else {
+            LOG_ERROR(Render, "SHADPS4_RENDERDOC_PATH does not contain a RenderDoc library");
+        }
+    }
+    if (!mod && allow_offline_loading && EmulatorSettings.IsRenderdocEnabled()) {
+        // If enabled in config, try to load RDoc runtime in offline mode
+        if (!(mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
             LOG_ERROR(Render, "Cannot load RenderDoc: {}", dlerror());
         }
+    }
+    if (mod) {
+        const auto RENDERDOC_GetAPI =
+            reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
+        if (!RENDERDOC_GetAPI) {
+            LOG_ERROR(Render, "Loaded RenderDoc library does not export RENDERDOC_GetAPI");
+            return;
+        }
+        const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
+        ASSERT(ret == 1);
     }
 #endif
     if (rdoc_api) {
@@ -93,32 +121,26 @@ void LoadRenderDoc() {
     }
 }
 
-void StartCapture() {
-    if (!rdoc_api) {
-        return;
-    }
-
-    if (capture_state == CaptureState::Triggered) {
-        rdoc_api->StartFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::InProgress;
-    }
-}
-
-void EndCapture() {
-    if (!rdoc_api) {
-        return;
-    }
-
-    if (capture_state == CaptureState::InProgress) {
-        rdoc_api->EndFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::Idle;
-    }
-}
-
 void TriggerCapture() {
-    if (capture_state == CaptureState::Idle) {
-        capture_state = CaptureState::Triggered;
+    (void)capture_state.Trigger();
+}
+
+bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
+    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
+        return false;
     }
+
+    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
+    rdoc_api->StartFrameCapture(device, window_handle);
+    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
+    return true;
+}
+
+void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
+    ASSERT(rdoc_api);
+    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
+    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
+    LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
 }
 
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix) {
@@ -133,33 +155,16 @@ bool IsRenderDocLoaded() {
     return rdoc_api != nullptr;
 }
 
-void RequestScreenshot(const ScreenshotRequest request) {
-    switch (request) {
-    case ScreenshotRequest::GameOnly:
-        screenshot_game_only_count.fetch_add(1, std::memory_order_relaxed);
-        break;
-    case ScreenshotRequest::WithOverlays:
-        screenshot_with_overlays_count.fetch_add(1, std::memory_order_relaxed);
-        break;
-    case ScreenshotRequest::None:
-    default:
-        break;
-    }
+void RequestScreenshot(const ScreenshotRequest request, const ScreenshotRequestOrigin origin) {
+    screenshot_requests.Push(request, origin);
 }
 
-u32 ConsumeGameOnlyScreenshotRequests() {
-    return screenshot_game_only_count.exchange(0, std::memory_order_acq_rel);
+ScreenshotRequestBatch ConsumeGameOnlyScreenshotRequests() {
+    return screenshot_requests.ConsumeGameOnly();
 }
 
-u32 ConsumeWithOverlaysScreenshotRequests() {
-    return screenshot_with_overlays_count.exchange(0, std::memory_order_acq_rel);
-}
-
-ScreenshotRequests ConsumeScreenshotRequests() {
-    return ScreenshotRequests{
-        .game_only_count = ConsumeGameOnlyScreenshotRequests(),
-        .with_overlays_count = ConsumeWithOverlaysScreenshotRequests(),
-    };
+ScreenshotRequestBatch ConsumeWithOverlaysScreenshotRequests() {
+    return screenshot_requests.ConsumeWithOverlays();
 }
 
 } // namespace VideoCore
