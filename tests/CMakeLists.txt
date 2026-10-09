@@ -20,6 +20,12 @@ set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
+    shadps4_aux_tess_shader_test
+)
+
+add_executable(shadps4_aux_tess_shader_test
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/backend/spirv/emit_spirv_quad_rect.cpp
+    test_aux_tess_shader.cpp
 )
 
 add_executable(shadps4_controller_trace_test
@@ -293,6 +299,12 @@ target_link_libraries(shadps4_gcn_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
     half::half
+)
+target_link_libraries(shadps4_aux_tess_shader_test PRIVATE
+    GTest::gtest_main
+    fmt::fmt
+    sirit
+    spdlog::spdlog
 )
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR

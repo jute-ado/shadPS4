@@ -45,16 +45,7 @@ struct QuadRectListEmitter : public Sirit::Module {
     void EmitRectListTCS() {
         DefineEntry(spv::ExecutionModel::TessellationControl);
 
-        // Set passthrough tessellation factors
-        const Id output_float_id{TypePointer(spv::StorageClass::Output, float_id)};
-        for (int i = 0; i < 4; i++) {
-            const Id ptr{OpAccessChain(output_float_id, gl_tess_level_outer, Int(i))};
-            OpStore(ptr, float_one);
-        }
-        for (int i = 0; i < 2; i++) {
-            const Id ptr{OpAccessChain(output_float_id, gl_tess_level_inner, Int(i))};
-            OpStore(ptr, float_one);
-        }
+        EmitPassthroughTessellationFactors();
 
         const Id input_vec4{TypePointer(spv::StorageClass::Input, vec4_id)};
         const Id output_vec4{TypePointer(spv::StorageClass::Output, vec4_id)};
@@ -140,16 +131,7 @@ struct QuadRectListEmitter : public Sirit::Module {
         const Id indices{AddLocalVariable(TypePointer(spv::StorageClass::Function, array_type),
                                           spv::StorageClass::Function, values)};
 
-        // Set passthrough tessellation factors
-        const Id output_float{TypePointer(spv::StorageClass::Output, float_id)};
-        for (int i = 0; i < 4; i++) {
-            const Id ptr{OpAccessChain(output_float, gl_tess_level_outer, Int(i))};
-            OpStore(ptr, float_one);
-        }
-        for (int i = 0; i < 2; i++) {
-            const Id ptr{OpAccessChain(output_float, gl_tess_level_inner, Int(i))};
-            OpStore(ptr, float_one);
-        }
+        EmitPassthroughTessellationFactors();
 
         const Id input_vec4{TypePointer(spv::StorageClass::Input, vec4_id)};
         const Id output_vec4{TypePointer(spv::StorageClass::Output, vec4_id)};
@@ -169,6 +151,28 @@ struct QuadRectListEmitter : public Sirit::Module {
 
         OpReturn();
         OpFunctionEnd();
+    }
+
+    void EmitPassthroughTessellationFactors() {
+        const Id factor_writer_label{OpLabel()};
+        const Id merge_label{OpLabel()};
+        const Id invocation_id{OpLoad(int_id, gl_invocation_id)};
+        const Id is_factor_writer{OpIEqual(bool_id, invocation_id, int_zero)};
+        OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+        OpBranchConditional(is_factor_writer, factor_writer_label, merge_label);
+        AddLabel(factor_writer_label);
+
+        const Id output_float{TypePointer(spv::StorageClass::Output, float_id)};
+        for (int i = 0; i < 4; i++) {
+            const Id ptr{OpAccessChain(output_float, gl_tess_level_outer, Int(i))};
+            OpStore(ptr, float_one);
+        }
+        for (int i = 0; i < 2; i++) {
+            const Id ptr{OpAccessChain(output_float, gl_tess_level_inner, Int(i))};
+            OpStore(ptr, float_one);
+        }
+        OpBranch(merge_label);
+        AddLabel(merge_label);
     }
 
     /// Emits a passthrough quad tessellation evaluation shader that outputs 4 control points.
