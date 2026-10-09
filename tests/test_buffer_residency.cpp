@@ -15,6 +15,25 @@
 
 namespace {
 
+std::string ReadFile(const char* path) {
+    std::ifstream input{path, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+}
+
+std::string FunctionBody(const std::string& source, std::string_view begin_marker,
+                         std::string_view end_marker) {
+    const auto function_begin = source.find(begin_marker);
+    const auto function_end = source.find(end_marker, function_begin);
+    EXPECT_NE(function_begin, std::string::npos);
+    EXPECT_NE(function_end, std::string::npos);
+    if (function_begin == std::string::npos || function_end == std::string::npos) {
+        return {};
+    }
+    return source.substr(function_begin, function_end - function_begin);
+}
+
 enum class ResidencyCall {
     Synchronize,
     Publish,
@@ -53,10 +72,7 @@ public:
 } // namespace
 
 TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThread) {
-    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
-    std::ostringstream contents;
-    contents << input.rdbuf();
-    const std::string source = contents.str();
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
 
     const auto function_begin = source.find("void Rasterizer::UnmapMemory(");
     const auto function_end = source.find("void Rasterizer::UpdateDynamicState(", function_begin);
@@ -68,7 +84,7 @@ TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThrea
     const auto queued = body.find("liverpool->SendCommand<false>([this, addr, size]");
     const auto texture_unmap = body.find("texture_cache.UnmapMemory(addr, size)", queued);
     const auto queued_end = body.find("});", queued);
-    const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size)");
+    const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size");
     ASSERT_NE(queued, std::string::npos);
     ASSERT_NE(buffer_unmap, std::string::npos);
     ASSERT_NE(texture_unmap, std::string::npos);
@@ -81,15 +97,160 @@ TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThrea
     EXPECT_EQ(body.find("SendCommand<true>"), std::string::npos);
 }
 
+TEST(GpuMappingLifecycle, SerializesPrtOwnerTransitionWithVmmMappings) {
+    const std::string source = ReadFile(SHADPS4_MEMORY_SOURCE_PATH);
+    const std::string body = FunctionBody(
+        source, "void MemoryManager::SetPrtArea(", "void MemoryManager::CopySparseMemory(");
+
+    const auto lock = body.find("std::unique_lock lk{unmap_mutex}");
+    const auto retire = body.find("rasterizer->UnmapMemory(");
+    const auto mutate = body.find("area.start = address;");
+    const auto publish = body.find(
+        "rasterizer->MapMemory(address, size, VideoCore::GpuMappingKind::SparsePlaceholder)");
+    ASSERT_NE(lock, std::string::npos);
+    ASSERT_NE(retire, std::string::npos);
+    ASSERT_NE(mutate, std::string::npos);
+    ASSERT_NE(publish, std::string::npos);
+    EXPECT_LT(lock, retire);
+    EXPECT_LT(retire, mutate);
+    EXPECT_LT(mutate, publish);
+}
+
+TEST(PageWatcherProtection, ClipsContiguousUpdatesToMappedSubranges) {
+    const std::string source = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string body =
+        FunctionBody(source, "void UpdatePageWatchers(VAddr addr, u64 size)",
+                     "void UpdatePageWatchersForRegion(VAddr base_addr, RegionBits& mask)");
+
+    EXPECT_NE(body.find("ProtectMapped("), std::string::npos);
+    EXPECT_EQ(body.find("Protect(range_begin << PM_PAGE_BITS"), std::string::npos);
+}
+
+TEST(PageWatcherProtection, ClipsMaskedUpdatesToMappedSubranges) {
+    const std::string source = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string body =
+        FunctionBody(source, "void UpdatePageWatchersForRegion(VAddr base_addr, RegionBits& mask)",
+                     "[[nodiscard]] u64 BeginSnapshotEpoch()");
+
+    EXPECT_NE(body.find("ProtectMapped("), std::string::npos);
+    EXPECT_EQ(body.find("Protect((range_begin << PM_PAGE_BITS)"), std::string::npos);
+}
+
+TEST(PageManagerValidation, AppliesTrackedPageArrayBoundsToBothMappingKinds) {
+    const std::string source = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string map_body =
+        FunctionBody(source, "void OnMap(VAddr address, size_t size", "void OnUnmap(");
+    const std::string unmap_body = FunctionBody(source, "void OnUnmap(VAddr address, size_t size",
+                                                "template <bool track, bool is_read>");
+
+    const auto assert_bounds_before_kind_split = [](const std::string& body,
+                                                    std::string_view sparse_operation) {
+        const auto range_check =
+            body.find("Detail::IsValidAddressRangeWithin(address, size, MAX_TRACKED_ADDRESS)");
+        const auto kind_split = body.find("if (kind == GpuMappingKind::HostMapped)");
+        const auto sparse_operation_pos = body.find(sparse_operation);
+
+        EXPECT_NE(range_check, std::string::npos);
+        EXPECT_NE(kind_split, std::string::npos);
+        EXPECT_NE(sparse_operation_pos, std::string::npos);
+        if (range_check != std::string::npos && kind_split != std::string::npos &&
+            sparse_operation_pos != std::string::npos) {
+            EXPECT_LT(range_check, kind_split);
+            EXPECT_LT(range_check, sparse_operation_pos);
+        }
+    };
+
+    assert_bounds_before_kind_split(map_body, "logical_mappings.PublishSparsePlaceholderRange(");
+    assert_bounds_before_kind_split(unmap_body, "logical_mappings.RetireSparsePlaceholderRange(");
+}
+
+TEST(GpuMappedRangeOwnership, RasterizerDelegatesToPageManager) {
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const std::string header = ReadFile(SHADPS4_RASTERIZER_HEADER_PATH);
+    const std::string body =
+        FunctionBody(source, "bool Rasterizer::IsMapped(", "void Rasterizer::UpdateDynamicState(");
+
+    EXPECT_NE(body.find("return page_manager.IsGpuMapped(addr, size);"), std::string::npos);
+    EXPECT_EQ(body.find("mapped_ranges"), std::string::npos);
+    EXPECT_EQ(header.find("mapped_ranges"), std::string::npos);
+}
+
+TEST(GpuMappedRangeOwnership, SeparatesSparseLogicalCoverageFromHostProtection) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string memory = ReadFile(SHADPS4_MEMORY_SOURCE_PATH);
+    const std::string map_body = FunctionBody(page_manager, "void OnMap(VAddr address, size_t size",
+                                              "void OnUnmap(VAddr address, size_t size");
+
+    EXPECT_NE(page_manager.find("logical_mappings.Contains(address, size)"), std::string::npos);
+    EXPECT_NE(page_manager.find("protectable_mappings.ForEachMappedSubrange"), std::string::npos);
+    EXPECT_NE(page_manager.find("if (!logical_mappings.Contains(aligned_addr"), std::string::npos);
+    EXPECT_NE(memory.find("GpuMappingKind::SparsePlaceholder"), std::string::npos);
+    EXPECT_NE(map_body.find("ForEachAddressRangeChunk("), std::string::npos);
+    EXPECT_EQ(map_body.find("Common::RangeLockGuard"), std::string::npos);
+}
+
+TEST(GpuMappedRangeOwnership, HostMapRegistersAndReplaysBeforeLogicalPublication) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string map_body = FunctionBody(page_manager, "void OnMap(VAddr address, size_t size",
+                                              "void OnUnmap(VAddr address, size_t size");
+
+    const auto protectable_publish = map_body.find("protectable_mappings.PublishMappedRange(");
+    const auto register_range =
+        map_body.find("RegisterRange(mapped_address, mapped_size)", protectable_publish);
+    const auto replay_watchers =
+        map_body.find("ReplayPageWatchers(mapped_address, mapped_size)", protectable_publish);
+    const auto logical_publish = map_body.find("logical_mappings.PublishHostMappedRange(");
+
+    ASSERT_NE(protectable_publish, std::string::npos);
+    ASSERT_NE(register_range, std::string::npos);
+    ASSERT_NE(replay_watchers, std::string::npos);
+    ASSERT_NE(logical_publish, std::string::npos);
+    EXPECT_LT(protectable_publish, register_range);
+    EXPECT_LT(register_range, replay_watchers);
+    EXPECT_LT(replay_watchers, logical_publish);
+}
+
+TEST(GpuMappedRangeOwnership, HostUnmapRetiresProtectionBeforeLogicalCoverage) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string unmap_body =
+        FunctionBody(page_manager, "void OnUnmap(VAddr address, size_t size",
+                     "template <bool track, bool is_read>");
+
+    const auto protectable_retire = unmap_body.find("protectable_mappings.RetireMappedRange(");
+    const auto unregister_range =
+        unmap_body.find("UnregisterRange(mapped_address, mapped_size)", protectable_retire);
+    const auto logical_retire = unmap_body.find("logical_mappings.RetireHostMappedRange(");
+
+    ASSERT_NE(protectable_retire, std::string::npos);
+    ASSERT_NE(unregister_range, std::string::npos);
+    ASSERT_NE(logical_retire, std::string::npos);
+    EXPECT_LT(protectable_retire, unregister_range);
+    EXPECT_LT(unregister_range, logical_retire);
+}
+
+TEST(GpuMappedRangeOwnership, SparsePlaceholderAllowsAbiGranularityAndZeroDisablesIt) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string memory = ReadFile(SHADPS4_MEMORY_SOURCE_PATH);
+    const std::string map_body = FunctionBody(page_manager, "void OnMap(VAddr address, size_t size",
+                                              "void OnUnmap(VAddr address, size_t size");
+    const std::string prt_body = FunctionBody(memory, "void MemoryManager::SetPrtArea(",
+                                              "void MemoryManager::CopySparseMemory(");
+
+    const auto host_branch = map_body.find("if (kind == GpuMappingKind::HostMapped)");
+    const auto alignment_check = map_body.find("address % PM_PAGE_SIZE");
+    ASSERT_NE(host_branch, std::string::npos);
+    ASSERT_NE(alignment_check, std::string::npos);
+    EXPECT_LT(host_branch, alignment_check);
+    EXPECT_NE(prt_body.find("area.mapped = size != 0"), std::string::npos);
+    EXPECT_NE(prt_body.find("if (!area.mapped)"), std::string::npos);
+}
+
 TEST(DescriptorBindingStorage, ReservesBackingBeforeWritesCaptureElementPointers) {
-    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
-    std::ostringstream contents;
-    contents << input.rdbuf();
-    const std::string source = contents.str();
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
 
     const auto function_begin = source.find("bool Rasterizer::BindResources(");
-    const auto function_end = source.find("void Rasterizer::PrepareAddr64PointerResidency(",
-                                          function_begin);
+    const auto function_end =
+        source.find("void Rasterizer::PrepareAddr64PointerResidency(", function_begin);
     ASSERT_NE(function_begin, std::string::npos);
     ASSERT_NE(function_end, std::string::npos);
     const auto body = source.substr(function_begin, function_end - function_begin);
@@ -215,8 +376,8 @@ TEST(BufferResidency, Addr64PointerRootSelectionIsBoundedDeduplicatedAndFailClos
     ASSERT_EQ(duplicate.count, 1U);
     EXPECT_EQ(duplicate.values[0].pointer_lo_flat_index, 20U);
 
-    constexpr std::array too_many_pairs{0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U,
-                                        10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U};
+    constexpr std::array too_many_pairs{0U, 1U,  2U,  3U,  4U,  5U,  6U,  7U,  8U,
+                                        9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U};
     const auto overflow = Shader::SelectAddr64PointerRoots(1, too_many_pairs);
     EXPECT_TRUE(overflow.overflow);
     EXPECT_EQ(overflow.count, 0U);
@@ -237,16 +398,13 @@ TEST(BufferResidency, Addr64PointerTraversalSetBoundsQueueGrowthAndDeduplicatesN
 TEST(BufferResidency, Addr64PointerResidencyPlansOneExactBoundedGuestTable) {
     constexpr u64 address_space_size = 1ULL << 40U;
 
-    const auto exact = Shader::PlanAddr64PointerResidency(0x06622E30U, 0x10U,
-                                                          address_space_size);
+    const auto exact = Shader::PlanAddr64PointerResidency(0x06622E30U, 0x10U, address_space_size);
     EXPECT_TRUE(exact.valid);
     EXPECT_EQ(exact.address, 0x1006622E30ULL);
     EXPECT_EQ(exact.size, Shader::Addr64PointerTableBytes);
 
     EXPECT_FALSE(Shader::PlanAddr64PointerResidency(0U, 0U, address_space_size).valid);
-    EXPECT_FALSE(Shader::PlanAddr64PointerResidency(
-                     0xFFFFFF80U, 0xFFU, address_space_size)
-                     .valid);
+    EXPECT_FALSE(Shader::PlanAddr64PointerResidency(0xFFFFFF80U, 0xFFU, address_space_size).valid);
 }
 
 TEST(BufferResidency, Addr64PointerResidencyUsesExistingFindThenSynchronizePathExactlyOnce) {

@@ -24,8 +24,8 @@ public:
                          StreamBuffer& stream_buffer);
     ~TileManager();
 
-    void TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                   vk::Buffer out_buffer, u32 out_offset, u32 copy_size);
+    [[nodiscard]] bool TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
+                                 vk::Buffer out_buffer, u64 out_offset, u64 out_size);
 
     Result DetileImage(vk::Buffer in_buffer, u32 in_offset, const ImageInfo& info);
 

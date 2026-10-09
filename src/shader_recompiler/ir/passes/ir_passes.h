@@ -4,6 +4,7 @@
 #pragma once
 
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
@@ -18,16 +19,23 @@ void SsaDestroyPass(IR::Program& program);
 void IdentityRemovalPass(IR::BlockList& program);
 void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
-void FlattenExtendedUserdataPass(IR::Program& program);
+[[nodiscard]] bool FlattenExtendedUserdataPass(IR::Program& program,
+                                               SrtMemoryReader reader = {});
 void ReadLaneEliminationPass(IR::Program& program);
-void ResourceTrackingPass(IR::Program& program, const Profile& profile);
+// Bit i is set when operand i supplies a guest descriptor before resource tracking.
+[[nodiscard]] u32 GetResourceHandleOperandMask(const IR::Inst& inst);
+void ResourceTrackingPass(IR::Program& program, const Profile& profile,
+                           bool coherent_reserved_ranges_ready);
+void LowerLaneIdToLocalInvocationIndexPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                                           const Profile& profile);
 void BufferAccessRangePass(IR::Program& program);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
 void LowerBufferFormatToRaw(IR::Program& program);
 void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info);
 void LowerFp64ToFp32(IR::Program& program);
 void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtime_info);
-void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info);
+void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info,
+                            SrtMemoryReader reader = {});
 void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info);
 void DomainShaderTransform(const IR::Program& program, const RuntimeInfo& runtime_info);
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,

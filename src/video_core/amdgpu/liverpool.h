@@ -19,6 +19,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/eop_flip_tracker.h"
+#include "video_core/amdgpu/eop_submission_batch.h"
 #include "video_core/amdgpu/owned_command_buffers.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/amdgpu/submission_completion_queue.h"
@@ -74,6 +75,8 @@ public:
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
     void SubmitDone(Common::UniqueFunction<void>&& completion) noexcept;
+
+    void WaitGpuCompletion();
 
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
@@ -175,6 +178,8 @@ private:
                         SubmissionCompletionQueue::Sequence submission_sequence);
 
     void ProcessCommands();
+    void FlushPendingEops();
+    void DrainCompletedEops();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -194,6 +199,7 @@ private:
     u32 num_counter_pairs{};
     u64 pixel_counter{};
     EopFlipTracker eop_flip_tracker;
+    EopSubmissionBatch eop_submission_batch;
     struct ConstantEngine {
         void Reset() {
             ce_count = 0;

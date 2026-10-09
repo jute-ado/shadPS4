@@ -65,9 +65,9 @@ private:
 };
 
 class DescriptorHeap final {
+public:
     static constexpr u32 DescriptorSetBatch = 32;
 
-public:
     explicit DescriptorHeap(const Instance& instance, MasterSemaphore* master_semaphore,
                             std::span<const vk::DescriptorPoolSize> pool_sizes,
                             u32 descriptor_heap_count = 1024);
