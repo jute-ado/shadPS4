@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "common/unique_function.h"
 #include "common/types.h"
 #include "core/libraries/kernel/equeue.h"
 
@@ -15,6 +16,7 @@ namespace Libraries::GnmDriver {
 using namespace Kernel;
 
 void WaitForSubmissionBoundary();
+Common::UniqueFunction<void> AcquireGpuSubmissionBoundary();
 
 s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata);
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed();

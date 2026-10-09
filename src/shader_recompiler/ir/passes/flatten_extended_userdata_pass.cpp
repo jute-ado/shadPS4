@@ -1,10 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <limits>
+#include <mutex>
+#include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <boost/container/flat_map.hpp>
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
+#include "common/alignment.h"
 #include "common/arch.h"
 #include "common/decoder.h"
 #include "common/io_file.h"
@@ -16,6 +22,9 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/opcodes.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_matcher.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_policy.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reg.h"
@@ -126,16 +135,27 @@ struct PassInfo {
     using PtrUserList = boost::container::flat_map<u32, Shader::IR::Inst*>;
 
     Optimization::SrtGvnTable gvn_table;
-    // keys are GetUserData or ReadConst instructions that are used as pointers
+    // Key by the complete pointer expression. Two adjustments of one source are not one table.
     std::unordered_map<IR::Inst*, PtrUserList> pointer_uses;
-    // GetUserData instructions corresponding to sgpr_base of SRT roots
-    boost::container::small_flat_map<IR::ScalarReg, IR::Inst*, 1> srt_roots;
+    boost::container::small_vector<IR::Inst*, 8> pointer_order;
+    boost::container::small_vector<IR::Inst*, 8> emitted_pointers;
+    std::unordered_set<IR::Inst*> visited_dependencies;
+    enum class ScalarState { Visiting, Supported, Unsupported };
+    std::unordered_map<IR::Inst*, ScalarState> scalar_validation;
+    std::unordered_set<IR::Inst*> host_descriptor_dependencies;
+    IR::Inst* rejected_scalar{};
+    std::string_view rejection_reason;
+    // Arithmetic results are written once per walker invocation into private flattened storage.
+    // Shared SSA diamonds must not expand exponentially into native instructions.
+    std::unordered_map<IR::Inst*, u32> scalar_offsets;
 
     // pick a single inst for a given value number
     std::unordered_map<u32, IR::Inst*> vn_to_inst;
 
     // Bumped during codegen to assign offsets to readconsts
     u32 dst_off_dw;
+
+    boost::container::small_vector<Optimization::DynamicImageTableMatch, 2> dynamic_image_tables;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
@@ -159,50 +179,432 @@ namespace Shader::Optimization {
 
 namespace {
 
-static inline void PushPtr(Xbyak::CodeGenerator& c, u32 off_dw) {
-    c.push(rdi);
-    c.mov(rdi, ptr[rdi + (off_dw << 2)]);
+static bool HasSrtSource(IR::Value value) {
+    return IR::BreadthFirstSearch(value,
+                                  [](IR::Inst* inst) -> std::optional<IR::Inst*> {
+                                      if (inst->GetOpcode() == IR::Opcode::GetUserData ||
+                                          inst->GetOpcode() == IR::Opcode::ReadConst) {
+                                          return inst;
+                                      }
+                                      return std::nullopt;
+                                  })
+        .has_value();
+}
+
+static void CollectHostDescriptorDependencies(IR::Program& program, PassInfo& pass_info) {
+    boost::container::small_vector<IR::Inst*, 32> pending;
+    const auto enqueue = [&](IR::Value value) {
+        if (auto* const producer = value.TryInstRecursive();
+            producer && pass_info.host_descriptor_dependencies.insert(producer).second) {
+            pending.push_back(producer);
+        }
+    };
+    for (auto* const block : program.blocks) {
+        for (IR::Inst& inst : *block) {
+            const u32 mask = GetResourceHandleOperandMask(inst);
+            if (mask == 0) {
+                continue;
+            }
+            const auto match = MatchDynamicImageTable(inst);
+            const bool known_table =
+                match && PlanDynamicImageTable(match->Pattern(0U, NUM_IMAGES, true, true));
+            for (u32 arg = 0; arg < inst.NumArgs(); ++arg) {
+                if ((mask & (1U << arg)) == 0) {
+                    continue;
+                }
+                if (arg == 0 && known_table) {
+                    // Table bytes/base must be captured; its selecting index executes on GPU.
+                    // This is not activation proof: ResourceTrackingPass must still admit the
+                    // exact reservation/profile or refuse its unmaterialized static fallback.
+                    enqueue(IR::Value{match->pointer_lo});
+                    enqueue(IR::Value{match->pointer_hi});
+                } else {
+                    // Include indirect arithmetic and nested pointer-table dependencies.
+                    enqueue(inst.Arg(arg));
+                }
+            }
+        }
+    }
+    while (!pending.empty()) {
+        auto* const inst = pending.back();
+        pending.pop_back();
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+            enqueue(inst->Arg(arg));
+        }
+    }
+}
+
+// Only evaluate explicit, side-effect-free scalar operations. In particular, looking through an
+// unknown operation to its first user-data ancestor changes the guest address rather than merely
+// discovering its provenance. The supported select/comparison pattern covers S_ADD/S_ADDC carry.
+static bool IsSupportedPointerScalar(IR::Value value, PassInfo& pass_info, u32 depth = 0) {
+    const auto reject = [&](IR::Inst* inst, std::string_view reason) {
+        if (pass_info.rejection_reason.empty()) {
+            pass_info.rejected_scalar = inst;
+            pass_info.rejection_reason = reason;
+        }
+        return false;
+    };
+    if (depth > 64) {
+        return reject(value.TryInstRecursive(), "scalar recursion depth exceeded");
+    }
+    value = value.Resolve();
+    if (value.IsImmediate()) {
+        return value.Type() == IR::Type::U32 || value.Type() == IR::Type::U1 ||
+               reject(nullptr, "scalar immediate is not U32 or U1");
+    }
+    auto* const inst = value.TryInstRecursive();
+    if (!inst) {
+        return reject(nullptr, "scalar has no producer");
+    }
+    const auto [state, inserted] =
+        pass_info.scalar_validation.try_emplace(inst, PassInfo::ScalarState::Visiting);
+    if (!inserted) {
+        return state->second == PassInfo::ScalarState::Supported ||
+               reject(inst, state->second == PassInfo::ScalarState::Visiting
+                                ? "cyclic scalar dependency"
+                                : "previously rejected scalar dependency");
+    }
+    const auto result = [&](bool supported) {
+        // Recursive insertion may rehash the map; do not retain an iterator across recursion.
+        pass_info.scalar_validation.at(inst) =
+            supported ? PassInfo::ScalarState::Supported : PassInfo::ScalarState::Unsupported;
+        if (!supported) {
+            reject(inst, "scalar operand or source is unsupported");
+        }
+        return supported;
+    };
+    const auto supported = [&](IR::Value argument) {
+        return IsSupportedPointerScalar(argument, pass_info, depth + 1);
+    };
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        return result(static_cast<u32>(inst->Arg(0).ScalarReg()) < NUM_USER_DATA_REGS);
+    case IR::Opcode::ReadConst: {
+        auto* const pointer = inst->Arg(0).TryInstRecursive();
+        return result(inst->Arg(1).IsImmediate() && pointer && HasSrtSource(inst->Arg(0)) &&
+                      pointer->GetOpcode() == IR::Opcode::CompositeConstructU32x2 &&
+                      supported(pointer->Arg(0)) && supported(pointer->Arg(1)));
+    }
+    case IR::Opcode::Phi: {
+        auto* const source = Detail::FindUniquePointerSource(*inst);
+        if (!source) {
+            reject(inst, "phi has no unique scalar source");
+        }
+        return result(source && supported(IR::Value{source}));
+    }
+    case IR::Opcode::IAdd32:
+    case IR::Opcode::ISub32:
+    case IR::Opcode::BitwiseAnd32:
+    case IR::Opcode::ULessThan32:
+        return result(supported(inst->Arg(0)) && supported(inst->Arg(1)));
+    case IR::Opcode::SelectU32:
+        return result(supported(inst->Arg(0)) && supported(inst->Arg(1)) &&
+                      supported(inst->Arg(2)));
+    default:
+        reject(inst, "scalar opcode is unsupported");
+        return result(false);
+    }
+}
+
+static void LogUnsupportedPointer(const Info& info, IR::Inst& read, const PassInfo& pass_info) {
+    // Rejected shaders can be retried every dispatch. Keep diagnostics useful and bounded without
+    // dumping shader contents or user-data values. This records graph structure, not guest bytes.
+    static std::mutex diagnostic_mutex;
+    static std::unordered_set<u64> logged_shaders;
+    {
+        const std::scoped_lock lock{diagnostic_mutex};
+        if (logged_shaders.size() >= 64 || !logged_shaders.insert(info.pgm_hash).second) {
+            return;
+        }
+    }
+    constexpr size_t MaxNodes = 32;
+    boost::container::small_vector<IR::Inst*, MaxNodes> nodes;
+    if (auto* const pointer = read.Arg(0).TryInstRecursive()) {
+        nodes.push_back(pointer);
+    }
+    std::string graph;
+    for (size_t index = 0; index < nodes.size(); ++index) {
+        auto* const node = nodes[index];
+        graph += fmt::format("{}:{}(", index, node->GetOpcode());
+        for (size_t arg = 0; arg < std::min(node->NumArgs(), size_t{8}); ++arg) {
+            const auto operand = node->Arg(arg).Resolve();
+            if (arg != 0) {
+                graph += ',';
+            }
+            if (operand.IsImmediate()) {
+                graph += fmt::format("immediate:{}", operand.Type());
+                continue;
+            }
+            auto* const producer = operand.TryInstRecursive();
+            if (!producer) {
+                graph += "no-producer";
+                continue;
+            }
+            auto found = std::ranges::find(nodes, producer);
+            if (found == nodes.end()) {
+                if (nodes.size() >= MaxNodes) {
+                    graph += "...";
+                    continue;
+                }
+                nodes.push_back(producer);
+                found = std::prev(nodes.end());
+            }
+            graph += fmt::format("{}", std::distance(nodes.begin(), found));
+        }
+        graph += ");";
+    }
+    LOG_WARNING(Render_Recompiler,
+                "Unsupported scalar SRT pointer: shader={:#x} stage={} reason={} rejected={} "
+                "read_offset_dw={} graph={}",
+                info.pgm_hash, info.stage,
+                pass_info.rejection_reason.empty() ? "pointer is not a scalar pair"
+                                                   : pass_info.rejection_reason,
+                pass_info.rejected_scalar ? IR::NameOf(pass_info.rejected_scalar->GetOpcode())
+                                          : std::string_view{"none"},
+                read.Arg(1).U32(), graph);
+}
+
+// Leaves the exact 32-bit scalar result (including wrapping arithmetic) in r10d.
+static void EmitPointerScalar(IR::Value value, PassInfo& pass_info, Xbyak::CodeGenerator& c) {
+    value = value.Resolve();
+    if (value.IsImmediate()) {
+        c.mov(r10d, value.Type() == IR::Type::U1 ? u32{value.U1()} : value.U32());
+        return;
+    }
+    auto* const inst = value.InstRecursive();
+    if (const auto existing = pass_info.scalar_offsets.find(inst);
+        existing != pass_info.scalar_offsets.end()) {
+        c.mov(r10d, ptr[r13 + (existing->second << 2)]);
+        return;
+    }
+    const auto cache_result = [&] {
+        const u32 offset = pass_info.dst_off_dw++;
+        pass_info.scalar_offsets.emplace(inst, offset);
+        c.mov(ptr[r13 + (offset << 2)], r10d);
+    };
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        c.mov(r10d, ptr[r13 + (static_cast<u32>(inst->Arg(0).ScalarReg()) << 2)]);
+        return;
+    case IR::Opcode::ReadConst:
+        c.mov(r10d, ptr[r13 + (pass_info.DeduplicateInstruction(inst)->Flags<u32>() << 2)]);
+        return;
+    case IR::Opcode::Phi:
+        EmitPointerScalar(IR::Value{Detail::FindUniquePointerSource(*inst)}, pass_info, c);
+        return;
+    case IR::Opcode::SelectU32: {
+        // Operands are pure scalar arithmetic over captured values. Emit both before selecting,
+        // so a cached subexpression is initialized on every path that reuses it.
+        EmitPointerScalar(inst->Arg(0), pass_info, c);
+        c.sub(rsp, 16);
+        c.mov(ptr[rsp], r10d);
+        EmitPointerScalar(inst->Arg(1), pass_info, c);
+        c.sub(rsp, 16);
+        c.mov(ptr[rsp], r10d);
+        EmitPointerScalar(inst->Arg(2), pass_info, c);
+        c.mov(r11d, r10d);
+        c.mov(r10d, ptr[rsp]);
+        c.add(rsp, 16);
+        c.mov(eax, ptr[rsp]);
+        c.add(rsp, 16);
+        c.test(eax, eax);
+        c.cmovz(r10d, r11d);
+        cache_result();
+        return;
+    }
+    default:
+        break;
+    }
+
+    EmitPointerScalar(inst->Arg(0), pass_info, c);
+    c.sub(rsp, 16);
+    c.mov(ptr[rsp], r10d);
+    EmitPointerScalar(inst->Arg(1), pass_info, c);
+    c.mov(r11d, r10d);
+    c.mov(r10d, ptr[rsp]);
+    c.add(rsp, 16);
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::IAdd32:
+        c.add(r10d, r11d);
+        break;
+    case IR::Opcode::ISub32:
+        c.sub(r10d, r11d);
+        break;
+    case IR::Opcode::BitwiseAnd32:
+        c.and_(r10d, r11d);
+        break;
+    case IR::Opcode::ULessThan32:
+        c.cmp(r10d, r11d);
+        c.setb(r10b);
+        c.movzx(r10d, r10b);
+        break;
+    default:
+        UNREACHABLE_MSG("Unvalidated SRT pointer expression");
+    }
+    cache_result();
+}
+
+static void EmitPointer(IR::Inst* pointer, PassInfo& pass_info, Xbyak::CodeGenerator& c) {
+    EmitPointerScalar(pointer->Arg(0), pass_info, c);
+    c.sub(rsp, 16);
+    c.mov(ptr[rsp], r10d);
+    EmitPointerScalar(pointer->Arg(1), pass_info, c);
+    c.mov(edi, r10d);
+    c.shl(rdi, 32);
+    c.mov(r11d, ptr[rsp]);
+    c.add(rsp, 16);
+    c.or_(rdi, r11);
     c.mov(r10, 0xFFFFFFFFFFFFULL);
     c.and_(rdi, r10);
 }
 
-static inline void PopPtr(Xbyak::CodeGenerator& c) {
-    c.pop(rdi);
+struct SrtSourceRange {
+    u64 begin_dw;
+    u64 end_dw;
 };
 
-static void VisitPointer(u32 off_dw, IR::Inst* subtree, PassInfo& pass_info,
-                         Xbyak::CodeGenerator& c) {
-    PushPtr(c, off_dw);
+static boost::container::small_vector<SrtSourceRange, 4> GetSourceRanges(
+    PassInfo::PtrUserList& use_list) {
+    boost::container::small_vector<SrtSourceRange, 4> ranges;
+    for (const auto [src_off_dw, use] : use_list) {
+        const u64 begin_dw = src_off_dw;
+        // Each actual pointer half has its own ReadConst dependency. Adjacent halves naturally
+        // coalesce; nonadjacent halves must not read the intervening dword as their high half.
+        const u64 end_dw = begin_dw + 1U;
+        if (!ranges.empty() && begin_dw <= ranges.back().end_dw) {
+            ranges.back().end_dw = std::max(ranges.back().end_dw, end_dw);
+        } else {
+            ranges.push_back({begin_dw, end_dw});
+        }
+    }
+    return ranges;
+}
+
+static void VisitNode(IR::Inst* subtree, PassInfo& pass_info, Xbyak::CodeGenerator& c) {
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
     ASSERT(use_list);
 
-    // First copy all the src data from this tree level
-    // That way, all data that was contiguous in the guest SRT is also contiguous in the
-    // flattened buffer.
-    // TODO src and dst are contiguous. Optimize with wider loads/stores
-    // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
-    for (auto [src_off_dw, use] : *use_list) {
-        c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
-        c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
-
-        use->SetFlags<u32>(pass_info.dst_off_dw);
-        pass_info.dst_off_dw++;
-    }
-
-    // Then visit any children used as pointers
+    struct SrtCopy {
+        u32 src_off_dw;
+        u32 dst_off_dw;
+    };
+    boost::container::small_vector<SrtCopy, 8> copies;
     for (const auto [src_off_dw, use] : *use_list) {
-        if (pass_info.GetUsesAsPointer(use)) {
-            VisitPointer(src_off_dw, use, pass_info, c);
-        }
+        const u32 dst_off_dw = pass_info.dst_off_dw++;
+        use->SetFlags<u32>(dst_off_dw);
+        copies.push_back({src_off_dw, dst_off_dw});
     }
 
-    PopPtr(c);
+    // Read every source range into private stack storage. A reader may obtain authoritative GPU
+    // bytes without publishing them back into mutable guest memory. Without a reader, preserve
+    // the original direct-memory behavior for callers that only consume CPU-owned SRTs.
+    EmitPointer(subtree, pass_info, c);
+    c.mov(rsi, r13);
+    for (const auto& range : GetSourceRanges(*use_list)) {
+        const u64 range_size = (range.end_dw - range.begin_dw) * sizeof(u32);
+        const u64 scratch_size = Common::AlignUp(range_size, 16ULL);
+        const u64 stack_size = scratch_size + 16;
+        Xbyak::Label direct_read;
+        Xbyak::Label refused;
+        Xbyak::Label null_source;
+        Xbyak::Label finished;
+        const auto zero_range = [&] {
+            for (const auto [src_off_dw, dst_off_dw] : copies) {
+                if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                    c.mov(dword[r13 + (dst_off_dw << 2)], 0);
+                }
+            }
+        };
+
+        c.test(rdi, rdi);
+        c.jz(null_source, Xbyak::CodeGenerator::T_NEAR);
+        c.test(r14, r14);
+        c.jz(direct_read, Xbyak::CodeGenerator::T_NEAR);
+        c.sub(rsp, stack_size);
+        c.mov(ptr[rsp + scratch_size], rdi);
+        c.lea(rsi, ptr[rdi + range.begin_dw * sizeof(u32)]);
+        c.mov(rdx, rsp);
+        c.mov(rcx, range_size);
+        c.mov(rdi, r15);
+        c.call(r14);
+        c.mov(rdi, ptr[rsp + scratch_size]);
+        c.mov(rsi, r13);
+        c.test(al, al);
+        c.jz(refused, Xbyak::CodeGenerator::T_NEAR);
+        for (const auto [src_off_dw, dst_off_dw] : copies) {
+            if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                c.mov(r10d, ptr[rsp + (src_off_dw - range.begin_dw) * sizeof(u32)]);
+                c.mov(ptr[rsi + (dst_off_dw << 2)], r10d);
+            }
+        }
+        c.add(rsp, stack_size);
+        c.jmp(finished, Xbyak::CodeGenerator::T_NEAR);
+
+        c.L(refused);
+        zero_range();
+        c.add(rsp, stack_size);
+        c.jmp(finished, Xbyak::CodeGenerator::T_NEAR);
+
+        c.L(null_source);
+        zero_range();
+        c.jmp(finished, Xbyak::CodeGenerator::T_NEAR);
+
+        c.L(direct_read);
+        for (const auto [src_off_dw, dst_off_dw] : copies) {
+            if (src_off_dw >= range.begin_dw && src_off_dw < range.end_dw) {
+                c.mov(r10d, ptr[rdi + (src_off_dw << 2)]);
+                c.mov(ptr[rsi + (dst_off_dw << 2)], r10d);
+            }
+        }
+        c.L(finished);
+    }
+}
+
+static void VisitPointer(IR::Inst* pointer, PassInfo& pass_info, Xbyak::CodeGenerator& c);
+
+static void VisitPointerDependencies(IR::Value value, PassInfo& pass_info,
+                                     Xbyak::CodeGenerator& c) {
+    value = value.Resolve();
+    if (value.IsImmediate()) {
+        return;
+    }
+    auto* const inst = value.InstRecursive();
+    if (!pass_info.visited_dependencies.insert(inst).second) {
+        return;
+    }
+    if (inst->GetOpcode() == IR::Opcode::GetUserData) {
+        return;
+    }
+    if (inst->GetOpcode() == IR::Opcode::ReadConst) {
+        auto* const dependency = pass_info.DeduplicateInstruction(inst->Arg(0).InstRecursive());
+        VisitPointer(dependency, pass_info, c);
+        return;
+    }
+    if (inst->GetOpcode() == IR::Opcode::Phi) {
+        VisitPointerDependencies(IR::Value{Detail::FindUniquePointerSource(*inst)}, pass_info, c);
+        return;
+    }
+    for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+        VisitPointerDependencies(inst->Arg(arg), pass_info, c);
+    }
+}
+
+static void VisitPointer(IR::Inst* pointer, PassInfo& pass_info, Xbyak::CodeGenerator& c) {
+    if (std::ranges::find(pass_info.emitted_pointers, pointer) !=
+        pass_info.emitted_pointers.end()) {
+        return;
+    }
+    VisitPointerDependencies(pointer->Arg(0), pass_info, c);
+    VisitPointerDependencies(pointer->Arg(1), pass_info, c);
+    VisitNode(pointer, pass_info, c);
+    pass_info.emitted_pointers.push_back(pointer);
 }
 
 static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     Xbyak::CodeGenerator& c = g_srt_codegen;
 
-    if (pass_info.srt_roots.empty()) {
+    if (pass_info.pointer_order.empty()) {
         return;
     }
 
@@ -219,10 +621,27 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
 
-    for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
-        VisitPointer(static_cast<u32>(sgpr_base), root, pass_info, c);
+    // SysV arguments arrive in rdi/rsi/rdx/rcx. Retain them in callee-saved registers and align
+    // the stack once because generated walkers can now call the optional synchronizer.
+    c.push(r12);
+    c.push(r13);
+    c.push(r14);
+    c.push(r15);
+    c.sub(rsp, 8);
+    c.mov(r12, rdi);
+    c.mov(r13, rsi);
+    c.mov(r14, rdx);
+    c.mov(r15, rcx);
+
+    for (auto* const pointer : pass_info.pointer_order) {
+        VisitPointer(pointer, pass_info, c);
     }
 
+    c.add(rsp, 8);
+    c.pop(r15);
+    c.pop(r14);
+    c.pop(r13);
+    c.pop(r12);
     c.ret();
     c.ready();
 
@@ -239,9 +658,10 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
 }; // namespace
 
-void FlattenExtendedUserdataPass(IR::Program& program) {
+bool FlattenExtendedUserdataPass(IR::Program& program, SrtMemoryReader reader) {
     Shader::Info& info = program.info;
     PassInfo pass_info;
+    CollectHostDescriptorDependencies(program, pass_info);
 
     // traverse at end and assign offsets to duplicate readconsts, using
     // vn_to_inst as the source
@@ -251,28 +671,40 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
          r_it++) {
         IR::Block* block = *r_it;
         for (IR::Inst& inst : *block) {
+            if (const auto match = MatchDynamicImageTable(inst)) {
+                // This pass has no device profile. Reserve only a policy-safe host window here;
+                // ResourceTrackingPass separately gates stage, feature, and Vulkan capacities.
+                if (PlanDynamicImageTable(match->Pattern(0U, NUM_IMAGES, true, true))) {
+                    pass_info.dynamic_image_tables.push_back(*match);
+                }
+            }
             if (inst.GetOpcode() == IR::Opcode::ReadConst) {
                 if (!inst.Arg(1).IsImmediate()) {
                     LOG_WARNING(Render_Recompiler, "ReadConst has non-immediate offset");
                     continue;
                 }
 
-                IR::Inst* ptr_composite = inst.Arg(0).InstRecursive();
-
-                const auto pred = [](IR::Inst* inst) -> std::optional<IR::Inst*> {
-                    if (inst->GetOpcode() == IR::Opcode::GetUserData ||
-                        inst->GetOpcode() == IR::Opcode::ReadConst) {
-                        return inst;
+                pass_info.rejected_scalar = nullptr;
+                pass_info.rejection_reason = {};
+                IR::Inst* ptr_composite = inst.Arg(0).TryInstRecursive();
+                if (!HasSrtSource(inst.Arg(0)) || !ptr_composite ||
+                    ptr_composite->GetOpcode() != IR::Opcode::CompositeConstructU32x2 ||
+                    !IsSupportedPointerScalar(ptr_composite->Arg(0), pass_info) ||
+                    !IsSupportedPointerScalar(ptr_composite->Arg(1), pass_info)) {
+                    if (EmulatorSettings.IsDirectMemoryAccessEnabled() &&
+                        !pass_info.host_descriptor_dependencies.contains(&inst)) {
+                        // SMRD data pointers may come from ReadFirstLane/shared memory. Keep the
+                        // entire address expression on the GPU; do not capture a nearby ancestor.
+                        // Only data reads can use flags=0: a host descriptor consumer would treat
+                        // it as user-data register zero, and the no-DMA backend has no direct read.
+                        inst.SetFlags<u32>(0U);
+                        continue;
                     }
-                    return std::nullopt;
-                };
-                auto base0 = IR::BreadthFirstSearch(ptr_composite->Arg(0), pred);
-                auto base1 = IR::BreadthFirstSearch(ptr_composite->Arg(1), pred);
-                if (!base0 || !base1) {
-                    // Direct guest-memory reads, such as MUBUF ADDR64, may use a VGPR-derived
-                    // address. They are not part of an extended user-data/SRT tree and must
-                    // remain dynamic for the backend's direct-memory path.
-                    continue;
+                    // Descriptor consumers need a correct host snapshot too; leaving a zero flat
+                    // offset here could make resource tracking read user-data register zero.
+                    LogUnsupportedPointer(info, inst, pass_info);
+                    info.translation_failed = true;
+                    return false;
                 }
 
                 all_readconsts.push_back(&inst);
@@ -281,19 +713,14 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
                     continue;
                 }
 
-                IR::Inst* ptr_lo = base0.value();
-                ptr_lo = pass_info.DeduplicateInstruction(ptr_lo);
-
+                ptr_composite = pass_info.DeduplicateInstruction(ptr_composite);
                 auto ptr_uses_kv =
-                    pass_info.pointer_uses.try_emplace(ptr_lo, PassInfo::PtrUserList{});
+                    pass_info.pointer_uses.try_emplace(ptr_composite, PassInfo::PtrUserList{});
                 PassInfo::PtrUserList& user_list = ptr_uses_kv.first->second;
-
-                user_list[inst.Arg(1).U32()] = &inst;
-
-                if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
-                    IR::ScalarReg ud_reg = ptr_lo->Arg(0).ScalarReg();
-                    pass_info.srt_roots[ud_reg] = ptr_lo;
+                if (ptr_uses_kv.second) {
+                    pass_info.pointer_order.push_back(ptr_composite);
                 }
+                user_list[inst.Arg(1).U32()] = &inst;
             }
         }
     }
@@ -307,7 +734,46 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         readconst->SetFlags<u32>(original->Flags<u32>());
     }
 
-    info.RefreshFlatBuf();
+    const auto flat_pointer_location = [](IR::Inst* pointer_dword) -> std::optional<u32> {
+        switch (pointer_dword->GetOpcode()) {
+        case IR::Opcode::GetUserData:
+            return static_cast<u32>(pointer_dword->Arg(0).ScalarReg());
+        case IR::Opcode::ReadConst: {
+            const u32 location = pointer_dword->Flags<u32>();
+            return location >= NUM_USER_DATA_REGS ? std::optional{location} : std::nullopt;
+        }
+        default:
+            return std::nullopt;
+        }
+    };
+
+    struct ReservationRequest {
+        DynamicImageTablePlan plan{};
+    };
+    boost::container::small_vector<ReservationRequest, 2> requests;
+    for (auto& match : pass_info.dynamic_image_tables) {
+        const auto pointer_lo = flat_pointer_location(match.pointer_lo);
+        const auto pointer_hi = flat_pointer_location(match.pointer_hi);
+        if (!pointer_lo || !pointer_hi || *pointer_lo == std::numeric_limits<u32>::max() ||
+            *pointer_hi != *pointer_lo + 1U) {
+            continue;
+        }
+        const auto plan = PlanDynamicImageTable(match.Pattern(*pointer_lo, NUM_IMAGES, true, true));
+        if (plan) {
+            requests.push_back({.plan = *plan});
+        }
+    }
+    std::ranges::sort(requests, {}, [](const ReservationRequest& request) {
+        return std::tuple{request.plan.base_pointer_location, request.plan.offset_dw,
+                          request.plan.snapshot_span_dw};
+    });
+    for (auto& request : requests) {
+        [[maybe_unused]] const auto destination =
+            info.srt_info.TryReserveRange(request.plan.base_pointer_location,
+                                          request.plan.offset_dw, request.plan.snapshot_span_dw);
+    }
+
+    return info.RefreshFlatBuf(reader);
 }
 
 } // namespace Shader::Optimization
@@ -322,7 +788,7 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
 
 namespace Optimization {
 
-void FlattenExtendedUserdataPass(IR::Program& program) {
+bool FlattenExtendedUserdataPass(IR::Program& program, SrtMemoryReader) {
     UNREACHABLE_MSG("FlattenExtendedUserdataPass unimplemented for target architecture.");
 }
 

@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <shared_mutex>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
+#include "core/backing_memory_write.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/memory.h"
@@ -132,75 +135,40 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 void MemoryManager::SetPrtArea(u32 id, VAddr address, u64 size) {
     PrtArea& area = prt_areas[id];
     if (area.mapped) {
-        rasterizer->UnmapMemory(area.start, area.end - area.start);
+        rasterizer->UnmapMemory(area.start, area.end - area.start,
+                                VideoCore::GpuMappingKind::SparsePlaceholder);
     }
 
     area.start = address;
     area.end = address + size;
-    area.mapped = true;
+    area.mapped = size != 0;
+    if (!area.mapped) {
+        return;
+    }
 
     // Pretend the entire PRT area is mapped to avoid GPU tracking errors.
     // The caches will use CopySparseMemory to fetch data which avoids unmapped areas.
-    rasterizer->MapMemory(address, size);
+    rasterizer->MapMemory(address, size, VideoCore::GpuMappingKind::SparsePlaceholder);
 }
 
 void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr), "Attempted to access invalid address {:#x}",
-               virtual_addr);
-
-    auto vma = FindVMA(virtual_addr);
-    while (size) {
-        u64 copy_size = std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
-        if (vma->second.HasReadableBacking()) {
-            std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
-        } else {
-            std::memset(dest, 0, copy_size);
-        }
-        size -= copy_size;
-        virtual_addr += copy_size;
-        dest += copy_size;
-        ++vma;
-    }
+    const bool copied = ForEachSparseMemorySegment(
+        vma_map, virtual_addr, size, [&dest](VAddr address, u64 segment_size, bool readable) {
+            if (readable) {
+                std::memcpy(dest, std::bit_cast<const u8*>(address), segment_size);
+            } else {
+                std::memset(dest, 0, segment_size);
+            }
+            dest += segment_size;
+        });
+    ASSERT_MSG(copied, "Invalid sparse memory range {:#x} size {:#x}", virtual_addr, size);
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     const VAddr virtual_addr = std::bit_cast<VAddr>(address);
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
-               virtual_addr);
-
-    std::vector<VirtualMemoryArea> vmas_to_write;
-    auto current_vma = FindVMA(virtual_addr);
-    while (current_vma->second.Overlaps(virtual_addr, size)) {
-        if (!HasPhysicalBacking(current_vma->second)) {
-            break;
-        }
-        vmas_to_write.emplace_back(current_vma->second);
-        current_vma++;
-    }
-
-    if (vmas_to_write.empty()) {
-        return false;
-    }
-
-    for (auto& vma : vmas_to_write) {
-        auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
-        auto phys_handle = std::prev(vma.phys_areas.upper_bound(start_in_vma));
-        for (; phys_handle != vma.phys_areas.end(); phys_handle++) {
-            if (!size) {
-                break;
-            }
-            const u64 start_in_dma =
-                std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
-            u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
-            u64 copy_size = std::min<u64>(size, phys_handle->second.size - start_in_dma);
-            memcpy(backing, data, copy_size);
-            size -= copy_size;
-        }
-    }
-
-    return true;
+    return TryWriteBackingMemory(vma_map, impl.BackingBase(), virtual_addr, data, size);
 }
 
 PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment) {
@@ -898,7 +866,8 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
     return ORBIS_OK;
 }
 
-s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
+s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size,
+                               AcquireSubmissionBoundary&& acquire_submission_boundary) {
     if (size == 0) {
         return ORBIS_OK;
     }
@@ -907,10 +876,29 @@ s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
     // Align address and size appropriately
     virtual_addr = Common::AlignDown(virtual_addr, 16_KB);
     size = Common::AlignUp(size, 16_KB);
-    if (!IsValidMapping(virtual_addr, size)) {
-        LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map", virtual_addr,
-                  size);
-        return ORBIS_KERNEL_ERROR_EINVAL;
+    bool requires_submission_boundary{};
+    {
+        std::shared_lock lk2{mutex};
+        if (!IsValidMapping(virtual_addr, size)) {
+            LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map",
+                      virtual_addr, size);
+            return ORBIS_KERNEL_ERROR_EINVAL;
+        }
+        requires_submission_boundary = RequiresSubmissionBoundaryBeforeUnmapping(
+            virtual_addr, size,
+            [this](VAddr query_addr, MemoryProt& prot, VAddr& area_end) {
+                const auto& area = FindVMA(query_addr)->second;
+                prot = area.prot;
+                area_end = area.base + area.size;
+                return true;
+            });
+    }
+    SubmissionBoundaryToken submission_admission;
+    if (requires_submission_boundary && acquire_submission_boundary) {
+        // Retain unmap_mutex across admission and revocation so another mapping operation cannot
+        // replace the classified VMA while the matching GPU submission boundary is pending. Keep
+        // the returned admission token alive through the actual backing revocation as well.
+        submission_admission = acquire_submission_boundary();
     }
 
     // If the requested range has GPU access, unmap from GPU.
@@ -1598,7 +1586,7 @@ MemoryManager::VMAHandle MemoryManager::Split(VMAHandle vma_handle, u64 offset_i
     new_vma.base += offset_in_vma;
     new_vma.size -= offset_in_vma;
 
-    if (HasPhysicalBacking(new_vma)) {
+    if (new_vma.HasPhysicalBacking()) {
         // Update physical areas map for both areas
         new_vma.phys_areas.clear();
 
