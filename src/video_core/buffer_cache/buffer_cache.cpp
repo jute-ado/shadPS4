@@ -8,6 +8,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_fault_admission.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -68,21 +69,22 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
-    if (!IsRegionRegistered(device_addr, size)) {
-        return;
-    }
-    memory_tracker->InvalidateRegion(
-        device_addr, size,
+    (void)ProcessTrackedBufferFault(
         [this, device_addr, size] {
-            cpu_page_write_tracker.Discard(device_addr, size);
-            ReadMemory(device_addr, size, true);
+            return memory_tracker->InvalidateRegion(
+                device_addr, size,
+                [this, device_addr, size] {
+                    cpu_page_write_tracker.Discard(device_addr, size);
+                    ReadMemory(device_addr, size, true);
+                },
+                [this](VAddr page_addr, size_t write_offset, size_t write_size) {
+                    const auto page = std::span<const u8, TRACKER_BYTES_PER_PAGE>{
+                        std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
+                    return cpu_page_write_tracker.Capture(page_addr, page, write_offset,
+                                                          write_size);
+                });
         },
-        [this](VAddr page_addr, size_t write_offset, size_t write_size) {
-            const auto page = std::span<const u8, TRACKER_BYTES_PER_PAGE>{
-                std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
-            return cpu_page_write_tracker.Capture(page_addr, page, write_offset, write_size);
-        });
-    dma_dirty_ranges.Mark(device_addr, size);
+        [this, device_addr, size] { dma_dirty_ranges.Mark(device_addr, size); });
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
