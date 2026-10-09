@@ -19,6 +19,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -653,6 +654,41 @@ Frame* Presenter::PrepareLastFrame() {
         }
         if (result == vk::Result::eTimeout) {
             continue;
+        }
+        if (result == vk::Result::eErrorDeviceLost && instance.SupportsDiagnosticCheckpoints()) {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            for (const auto& checkpoint : instance.GetGraphicsQueue().getCheckpointDataNV()) {
+                const auto command = FindCommandCheckpoint(checkpoint.pCheckpointMarker);
+                if (command) {
+                    LOG_CRITICAL(
+                        Render_Vulkan,
+                        "GPU command checkpoint: stage={}, sequence={}, type={}, pipeline={:#018x}, "
+                        "shaders=[{:#010x}, {:#010x}, {:#010x}, {:#010x}, {:#010x}, {:#010x}], "
+                        "args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}], "
+                        "target=[register={:#x}, guest={:#x}, id={}, image={:#x}, range={:#x}, "
+                        "layout={}, access={:#x}], "
+                        "sample=[sharp={:#x}, guest={:#x}, id={}, image={:#x}, range={:#x}, "
+                        "layout={}, access={:#x}], sizes=[{:#x}, {:#x}]",
+                        vk::to_string(checkpoint.stage), command->sequence,
+                        static_cast<u64>(command->type), command->pipeline_hash,
+                        command->shader_hashes[0], command->shader_hashes[1],
+                        command->shader_hashes[2], command->shader_hashes[3],
+                        command->shader_hashes[4], command->shader_hashes[5],
+                        command->arguments[0], command->arguments[1], command->arguments[2],
+                        command->arguments[3], command->arguments[4], command->arguments[5],
+                        command->arguments[6], command->arguments[7], command->arguments[8],
+                        command->arguments[9], command->arguments[10], command->arguments[11],
+                        command->arguments[12], command->arguments[13], command->arguments[14],
+                        command->arguments[15], command->arguments[16], command->arguments[17],
+                        command->arguments[18], command->arguments[19], command->arguments[20],
+                        command->arguments[21]);
+                } else {
+                    LOG_CRITICAL(Render_Vulkan,
+                                 "GPU command checkpoint: stage={}, marker={:#x} (history expired)",
+                                 vk::to_string(checkpoint.stage),
+                                 reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker));
+                }
+            }
         }
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
