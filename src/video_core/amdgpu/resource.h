@@ -28,7 +28,8 @@ struct Buffer {
     u32 element_size : 2;
     u32 index_stride : 2;
     u32 add_tid_enable : 1;
-    u32 _padding1 : 6;
+    u32 _padding1 : 3;
+    u32 mtype : 3;
     u32 type : 2; // overlaps with T# type, so should be 0 for buffer
 
     static constexpr Buffer Null() {
@@ -252,6 +253,48 @@ struct Image {
         return last_level + 1;
     }
 
+    /// MSAA descriptors encode log2(sample_count) in last_level.  The hardware image formats
+    /// represented by this register support at most 16 samples; larger values are malformed and
+    /// must be rejected before they become ImageInfo or Vulkan sample-count state.
+    [[nodiscard]] bool HasValidMsaaSampleExponent() const noexcept {
+        const auto image_type = GetType();
+        return (image_type != ImageType::Color2DMsaa &&
+                image_type != ImageType::Color2DMsaaArray) ||
+               last_level <= 4;
+    }
+
+    /// The guest mip window is inclusive.  MSAA descriptors reuse last_level for the sample
+    /// exponent and expose exactly one host mip, so their base level must remain zero.  Reject an
+    /// inverted window before it can be converted to an unsigned descriptor-array length.
+    [[nodiscard]] bool HasValidMipRange() const noexcept {
+        const auto image_type = GetType();
+        if (image_type == ImageType::Color2DMsaa || image_type == ImageType::Color2DMsaaArray) {
+            return base_level == 0;
+        }
+        return base_level <= last_level;
+    }
+
+    /// Array and cube descriptors carry an inclusive layer window.  Unlike ordinary 1D/2D
+    /// descriptors, the base/last array fields are meaningful for these types and must stay
+    /// inside the layer count derived from the image descriptor.  Reject malformed windows before
+    /// they reach ImageViewInfo, where clamping them would silently bind a different layer.
+    [[nodiscard]] bool HasValidArrayRange() const noexcept {
+        if (!IsCube()) {
+            const auto image_type = GetType();
+            if (image_type != ImageType::Color1DArray &&
+                image_type != ImageType::Color2DArray &&
+                image_type != ImageType::Color2DMsaaArray) {
+                return true;
+            }
+        }
+        const u32 layers = NumLayers();
+        return layers != 0 && base_array <= last_array && last_array < layers;
+    }
+
+    [[nodiscard]] bool HasValidSubresourceRange() const noexcept {
+        return HasValidMsaaSampleExponent() && HasValidMipRange() && HasValidArrayRange();
+    }
+
     u32 NumSamples() const {
         if (GetType() == ImageType::Color2DMsaa || GetType() == ImageType::Color2DMsaaArray) {
             return 1u << last_level;
@@ -290,13 +333,24 @@ struct Image {
 
     u8 GetBankSwizzle() const {
         const auto tile_mode = GetTileMode();
-        const auto array_mode = GetArrayMode(tile_mode);
-        const auto dfmt = GetDataFmt();
-        if (!alt_tile_mode || dfmt == DataFormat::FormatInvalid || !IsMacroTiled(array_mode)) {
+        const auto array_mode = TryGetArrayMode(tile_mode);
+        if (!array_mode) {
             return 0;
         }
-        const u32 bpp = NumBitsPerElement(dfmt);
+        const auto dfmt = GetDataFmt();
+        if (!alt_tile_mode || dfmt == DataFormat::FormatInvalid || !IsMacroTiled(*array_mode) ||
+            !HasValidMsaaSampleExponent()) {
+            return 0;
+        }
+        // The hardware macro-tile formula uses the physical element represented by one
+        // micro-tile.  For block-compressed formats that element is a 4x4 block (64/128 bits),
+        // not one compressed texel (4/8 bits); using the latter makes tile_bytes/64 zero and
+        // underflows the macro-tile index.  ImageInfo and the detiler use the same block width.
+        const u32 bpp = IsBlockCoded(dfmt) ? NumBitsPerBlock(dfmt) : NumBitsPerElement(dfmt);
         const auto macro_tile_mode = CalculateMacrotileMode(tile_mode, bpp, NumSamples());
+        if (!IsValidMacroTileMode(macro_tile_mode)) {
+            return 0;
+        }
         const u32 banks = GetAltNumBanks(macro_tile_mode);
         return (((banks - 1) << 4) & base_address) >> 4;
     }
