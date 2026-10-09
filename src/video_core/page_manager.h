@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "common/alignment.h"
 #include "common/types.h"
 #include "video_core/buffer_cache//region_definitions.h"
@@ -14,6 +16,11 @@ class Rasterizer;
 }
 
 namespace VideoCore {
+
+enum class GpuMappingKind : u8 {
+    HostMapped,
+    SparsePlaceholder,
+};
 
 class PageManager {
     // PAGE_SIZE and PAGE_BITS conflicts with machine/param.h definitions on freebsd!
@@ -26,17 +33,63 @@ class PageManager {
     static constexpr size_t PAGES_PER_LOCK = NUM_PAGES_PER_REGION;
 
 public:
+    class SnapshotEpoch {
+    public:
+        SnapshotEpoch() = default;
+        SnapshotEpoch(const SnapshotEpoch&) = delete;
+        SnapshotEpoch& operator=(const SnapshotEpoch&) = delete;
+        SnapshotEpoch(SnapshotEpoch&& other) noexcept;
+        SnapshotEpoch& operator=(SnapshotEpoch&& other) noexcept;
+        ~SnapshotEpoch();
+
+        [[nodiscard]] bool BeginPageCopy(VAddr address, u64 size);
+        [[nodiscard]] bool EndPageCopy(VAddr address, u64 size, bool copied);
+        [[nodiscard]] bool Valid() const;
+        [[nodiscard]] bool Seal();
+
+    private:
+        friend class PageManager;
+        SnapshotEpoch(PageManager* manager_, u64 id_) : manager{manager_}, id{id_} {}
+
+        PageManager* manager{};
+        u64 id{};
+        bool result{};
+    };
+
     explicit PageManager(Vulkan::Rasterizer* rasterizer);
     ~PageManager();
 
+    /// Starts one short-lived coherent guest-memory capture on the GPU command processor thread.
+    [[nodiscard]] SnapshotEpoch BeginSnapshotEpoch();
+
+    /// Invalidates an overlapping active capture before ordinary CPU invalidation proceeds.
+    void NotifyCpuWrite(VAddr address, u64 size);
+
+    /// Invalidates and waits out an overlapping capture before its guest mapping is removed.
+    void PrepareForGpuUnmap(VAddr address, u64 size);
+
     /// Register a range of mapped gpu memory.
-    void OnGpuMap(VAddr address, size_t size);
+    void OnGpuMap(VAddr address, size_t size, GpuMappingKind kind = GpuMappingKind::HostMapped);
 
     /// Unregister a range of gpu memory that was unmapped.
-    void OnGpuUnmap(VAddr address, size_t size);
+    void OnGpuUnmap(VAddr address, size_t size, GpuMappingKind kind = GpuMappingKind::HostMapped);
 
     /// Returns whether the entire range is mapped for GPU access.
     [[nodiscard]] bool IsGpuMapped(VAddr address, size_t size) const;
+
+    /// Returns the size from address through the last GPU-mapped byte in the range, or zero.
+    /// Leading/interior holes and sparse placeholders retain their original guest offsets.
+    [[nodiscard]] u64 GetGpuMappedExtent(VAddr address, u64 size) const;
+
+    /// Returns each visible GPU-mapped subrange clipped to the requested range. Unmapped holes
+    /// are omitted, allowing destructive callers to revoke only ranges that are actually mapped.
+    [[nodiscard]] std::vector<std::pair<VAddr, u64>> GetGpuMappedSubranges(VAddr address,
+                                                                            u64 size) const;
+
+    /// Returns only the subranges owned by the requested mapping kind.  Host and sparse owners
+    /// may overlap, but teardown must retire the owner that actually requested the unmap.
+    [[nodiscard]] std::vector<std::pair<VAddr, u64>> GetGpuMappedSubranges(
+        VAddr address, u64 size, GpuMappingKind kind) const;
 
     /// Updates watches in the pages touching the specified region.
     template <bool track>
@@ -57,6 +110,11 @@ public:
     }
 
 private:
+    [[nodiscard]] bool BeginSnapshotPage(u64 id, VAddr address, u64 size);
+    [[nodiscard]] bool EndSnapshotPage(u64 id, VAddr address, u64 size, bool copied);
+    [[nodiscard]] bool IsSnapshotEpochValid(u64 id) const;
+    [[nodiscard]] bool SealSnapshotEpoch(u64 id);
+
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

@@ -48,6 +48,15 @@ public:
         return m_ptr == m_end;
     }
 
+    bool canRead(u32 count) const {
+        return m_ptr != nullptr && m_end != nullptr && m_end >= m_ptr &&
+               static_cast<u64>(m_end - m_ptr) >= count;
+    }
+
+    void skipToEnd() {
+        m_ptr = m_end;
+    }
+
 private:
     const u32* m_ptr{};
     const u32* m_end{};
@@ -56,6 +65,10 @@ private:
 class GcnDecodeContext {
 public:
     GcnInst decodeInstruction(GcnCodeSlice& code);
+
+    [[nodiscard]] bool HasError() const noexcept {
+        return m_decode_failed;
+    }
 
 private:
     uint32_t getEncodingLength(InstEncoding encoding);
@@ -95,6 +108,7 @@ private:
 
 private:
     GcnInst m_instruction;
+    bool m_decode_failed{};
 };
 
 } // namespace Shader::Gcn

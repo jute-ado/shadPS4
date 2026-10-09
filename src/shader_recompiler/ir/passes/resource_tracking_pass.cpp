@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -8,8 +12,12 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_matcher.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_policy.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
+#include "shader_recompiler/backend/spirv/spirv_image_coordinates.h"
 #include "shader_recompiler/profile.h"
 #include "video_core/amdgpu/resource.h"
 
@@ -254,15 +262,18 @@ public:
         auto& buffer = buffer_resources[index];
         buffer.used_types |= desc.used_types;
         buffer.is_written |= desc.is_written;
+        const bool requires_descriptor_format =
+            (buffer.is_formatted && !buffer.is_instruction_formatted_only) ||
+            (desc.is_formatted && !desc.is_instruction_formatted_only);
         buffer.is_formatted |= desc.is_formatted;
+        buffer.is_instruction_formatted_only =
+            buffer.is_formatted && !requires_descriptor_format;
         return index;
     }
 
     u32 Add(const ImageResource& desc) {
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
-            return desc.sharp_idx == existing.sharp_idx && desc.is_array == existing.is_array &&
-                   desc.mip_fallback_mode == existing.mip_fallback_mode &&
-                   desc.constant_mip_index == existing.constant_mip_index;
+            return CanAliasImageResources(desc, existing);
         })};
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
@@ -273,17 +284,15 @@ public:
     }
 
     u32 Add(const SamplerResource& desc) {
-        const u32 index{Add(sampler_resources, desc, [this, &desc](const auto& existing) {
-            return desc.sharp_idx == existing.sharp_idx &&
-                   desc.is_inline_sampler == existing.is_inline_sampler &&
-                   desc.inline_sampler == existing.inline_sampler;
+        const u32 index{Add(sampler_resources, desc, [&desc](const auto& existing) {
+            return CanAliasSamplerResources(desc, existing);
         })};
         return index;
     }
 
     u32 Add(const FMaskResource& desc) {
         u32 index = Add(fmask_resources, desc, [&desc](const auto& existing) {
-            return desc.sharp_idx == existing.sharp_idx;
+            return desc.sharp_idx == existing.sharp_idx && desc.is_r128 == existing.is_r128;
         });
         return index;
     }
@@ -307,6 +316,22 @@ private:
 };
 
 } // Anonymous namespace
+
+u32 GetResourceHandleOperandMask(const IR::Inst& inst) {
+    if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
+        return 0b11U; // Image and sampler descriptors.
+    }
+    return IsBufferInstruction(inst) || IsImageInstruction(inst) ? 0b1U : 0U;
+}
+
+u32 GetResourceHandleDwordCount(const IR::Inst& inst, u32 operand) {
+    if (operand >= 32U || (GetResourceHandleOperandMask(inst) & (1U << operand)) == 0U) {
+        return 0U;
+    }
+    return operand == 0U && IsImageInstruction(inst)
+               ? (inst.Flags<IR::TextureInstInfo>().is_r128 ? 4U : 8U)
+               : 4U;
+}
 
 std::pair<const IR::Inst*, bool> TryDisableAnisoLod0(const IR::Inst* inst) {
     std::pair not_found{inst, false};
@@ -452,15 +477,19 @@ bool IsCfgBlockDominatedBy(const Shader::Gcn::Block* maybe_dominator,
     return true;
 }
 
-SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
+std::optional<SharpLocation> SharpLocationFromSource(const IR::Inst* inst) {
     if (inst->GetOpcode() == IR::Opcode::GetUserData) {
         return static_cast<SharpLocation>(inst->Arg(0).ScalarReg());
     } else {
-        return inst->Flags<u32>();
+        const u32 location = inst->Flags<u32>();
+        // Zero on ReadConst means a runtime GPU read, not user-data register zero. A dynamic
+        // table may bypass this static path only after its reservation/profile are admitted.
+        return location != 0U ? std::optional{location} : std::nullopt;
     }
 }
 
-SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, u32 pc = 0) {
+std::optional<SharpLocation> TrackSharp(const IR::Inst* inst, const IR::Block& current_parent,
+                                        u32 pc = 0) {
     auto sources = FindSharpSources(inst, pc);
     size_t num_sources = sources.size();
     ASSERT(current_parent.cfg_block);
@@ -496,6 +525,11 @@ SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, 
 
 void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& descriptors,
                       const Profile& profile) {
+    const bool is_formatted = inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 ||
+                              inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32;
+    const bool is_instruction_formatted_only =
+        is_formatted && inst.Flags<IR::BufferInstInfo>().inst_data_fmt !=
+                            AmdGpu::DataFormat::FormatInvalid;
     IR::Inst* handle = inst.Arg(0).InstRecursive();
     u32 buffer_binding = 0;
     if (handle->AreAllArgsImmediates()) {
@@ -518,20 +552,28 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
             .used_types = BufferDataType(inst, profile, buffer.GetNumberFmt()),
             .inline_cbuf = buffer,
             .buffer_type = BufferType::Guest,
+            .is_written = IsBufferStore(inst),
+            .is_formatted = is_formatted,
+            .is_instruction_formatted_only = is_instruction_formatted_only,
         });
     } else {
         // Normal buffer resource.
         IR::Inst* buffer_handle = handle->Arg(0).InstRecursive();
         const auto inst_info = inst.Flags<IR::BufferInstInfo>();
-        const auto sharp_idx = TrackSharp(buffer_handle, block, inst_info.pc);
+        const auto sharp_location = TrackSharp(buffer_handle, block, inst_info.pc);
+        if (!sharp_location) {
+            info.translation_failed = true;
+            return;
+        }
+        const u32 sharp_idx = *sharp_location;
         const auto buffer = info.ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
         buffer_binding = descriptors.Add(BufferResource{
             .sharp_idx = sharp_idx,
             .used_types = BufferDataType(inst, profile, buffer.GetNumberFmt()),
             .buffer_type = BufferType::Guest,
             .is_written = IsBufferStore(inst),
-            .is_formatted = inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 ||
-                            inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32,
+            .is_formatted = is_formatted,
+            .is_instruction_formatted_only = is_instruction_formatted_only,
         });
     }
 
@@ -547,15 +589,19 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     // Read image sharp.
     const auto inst_info = inst.Flags<IR::TextureInstInfo>();
     const IR::Inst* image_handle = inst.Arg(0).InstRecursive();
-    const auto tsharp = TrackSharp(image_handle, block, inst_info.pc);
+    const auto image_location = TrackSharp(image_handle, block, inst_info.pc);
+    if (!image_location) {
+        info.translation_failed = true;
+        return;
+    }
+    const u32 tsharp = *image_location;
     const bool is_atomic = IsImageAtomicInstruction(inst);
     const bool is_written = inst.GetOpcode() == IR::Opcode::ImageWrite || is_atomic;
-    const bool is_storage =
-        inst.GetOpcode() == IR::Opcode::ImageRead || inst.GetOpcode() == IR::Opcode::ImageWrite;
-    // ImageRead with !is_written gets emitted as OpImageFetch with LOD operand, doesn't
-    // need fallback (TODO is this 100% true?)
-    const bool needs_mip_storage_fallback =
-        inst_info.has_lod && is_written && !profile.supports_image_load_store_lod;
+    // Read-only image operations are emitted as sampled fetches.  Only writes and atomics need
+    // storage-image semantics (and the integer-coordinate/native-host path that follows from
+    // them); treating ImageRead as storage unnecessarily forces native rebinding and can select
+    // an incompatible host-image usage for otherwise valid sampled descriptors.
+    const bool is_storage = is_written;
     ImageResource image_res = {
         .sharp_idx = tsharp,
         .is_depth = bool(inst_info.is_depth),
@@ -569,14 +615,68 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
+    const bool valid_msaa = image.HasValidMsaaSampleExponent();
+    const bool valid_mip = image.HasValidMipRange();
+    const bool valid_array = image.HasValidArrayRange();
+    if (!image.HasValidSubresourceRange()) {
+        LOG_WARNING(
+            Render_Recompiler,
+            "Malformed image descriptor subresource range: valid_msaa={} valid_mip={} "
+            "valid_array={} (sample_exponent={} mip_range={}..{} array_range={}..{}); "
+            "rejecting shader",
+            valid_msaa, valid_mip, valid_array, static_cast<u64>(image.last_level),
+            static_cast<u64>(image.base_level), static_cast<u64>(image.last_level),
+            static_cast<u64>(image.base_array), static_cast<u64>(image.last_array));
+        info.translation_failed = true;
+        return;
+    }
+    const auto view_type = image.GetViewType(image_res.is_array);
+    // Multisampled images have exactly one mip level in Vulkan. Do not enter the ordinary
+    // storage-mip fallback, which would otherwise interpret the MSAA sample operand as a LOD (and
+    // used to abort for Color2DMsaaArray before the backend could reject/translate it safely).
+    const bool needs_mip_storage_fallback =
+        inst_info.has_lod && is_written && !profile.supports_image_load_store_lod &&
+        !Backend::SPIRV::IsImageMultisampled(view_type);
+    if (!Backend::SPIRV::IsStorageImageMultisampleAllowed(
+            view_type, image_res.is_written, profile.supports_storage_image_multisample)) {
+        LOG_WARNING(Render_Recompiler,
+                    "Storage multisampled image is unsupported by the selected Vulkan device; "
+                    "rejecting shader");
+        info.translation_failed = true;
+        return;
+    }
 
     if (needs_mip_storage_fallback) {
         // If the mip level to IMAGE_(LOAD/STORE)_MIP is a constant, set up ImageResource
         // so that we will only bind a single level.
         // If index is dynamic, we will bind levels as an array
-        const auto view_type = image.GetViewType(image_res.is_array);
-
-        IR::Inst* body = inst.Arg(1).InstRecursive();
+        IR::Inst* const body = inst.Arg(1).TryInstRecursive();
+        const u32 lod_arg_index = [&] {
+            switch (view_type) {
+            case AmdGpu::ImageType::Color1D:
+                return 1U;
+            case AmdGpu::ImageType::Color1DArray:
+            case AmdGpu::ImageType::Color2D:
+                return 2U;
+            case AmdGpu::ImageType::Color2DArray:
+            case AmdGpu::ImageType::Color3D:
+                return 3U;
+            case AmdGpu::ImageType::Color2DMsaa:
+            case AmdGpu::ImageType::Color2DMsaaArray:
+            default:
+                return std::numeric_limits<u32>::max();
+            }
+        }();
+        if (body == nullptr || lod_arg_index == std::numeric_limits<u32>::max() ||
+            body->NumArgs() <= lod_arg_index) {
+            LOG_WARNING(Render_Recompiler,
+                        "Rejecting malformed mipmapped image operation {} for shader {:#x}: "
+                        "coordinate body has {} arguments, requires argument {}",
+                        u32(inst.GetOpcode()), info.pgm_hash,
+                        body != nullptr ? body->NumArgs() : 0U, lod_arg_index);
+            info.translation_failed = true;
+            return;
+        }
         const auto lod_arg = [&] -> IR::Value {
             switch (view_type) {
             case AmdGpu::ImageType::Color1D: // x, [lod]
@@ -602,9 +702,25 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
         }
     }
 
+    if (image_res.NumBindings(info) == 0) {
+        LOG_WARNING(Render_Recompiler,
+                    "Malformed mip fallback range for image descriptor {}..{}; rejecting shader",
+                    static_cast<u64>(image.base_level), static_cast<u64>(image.last_level));
+        info.translation_failed = true;
+        return;
+    }
+
     // Patch image instruction if image is FMask.
     if (AmdGpu::IsFmask(image.GetDataFmt())) {
-        ASSERT_MSG(!is_written, "FMask storage instructions are not supported");
+        if (is_written) {
+            // FMask storage writes/atomics require metadata-aware operations that Vulkan cannot
+            // represent through an ordinary image binding. Reject this shader cleanly instead of
+            // aborting the emulator while compiling an unrelated draw.
+            LOG_WARNING(Render_Recompiler,
+                        "FMask storage instruction is unsupported; rejecting shader");
+            info.translation_failed = true;
+            return;
+        }
 
         IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
         switch (inst.GetOpcode()) {
@@ -627,6 +743,7 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
             // Track FMask resource to do specialization.
             descriptors.Add(FMaskResource{
                 .sharp_idx = tsharp,
+                .is_r128 = bool(inst_info.is_r128),
             });
             return;
         }
@@ -658,7 +775,12 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
             // Normal sampler resource.
             const auto& [sampler_handle, disable_aniso] =
                 TryDisableAnisoLod0(sampler->Arg(0).InstRecursive());
-            const auto ssharp = TrackSharp(sampler_handle, block, inst_info.pc);
+            const auto sampler_location = TrackSharp(sampler_handle, block, inst_info.pc);
+            if (!sampler_location) {
+                info.translation_failed = true;
+                return;
+            }
+            const u32 ssharp = *sampler_location;
             sampler_binding = descriptors.Add(SamplerResource{
                 .sharp_idx = ssharp,
                 .is_inline_sampler = false,
@@ -670,6 +792,280 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     } else {
         inst.SetArg(0, ir.Imm32(image_binding));
     }
+}
+
+struct PendingDynamicImage {
+    IR::Block* block{};
+    IR::Inst* inst{};
+    std::optional<DynamicImageTableMatch> match{};
+};
+
+using DynamicImageIndices = std::unordered_map<const IR::Inst*, IR::Value>;
+
+[[nodiscard]] bool HasDirectDynamicImageHandle(IR::Inst& inst) {
+    if (inst.Arg(0).IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* const handle = inst.Arg(0).TryInstRecursive();
+    return handle && handle->GetOpcode() == IR::Opcode::ReadConst &&
+           (!handle->Arg(1).IsImmediate() || MatchDynamicImageTable(inst).has_value());
+}
+
+[[nodiscard]] std::optional<u32> FlattenedPointerLocation(const IR::Inst& pointer) {
+    switch (pointer.GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        return static_cast<u32>(pointer.Arg(0).ScalarReg());
+    case IR::Opcode::ReadConst: {
+        const u32 location = pointer.Flags<u32>();
+        return location >= NUM_USER_DATA_REGS ? std::optional{location} : std::nullopt;
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] bool DeclineDynamicImageTable(IR::Inst& inst, std::string_view reason) {
+    const auto inst_info = inst.Flags<IR::TextureInstInfo>();
+    LOG_DEBUG(Render_Recompiler,
+              "Dynamic image-table activation at pc={:#x} was declined; preserving the ordinary "
+              "resource path: {}",
+              static_cast<u32>(inst_info.pc), reason);
+    return false;
+}
+
+struct DynamicSamplerCandidate {
+    SamplerResource resource{};
+    AmdGpu::Sampler sharp{};
+};
+
+[[nodiscard]] std::optional<DynamicSamplerCandidate> GetDynamicSamplerCandidate(
+    IR::Block& block, const IR::Inst& inst, const Info& info) {
+    const IR::Inst* const sampler = inst.Arg(1).TryInstRecursive();
+    if (!sampler || sampler->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
+        return std::nullopt;
+    }
+    if (sampler->AreAllArgsImmediates()) {
+        const auto inline_sampler = AmdGpu::Sampler{
+            .raw0 = u64(sampler->Arg(1).U32()) << 32 | u64(sampler->Arg(0).U32()),
+            .raw1 = u64(sampler->Arg(3).U32()) << 32 | u64(sampler->Arg(2).U32()),
+        };
+        return DynamicSamplerCandidate{
+            .resource =
+                SamplerResource{
+                    .sharp_idx = std::numeric_limits<u32>::max(),
+                    .inline_sampler = inline_sampler,
+                    .is_inline_sampler = true,
+                    .associated_image = 0,
+                    .disable_aniso = false,
+                },
+            .sharp = inline_sampler,
+        };
+    }
+
+    const IR::Inst* const sampler_dword = sampler->Arg(0).TryInstRecursive();
+    if (!sampler_dword) {
+        return std::nullopt;
+    }
+    const auto [sampler_handle, ignored_disable_aniso] = TryDisableAnisoLod0(sampler_dword);
+    (void)ignored_disable_aniso;
+    const auto sampler_location =
+        TrackSharp(sampler_handle, block, inst.Flags<IR::TextureInstInfo>().pc);
+    if (!sampler_location) {
+        return std::nullopt;
+    }
+    const u32 ssharp = *sampler_location;
+    constexpr u32 SamplerDwords = sizeof(AmdGpu::Sampler) / sizeof(u32);
+    if (ssharp > info.flattened_ud_buf.size() ||
+        SamplerDwords > info.flattened_ud_buf.size() - ssharp) {
+        return std::nullopt;
+    }
+    const auto sharp = info.ReadUdSharp<AmdGpu::Sampler>(ssharp);
+    return DynamicSamplerCandidate{
+        .resource =
+            SamplerResource{
+                .sharp_idx = ssharp,
+                .is_inline_sampler = false,
+                .associated_image = 0,
+                // One associated image cannot represent a descriptor table. Do not let entry
+                // zero control anisotropy for all entries.
+                .disable_aniso = false,
+            },
+        .sharp = sharp,
+    };
+}
+
+struct DynamicDescriptorUsage {
+    u64 sampled{};
+    u64 resources{};
+};
+
+[[nodiscard]] DynamicDescriptorUsage GetDynamicDescriptorUsage(const Info& info) {
+    DynamicDescriptorUsage usage{
+        .resources = info.buffers.size() + info.samplers.size(),
+    };
+    for (const auto& image : info.images) {
+        const u32 descriptors = image.NumBindings(info);
+        usage.resources += descriptors;
+        if (!image.is_written) {
+            // Read-only ImageRead resources also occupy sampled-image descriptors.
+            usage.sampled += descriptors;
+        }
+    }
+    return usage;
+}
+
+[[nodiscard]] u32 DynamicTableSpan(u32 descriptor_count, u32 stride_dw,
+                                   u32 descriptor_dw) noexcept {
+    const u64 span = u64{descriptor_count - 1U} * stride_dw + descriptor_dw;
+    return span <= std::numeric_limits<u32>::max() ? static_cast<u32>(span) : 0U;
+}
+
+[[nodiscard]] bool PatchDynamicImageSharp(IR::Block& block, IR::Inst& inst,
+                                          const DynamicImageTableMatch& match, Info& info,
+                                          Descriptors& descriptors, const Profile& profile,
+                                          bool coherent_reserved_ranges_ready,
+                                          DynamicImageIndices& dynamic_indices) {
+    if (!coherent_reserved_ranges_ready) {
+        return DeclineDynamicImageTable(inst,
+                                        "the coherent reserved-range snapshot is unavailable");
+    }
+    if (info.stage != Stage::Compute &&
+        !(info.stage == Stage::Vertex && info.l_stage == LogicalStage::Vertex)) {
+        return DeclineDynamicImageTable(inst, "this shader stage has no dynamic-table admission");
+    }
+    if (!info.srt_info.ValidateRangeReservations()) {
+        return DeclineDynamicImageTable(inst, "the reservation metadata is malformed");
+    }
+
+    const auto pointer_lo = FlattenedPointerLocation(*match.pointer_lo);
+    const auto pointer_hi = FlattenedPointerLocation(*match.pointer_hi);
+    if (!pointer_lo || !pointer_hi || *pointer_lo == std::numeric_limits<u32>::max() ||
+        *pointer_hi != *pointer_lo + 1U) {
+        return DeclineDynamicImageTable(inst, "the flattened pointer pair is malformed");
+    }
+
+    // A one-entry plan safely discovers the table's reserved destination without treating an
+    // ordinary ReadConst destination flag as reservation proof.
+    const auto model_plan = PlanDynamicImageTable(match.Pattern(*pointer_lo, 1U, true, true));
+    if (!model_plan) {
+        return DeclineDynamicImageTable(inst,
+                                        "the access is not explicit-LOD sampled-image table use");
+    }
+    const auto model_destination = info.srt_info.FindReservedRange(
+        *pointer_lo, model_plan->offset_dw, model_plan->snapshot_span_dw);
+    if (!model_destination) {
+        return DeclineDynamicImageTable(inst, "no reserved model descriptor exists");
+    }
+
+    const auto inst_info = inst.Flags<IR::TextureInstInfo>();
+    const auto sampler = GetDynamicSamplerCandidate(block, inst, info);
+    if (!sampler || sampler->sharp.force_unnormalized) {
+        return DeclineDynamicImageTable(inst, "the sampler shape is unsupported");
+    }
+    const bool sampler_will_add = std::ranges::none_of(info.samplers, [&](const auto& existing) {
+        return CanAliasSamplerResources(sampler->resource, existing);
+    });
+    if (sampler_will_add && info.samplers.size() >= NUM_SAMPLERS) {
+        return DeclineDynamicImageTable(inst, "the sampler resource list is full");
+    }
+
+    const auto existing = std::ranges::find_if(info.images, [&](const ImageResource& candidate) {
+        return candidate.sharp_idx == *model_destination &&
+               candidate.dynamic_descriptor_count != 0 &&
+               candidate.dynamic_descriptor_stride_dw == model_plan->stride_dw &&
+               candidate.is_array == bool(inst_info.is_array) &&
+               candidate.is_r128 == bool(inst_info.is_r128) && !candidate.is_depth &&
+               !candidate.is_atomic && !candidate.is_written &&
+               candidate.mip_fallback_mode == MipStorageFallbackMode::None;
+    });
+    if (existing == info.images.end() && info.images.size() >= NUM_IMAGES) {
+        return DeclineDynamicImageTable(inst, "the image resource list is full");
+    }
+
+    auto usage = GetDynamicDescriptorUsage(info);
+    if (existing != info.images.end()) {
+        if (usage.sampled < existing->dynamic_descriptor_count ||
+            usage.resources < existing->dynamic_descriptor_count) {
+            return DeclineDynamicImageTable(inst, "the existing descriptor usage is inconsistent");
+        }
+        usage.sampled -= existing->dynamic_descriptor_count;
+        usage.resources -= existing->dynamic_descriptor_count;
+    }
+    usage.resources += sampler_will_add ? 1U : 0U;
+    const u32 window = DynamicImageDescriptorWindow(
+        NUM_IMAGES, usage.sampled, usage.resources, profile.max_sampled_images_per_stage,
+        profile.max_sampled_images_per_set, profile.max_resources_per_stage,
+        profile.max_sampled_images_per_descriptor_heap_set);
+    const auto plan = PlanDynamicImageTable(match.Pattern(
+        *pointer_lo, window, profile.supports_sampled_image_array_nonuniform_indexing, true));
+    if (!plan) {
+        return DeclineDynamicImageTable(inst,
+                                        "host features or descriptor limits are insufficient");
+    }
+
+    const u32 target_count =
+        existing == info.images.end()
+            ? plan->descriptor_count
+            : std::max(existing->dynamic_descriptor_count, plan->descriptor_count);
+    if (target_count > window) {
+        return DeclineDynamicImageTable(inst,
+                                        "a reused table exceeds the remaining resource limits");
+    }
+    const u32 descriptor_dw = inst_info.is_r128 ? 4U : sizeof(AmdGpu::Image) / sizeof(u32);
+    const u32 target_span = DynamicTableSpan(target_count, plan->stride_dw, descriptor_dw);
+    const auto destination =
+        target_span == 0U
+            ? std::nullopt
+            : info.srt_info.FindReservedRange(*pointer_lo, plan->offset_dw, target_span);
+    if (!destination || *destination != *model_destination) {
+        return DeclineDynamicImageTable(inst,
+                                        "no reservation exactly covers the admitted table plan");
+    }
+    const u64 end_dw = u64{*destination} + target_span;
+    if (end_dw > info.srt_info.flattened_bufsize_dw || end_dw > info.flattened_ud_buf.size()) {
+        return DeclineDynamicImageTable(inst,
+                                        "the admitted table is outside the coherent snapshot");
+    }
+
+    ImageResource image_res{
+        .sharp_idx = *destination,
+        .dynamic_descriptor_count = target_count,
+        .dynamic_descriptor_stride_dw = plan->stride_dw,
+        .is_depth = false,
+        .is_atomic = false,
+        .is_array = bool(inst_info.is_array),
+        .is_written = false,
+        .uses_integer_coordinates = false,
+        .queries_dimensions = false,
+        .is_r128 = bool(inst_info.is_r128),
+        .requires_dynamic_oob_guard = plan->requires_oob_guard,
+        .mip_fallback_mode = MipStorageFallbackMode::None,
+    };
+    if (!image_res.HasValidDynamicRange(info) ||
+        !IsSupportedDynamicImageModel(image_res.ReadSharpUnchecked(info), image_res.is_array)) {
+        return DeclineDynamicImageTable(inst,
+                                        "the runtime model descriptor is invalid or unsupported");
+    }
+
+    u32 image_binding{};
+    if (existing == info.images.end()) {
+        image_binding = descriptors.Add(image_res);
+    } else {
+        image_binding = static_cast<u32>(std::distance(info.images.begin(), existing));
+        existing->dynamic_descriptor_count = target_count;
+        existing->requires_dynamic_oob_guard |= plan->requires_oob_guard;
+    }
+    auto sampler_resource = sampler->resource;
+    sampler_resource.associated_image = image_binding;
+    const u32 sampler_binding = descriptors.Add(sampler_resource);
+
+    // This rewrite is deliberately last: only an admitted, fully covered coherent reservation may
+    // turn the dynamic ReadConst into a flattened-table handle.
+    match.image_handle->SetFlags<u32>(*destination);
+    IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
+    inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
+    dynamic_indices.emplace(&inst, match.index);
+    return true;
 }
 
 void PatchGlobalDataShareAccess(IR::Block& block, IR::Inst& inst, Info& info,
@@ -775,7 +1171,7 @@ void PatchGlobalDataShareAccess(IR::Block& block, IR::Inst& inst, Info& info,
     }
 }
 
-IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
+IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, Info& info,
                                const AmdGpu::Buffer& buffer, u32 stride) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
@@ -807,8 +1203,17 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         index = ir.IAdd(index, vgpr_index);
     }
     if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.l_stage == LogicalStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
+        // GCN defines this as the wavefront thread ID (0..63). The graphics backend does not yet
+        // provide a guest-wave64 mapping: SubgroupLocalInvocationId is only the host subgroup
+        // lane and may be 0..31 on the NVIDIA graphics path. Do not silently translate this to a
+        // different address; reject the shader through the normal translation-failure path.
+        if (info.l_stage != LogicalStage::Compute) {
+            LOG_WARNING(Render_Recompiler,
+                        "Unsupported ADD_TID buffer addressing in non-compute shader (stage {})",
+                        magic_enum::enum_name(info.l_stage));
+            info.translation_failed = true;
+            return ir.Imm32(0U);
+        }
         const IR::U32 thread_id{ir.LaneId()};
         index = ir.IAdd(index, thread_id);
     }
@@ -881,8 +1286,28 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
     return ir.CompositeConstruct(fixed_x, fixed_y, fixed_face);
 }
 
+[[nodiscard]] bool RejectInvalidImageCoordinateArity(Info& info, const IR::Inst& inst,
+                                                     AmdGpu::ImageType view_type,
+                                                     const IR::Value& coordinates) {
+    if (Backend::SPIRV::IsImageCoordinateArityValid(view_type, coordinates.Type())) {
+        return false;
+    }
+
+    LOG_WARNING(Render_Recompiler,
+                "Rejecting image operation {} for shader {:#x}: view type {} requires at least "
+                "{} coordinate components, but IR supplied {} ({})",
+                u32(inst.GetOpcode()), info.pgm_hash, AmdGpu::NameOf(view_type),
+                Backend::SPIRV::ImageCoordinateComponentCount(view_type),
+                Backend::SPIRV::CoordinateComponentCount(coordinates.Type()),
+                IR::NameOf(coordinates.Type()));
+    info.translation_failed = true;
+    return true;
+}
+
 void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
-                          const ImageResource& image_res, const AmdGpu::Image& image) {
+                          const ImageResource& image_res, const AmdGpu::Image& image,
+                          const IR::Value& dynamic_index,
+                          AmdGpu::NumberConversion number_conversion) {
     const auto handle = inst.Arg(0);
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
@@ -943,6 +1368,7 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
+        case AmdGpu::ImageType::Color2DMsaaArray:
             return ir.CompositeConstruct(read(0), read(8));
         case AmdGpu::ImageType::Color3D:
             return ir.CompositeConstruct(read(0), read(8), read(16));
@@ -965,6 +1391,7 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
+        case AmdGpu::ImageType::Color2DMsaaArray:
             // (du/dx, dv/dx), (du/dy, dv/dy)
             addr_reg = addr_reg + 4;
             return {ir.CompositeConstruct(get_addr_reg(addr_reg - 4), get_addr_reg(addr_reg - 3)),
@@ -1021,6 +1448,7 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             addr_reg = addr_reg + 2;
             return ir.CompositeConstruct(get_coord(addr_reg - 2, 0), get_coord(addr_reg - 1, 1));
         case AmdGpu::ImageType::Color2DArray: // x, y, slice
+        case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice
             addr_reg = addr_reg + 3;
             // Note we can use FixCubeCoords with fallthrough cases since it checks for image type.
             return FixCubeCoords(ir, image, get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
@@ -1033,6 +1461,10 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             UNREACHABLE();
         }
     }();
+
+    if (RejectInvalidImageCoordinateArity(info, inst, view_type, coords)) {
+        return;
+    }
 
     ASSERT(!inst_info.has_lod || !inst_info.has_lod_clamp);
     const bool explicit_lod = inst_info.has_lod || inst_info.force_level0;
@@ -1062,19 +1494,24 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             return ir.ImageSampleDrefImplicitLod(handle, coords, dref, bias, offset, inst_info);
         }
         if (explicit_lod) {
+            if (!dynamic_index.IsEmpty()) {
+                return ir.ImageSampleExplicitLodDynamic(handle, IR::U32{dynamic_index}, coords, lod,
+                                                        offset, inst_info);
+            }
             return ir.ImageSampleExplicitLod(handle, coords, lod, offset, inst_info);
         }
         return ir.ImageSampleImplicitLod(handle, coords, bias, offset, inst_info);
     }();
 
-    auto converted = ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
+    auto converted = ApplyReadNumberConversionVec4(ir, texel, number_conversion);
     if (sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
         converted = ApplyForceDegamma(ir, texel);
     }
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info,
+                    const DynamicImageIndices& dynamic_indices) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -1085,17 +1522,90 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
     const auto& image_res = info.images[binding_index];
     auto image = image_res.GetSharp(info);
 
+    // Queries and atomic operations do not run texel number conversion here. For consuming
+    // instructions, unsupported raw formats reject translation before any conversion is emitted.
+    std::optional<AmdGpu::NumberConversion> number_conversion;
+    if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw ||
+        inst.GetOpcode() == IR::Opcode::ImageRead || inst.GetOpcode() == IR::Opcode::ImageWrite) {
+        number_conversion = AmdGpu::TryMapNumberConversion(
+            AmdGpu::NumberFormat(image.num_format), AmdGpu::DataFormat(image.data_format));
+        if (!number_conversion) {
+            LOG_WARNING(Render_Recompiler,
+                        "Unsupported image number conversion: shader {:#x}, operation {}, "
+                        "raw formats {}/{}",
+                        info.pgm_hash, u32(inst.GetOpcode()), u32(image.data_format),
+                        u32(image.num_format));
+            info.translation_failed = true;
+            return;
+        }
+    }
+
     // Sample instructions must be handled separately using address register data.
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
-        return PatchImageSampleArgs(block, inst, info, image_res, image);
+        const auto dynamic = dynamic_indices.find(&inst);
+        const IR::Value dynamic_index =
+            dynamic != dynamic_indices.end() ? dynamic->second : IR::Value{};
+        return PatchImageSampleArgs(block, inst, info, image_res, image, dynamic_index,
+                                    *number_conversion);
     }
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     auto inst_info = inst.Flags<IR::TextureInstInfo>();
     const auto view_type = image.GetViewType(image_res.is_array);
 
-    // Now that we know the image type, adjust texture coordinate vector.
-    IR::Inst* body = inst.Arg(1).InstRecursive();
+    // Image atomics already carry their final integer coordinate in argument 1. Unlike sampler
+    // instructions, they do not use the frontend's packed address-register body with trailing
+    // LOD/sample operands. Decode this form before the sampler-style body validation below; the
+    // latter would incorrectly reject a valid 2D U32x2 atomic because it expects a third body
+    // argument.
+    if (IsImageAtomicInstruction(inst)) {
+        const auto coordinates = inst.Arg(1);
+        if (!Backend::SPIRV::IsImageCoordinateTypeValid(view_type, coordinates.Type(), true)) {
+            LOG_WARNING(Render_Recompiler,
+                        "Rejecting image atomic operation {} for shader {:#x}: view type {} "
+                        "requires at least {} 32-bit unsigned integer coordinate components, "
+                        "but IR supplied {} ({})",
+                        u32(inst.GetOpcode()), info.pgm_hash, AmdGpu::NameOf(view_type),
+                        Backend::SPIRV::ImageCoordinateComponentCount(view_type),
+                        Backend::SPIRV::CoordinateComponentCount(coordinates.Type()),
+                        IR::NameOf(coordinates.Type()));
+            info.translation_failed = true;
+        }
+        return;
+    }
+
+    // Now that we know the image type, adjust texture coordinate vector. Image operands are
+    // opaque in the IR schema, so a malformed pass can supply an immediate or a short composite;
+    // fail translation before indexing into it instead of dereferencing an invalid instruction.
+    IR::Inst* const body = inst.Arg(1).TryInstRecursive();
+    const u32 required_body_args = [&] {
+        switch (view_type) {
+        case AmdGpu::ImageType::Color1D:
+            return 2U; // x, [lod/sample]
+        case AmdGpu::ImageType::Color1DArray:
+        case AmdGpu::ImageType::Color2D:
+            return 3U; // x, y, [lod/sample]
+        case AmdGpu::ImageType::Color2DMsaa:
+            return inst_info.has_lod ? 4U : 3U; // x, y, [lod], sample
+        case AmdGpu::ImageType::Color2DArray:
+            return 4U; // x, y, slice, [lod]
+        case AmdGpu::ImageType::Color2DMsaaArray:
+            return inst_info.has_lod ? 5U : 4U; // x, y, slice, [lod], sample
+        case AmdGpu::ImageType::Color3D:
+            return 4U; // x, y, z, [lod]
+        default:
+            return 0U;
+        }
+    }();
+    if (body == nullptr || body->NumArgs() < required_body_args) {
+        LOG_WARNING(Render_Recompiler,
+                    "Rejecting malformed image operation {} for shader {:#x}: coordinate body "
+                    "has {} arguments, requires at least {}",
+                    u32(inst.GetOpcode()), info.pgm_hash, body != nullptr ? body->NumArgs() : 0U,
+                    required_body_args);
+        info.translation_failed = true;
+        return;
+    }
     const auto [coords, arg] = [&] -> std::pair<IR::Value, IR::Value> {
         switch (view_type) {
         case AmdGpu::ImageType::Color1D: // x, [lod]
@@ -1116,21 +1626,51 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
                     inst_info.has_lod.Assign(false);
                     skip_lod = true;
                 } else {
-                    UNREACHABLE_MSG(
-                        "Encountered a _mip instruction with MSAA image, and mipid is non-zero");
+                    // MSAA images have a single mip level. A malformed or stale descriptor can
+                    // nevertheless leave the guest's mip operand non-zero; fail soft by dropping
+                    // the impossible LOD and retaining the following sample operand. Aborting
+                    // translation here prevents unrelated draws from making progress and does
+                    // not represent a valid Vulkan image operation.
+                    LOG_WARNING(Render_Recompiler,
+                                "Encountered a _mip instruction with MSAA image, and mipid is "
+                                "non-zero; ignoring LoD");
+                    inst_info.has_lod.Assign(false);
+                    skip_lod = true;
                 }
             }
             return {ir.CompositeConstruct(body->Arg(0), body->Arg(1)), body->Arg(skip_lod ? 3 : 2)};
         }
-        case AmdGpu::ImageType::Color2DArray:     // x, y, slice, [lod]
-        case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice. (sample is passed on different
-                                                  // argument)
-        case AmdGpu::ImageType::Color3D:          // x, y, z, [lod]
+        case AmdGpu::ImageType::Color2DArray: // x, y, slice, [lod]
+            return {ir.CompositeConstruct(body->Arg(0), body->Arg(1), body->Arg(2)), body->Arg(3)};
+        case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice, [lod], sample
+        {
+            auto skip_lod = false;
+            if (inst_info.has_lod) {
+                const auto mipid = body->Arg(3);
+                if (mipid.IsImmediate() && mipid.U32() == 0) {
+                    LOG_WARNING(Render_Recompiler, "Encountered a _mip instruction with MSAA "
+                                                   "array image, and mipid is 0, skipping LoD");
+                } else {
+                    LOG_WARNING(Render_Recompiler,
+                                "Encountered a _mip instruction with MSAA array image, and "
+                                "mipid is non-zero; ignoring LoD");
+                }
+                inst_info.has_lod.Assign(false);
+                skip_lod = true;
+            }
+            return {ir.CompositeConstruct(body->Arg(0), body->Arg(1), body->Arg(2)),
+                    body->Arg(skip_lod ? 4 : 3)};
+        }
+        case AmdGpu::ImageType::Color3D: // x, y, z, [lod]
             return {ir.CompositeConstruct(body->Arg(0), body->Arg(1), body->Arg(2)), body->Arg(3)};
         default:
             UNREACHABLE_MSG("Unknown image type {}", view_type);
         }
     }();
+
+    if (RejectInvalidImageCoordinateArity(info, inst, view_type, coords)) {
+        return;
+    }
 
     const auto has_ms = view_type == AmdGpu::ImageType::Color2DMsaa ||
                         view_type == AmdGpu::ImageType::Color2DMsaaArray;
@@ -1150,7 +1690,7 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
             texel = ApplySwizzle(ir, texel, image.DstSelect());
         }
         const auto converted =
-            ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
+            ApplyReadNumberConversionVec4(ir, texel, *number_conversion);
         inst.ReplaceUsesWith(converted);
     } else {
         inst.SetArg(1, coords);
@@ -1164,25 +1704,60 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
                 texel = ApplySwizzle(ir, texel, image.DstSelect().Inverse());
             }
             const auto converted =
-                ApplyWriteNumberConversionVec4(ir, texel, image.GetNumberConversion());
+                ApplyWriteNumberConversionVec4(ir, texel, *number_conversion);
             inst.SetArg(4, converted);
         }
     }
 }
 
-void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
+void ResourceTrackingPass(IR::Program& program, const Profile& profile,
+                          bool coherent_reserved_ranges_ready) {
     // Iterate resource instructions and patch them after finding the sharp.
     auto& info = program.info;
+    const bool can_attempt_dynamic_tables =
+        coherent_reserved_ranges_ready &&
+        (info.stage == Stage::Compute ||
+         (info.stage == Stage::Vertex && info.l_stage == LogicalStage::Vertex)) &&
+        profile.supports_sampled_image_array_nonuniform_indexing &&
+        profile.max_sampled_images_per_stage != 0U && profile.max_sampled_images_per_set != 0U &&
+        profile.max_resources_per_stage != 0U &&
+        profile.max_sampled_images_per_descriptor_heap_set != 0U &&
+        !info.srt_info.range_reservations.empty() && info.srt_info.ValidateRangeReservations();
 
     // Pass 1: Track resource sharps
     Descriptors descriptors{info};
+    std::vector<PendingDynamicImage> pending_dynamic_images;
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (IsBufferInstruction(inst)) {
                 PatchBufferSharp(*block, inst, info, descriptors, profile);
             } else if (IsImageInstruction(inst)) {
-                PatchImageSharp(*block, inst, info, descriptors, profile);
+                if (can_attempt_dynamic_tables && HasDirectDynamicImageHandle(inst)) {
+                    pending_dynamic_images.push_back({
+                        .block = block,
+                        .inst = &inst,
+                        .match = MatchDynamicImageTable(inst),
+                    });
+                } else {
+                    PatchImageSharp(*block, inst, info, descriptors, profile);
+                }
             }
+            if (info.translation_failed) {
+                return;
+            }
+        }
+    }
+    DynamicImageIndices dynamic_indices;
+    for (auto& pending : pending_dynamic_images) {
+        const bool activated =
+            pending.match &&
+            PatchDynamicImageSharp(*pending.block, *pending.inst, *pending.match, info, descriptors,
+                                   profile, coherent_reserved_ranges_ready, dynamic_indices);
+        if (!activated) {
+            PatchImageSharp(*pending.block, *pending.inst, info, descriptors, profile);
+        }
+        if (info.translation_failed) {
+            return;
         }
     }
 
@@ -1192,9 +1767,12 @@ void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
             if (IsBufferInstruction(inst)) {
                 PatchBufferArgs(*block, inst, info);
             } else if (IsImageInstruction(inst)) {
-                PatchImageArgs(*block, inst, info);
+                PatchImageArgs(*block, inst, info, dynamic_indices);
             } else if (IsDataRingInstruction(inst)) {
                 PatchGlobalDataShareAccess(*block, inst, info, descriptors, profile);
+            }
+            if (info.translation_failed) {
+                return;
             }
         }
     }

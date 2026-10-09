@@ -4,6 +4,7 @@
 #include "core/libraries/audio/test_lab_audio_capture.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cmath>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <system_error>
 
 namespace Libraries::AudioOut {
 namespace {
@@ -64,6 +66,7 @@ float Downmix(const void* source, std::size_t frame, const TestLabAudioFormat& f
 std::mutex capture_mutex;
 std::once_flag capture_init;
 std::unique_ptr<TestLabPcm16CaptureFile> capture_file;
+std::atomic<u64> next_port_capture_index{1};
 
 } // namespace
 
@@ -140,6 +143,66 @@ void CaptureTestLabMainPortAudio(const void* source, u32 frames,
         source, frames, format);
     std::scoped_lock lock{capture_mutex};
     capture_file->Append(pcm);
+}
+
+std::unique_ptr<TestLabPcm16CaptureFile> CreateTestLabPortPcm16Capture(
+    const std::filesystem::path& output_directory, u64 capture_index, u32 port_type,
+    u32 sample_rate) {
+    if (output_directory.empty()) {
+        return {};
+    }
+    if (!output_directory.is_absolute() || capture_index == 0 || sample_rate == 0) {
+        throw std::invalid_argument("invalid per-port audio capture directory or metadata");
+    }
+    const auto filename = "port-" + std::to_string(capture_index) + "-type-" +
+                          std::to_string(port_type) + "-" + std::to_string(sample_rate) +
+                          "hz.s16le";
+    return std::make_unique<TestLabPcm16CaptureFile>(output_directory / filename);
+}
+
+std::unique_ptr<TestLabPcm16CaptureFile> CreateTestLabPortPcm16Capture(u32 port_type,
+                                                                 u32 sample_rate) {
+    const char* path = std::getenv(TEST_LAB_AUDIO_PORT_CAPTURE_ENV);
+    if (path == nullptr || path[0] == '\0') {
+        return {};
+    }
+
+    const auto output_directory = std::filesystem::path{path};
+    for (;;) {
+        const auto capture_index =
+            next_port_capture_index.fetch_add(1, std::memory_order_relaxed);
+        const auto filename = "port-" + std::to_string(capture_index) + "-type-" +
+                              std::to_string(port_type) + "-" +
+                              std::to_string(sample_rate) + "hz.s16le";
+        const auto candidate = output_directory / filename;
+
+        std::error_code exists_error;
+        if (std::filesystem::exists(candidate, exists_error)) {
+            continue;
+        }
+        if (exists_error) {
+            throw std::system_error(exists_error,
+                                    "failed to inspect audio capture evidence");
+        }
+
+        try {
+            return CreateTestLabPortPcm16Capture(output_directory, capture_index, port_type,
+                                                 sample_rate);
+        } catch (const std::runtime_error&) {
+            // Another emulator process may have claimed this index between
+            // the existence check and the exclusive create. Retry only when
+            // the candidate is now present; preserve all other I/O errors.
+            exists_error.clear();
+            if (std::filesystem::exists(candidate, exists_error)) {
+                continue;
+            }
+            if (exists_error) {
+                throw std::system_error(exists_error,
+                                        "failed to inspect audio capture evidence");
+            }
+            throw;
+        }
+    }
 }
 
 } // namespace Libraries::AudioOut

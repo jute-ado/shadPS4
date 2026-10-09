@@ -15,11 +15,12 @@ std::string_view NameOf(TileMode tile_mode) {
     return magic_enum::enum_name(tile_mode);
 }
 
-ArrayMode GetArrayMode(TileMode tile_mode) {
+std::optional<ArrayMode> TryGetArrayMode(TileMode tile_mode) {
     switch (tile_mode) {
     case TileMode::Depth1DThin:
     case TileMode::Display1DThin:
     case TileMode::Thin1DThin:
+    case TileMode::Rotated1DThin:
         return ArrayMode::Array1DTiledThin1;
     case TileMode::Depth2DThin64:
     case TileMode::Depth2DThin128:
@@ -28,9 +29,11 @@ ArrayMode GetArrayMode(TileMode tile_mode) {
     case TileMode::Depth2DThin1K:
     case TileMode::Display2DThin:
     case TileMode::Thin2DThin:
+    case TileMode::Rotated2DThin:
         return ArrayMode::Array2DTiledThin1;
     case TileMode::DisplayThinPrt:
     case TileMode::ThinThinPrt:
+    case TileMode::RotatedThinPrt:
         return ArrayMode::ArrayPrtTiledThin1;
     case TileMode::Depth2DThinPrt256:
     case TileMode::Depth2DThinPrt1K:
@@ -61,8 +64,15 @@ ArrayMode GetArrayMode(TileMode tile_mode) {
     case TileMode::DisplayLinearGeneral:
         return ArrayMode::ArrayLinearGeneral;
     default:
-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
+        return std::nullopt;
     }
+}
+
+ArrayMode GetArrayMode(TileMode tile_mode) {
+    if (const auto array_mode = TryGetArrayMode(tile_mode)) {
+        return *array_mode;
+    }
+    UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
 }
 
 MicroTileMode GetMicroTileMode(TileMode tile_mode) {
@@ -90,6 +100,10 @@ MicroTileMode GetMicroTileMode(TileMode tile_mode) {
     case TileMode::Thin2DThinPrt:
     case TileMode::Thin3DThinPrt:
         return MicroTileMode::Thin;
+    case TileMode::Rotated1DThin:
+    case TileMode::Rotated2DThin:
+    case TileMode::RotatedThinPrt:
+        return MicroTileMode::Rotated;
     case TileMode::Thick1DThick:
     case TileMode::Thick2DThick:
     case TileMode::Thick3DThick:
@@ -126,6 +140,9 @@ PipeConfig GetPipeConfig(TileMode tile_mode) {
     case TileMode::Thick2DThick:
     case TileMode::Thick2DThickPrt:
     case TileMode::Thick2DXThick:
+    case TileMode::Rotated1DThin:
+    case TileMode::Rotated2DThin:
+    case TileMode::RotatedThinPrt:
         return PipeConfig::P8_32x32_16x16;
     case TileMode::DisplayThinPrt:
     case TileMode::Thin3DThin:
@@ -171,6 +188,9 @@ PipeConfig GetAltPipeConfig(TileMode tile_mode) {
     case TileMode::Thick3DThickPrt:
     case TileMode::Thick2DXThick:
     case TileMode::Thick3DXThick:
+    case TileMode::Rotated1DThin:
+    case TileMode::Rotated2DThin:
+    case TileMode::RotatedThinPrt:
         return PipeConfig::P16_32x32_8x16;
     case TileMode::DisplayLinearGeneral:
         return PipeConfig::P2;
@@ -210,7 +230,11 @@ u32 GetSampleSplit(TileMode tile_mode) {
     case TileMode::ThinThinPrt:
     case TileMode::Thin2DThinPrt:
     case TileMode::Thin3DThinPrt:
+    case TileMode::Rotated1DThin:
+    case TileMode::Rotated2DThin:
         return 2;
+    case TileMode::RotatedThinPrt:
+        return 8;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }
@@ -239,6 +263,9 @@ u32 GetTileSplitHw(TileMode tile_mode) {
     case TileMode::Thick3DThickPrt:
     case TileMode::Thick2DXThick:
     case TileMode::Thick3DXThick:
+    case TileMode::Rotated1DThin:
+    case TileMode::Rotated2DThin:
+    case TileMode::RotatedThinPrt:
     case TileMode::DisplayLinearGeneral:
         return 64;
     case TileMode::Depth2DThin128:

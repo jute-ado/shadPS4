@@ -4,15 +4,19 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <ranges>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "core/libraries/gnmdriver/gfx_boundary_wait_diagnostic.h"
 #include "core/libraries/gnmdriver/submission_gate.h"
 #include "video_core/amdgpu/owned_command_buffers.h"
 #include "video_core/amdgpu/submission_completion_queue.h"
@@ -21,6 +25,138 @@ using namespace std::chrono_literals;
 
 namespace Libraries::GnmDriver {
 namespace {
+
+TEST(GfxBoundaryWaitDiagnostic, OnlyExactOneEnablesTheExperiment) {
+    for (const char* value :
+         std::array<const char*, 8>{nullptr, "", "0", "true", "01", "1 ", " 1", "-1"}) {
+        EXPECT_FALSE(IsGfxBoundaryWaitDiagnosticEnabled(value));
+    }
+    EXPECT_TRUE(IsGfxBoundaryWaitDiagnosticEnabled("1"));
+}
+
+TEST(GfxBoundaryWaitDiagnostic, SelectsExactlyOneAdmissionPathWithoutTakingAnOuterGuard) {
+    struct GateSpy {
+        int entered{};
+        int waited{};
+        int Enter() {
+            ++entered;
+            return 11;
+        }
+        int WaitForBoundaryAndEnter() {
+            ++waited;
+            return 22;
+        }
+    } gate;
+    EXPECT_EQ(EnterGraphicsSubmissionDiagnostic(gate, false), 11);
+    EXPECT_EQ(gate.entered, 1);
+    EXPECT_EQ(gate.waited, 0);
+    EXPECT_EQ(EnterGraphicsSubmissionDiagnostic(gate, true), 22);
+    EXPECT_EQ(gate.entered, 1);
+    EXPECT_EQ(gate.waited, 1);
+}
+
+TEST(GfxBoundaryWaitDiagnostic, DisabledDoesNotWaitForAPendingParserBoundary) {
+    SubmissionGate gate;
+    auto complete = gate.BeginBoundary();
+    auto graphics = std::async(std::launch::async, [&] {
+        auto guard = EnterGraphicsSubmissionDiagnostic(gate, false);
+        return guard.owns_lock();
+    });
+    const auto status = graphics.wait_for(1s);
+    complete(); // Always rescue an accidentally waiting implementation before assertions/join.
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(graphics.get());
+}
+
+TEST(GfxBoundaryWaitDiagnostic, OpenBoundaryEntersWithoutSelfDeadlock) {
+    SubmissionGate gate;
+    auto guard = EnterGraphicsSubmissionDiagnostic(gate, true);
+    EXPECT_TRUE(guard.owns_lock());
+    guard.unlock();
+    EXPECT_TRUE(gate.IsBoundaryOpen());
+}
+
+TEST(GfxBoundaryWaitDiagnostic, PriorAscBoundaryCanBlockGfxWhileNewAscAdmissionRemainsOpen) {
+    SubmissionGate gate;
+    AmdGpu::SubmissionCompletionQueue queue;
+    const auto prior_asc = queue.IssueSubmission();
+    auto boundary = gate.BeginGuardedBoundary();
+    queue.EnqueueBoundary(std::move(boundary.complete));
+    boundary.issuance.unlock();
+    std::promise<void> graphics_started;
+    const bool gpu_fence_completed = false;
+    auto graphics = std::async(std::launch::async, [&] {
+        graphics_started.set_value();
+        auto guard = EnterGraphicsSubmissionDiagnostic(gate, true);
+        return std::pair{guard.owns_lock(), gpu_fence_completed};
+    });
+    graphics_started.get_future().wait();
+    auto asc = std::async(std::launch::async, [&] {
+        auto guard = gate.Enter(); // Actual unchanged DingDong admission path.
+        return guard.owns_lock();
+    });
+    const auto asc_status = asc.wait_for(1s);
+    const auto graphics_status = graphics.wait_for(20ms);
+
+    // This is also an explicit limitation: if earlier ASC needs this next GFX, ON can
+    // deadlock. Rescue the synthetic dependency before any assertion can leave a waiter.
+    // Parser completion releases the gate even though no physical GPU fence completed.
+    queue.CompleteSubmission(prior_asc);
+    const auto graphics_result = graphics.get();
+    EXPECT_EQ(asc_status, std::future_status::ready);
+    EXPECT_TRUE(asc.get());
+    EXPECT_EQ(graphics_status, std::future_status::timeout);
+    EXPECT_TRUE(graphics_result.first);
+    EXPECT_FALSE(graphics_result.second);
+    EXPECT_TRUE(gate.AreGuestSubmitsAllowed());
+    EXPECT_TRUE(gate.IsBoundaryOpen());
+}
+
+TEST(GfxBoundaryWaitDiagnostic, SourceWiringIsGfxOnlyAndProcessLocal) {
+    const auto source_root =
+        std::filesystem::path{LIVERPOOL_SOURCE_PATH}.parent_path().parent_path().parent_path();
+    std::ifstream input{source_root / "core/libraries/gnmdriver/gnmdriver.cpp"};
+    ASSERT_TRUE(input);
+    const std::string source{std::istreambuf_iterator<char>{input}, {}};
+    const auto section = [&](std::string_view begin, std::string_view end) {
+        const auto start = source.find(begin);
+        const auto finish = source.find(end, start);
+        return start == std::string::npos || finish == std::string::npos
+                   ? std::string{}
+                   : source.substr(start, finish - start);
+    };
+    const auto policy = section("static bool GfxBoundaryWaitDiagnosticEnabledForProcess()",
+                                "static u64 frames_submitted");
+    ASSERT_FALSE(policy.empty());
+    EXPECT_NE(policy.find("static const bool enabled"), std::string::npos);
+    EXPECT_NE(policy.find("IsGfxBoundaryWaitDiagnosticEnabled(std::getenv("), std::string::npos);
+    EXPECT_NE(policy.find("SHADPS4_GFX_BOUNDARY_WAIT_DIAGNOSTIC"), std::string::npos);
+    EXPECT_NE(policy.find("if (enabled)"), std::string::npos);
+    const auto warning = policy.find("LOG_WARNING(");
+    ASSERT_NE(warning, std::string::npos);
+    EXPECT_EQ(policy.find("LOG_WARNING(", warning + 1), std::string::npos);
+
+    const auto graphics = section("int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(",
+                                  "s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(");
+    ASSERT_FALSE(graphics.empty());
+    EXPECT_NE(graphics.find("EnterGraphicsSubmissionDiagnostic("), std::string::npos);
+    EXPECT_NE(graphics.find("*submission_gate, GfxBoundaryWaitDiagnosticEnabledForProcess()"),
+              std::string::npos);
+    EXPECT_EQ(graphics.find("submission_gate->Enter()"), std::string::npos);
+    const auto asc = section("void PS4_SYSV_ABI sceGnmDingDong(",
+                             "void PS4_SYSV_ABI sceGnmDingDongForWorkload(");
+    ASSERT_FALSE(asc.empty());
+    EXPECT_NE(asc.find("submission_gate->Enter()"), std::string::npos);
+    EXPECT_EQ(asc.find("EnterGraphicsSubmissionDiagnostic"), std::string::npos);
+    const auto submit_done =
+        section("int PS4_SYSV_ABI sceGnmSubmitDone()", "int PS4_SYSV_ABI sceGnmUnmapComputeQueue(");
+    EXPECT_NE(submit_done.find("submission_gate->BeginGuardedBoundary()"), std::string::npos);
+    EXPECT_EQ(submit_done.find("WaitForBoundaryAndEnter"), std::string::npos);
+    EXPECT_EQ(submit_done.find("EnterGraphicsSubmissionDiagnostic"), std::string::npos);
+    const auto eligibility = section("int PS4_SYSV_ABI sceGnmAreSubmitsAllowed()",
+                                     "int PS4_SYSV_ABI sceGnmBeginWorkload(");
+    EXPECT_NE(eligibility.find("submission_gate->AreGuestSubmitsAllowed()"), std::string::npos);
+}
 
 TEST(GnmSubmissionGate, PendingBoundaryDoesNotBlockTheNextSubmission) {
     SubmissionGate gate;
@@ -51,6 +187,26 @@ TEST(GnmSubmissionGate, PendingBoundaryBlocksGpuVisibleMappingWork) {
 
     EXPECT_EQ(mapping.wait_for(1s), std::future_status::ready);
     EXPECT_TRUE(mapping.get());
+}
+
+TEST(GnmSubmissionGate, GpuVisibleAddressChangeExcludesLaterSubmissions) {
+    SubmissionGate gate;
+    auto admission = gate.WaitForBoundaryAndEnter();
+    std::promise<void> entrant_started;
+    auto started = entrant_started.get_future();
+
+    auto entrant = std::async(std::launch::async, [&] {
+        entrant_started.set_value();
+        auto submission = gate.Enter();
+        return true;
+    });
+    ASSERT_EQ(started.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(entrant.wait_for(20ms), std::future_status::timeout);
+
+    admission.unlock();
+
+    EXPECT_EQ(entrant.wait_for(1s), std::future_status::ready);
+    EXPECT_TRUE(entrant.get());
 }
 
 TEST(GnmSubmissionGate, SubmitDoneCannotSplitAnInProgressSubmission) {
@@ -114,6 +270,32 @@ TEST(GnmSubmissionGate, PublishedBoundaryCannotBeOvertakenByTheNextSubmission) {
     EXPECT_EQ(entrant.wait_for(1s), std::future_status::ready);
     EXPECT_TRUE(entrant.get());
     boundary.complete();
+}
+
+TEST(GnmSubmissionGate, CompletionCanAcknowledgeWhileAdmissionIsRetained) {
+    SubmissionGate gate;
+    auto boundary = gate.BeginGuardedBoundary();
+    boundary.issuance.unlock();
+
+    // Model a GPU-visible unmap holding submission admission while a synchronous owner-side
+    // readback waits for the worker to run the already-published SubmitDone callback.
+    auto admission = gate.Enter();
+    auto completion = std::async(std::launch::async, [&] {
+        boundary.complete();
+        return gate.IsBoundaryOpen();
+    });
+
+    const auto status = completion.wait_for(1s);
+    // Always release the modeled unmap admission before returning, even when the regression is
+    // present, so a failing implementation cannot strand the async worker in future destruction.
+    if (status != std::future_status::ready) {
+        admission.unlock();
+    }
+    ASSERT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(completion.get());
+    if (admission.owns_lock()) {
+        admission.unlock();
+    }
 }
 
 TEST(GnmSubmissionGate, ConsecutiveBoundariesDoNotBlockTheGuestAndWaitForAllCompletions) {
@@ -197,6 +379,58 @@ TEST(SubmissionCompletionQueue, BoundaryWithoutSubmissionsRunsOnExplicitDrain) {
 
     EXPECT_TRUE(boundary_completed);
     EXPECT_FALSE(queue.HasPendingBoundaries());
+}
+
+TEST(GnmSubmissionGate, SubmitDoneAdmissionIsNotAnIssuedSubmissionCompletionFence) {
+    SubmissionGate gate;
+    AmdGpu::SubmissionCompletionQueue queue;
+    const auto submitted = queue.IssueSubmission();
+    bool issued_work_finished{};
+
+    // No SubmitDone has been published. Its gate is open even though submitted work remains.
+    // Holding this admission prevents later submissions; it does not finish the existing one.
+    EXPECT_TRUE(gate.IsBoundaryOpen());
+    auto admission = gate.WaitForBoundaryAndEnter();
+    queue.EnqueueBoundary([&] { issued_work_finished = true; });
+    queue.DrainReadyBoundaries();
+    EXPECT_FALSE(issued_work_finished);
+
+    queue.CompleteSubmission(submitted);
+    EXPECT_TRUE(issued_work_finished);
+}
+
+TEST(SubmissionCompletionQueue, IssuedWorkFenceNeedsAllocatorProgressUntilPendingWorkCompletes) {
+    AmdGpu::SubmissionCompletionQueue queue;
+    const auto submitted = queue.IssueSubmission();
+    std::promise<void> finished;
+    auto finish = finished.get_future();
+    queue.EnqueueBoundary([&] { finished.set_value(); });
+
+    // Model an unrelated allocation needed to satisfy a pending guest WaitRegMem. A retirement
+    // path must not hold the global allocation lock while waiting for all issued work to finish.
+    std::mutex allocation_mutex;
+    std::unique_lock retirement_allocation_lock{allocation_mutex};
+    std::promise<void> allocation_started;
+    auto started = allocation_started.get_future();
+    auto allocation = std::async(std::launch::async, [&] {
+        allocation_started.set_value();
+        {
+            std::scoped_lock lock{allocation_mutex};
+            // Publishing fresh backing lets the guest satisfy its pending command dependency.
+        }
+        queue.CompleteSubmission(submitted);
+    });
+
+    EXPECT_EQ(started.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(allocation.wait_for(20ms), std::future_status::timeout);
+    EXPECT_EQ(finish.wait_for(0ms), std::future_status::timeout);
+
+    // Always release before assertions that could end the test: the counterexample must never
+    // leave an intentionally blocked worker behind.
+    retirement_allocation_lock.unlock();
+    EXPECT_EQ(allocation.wait_for(1s), std::future_status::ready);
+    EXPECT_EQ(finish.wait_for(1s), std::future_status::ready);
+    allocation.get();
 }
 
 TEST(OwnedCommandBuffers, ConsecutiveCopiesRetainIndependentImmutableStorage) {

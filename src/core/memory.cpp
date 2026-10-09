@@ -1,19 +1,64 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <shared_mutex>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
+#include "core/backing_memory_write.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/memory.h"
+#include "core/physical_release_plan.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace Core {
+
+std::optional<GpuOwnerLifetime::Guard> MemoryManager::AcquireGpuOwnerLease() const {
+    // No owner is installed before GPU initialization. A closed lifetime remains installed
+    // afterward so later cache users cannot dereference a destroyed command owner.
+    if (!gpu_owner_lifetime) {
+        return GpuOwnerLifetime::Guard{};
+    }
+    return gpu_owner_lifetime->Acquire();
+}
+
+bool MemoryManager::IsGpuMapped(VAddr virtual_addr, u64 size) const {
+    // IsValidGpuMapping only checks the guest address width.  Consult the page manager as well so
+    // a newly selected/free VMA is not mistaken for a previously registered GPU range.
+    return rasterizer != nullptr && IsValidGpuMapping(virtual_addr, size) &&
+           rasterizer->IsMapped(virtual_addr, size);
+}
+
+bool MemoryManager::HasGpuMappedSubrange(VAddr virtual_addr, u64 size) const {
+    return rasterizer != nullptr && IsValidGpuMapping(virtual_addr, size) &&
+           rasterizer->HasGpuMappedSubrange(virtual_addr, size);
+}
+
+void MemoryManager::UnmapGpuMappings(VAddr virtual_addr, u64 size,
+                                     VideoCore::GpuMappingKind kind) {
+    if (!rasterizer || !IsValidGpuMapping(virtual_addr, size)) {
+        return;
+    }
+    rasterizer->UnmapMappedMemory(virtual_addr, size, kind);
+}
+
+namespace {
+
+Common::UniqueFunction<void> AcquireGpuMappingAdmission(
+    bool gpu_mapped, const AcquireGpuAddressSpaceGuard& acquire_gpu_address_space_guard) {
+    if (!gpu_mapped || !acquire_gpu_address_space_guard) {
+        return {};
+    }
+    return acquire_gpu_address_space_guard();
+}
+
+} // namespace
 
 MemoryManager::MemoryManager() {
     LOG_INFO(Kernel_Vmm, "Virtual memory space initialized with regions:");
@@ -129,78 +174,125 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     return clamped_size;
 }
 
-void MemoryManager::SetPrtArea(u32 id, VAddr address, u64 size) {
+void MemoryManager::SetPrtArea(u32 id, VAddr address, u64 size,
+                               AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
+    // Serialize sparse-placeholder retirement and publication with every other destructive VMM
+    // path.  UnmapMappedMemory snapshots owner-specific ranges before retiring them, so allowing
+    // another SetPrtArea call to interleave would make the snapshot stale.
+    std::unique_lock lk{unmap_mutex};
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return;
+    }
     PrtArea& area = prt_areas[id];
-    if (area.mapped) {
-        rasterizer->UnmapMemory(area.start, area.end - area.start);
+    Common::UniqueFunction<void> submission_admission;
+    const bool gpu_mapped =
+        area.mapped && HasGpuMappedSubrange(area.start, area.end - area.start);
+    if (gpu_mapped) {
+        submission_admission =
+            AcquireGpuMappingAdmission(gpu_mapped, acquire_gpu_address_space_guard);
+        UnmapGpuMappings(area.start, area.end - area.start,
+                         VideoCore::GpuMappingKind::SparsePlaceholder);
     }
 
     area.start = address;
     area.end = address + size;
-    area.mapped = true;
+    area.mapped = size != 0;
+    if (!area.mapped) {
+        return;
+    }
 
     // Pretend the entire PRT area is mapped to avoid GPU tracking errors.
     // The caches will use CopySparseMemory to fetch data which avoids unmapped areas.
-    rasterizer->MapMemory(address, size);
+    rasterizer->MapMemory(address, size, VideoCore::GpuMappingKind::SparsePlaceholder);
 }
 
 void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr), "Attempted to access invalid address {:#x}",
-               virtual_addr);
+    const bool copied = ForEachSparseMemorySegment(
+        vma_map, virtual_addr, size, [&dest](VAddr address, u64 segment_size, bool readable) {
+            if (readable) {
+                std::memcpy(dest, std::bit_cast<const u8*>(address), segment_size);
+            } else {
+                std::memset(dest, 0, segment_size);
+            }
+            dest += segment_size;
+        });
+    ASSERT_MSG(copied, "Invalid sparse memory range {:#x} size {:#x}", virtual_addr, size);
+}
 
-    auto vma = FindVMA(virtual_addr);
-    while (size) {
-        u64 copy_size = std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
-        if (vma->second.HasReadableBacking()) {
-            std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
-        } else {
-            std::memset(dest, 0, copy_size);
-        }
-        size -= copy_size;
-        virtual_addr += copy_size;
-        dest += copy_size;
-        ++vma;
+bool MemoryManager::TryReadBacking(const void* address, void* data, u64 size) {
+    if (size == 0) {
+        return true;
     }
+    if (!address || !data) {
+        return false;
+    }
+
+    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    std::shared_lock lk{mutex};
+    if (!Detail::IsCompleteReadableBackingRange(vma_map, virtual_addr, size)) {
+        return false;
+    }
+
+    std::memcpy(data, address, size);
+    return true;
+}
+
+bool MemoryManager::CanWriteBacking(std::span<const GuestMemoryRange> ranges) {
+    std::shared_lock lk{mutex};
+    return Detail::AreCompleteWritableBackingRanges(vma_map, ranges);
+}
+
+bool MemoryManager::TryClearBacking(std::span<const GuestMemoryRange> ranges) {
+    std::shared_lock lk{mutex};
+    if (!Detail::AreCompleteWritableBackingRanges(vma_map, ranges)) {
+        return false;
+    }
+
+    for (const auto& range : ranges) {
+        if (range.size != 0) {
+            std::memset(reinterpret_cast<void*>(range.address), 0, range.size);
+        }
+    }
+    return true;
+}
+
+bool MemoryManager::TryWriteGuest(std::span<const GuestMemoryWrite> writes) {
+    std::shared_lock lk{mutex};
+    if (!Detail::AreCompleteWritableGuestWrites(vma_map, writes)) {
+        return false;
+    }
+
+    for (const auto& write : writes) {
+        if (write.size != 0) {
+            std::memcpy(reinterpret_cast<void*>(write.address), write.data, write.size);
+        }
+    }
+    return true;
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     const VAddr virtual_addr = std::bit_cast<VAddr>(address);
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
-               virtual_addr);
+    return TryWriteBackingMemory(vma_map, impl.BackingBase(), virtual_addr, data, size);
+}
 
-    std::vector<VirtualMemoryArea> vmas_to_write;
-    auto current_vma = FindVMA(virtual_addr);
-    while (current_vma->second.Overlaps(virtual_addr, size)) {
-        if (!HasPhysicalBacking(current_vma->second)) {
-            break;
-        }
-        vmas_to_write.emplace_back(current_vma->second);
-        current_vma++;
-    }
+std::optional<DeferredBackingWrite> MemoryManager::CaptureReadbackDestinations(
+    std::span<const ReadbackWriteRange> ranges, u64 source_size) {
+    std::shared_lock lock{mutex};
+    return CaptureDeferredBackingWrite(vma_map, virtual_identity, ranges, source_size);
+}
 
-    if (vmas_to_write.empty()) {
-        return false;
-    }
-
-    for (auto& vma : vmas_to_write) {
-        auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
-        auto phys_handle = std::prev(vma.phys_areas.upper_bound(start_in_vma));
-        for (; phys_handle != vma.phys_areas.end(); phys_handle++) {
-            if (!size) {
-                break;
-            }
-            const u64 start_in_dma =
-                std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
-            u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
-            u64 copy_size = std::min<u64>(size, phys_handle->second.size - start_in_dma);
-            memcpy(backing, data, copy_size);
-            size -= copy_size;
-        }
-    }
-
-    return true;
+bool MemoryManager::TryPublishReadback(
+    const DeferredBackingWrite& token, std::span<const u8> source,
+    Common::UniqueFunction<void, std::span<const ReadbackWriteRange>>&& on_published) {
+    return PublishDeferredBackingWrite(mutex, vma_map, virtual_identity, impl.BackingBase(), token,
+                                       source, [&](std::span<const ReadbackWriteRange> ranges) {
+                                           if (on_published) {
+                                               on_published(std::move(ranges));
+                                           }
+                                       });
 }
 
 PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment) {
@@ -237,6 +329,7 @@ PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, 
     auto& area = CarvePhysArea(dmem_map, mapping_start, size)->second;
     area.dma_type = PhysicalMemoryType::Pooled;
     area.memory_type = 3;
+    ASSERT(physical_identity.Stamp(mapping_start, size));
 
     // Track how much dmem was allocated for pools.
     pool_budget += size;
@@ -278,14 +371,20 @@ PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, u64 size, u6
     auto& area = CarvePhysArea(dmem_map, mapping_start, size)->second;
     area.memory_type = memory_type;
     area.dma_type = PhysicalMemoryType::Allocated;
+    ASSERT(physical_identity.Stamp(mapping_start, size));
     MergeAdjacent(dmem_map, dmem_area);
 
     return mapping_start;
 }
 
-s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
+s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked,
+                        AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
+    if (size == 0) {
+        return ORBIS_OK;
+    }
     // Basic bounds checking
-    if (phys_addr > total_direct_size || (is_checked && phys_addr + size > total_direct_size)) {
+    if (phys_addr >= total_direct_size ||
+        (is_checked && size > total_direct_size - phys_addr)) {
         LOG_ERROR(Kernel_Vmm, "phys_addr {:#x}, size {:#x} goes outside dmem map", phys_addr, size);
         if (is_checked) {
             return ORBIS_KERNEL_ERROR_ENOENT;
@@ -293,36 +392,19 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
         return ORBIS_OK;
     }
 
-    std::scoped_lock lk{unmap_mutex};
+    size = std::min(size, total_direct_size - phys_addr);
+    std::unique_lock lk{unmap_mutex};
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    }
     // If this is a checked free, then all direct memory in range must be allocated.
-    std::vector<std::pair<PAddr, u64>> free_list;
-    u64 remaining_size = size;
-    auto phys_handle = FindDmemArea(phys_addr);
-    for (; phys_handle != dmem_map.end(); phys_handle++) {
-        if (remaining_size == 0) {
-            // Done searching
-            break;
-        }
-        auto& dmem_area = phys_handle->second;
-        if (dmem_area.dma_type == PhysicalMemoryType::Free) {
-            if (is_checked) {
-                // Checked frees will error if anything in the area isn't allocated.
-                // Unchecked frees will just ignore free areas.
-                LOG_ERROR(Kernel_Vmm, "Attempting to release a free dmem area");
-                return ORBIS_KERNEL_ERROR_ENOENT;
-            }
-            continue;
-        }
-
-        // Store physical address and size to release
-        const PAddr current_phys_addr = std::max<PAddr>(phys_addr, phys_handle->first);
-        const u64 start_in_dma = current_phys_addr - phys_handle->first;
-        const u64 size_in_dma =
-            std::min<u64>(remaining_size, phys_handle->second.size - start_in_dma);
-        free_list.emplace_back(current_phys_addr, size_in_dma);
-
-        // Track remaining size to free
-        remaining_size -= size_in_dma;
+    auto free_list = PlanPhysicalMemoryRelease(
+        dmem_map, phys_addr, size, is_checked,
+        [](const auto& area) { return area.dma_type == PhysicalMemoryType::Free; });
+    if (!free_list) {
+        LOG_ERROR(Kernel_Vmm, "Attempting to release a free or invalid dmem area");
+        return ORBIS_KERNEL_ERROR_ENOENT;
     }
 
     // Release any dmem mappings that reference this physical block.
@@ -332,12 +414,11 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
             continue;
         }
         for (auto& [offset_in_vma, phys_mapping] : mapping.phys_areas) {
-            if (phys_addr + size > phys_mapping.base &&
-                phys_addr < phys_mapping.base + phys_mapping.size) {
-                const u64 phys_offset =
-                    std::max<u64>(phys_mapping.base, phys_addr) - phys_mapping.base;
+            if (const auto overlap = IntersectMemoryReleaseRanges(
+                    phys_addr, size, phys_mapping.base, phys_mapping.size)) {
+                const u64 phys_offset = overlap->address - phys_mapping.base;
                 const VAddr addr_in_vma = mapping.base + offset_in_vma + phys_offset;
-                const u64 unmap_size = std::min<u64>(phys_mapping.size - phys_offset, size);
+                const u64 unmap_size = overlap->size;
 
                 // Unmapping might erase from vma_map. We can't do it here.
                 remove_list.emplace_back(addr_in_vma, unmap_size);
@@ -345,10 +426,18 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
         }
     }
 
+    // Keep submission admission across every GPU-side unmap and the backing release. A physical
+    // free can retire more than one alias, so one scoped guard covers the complete operation.
+    Common::UniqueFunction<void> submission_admission;
+
     // Early unmap from GPU to avoid deadlocking.
     for (auto& [addr, unmap_size] : remove_list) {
-        if (IsValidGpuMapping(addr, unmap_size)) {
-            rasterizer->UnmapMemory(addr, unmap_size);
+        if (HasGpuMappedSubrange(addr, unmap_size)) {
+            if (!submission_admission) {
+                submission_admission =
+                    AcquireGpuMappingAdmission(true, acquire_gpu_address_space_guard);
+            }
+            UnmapGpuMappings(addr, unmap_size, VideoCore::GpuMappingKind::HostMapped);
         }
     }
 
@@ -361,12 +450,13 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
     }
 
     // Unmap all dmem areas within this area.
-    for (auto& [phys_addr, size] : free_list) {
+    for (auto& [phys_addr, size] : *free_list) {
         // Carve a free dmem area in place of this one.
         const auto dmem_handle = CarvePhysArea(dmem_map, phys_addr, size);
         auto& new_dmem_area = dmem_handle->second;
         new_dmem_area.dma_type = PhysicalMemoryType::Free;
         new_dmem_area.memory_type = 0;
+        ASSERT(physical_identity.Erase(phys_addr, size));
 
         // Merge the new dmem_area with dmem_map
         MergeAdjacent(dmem_map, dmem_handle);
@@ -376,7 +466,11 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
 }
 
 s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32 mtype) {
-    std::scoped_lock lk{unmap_mutex};
+    std::unique_lock lk{unmap_mutex};
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    }
     std::unique_lock lk2{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -422,6 +516,7 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
     new_vma.name = "anon";
     new_vma.type = Core::VMAType::Pooled;
     new_vma.phys_areas.clear();
+    ASSERT(virtual_identity.Stamp(virtual_addr, size));
 
     // Find suitable physical addresses
     auto handle = dmem_map.begin();
@@ -442,6 +537,7 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
         auto& new_dmem_area = new_dmem_handle->second;
         new_dmem_area.dma_type = PhysicalMemoryType::Committed;
         new_dmem_area.memory_type = mtype;
+        ASSERT(physical_identity.Stamp(new_dmem_area.base, size_to_map));
 
         // Add the dmem area to this vma, merge it with any similar tracked areas.
         new_vma.phys_areas[current_addr - mapped_addr] = new_dmem_handle->second;
@@ -508,22 +604,34 @@ MemoryManager::VMAHandle MemoryManager::CreateArea(VAddr virtual_addr, u64 size,
     new_vma.name = name;
     new_vma.type = type;
     new_vma.phys_areas.clear();
+    ASSERT(new_vma.IsMapped() ? virtual_identity.Stamp(virtual_addr, size)
+                             : virtual_identity.Erase(virtual_addr, size));
     return new_vma_handle;
 }
 
 s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
                              MemoryMapFlags flags, VMAType type, std::string_view name,
-                             bool validate_dmem, PAddr phys_addr, u64 alignment) {
-    // Certain games perform flexible mappings on loop to determine
-    // the available flexible memory size. Questionable but we need to handle this.
-    if (type == VMAType::Flexible && flexible_usage + size > total_flexible_size) {
+                             bool validate_dmem, PAddr phys_addr, u64 alignment,
+                             AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
+    std::unique_lock lk{unmap_mutex};
+    const bool replaces = True(flags & MemoryMapFlags::Fixed) &&
+                          False(flags & MemoryMapFlags::NoOverwrite);
+    if (replaces && size > std::numeric_limits<VAddr>::max() - virtual_addr) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    }
+
+    // Check current capacity under allocator serialization, including probe-style requests.
+    if (type == VMAType::Flexible && size > total_flexible_size - flexible_usage) {
         LOG_ERROR(Kernel_Vmm,
                   "Out of flexible memory, available flexible memory = {:#x}"
                   " requested size = {:#x}",
                   total_flexible_size - flexible_usage, size);
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    std::scoped_lock lk{unmap_mutex};
 
     PhysHandle dmem_area;
     // Validate the requested physical address range
@@ -580,9 +688,12 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         }
     }
 
-    // Perform early GPU unmap to avoid potential deadlocks
-    if (IsValidGpuMapping(virtual_addr, size)) {
-        rasterizer->UnmapMemory(virtual_addr, size);
+    // A fixed mapping can replace an existing GPU-visible range. Retain address-space admission
+    // over both the GPU-side unmap and the VMA replacement; fresh mappings do not acquire it.
+    Common::UniqueFunction<void> submission_admission;
+    if (HasGpuMappedSubrange(virtual_addr, size)) {
+        submission_admission = AcquireGpuMappingAdmission(true, acquire_gpu_address_space_guard);
+        UnmapGpuMappings(virtual_addr, size, VideoCore::GpuMappingKind::HostMapped);
     }
 
     // Acquire writer lock.
@@ -615,6 +726,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
             const auto new_fmem_handle = CarvePhysArea(fmem_map, handle->second.base, size_to_map);
             auto& new_fmem_area = new_fmem_handle->second;
             new_fmem_area.dma_type = PhysicalMemoryType::Flexible;
+            ASSERT(physical_identity.Stamp(new_fmem_area.base, size_to_map));
 
             // Add the new area to the vma, merge it with any similar tracked areas.
             new_vma.phys_areas[current_addr - mapped_addr] = new_fmem_handle->second;
@@ -650,6 +762,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
             const auto dmem_handle = CarvePhysArea(dmem_map, start_phys_addr, size_in_dma);
             auto& new_dmem_area = dmem_handle->second;
             new_dmem_area.dma_type = PhysicalMemoryType::Mapped;
+            ASSERT(physical_identity.Stamp(start_phys_addr, size_in_dma));
 
             // Add the dmem area to this vma, merge it with any similar tracked areas.
             const u64 offset_in_vma = current_phys_addr - phys_addr;
@@ -694,9 +807,19 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
 }
 
 s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
-                           MemoryMapFlags flags, s32 fd, s64 phys_addr) {
+                           MemoryMapFlags flags, s32 fd, s64 phys_addr,
+                           AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
     uintptr_t handle = 0;
-    std::scoped_lock lk{unmap_mutex};
+    std::unique_lock lk{unmap_mutex};
+    const bool replaces = True(flags & MemoryMapFlags::Fixed) &&
+                          False(flags & MemoryMapFlags::NoOverwrite);
+    if (replaces && size > std::numeric_limits<VAddr>::max() - virtual_addr) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    }
     // Get the file to map
     auto* h = Common::Singleton<Core::FileSys::HandleTable>::Instance();
     auto file = h->GetFile(fd);
@@ -766,9 +889,12 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
         }
     }
 
-    // Perform early GPU unmap to avoid potential deadlocks
-    if (IsValidGpuMapping(virtual_addr, size)) {
-        rasterizer->UnmapMemory(virtual_addr, size);
+    // File mapping replacement has the same address-space lifetime as fixed MapMemory. Guard only
+    // an existing GPU mapping so ordinary fresh file mappings retain guest progress.
+    Common::UniqueFunction<void> submission_admission;
+    if (HasGpuMappedSubrange(virtual_addr, size)) {
+        submission_admission = AcquireGpuMappingAdmission(true, acquire_gpu_address_space_guard);
+        UnmapGpuMappings(virtual_addr, size, VideoCore::GpuMappingKind::HostMapped);
     }
 
     // Aquire writer lock
@@ -815,8 +941,16 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
     return ORBIS_OK;
 }
 
-s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
-    std::scoped_lock lk{unmap_mutex};
+s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size,
+                               AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
+    if (size > std::numeric_limits<VAddr>::max() - virtual_addr) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    std::unique_lock lk{unmap_mutex};
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    }
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
 
@@ -830,9 +964,11 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
         it++;
     }
 
-    // Perform early GPU unmap to avoid potential deadlocks
-    if (IsValidGpuMapping(virtual_addr, size)) {
-        rasterizer->UnmapMemory(virtual_addr, size);
+    // Retain address-space admission through the GPU unmap and pool VMA revocation.
+    Common::UniqueFunction<void> submission_admission;
+    if (HasGpuMappedSubrange(virtual_addr, size)) {
+        submission_admission = AcquireGpuMappingAdmission(true, acquire_gpu_address_space_guard);
+        UnmapGpuMappings(virtual_addr, size, VideoCore::GpuMappingKind::HostMapped);
     }
 
     // Aquire writer mutex
@@ -865,6 +1001,7 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
                 const auto new_dmem_handle = CarvePhysArea(dmem_map, phys_addr, size_in_dma);
                 auto& new_dmem_area = new_dmem_handle->second;
                 new_dmem_area.dma_type = PhysicalMemoryType::Pooled;
+                ASSERT(physical_identity.Stamp(phys_addr, size_in_dma));
 
                 // Coalesce with nearby direct memory areas.
                 MergeAdjacent(dmem_map, new_dmem_handle);
@@ -884,6 +1021,7 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
         vma.disallow_merge = false;
         vma.name = "anon";
         vma.phys_areas.clear();
+        ASSERT(virtual_identity.Erase(current_addr, size_in_vma));
         MergeAdjacent(vma_map, new_it);
 
         current_addr += size_in_vma;
@@ -898,24 +1036,44 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
     return ORBIS_OK;
 }
 
-s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
+s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size,
+                               AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard) {
     if (size == 0) {
         return ORBIS_OK;
     }
 
-    std::scoped_lock lk{unmap_mutex};
+    if (size > std::numeric_limits<u64>::max() - (16_KB - 1)) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    std::unique_lock lk{unmap_mutex};
     // Align address and size appropriately
     virtual_addr = Common::AlignDown(virtual_addr, 16_KB);
     size = Common::AlignUp(size, 16_KB);
-    if (!IsValidMapping(virtual_addr, size)) {
-        LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map", virtual_addr,
-                  size);
+    if (size > std::numeric_limits<VAddr>::max() - virtual_addr) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    }
+    {
+        std::shared_lock lk2{mutex};
+        if (!IsValidMapping(virtual_addr, size)) {
+            LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map",
+                      virtual_addr, size);
+            return ORBIS_KERNEL_ERROR_EINVAL;
+        }
+    }
 
-    // If the requested range has GPU access, unmap from GPU.
-    if (IsValidGpuMapping(virtual_addr, size)) {
-        rasterizer->UnmapMemory(virtual_addr, size);
+    // If the requested range has GPU access, hold the optional submission admission across both
+    // the GPU-side unmap and the backing revocation. Fresh or CPU-only ranges do not acquire it.
+    const bool gpu_mapped = HasGpuMappedSubrange(virtual_addr, size);
+    Common::UniqueFunction<void> submission_admission;
+    if (gpu_mapped && acquire_gpu_address_space_guard) {
+        submission_admission = acquire_gpu_address_space_guard();
+    }
+    if (gpu_mapped) {
+        UnmapGpuMappings(virtual_addr, size, VideoCore::GpuMappingKind::HostMapped);
     }
 
     // Acquire writer lock.
@@ -946,6 +1104,7 @@ u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma
                 const auto new_dmem_handle = CarvePhysArea(dmem_map, phys_addr, size_in_dma);
                 auto& new_dmem_area = new_dmem_handle->second;
                 new_dmem_area.dma_type = PhysicalMemoryType::Allocated;
+                ASSERT(physical_identity.Stamp(phys_addr, size_in_dma));
 
                 // Coalesce with nearby direct memory areas.
                 MergeAdjacent(dmem_map, new_dmem_handle);
@@ -954,6 +1113,7 @@ u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma
                 const auto new_fmem_handle = CarvePhysArea(fmem_map, phys_addr, size_in_dma);
                 auto& new_fmem_area = new_fmem_handle->second;
                 new_fmem_area.dma_type = PhysicalMemoryType::Free;
+                ASSERT(physical_identity.Erase(phys_addr, size_in_dma));
 
                 // Coalesce with nearby flexible memory areas.
                 MergeAdjacent(fmem_map, new_fmem_handle);
@@ -981,6 +1141,7 @@ u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma
     vma.phys_areas.clear();
     vma.disallow_merge = false;
     vma.name = "";
+    ASSERT(virtual_identity.Erase(virtual_addr, size_in_vma));
     MergeAdjacent(vma_map, new_it);
 
     if (vma_type != VMAType::Reserved && vma_type != VMAType::PoolReserved) {
@@ -1084,6 +1245,8 @@ s64 MemoryManager::ProtectBytes(VAddr addr, VirtualMemoryArea& vma_base, u64 siz
     const auto new_it = CarveVMA(addr, adjusted_size);
     auto& new_vma = new_it->second;
     new_vma.prot = prot;
+    // Permissions do not replace the backing incarnation. Deferred physical readbacks remain
+    // valid; permission changes do not alter their physical destinations.
     MergeAdjacent(vma_map, new_it);
 
     if (vma_base.type == VMAType::Reserved) {
@@ -1295,6 +1458,7 @@ s32 MemoryManager::SetDirectMemoryType(VAddr addr, u64 size, s32 memory_type) {
                     CarvePhysArea(dmem_map, phys_handle->second.base, phys_handle->second.size);
                 auto& dmem_area = dmem_handle->second;
                 dmem_area.memory_type = memory_type;
+                ASSERT(physical_identity.Stamp(dmem_area.base, dmem_area.size));
 
                 // Increment phys_handle
                 phys_handle++;
@@ -1423,6 +1587,10 @@ s32 MemoryManager::GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPool
 }
 
 void MemoryManager::InvalidateMemory(const VAddr addr, const u64 size) const {
+    auto lifetime = AcquireGpuOwnerLease();
+    if (!lifetime) {
+        return;
+    }
     if (rasterizer) {
         rasterizer->InvalidateMemory(addr, size);
     }
@@ -1598,7 +1766,7 @@ MemoryManager::VMAHandle MemoryManager::Split(VMAHandle vma_handle, u64 offset_i
     new_vma.base += offset_in_vma;
     new_vma.size -= offset_in_vma;
 
-    if (HasPhysicalBacking(new_vma)) {
+    if (new_vma.HasPhysicalBacking()) {
         // Update physical areas map for both areas
         new_vma.phys_areas.clear();
 
