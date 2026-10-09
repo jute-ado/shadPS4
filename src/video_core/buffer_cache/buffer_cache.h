@@ -109,13 +109,14 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
-    /// Binds host vertex buffers for the current draw.
-    void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
-                           boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+    /// Binds host vertex buffers for the current draw, returning false when its range is invalid.
+    [[nodiscard]] bool BindVertexBuffers(
+        const Vulkan::GraphicsPipeline& pipeline,
+        boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
     void CommitVertexInputState(const Vulkan::GraphicsPipeline& pipeline);
 
     /// Bind host index buffer for the current draw.
-    void BindIndexBuffer(u32 index_offset,
+    bool BindIndexBuffer(u32 index_offset,
                          boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
     /// Writes a value to GPU buffer. (uses command buffer to temporarily store the data)
