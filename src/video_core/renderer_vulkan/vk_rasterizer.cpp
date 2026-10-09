@@ -328,6 +328,22 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    if (cs.pgm_hash == 0x0a57ac2f) {
+        static u64 dispatch_count = 0;
+        ++dispatch_count;
+        if (dispatch_count == 1 || (dispatch_count & 1023) == 0) {
+            const auto& desc = cs.buffers.front();
+            const auto sharp = desc.GetSharp(cs);
+            LOG_WARNING(Render_Vulkan,
+                        "Diagnostic compute 0a57 dispatch={} cbuf_addr={:#x} size={:#x} "
+                        "registered={} cpu_modified={} gpu_modified={}",
+                        dispatch_count, sharp.base_address, sharp.GetSize(),
+                        buffer_cache.IsRegionRegistered(sharp.base_address, sharp.GetSize()),
+                        buffer_cache.IsRegionCpuModified(sharp.base_address, sharp.GetSize()),
+                        buffer_cache.IsRegionGpuModified(sharp.base_address, sharp.GetSize()));
+        }
+    }
+
     if (!BindResources(pipeline)) {
         return;
     }
