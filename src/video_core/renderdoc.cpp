@@ -132,7 +132,7 @@ bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) 
 
     const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
     rdoc_api->StartFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
+    LOG_WARNING(Common, "RenderDoc capture started before guest-frame submission");
     return true;
 }
 
@@ -140,6 +140,7 @@ void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
     ASSERT(rdoc_api);
     const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
     const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
+    ASSERT(capture_state.FinishPresentedFrameCapture());
     LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
 }
 

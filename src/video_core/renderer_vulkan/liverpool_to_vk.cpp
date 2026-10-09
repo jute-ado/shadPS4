@@ -772,10 +772,19 @@ static auto surface_format_table = []() constexpr {
     return result;
 }();
 
+bool IsSurfaceFormatKnown(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
+    if (u32(data_format) >= 1U << amd_gpu_data_format_bit_size ||
+        u32(num_format) >= 1U << amd_gpu_number_format_bit_size) {
+        return false;
+    }
+    return surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)] !=
+               vk::Format::eUndefined ||
+           data_format == AmdGpu::DataFormat::FormatInvalid;
+}
+
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    bool found =
-        result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
+    const bool found = IsSurfaceFormatKnown(data_format, num_format);
     ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
                static_cast<u32>(num_format));
     return result;

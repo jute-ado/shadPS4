@@ -131,15 +131,6 @@ void Visit(Info& info, const IR::Inst& inst) {
         info.readconst_types |= Info::ReadConstType::Dynamic;
         break;
     case IR::Opcode::ReadConst:
-        if (!info.uses_dma) {
-            info.buffers.push_back({
-                .used_types = IR::Type::U32,
-                // We can't guarantee that flatbuf will not grow past UBO
-                // limit if there are a lot of ReadConsts. (We could specialize)
-                .inline_cbuf = AmdGpu::Buffer::Placeholder(std::numeric_limits<u32>::max()),
-                .buffer_type = BufferType::Flatbuf,
-            });
-        }
         if (inst.Flags<u32>() != 0) {
             info.readconst_types |= Info::ReadConstType::Immediate;
         } else {
@@ -160,15 +151,35 @@ void Visit(Info& info, const IR::Inst& inst) {
 
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
     auto& info = program.info;
+    bool has_read_const = false;
+    bool has_unflattened_read_const = false;
     for (IR::Block* const block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() == IR::Opcode::ReadConst) {
+                has_read_const = true;
+                has_unflattened_read_const |= inst.Flags<u32>() == 0;
+            }
             Visit(info, inst);
         }
     }
 
+    if (has_read_const) {
+        info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            // We can't guarantee that flatbuf will not grow past UBO
+            // limit if there are a lot of ReadConsts. (We could specialize)
+            .inline_cbuf = AmdGpu::Buffer::Placeholder(std::numeric_limits<u32>::max()),
+            .buffer_type = BufferType::Flatbuf,
+        });
+    }
+
     if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
-        info.uses_dma = false;
-        info.readconst_types = Info::ReadConstType::None;
+        // A live ReadConst without a CPU-flattened snapshot has a shader-runtime address or
+        // offset. The flat buffer cannot represent it, so retain guarded BDA only for shaders
+        // that actually require it. ReadConstBufferAddr64 keeps its bounded non-DMA fallback.
+        info.uses_dma = has_unflattened_read_const;
+        info.readconst_types = has_unflattened_read_const ? Info::ReadConstType::Dynamic
+                                                         : Info::ReadConstType::None;
     }
 
     if (info.uses_dma) {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
@@ -18,7 +19,7 @@ void SsaDestroyPass(IR::Program& program);
 void IdentityRemovalPass(IR::BlockList& program);
 void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
-void FlattenExtendedUserdataPass(IR::Program& program);
+void FlattenExtendedUserdataPass(IR::Program& program, SrtMemorySynchronizer synchronizer = {});
 void ReadLaneEliminationPass(IR::Program& program);
 void ResourceTrackingPass(IR::Program& program, const Profile& profile);
 void BufferAccessRangePass(IR::Program& program);

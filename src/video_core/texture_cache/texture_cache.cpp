@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_copy_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -74,8 +75,9 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         return;
     }
     auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
-    const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
-                              image.info.resources.layers * (image.info.num_bits / 8);
+    const u64 download_size = static_cast<u64>(image.info.pitch) * image.info.size.height *
+                              image.info.size.depth * image.info.resources.layers *
+                              (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
     const auto [download, offset] = download_buffer.Map(download_size);
     download_buffer.Commit();
@@ -190,8 +192,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         requested_info.props.has_stencil == cache_image.info.props.has_stencil;
     const bool bpp_match = requested_info.num_bits == cache_image.info.num_bits;
 
-    // If an image in the cache has less slices we need to expand it
-    bool recreate = cache_image.info.resources < requested_info.resources;
+    // Expand when the cached image cannot contain every requested mip level and array layer.
+    bool recreate = !cache_image.info.resources.CanContain(requested_info.resources);
 
     switch (binding) {
     case BindingType::Texture:
@@ -225,7 +227,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 
     if (recreate) {
         auto new_info = requested_info;
-        new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
+        new_info.resources = requested_info.resources.ExpandedToFit(cache_image.info.resources);
+        new_info.UpdateSize();
         const auto new_image_id =
             slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info);
         RegisterImage(new_image_id);
@@ -239,7 +242,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 
         if (cache_image.info.num_samples == 1 && new_info.num_samples == 1) {
             // Perform depth<->color copy using the intermediate copy buffer.
-            if (instance.IsMaintenance8Supported()) {
+            if (instance.IsMaintenance8Supported() &&
+                CanUseMaintenance8ImageCopy(cache_image.info.pixel_format,
+                                            new_image.info.pixel_format)) {
                 new_image.CopyImage(cache_image);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
@@ -317,7 +322,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
         // Size and resources are greater, expand the image.
         if (image_info.type == cache_image.info.type &&
-            image_info.resources > cache_image.info.resources) {
+            !cache_image.info.resources.CanContain(image_info.resources)) {
             return {ExpandImage(image_info, cache_image_id), -1, -1};
         }
 
@@ -380,7 +385,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                   "  Same block size:       {}\n"
                   "  Same BlockDim:         {}\n"
                   "  Same pitch:            {}\n"
-                  "  Old resources <= new:  {} (old: {}, new: {})\n"
+                  "  New resources contain old: {} (old: {}, new: {})\n"
                   "  Old size <= new size:  {}\n"
                   "  Expected size (calc):  {} bytes\n"
                   "  Size ratio (new/expected): {:.2f}x\n"
@@ -417,7 +422,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                   (image_info.num_bits == cache_image.info.num_bits),
                   (image_info.BlockDim() == cache_image.info.BlockDim()),
                   (image_info.pitch == cache_image.info.pitch),
-                  (cache_image.info.resources <= image_info.resources),
+                  image_info.resources.CanContain(cache_image.info.resources),
                   cache_image.info.resources.levels, image_info.resources.levels,
                   (cache_image.info.guest_size <= image_info.guest_size), expected_size,
 
@@ -482,11 +487,15 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 }
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+    auto& src_image = slot_images[image_id];
+    auto new_info = info;
+    new_info.resources = info.resources.ExpandedToFit(src_image.info.resources);
+    new_info.UpdateSize();
+
     const auto new_image_id =
-        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info);
     RegisterImage(new_image_id);
 
-    auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
 
     RefreshImage(new_image);

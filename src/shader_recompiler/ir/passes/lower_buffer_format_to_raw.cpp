@@ -26,6 +26,37 @@ static bool IsBufferFormatStore(const IR::Inst& inst) {
     return inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32;
 }
 
+static bool IsSupportedBufferFormat(const FormatInfo& format) {
+    const auto is_one_of = [&](std::initializer_list<AmdGpu::NumberFormat> formats) {
+        return std::ranges::find(formats, format.num_format) != formats.end();
+    };
+
+    switch (format.data_format) {
+    case AmdGpu::DataFormat::Format8:
+    case AmdGpu::DataFormat::Format8_8:
+    case AmdGpu::DataFormat::Format8_8_8_8:
+    case AmdGpu::DataFormat::Format2_10_10_10:
+        return is_one_of({AmdGpu::NumberFormat::Unorm, AmdGpu::NumberFormat::Snorm,
+                          AmdGpu::NumberFormat::Uint, AmdGpu::NumberFormat::Sint});
+    case AmdGpu::DataFormat::Format16:
+    case AmdGpu::DataFormat::Format16_16:
+    case AmdGpu::DataFormat::Format16_16_16_16:
+        return is_one_of({AmdGpu::NumberFormat::Unorm, AmdGpu::NumberFormat::Snorm,
+                          AmdGpu::NumberFormat::Uint, AmdGpu::NumberFormat::Sint,
+                          AmdGpu::NumberFormat::Float});
+    case AmdGpu::DataFormat::Format10_11_11:
+        return format.num_format == AmdGpu::NumberFormat::Float;
+    case AmdGpu::DataFormat::Format32:
+    case AmdGpu::DataFormat::Format32_32:
+    case AmdGpu::DataFormat::Format32_32_32:
+    case AmdGpu::DataFormat::Format32_32_32_32:
+        return is_one_of({AmdGpu::NumberFormat::Uint, AmdGpu::NumberFormat::Sint,
+                          AmdGpu::NumberFormat::Float});
+    default:
+        return false;
+    }
+}
+
 static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                                   const IR::BufferInstInfo info, const FormatInfo& format_info) {
     IR::Value interpreted;
@@ -109,6 +140,13 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
                               const FormatInfo& format_info) {
+    // Stores through a null descriptor are discarded. In particular, FormatInvalid has zero
+    // components, so attempting to build a value before handling it would create an empty IR
+    // composite and abort shader compilation.
+    if (format_info.data_format == AmdGpu::DataFormat::FormatInvalid) {
+        return;
+    }
+
     // Extract actual number of components and apply additional modifications.
     const auto swizzled = ApplySwizzle(ir, value, format_info.swizzle.Inverse());
     boost::container::static_vector<IR::Value, 4> components;
@@ -121,7 +159,7 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
 
     switch (format_info.data_format) {
     case AmdGpu::DataFormat::FormatInvalid:
-        break;
+        UNREACHABLE();
     case AmdGpu::DataFormat::Format8: {
         const auto packed =
             ir.Pack4x8(format_info.num_format, ir.CompositeConstruct(real_value, ir.Imm32(0.f),
@@ -211,6 +249,20 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
                                         : buffer.GetNumberConversion(),
         .num_components = AmdGpu::NumComponents(data_format),
     };
+
+    if (!IsSupportedBufferFormat(format_info)) {
+        // Guest descriptors can be transient or malformed while a resource table is being
+        // updated. Unsupported pairs have no defined packing conversion, so fail closed rather
+        // than abort shader compilation or reinterpret the bits as another format.
+        if (IsBufferFormatLoad(inst)) {
+            const auto zero = ir.CompositeConstruct(ir.Imm32(0.f), ir.Imm32(0.f), ir.Imm32(0.f),
+                                                    ir.Imm32(0.f));
+            inst.ReplaceUsesWithAndRemove(zero);
+        } else {
+            inst.Invalidate();
+        }
+        return;
+    }
 
     if (IsBufferFormatLoad(inst)) {
         const auto interpreted =

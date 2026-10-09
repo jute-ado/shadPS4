@@ -14,6 +14,9 @@ namespace Shader {
 
 static constexpr u32 NUM_USER_DATA_REGS = 16;
 static constexpr u32 NUM_IMAGES = 64;
+// Dynamic descriptor tables expand one shader image resource into multiple Vulkan bindings.
+// Keep room for a full 64-entry table alongside the ordinary per-shader image budget.
+static constexpr u32 NUM_IMAGE_BINDINGS = NUM_IMAGES + 64;
 static constexpr u32 NUM_BUFFERS = 40;
 static constexpr u32 NUM_SAMPLERS = 16;
 static constexpr u32 NUM_FMASKS = 8;
@@ -89,18 +92,15 @@ struct ImageResource {
     bool uses_integer_coordinates{};
     bool queries_dimensions{};
     bool is_r128{};
+    bool is_dynamic_table{};
+    u32 dynamic_table_count{};
+    u32 dynamic_table_offset_dw{};
+    u32 dynamic_table_stride_dw{};
+    AmdGpu::Image dynamic_table_template{};
     MipStorageFallbackMode mip_fallback_mode{};
     u32 constant_mip_index{};
 
-    constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
-        AmdGpu::Image image{};
-        if (!is_r128) {
-            image = info.template ReadUdSharp<AmdGpu::Image>(sharp_idx);
-        } else {
-            const auto raw = info.template ReadUdSharp<u128>(sharp_idx);
-            std::memcpy(&image, &raw, sizeof(raw));
-            image.pitch = image.width;
-        }
+    constexpr AmdGpu::Image ValidateSharp(AmdGpu::Image image) const noexcept {
         if (!image.Valid()) {
             LOG_DEBUG(Render_Vulkan, "Encountered invalid image sharp");
             image = AmdGpu::Image::Null(is_depth);
@@ -116,7 +116,61 @@ struct ImageResource {
         return image;
     }
 
+    constexpr AmdGpu::Image GetSharp(const auto& info, const u32 table_index = 0) const noexcept {
+        AmdGpu::Image image{};
+        if (is_dynamic_table) {
+            // Shader compilation and specialization may outlive the guest table mapping. Use the
+            // descriptor captured while tracking the shader; runtime binding refreshes each table
+            // entry through GetSharpIfMapped instead of dereferencing this pointer again.
+            image = dynamic_table_template;
+        } else if (!is_r128) {
+            image = info.template ReadUdSharp<AmdGpu::Image>(sharp_idx);
+        } else {
+            const auto raw = info.template ReadUdSharp<u128>(sharp_idx);
+            std::memcpy(&image, &raw, sizeof(raw));
+            image.pitch = image.width;
+        }
+        return ValidateSharp(image);
+    }
+
+    template <typename ReadMappedMemory>
+    AmdGpu::Image GetSharpIfMapped(const auto& info, const u32 table_index,
+                                   ReadMappedMemory&& read_mapped_memory) const noexcept {
+        if (!is_dynamic_table) {
+            return GetSharp(info, table_index);
+        }
+        if (table_index >= dynamic_table_count) {
+            return AmdGpu::Image::Null(is_depth);
+        }
+
+        const VAddr table_base = info.template ReadUdSharp<VAddr>(sharp_idx);
+        const u64 descriptor_size = is_r128 ? sizeof(u128) : sizeof(AmdGpu::Image);
+        const u64 descriptor_offset_dw =
+            u64{dynamic_table_offset_dw} + u64{table_index} * dynamic_table_stride_dw;
+        if (descriptor_offset_dw > std::numeric_limits<u64>::max() / sizeof(u32)) {
+            return AmdGpu::Image::Null(is_depth);
+        }
+        const u64 descriptor_offset = descriptor_offset_dw * sizeof(u32);
+        if (table_base == 0 || table_base > std::numeric_limits<VAddr>::max() - descriptor_offset) {
+            return AmdGpu::Image::Null(is_depth);
+        }
+
+        AmdGpu::Image image{};
+        const VAddr descriptor_address = table_base + descriptor_offset;
+        if (!std::forward<ReadMappedMemory>(read_mapped_memory)(descriptor_address, &image,
+                                                                descriptor_size)) {
+            return AmdGpu::Image::Null(is_depth);
+        }
+        if (is_r128) {
+            image.pitch = image.width;
+        }
+        return ValidateSharp(image);
+    }
+
     u32 NumBindings(const auto& info) const {
+        if (is_dynamic_table) {
+            return dynamic_table_count;
+        }
         const AmdGpu::Image tsharp = GetSharp(info);
         return (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex)
                    ? (tsharp.last_level - tsharp.base_level + 1)

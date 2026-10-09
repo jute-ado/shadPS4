@@ -279,12 +279,18 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.has_image_query) {
         ctx.AddCapability(spv::Capability::ImageQuery);
     }
+    if (std::ranges::any_of(info.images, &ImageResource::is_dynamic_table)) {
+        ctx.AddExtension("SPV_EXT_descriptor_indexing");
+        ctx.AddCapability(spv::Capability::ShaderNonUniform);
+        ctx.AddCapability(spv::Capability::SampledImageArrayNonUniformIndexing);
+    }
     if ((info.uses_image_atomic_float_min_max && profile.supports_image_fp32_atomic_min_max) ||
         (info.uses_buffer_atomic_float_min_max && profile.supports_buffer_fp32_atomic_min_max)) {
         ctx.AddExtension("SPV_EXT_shader_atomic_float_min_max");
         ctx.AddCapability(spv::Capability::AtomicFloat32MinMaxEXT);
     }
-    if (info.uses_lane_id) {
+    if (info.uses_lane_id &&
+        !(info.l_stage == LogicalStage::Compute && profile.subgroup_size < 64)) {
         ctx.AddCapability(spv::Capability::GroupNonUniform);
     }
     if (info.uses_group_quad) {

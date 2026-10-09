@@ -195,6 +195,10 @@ public:
         return image_load_store_lod;
     }
 
+    bool IsSampledImageArrayNonuniformIndexingSupported() const {
+        return vk12_features.shaderSampledImageArrayNonUniformIndexing;
+    }
+
     /// Returns true when VK_AMD_gcn_shader is supported.
     bool IsAmdGcnShaderSupported() const {
         return amd_gcn_shader;
@@ -388,6 +392,26 @@ public:
     /// Returns the maximum render area height.
     u32 GetMaxFramebufferHeight() const {
         return properties.limits.maxFramebufferHeight;
+    }
+
+    u32 GetMaxImageDimension1D() const {
+        return properties.limits.maxImageDimension1D;
+    }
+
+    u32 GetMaxImageDimension2D() const {
+        return properties.limits.maxImageDimension2D;
+    }
+
+    u32 GetMaxImageDimension3D() const {
+        return properties.limits.maxImageDimension3D;
+    }
+
+    u32 GetMaxImageDimensionCube() const {
+        return properties.limits.maxImageDimensionCube;
+    }
+
+    u32 GetMaxImageArrayLayers() const {
+        return properties.limits.maxImageArrayLayers;
     }
 
     /// Returns the maximum number of samplers that can be allocated at once.

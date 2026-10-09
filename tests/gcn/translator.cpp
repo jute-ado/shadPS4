@@ -55,6 +55,15 @@ TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts) {
     return TranslateToSpirvWithInfoImpl(raw_gcn_insts, std::nullopt);
 }
 
+TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts,
+                                           bool direct_memory_access) {
+    const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    EmulatorSettings.SetDirectMemoryAccessEnabled(direct_memory_access);
+    const auto result = TranslateToSpirvWithInfoImpl(raw_gcn_insts, std::nullopt);
+    EmulatorSettings.SetDirectMemoryAccessEnabled(previous);
+    return result;
+}
+
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access,
                                            u64 source_buffer_base) {
     const bool previous = EmulatorSettings.IsDirectMemoryAccessEnabled();

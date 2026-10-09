@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <cstring>
+#include <unordered_map>
 
 #include <gtest/gtest.h>
 #include <half.hpp>
@@ -9,6 +11,7 @@
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
 #include "shader_recompiler/frontend/decode.h"
+#include "spirv/unified1/spirv.hpp"
 #include "translator.hpp"
 
 class GcnTest : public ::testing::Test {
@@ -26,6 +29,74 @@ struct F32x2 {
     float a;
     float b;
 };
+
+namespace {
+
+bool HasOpcode(const std::vector<u32>& spirv, spv::Op opcode) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        if (words == 0) {
+            return false;
+        }
+        if (static_cast<spv::Op>(word & 0xffff) == opcode) {
+            return true;
+        }
+        offset += words;
+    }
+    return false;
+}
+
+bool HasCapability(const std::vector<u32>& spirv, spv::Capability capability) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        if (words == 0) {
+            return false;
+        }
+        if (static_cast<spv::Op>(word & 0xffff) == spv::OpCapability && words >= 2 &&
+            spirv[offset + 1] == static_cast<u32>(capability)) {
+            return true;
+        }
+        offset += words;
+    }
+    return false;
+}
+
+bool HasNamedFunctionCall(const std::vector<u32>& spirv, std::string_view function_name) {
+    std::unordered_map<u32, std::string> names;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        if (words == 0) {
+            return false;
+        }
+        if (static_cast<spv::Op>(word & 0xffff) == spv::OpName && words >= 3) {
+            const char* const name = reinterpret_cast<const char*>(&spirv[offset + 2]);
+            const size_t max_size = (words - 2) * sizeof(u32);
+            names.emplace(spirv[offset + 1], std::string{name, strnlen(name, max_size)});
+        }
+        offset += words;
+    }
+
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        if (words == 0) {
+            return false;
+        }
+        if (static_cast<spv::Op>(word & 0xffff) == spv::OpFunctionCall && words >= 4) {
+            const auto name = names.find(spirv[offset + 3]);
+            if (name != names.end() && name->second == function_name) {
+                return true;
+            }
+        }
+        offset += words;
+    }
+    return false;
+}
+
+} // namespace
 
 TEST_F(GcnTest, mubuf_addr64_uses_vector_address) {
     // buffer_load_dword v0, v[0:1], s[4:7], 0 offset:12 addr64
@@ -80,6 +151,22 @@ TEST_F(GcnTest, mubuf_addr64_global_address_remains_runtime_rebindable) {
     // The descriptor base is read from live user data. Rebinding it must change the effective
     // absolute address without forcing a shader permutation.
     EXPECT_EQ(first.spirv, rebound.spirv);
+}
+
+TEST_F(GcnTest, unflattened_read_const_uses_guarded_dma_when_global_dma_is_disabled) {
+    constexpr u64 s_load_dword_s4_s0_s1_s2 = 0xc0020002;
+    const std::array<u64, 2> instructions{
+        s_load_dword_s4_s0_s1_s2,
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S4).Get(),
+    };
+
+    const auto result = TranslateToSpirvWithInfo(instructions, false);
+
+    EXPECT_TRUE(result.uses_dma);
+    EXPECT_TRUE(HasCapability(result.spirv, spv::CapabilityPhysicalStorageBufferAddresses));
+    EXPECT_TRUE(HasNamedFunctionCall(result.spirv, "read_const_dynamic"));
+    EXPECT_TRUE(HasOpcode(result.spirv, spv::OpULessThan));
+    EXPECT_TRUE(HasOpcode(result.spirv, spv::OpAtomicOr));
 }
 
 // Example

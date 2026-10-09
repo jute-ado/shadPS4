@@ -105,6 +105,33 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
+Id EmitImageSampleExplicitLodDynamic(EmitContext& ctx, IR::Inst* inst, u32 handle,
+                                     Id descriptor_index, Id coords, Id lod,
+                                     const IR::Value& offset) {
+    const auto& texture = ctx.images[handle & 0xFFFF];
+    ASSERT(texture.is_dynamic_table);
+    // A single SSA index can feed more than one image instruction. Decorating that original ID
+    // from every emitter call produces duplicate NonUniform decorations, which is invalid SPIR-V.
+    // Give each descriptor access its own decorated ID instead.
+    const Id nonuniform_index =
+        ctx.OpIAdd(ctx.U32[1], descriptor_index, ctx.u32_zero_value);
+    ctx.Decorate(nonuniform_index, spv::Decoration::NonUniform);
+    const Id image_pointer_type =
+        ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
+    const Id image_pointer =
+        ctx.OpAccessChain(image_pointer_type, texture.id, std::array{nonuniform_index});
+    const Id image = ctx.OpLoad(texture.image_type, image_pointer);
+    const Id result_type = texture.data_types->Get(4);
+    const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
+    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    ImageOperands operands;
+    operands.Add(spv::ImageOperandsMask::Lod, lod);
+    operands.AddOffset(ctx, offset);
+    const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
+                                                   operands.mask, operands.operands);
+    return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
+}
+
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id bias, const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
@@ -174,7 +201,9 @@ Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod
     const auto sharp = ctx.info.images[handle & 0xFFFF].GetSharp(ctx.info);
     const Id zero = ctx.u32_zero_value;
     const auto mips{[&] { return has_mips ? ctx.OpImageQueryLevels(ctx.U32[1], image) : zero; }};
-    const bool uses_lod{texture.view_type != AmdGpu::ImageType::Color2DMsaa && !texture.is_storage};
+    const bool is_msaa = texture.view_type == AmdGpu::ImageType::Color2DMsaa ||
+                         texture.view_type == AmdGpu::ImageType::Color2DMsaaArray;
+    const bool uses_lod{!is_msaa && !texture.is_storage};
     const auto query{[&](Id type) {
         return uses_lod ? ctx.OpImageQuerySizeLod(type, image, lod)
                         : ctx.OpImageQuerySize(type, image);
@@ -187,6 +216,7 @@ Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod
     case AmdGpu::ImageType::Color2DMsaa:
         return ctx.OpCompositeConstruct(ctx.U32[4], query(ctx.U32[2]), zero, mips());
     case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Color2DMsaaArray:
     case AmdGpu::ImageType::Color3D:
         return ctx.OpCompositeConstruct(ctx.U32[4], query(ctx.U32[3]), mips());
     default:
@@ -225,7 +255,8 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
     Id texel;
     if (!texture.is_storage) {
         const Id image = ctx.OpLoad(texture.image_type, texture.id);
-        if (texture.view_type == AmdGpu::ImageType::Color2DMsaa) {
+        if (texture.view_type == AmdGpu::ImageType::Color2DMsaa ||
+            texture.view_type == AmdGpu::ImageType::Color2DMsaaArray) {
             // GCN hardware wraps out-of-range MSAA sample indices
             if (Sirit::ValidId(ms)) {
                 const Id sample_count = ctx.OpImageQuerySamples(ctx.U32[1], image);

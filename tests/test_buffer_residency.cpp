@@ -3,10 +3,15 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "shader_recompiler/addr64_pointer_residency.h"
+#include "shader_recompiler/specialization.h"
+#include "video_core/buffer_cache/buffer_binding_policy.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/fault_range.h"
 
@@ -48,6 +53,35 @@ public:
 };
 
 } // namespace
+
+TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThread) {
+    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string source = contents.str();
+
+    const auto function_begin = source.find("void Rasterizer::UnmapMemory(");
+    const auto function_end = source.find("void Rasterizer::UpdateDynamicState(", function_begin);
+    ASSERT_NE(function_begin, std::string::npos);
+    ASSERT_NE(function_end, std::string::npos);
+    const auto body = source.substr(function_begin, function_end - function_begin);
+
+    const auto buffer_unmap = body.find("buffer_cache.InvalidateMemory(addr, size)");
+    const auto queued = body.find("liverpool->SendCommand<false>([this, addr, size]");
+    const auto texture_unmap = body.find("texture_cache.UnmapMemory(addr, size)", queued);
+    const auto queued_end = body.find("});", queued);
+    const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size)");
+    ASSERT_NE(queued, std::string::npos);
+    ASSERT_NE(buffer_unmap, std::string::npos);
+    ASSERT_NE(texture_unmap, std::string::npos);
+    ASSERT_NE(queued_end, std::string::npos);
+    ASSERT_NE(page_unmap, std::string::npos);
+    EXPECT_LT(buffer_unmap, queued);
+    EXPECT_LT(queued, texture_unmap);
+    EXPECT_LT(texture_unmap, queued_end);
+    EXPECT_LT(queued_end, page_unmap);
+    EXPECT_EQ(body.find("SendCommand<true>"), std::string::npos);
+}
 
 TEST(BufferResidency, PublishesExpandedDmaMappingOnlyAfterFullSpanIsResident) {
     ExpandedDmaBuffer buffer;
@@ -200,4 +234,182 @@ TEST(BufferResidency, Addr64PointerResidencyUsesExistingFindThenSynchronizePathE
     EXPECT_EQ(cache.calls[1].operation, ResidencyCall::Synchronize);
     EXPECT_EQ(cache.calls[1].address, address);
     EXPECT_EQ(cache.calls[1].size, Shader::Addr64PointerTableBytes);
+}
+
+TEST(BufferResidency, RejectsUnmappedOrOverflowingGuestBufferBindingsBeforeCacheLookup) {
+    constexpr VAddr mapped_begin = 0x0B920000ULL;
+    constexpr VAddr mapped_end = 0x10000000ULL;
+    const auto is_mapped = [](VAddr address, u64 size) {
+        return address >= mapped_begin && address < mapped_end && size <= mapped_end - address;
+    };
+
+    EXPECT_FALSE(VideoCore::IsGuestBufferBindingUsable(0x7C000ULL, 0x384000ULL, is_mapped));
+    EXPECT_FALSE(VideoCore::IsGuestBufferBindingUsable(0, 4, is_mapped));
+    EXPECT_FALSE(VideoCore::IsGuestBufferBindingUsable(mapped_begin, 0, is_mapped));
+    EXPECT_FALSE(VideoCore::IsGuestBufferBindingUsable(std::numeric_limits<VAddr>::max() - 3,
+                                                       8, is_mapped));
+}
+
+TEST(BufferResidency, AdmitsMappedBindingBaseWithoutRejectingSparseDeclaredTail) {
+    constexpr VAddr mapped_begin = 0x0B920000ULL;
+    constexpr VAddr mapped_end = 0x0B930000ULL;
+    const auto is_mapped = [](VAddr address, u64 size) {
+        return address >= mapped_begin && address < mapped_end && size <= mapped_end - address;
+    };
+
+    EXPECT_TRUE(VideoCore::IsGuestBufferBindingUsable(mapped_begin + 0x80, 2_GB, is_mapped));
+}
+
+TEST(BufferBindingPolicy, UnmappedGuestBuffersAreNotActiveSpecializationInputs) {
+    Shader::Info info{};
+    AmdGpu::Buffer first{};
+    first.base_address = 0x10000;
+    first.stride = 16;
+    first.num_records = 64;
+    AmdGpu::Buffer second = first;
+    second.base_address = 0x20000;
+    second.stride = 32;
+    info.buffers.push_back({
+        .inline_cbuf = first,
+        .buffer_type = Shader::BufferType::Guest,
+    });
+
+    Shader::StageSpecialization left{};
+    left.info = &info;
+    left.buffers.resize(1);
+    left.buffers[0].stride = first.GetStride();
+    left.bitset.set(0);
+    Shader::StageSpecialization right{};
+    right.info = &info;
+    right.buffers.resize(1);
+    right.buffers[0].stride = second.GetStride();
+    right.bitset.set(0);
+
+    left.CanonicalizeUnusableGuestBuffers([](u32, const auto&) { return false; });
+    right.CanonicalizeUnusableGuestBuffers([](u32, const auto&) { return false; });
+
+    EXPECT_FALSE(left.bitset[0]);
+    EXPECT_FALSE(right.bitset[0]);
+    EXPECT_EQ(left.buffers[0], Shader::BufferSpecialization{});
+    EXPECT_EQ(right.buffers[0], Shader::BufferSpecialization{});
+    EXPECT_EQ(left, right);
+    EXPECT_EQ(right, left);
+}
+
+TEST(BufferBindingPolicy, MappedGuestBufferSpecializationsRemainActiveAndDistinct) {
+    Shader::Info info{};
+    AmdGpu::Buffer sharp{};
+    sharp.base_address = 0x10000;
+    sharp.stride = 16;
+    sharp.num_records = 64;
+    info.buffers.push_back({
+        .inline_cbuf = sharp,
+        .buffer_type = Shader::BufferType::Guest,
+    });
+
+    Shader::StageSpecialization left{};
+    left.info = &info;
+    left.buffers.resize(1);
+    left.buffers[0].stride = 16;
+    left.bitset.set(0);
+    Shader::StageSpecialization right{};
+    right.info = &info;
+    right.buffers.resize(1);
+    right.buffers[0].stride = 32;
+    right.bitset.set(0);
+
+    left.CanonicalizeUnusableGuestBuffers([](u32, const auto&) { return true; });
+    right.CanonicalizeUnusableGuestBuffers([](u32, const auto&) { return true; });
+
+    EXPECT_TRUE(left.bitset[0]);
+    EXPECT_TRUE(right.bitset[0]);
+    EXPECT_NE(left, right);
+    EXPECT_NE(right, left);
+}
+
+TEST(BufferBindingPolicy, InternalBuffersAreNeverMaskedByGuestMappingAdmission) {
+    Shader::Info info{};
+    info.buffers.push_back({
+        .inline_cbuf = AmdGpu::Buffer::Placeholder(64),
+        .buffer_type = Shader::BufferType::Flatbuf,
+    });
+
+    Shader::StageSpecialization spec{};
+    spec.info = &info;
+    spec.buffers.resize(1);
+    spec.buffers[0].stride = 4;
+    spec.bitset.set(0);
+    spec.CanonicalizeUnusableGuestBuffers([](u32, const auto&) { return false; });
+
+    EXPECT_TRUE(spec.bitset[0]);
+    EXPECT_EQ(spec.buffers[0].stride, 4U);
+}
+
+TEST(ImageBindingPolicy, RejectedGuestImagesDoNotCreateShaderPermutations) {
+    Shader::Info info{};
+    info.buffers.push_back({
+        .inline_cbuf = AmdGpu::Buffer::Placeholder(64),
+        .buffer_type = Shader::BufferType::Flatbuf,
+    });
+    info.images.push_back({});
+
+    Shader::StageSpecialization left{};
+    left.info = &info;
+    left.images.resize(1);
+    left.images[0].type = AmdGpu::ImageType::Color2D;
+    left.bitset.set(1);
+    Shader::StageSpecialization right{};
+    right.info = &info;
+    right.images.resize(1);
+    right.images[0].type = AmdGpu::ImageType::Color3D;
+    right.bitset.set(1);
+
+    left.CanonicalizeUnusableGuestImages([](u32, const auto&) { return false; });
+    right.CanonicalizeUnusableGuestImages([](u32, const auto&) { return false; });
+
+    EXPECT_FALSE(left.bitset[1]);
+    EXPECT_FALSE(right.bitset[1]);
+    EXPECT_EQ(left.images[0], Shader::ImageSpecialization{});
+    EXPECT_EQ(right.images[0], Shader::ImageSpecialization{});
+    EXPECT_EQ(left, right);
+    EXPECT_EQ(right, left);
+}
+
+TEST(ImageBindingPolicy, AdmittedGuestImageSpecializationsRemainDistinct) {
+    Shader::Info info{};
+    info.images.push_back({});
+
+    Shader::StageSpecialization left{};
+    left.info = &info;
+    left.images.resize(1);
+    left.images[0].type = AmdGpu::ImageType::Color2D;
+    left.bitset.set(0);
+    Shader::StageSpecialization right{};
+    right.info = &info;
+    right.images.resize(1);
+    right.images[0].type = AmdGpu::ImageType::Color3D;
+    right.bitset.set(0);
+
+    left.CanonicalizeUnusableGuestImages([](u32, const auto&) { return true; });
+    right.CanonicalizeUnusableGuestImages([](u32, const auto&) { return true; });
+
+    EXPECT_TRUE(left.bitset[0]);
+    EXPECT_TRUE(right.bitset[0]);
+    EXPECT_NE(left, right);
+    EXPECT_NE(right, left);
+}
+
+TEST(ResourceSpecializationPolicy, SamplerOnlyStagesRetainTheirStartingBinding) {
+    Shader::Info info{};
+    info.samplers.push_back({});
+
+    Shader::StageSpecialization left{};
+    left.info = &info;
+    left.samplers.resize(1);
+    left.start.unified = 4;
+    Shader::StageSpecialization right = left;
+    right.start.unified = 9;
+
+    EXPECT_NE(left, right);
+    EXPECT_NE(right, left);
 }

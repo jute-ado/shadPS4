@@ -145,6 +145,27 @@ static std::intptr_t SignalHandlerBody(void* opaque) noexcept {
     const bool report_unhandled = WindowsException::ShouldReportUnhandledException(
         code, use_static_windows_guest_red_zone_protection, static_protection_exception);
     if (report_unhandled) { // Windows static guest red-zone protection
+        if (code == EXCEPTION_ACCESS_VIOLATION && pExp != nullptr &&
+            pExp->ExceptionRecord != nullptr && pExp->ContextRecord != nullptr) {
+            const auto* const exception = pExp->ExceptionRecord;
+            const auto* const registers = pExp->ContextRecord;
+            const auto access_kind = exception->NumberParameters > 0
+                                         ? exception->ExceptionInformation[0]
+                                         : static_cast<ULONG_PTR>(~0ULL);
+            const auto fault_address = exception->NumberParameters > 1
+                                           ? exception->ExceptionInformation[1]
+                                           : static_cast<ULONG_PTR>(0);
+            LOG_CRITICAL(Debug,
+                         "Unhandled access violation kind={} address={:#x} rip={:#x} rsp={:#x} "
+                         "rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} "
+                         "r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} "
+                         "r14={:#x} r15={:#x}",
+                         access_kind, fault_address, registers->Rip, registers->Rsp, registers->Rax,
+                         registers->Rbx, registers->Rcx, registers->Rdx, registers->Rsi,
+                         registers->Rdi, registers->R8, registers->R9, registers->R10,
+                         registers->R11, registers->R12, registers->R13, registers->R14,
+                         registers->R15);
+        }
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }

@@ -356,7 +356,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // SnormNz emulation is only needed for the packed 8- and 16-bit storage formats
+            // above. Wider and otherwise unsupported combinations do not have an extra host-side
+            // conversion to apply.
+            return NumberConversion::None;
         }
     }
     default:

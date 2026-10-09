@@ -8,6 +8,9 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_policy.h"
+#include "shader_recompiler/ir/passes/msaa_image_argument_policy.h"
+#include "shader_recompiler/ir/passes/sharp_source_policy.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -15,8 +18,6 @@
 
 namespace Shader::Optimization {
 namespace {
-
-using SharpLocation = u32;
 
 bool IsBufferAtomic(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
@@ -261,6 +262,10 @@ public:
     u32 Add(const ImageResource& desc) {
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
             return desc.sharp_idx == existing.sharp_idx && desc.is_array == existing.is_array &&
+                   desc.is_dynamic_table == existing.is_dynamic_table &&
+                   desc.dynamic_table_count == existing.dynamic_table_count &&
+                   desc.dynamic_table_offset_dw == existing.dynamic_table_offset_dw &&
+                   desc.dynamic_table_stride_dw == existing.dynamic_table_stride_dw &&
                    desc.mip_fallback_mode == existing.mip_fallback_mode &&
                    desc.constant_mip_index == existing.constant_mip_index;
         })};
@@ -452,15 +457,15 @@ bool IsCfgBlockDominatedBy(const Shader::Gcn::Block* maybe_dominator,
     return true;
 }
 
-SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
+SharpSource SharpSourceFromInst(const IR::Inst* inst) {
     if (inst->GetOpcode() == IR::Opcode::GetUserData) {
-        return static_cast<SharpLocation>(inst->Arg(0).ScalarReg());
+        return ClassifySharpSource(true, static_cast<u32>(inst->Arg(0).ScalarReg()));
     } else {
-        return inst->Flags<u32>();
+        return ClassifySharpSource(false, inst->Flags<u32>());
     }
 }
 
-SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, u32 pc = 0) {
+SharpSource TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, u32 pc = 0) {
     auto sources = FindSharpSources(inst, pc);
     size_t num_sources = sources.size();
     ASSERT(current_parent.cfg_block);
@@ -491,7 +496,76 @@ SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, 
     }
 
     ASSERT_MSG(sources.size() == 1, "Unable to deduce sharp source");
-    return SharpLocationFromSource(sources[0]);
+    return SharpSourceFromInst(sources[0]);
+}
+
+u32 StaticSharpLocation(const SharpSource source, const u32 pc) {
+    ASSERT_MSG(source.kind != SharpSourceKind::Dynamic,
+               "Dynamic sharp is unsupported for this resource pc={:#x}", pc);
+    return source.location;
+}
+
+struct DynamicImageTableMatch {
+    DynamicImageTablePlan plan;
+    IR::Value index;
+};
+
+std::optional<DynamicImageTableMatch> MatchDynamicImageTable(const IR::Inst* image_handle,
+                                                             const bool is_r128,
+                                                             const Profile& profile) {
+    if (image_handle->GetOpcode() != IR::Opcode::ReadConst || image_handle->Flags<u32>() != 0) {
+        return std::nullopt;
+    }
+    const IR::Inst* base = image_handle->Arg(0).InstRecursive();
+    if (base->GetOpcode() != IR::Opcode::CompositeConstructU32x2) {
+        return std::nullopt;
+    }
+    const auto low = SharpSourceFromInst(base->Arg(0).InstRecursive());
+    const auto high = SharpSourceFromInst(base->Arg(1).InstRecursive());
+    if (low.kind != SharpSourceKind::Flattened || high.kind != SharpSourceKind::Flattened ||
+        high.location != low.location + 1) {
+        return std::nullopt;
+    }
+
+    const IR::Inst* dword_offset = image_handle->Arg(1).InstRecursive();
+    if (dword_offset->GetOpcode() != IR::Opcode::ShiftRightLogical32 ||
+        !dword_offset->Arg(1).IsImmediate() || dword_offset->Arg(1).U32() != 2) {
+        return std::nullopt;
+    }
+    const IR::Inst* add = dword_offset->Arg(0).InstRecursive();
+    if (add->GetOpcode() != IR::Opcode::IAdd32) {
+        return std::nullopt;
+    }
+    const IR::Value add_lhs = add->Arg(0);
+    const IR::Value add_rhs = add->Arg(1);
+    const IR::Value byte_offset = add_lhs.IsImmediate() ? add_lhs : add_rhs;
+    const IR::Value scaled_index = add_lhs.IsImmediate() ? add_rhs : add_lhs;
+    if (!byte_offset.IsImmediate()) {
+        return std::nullopt;
+    }
+    const IR::Inst* multiply = scaled_index.InstRecursive();
+    if (multiply->GetOpcode() != IR::Opcode::IMul32) {
+        return std::nullopt;
+    }
+    const IR::Value mul_lhs = multiply->Arg(0);
+    const IR::Value mul_rhs = multiply->Arg(1);
+    const IR::Value byte_stride = mul_lhs.IsImmediate() ? mul_lhs : mul_rhs;
+    const IR::Value index = mul_lhs.IsImmediate() ? mul_rhs : mul_lhs;
+    if (!byte_stride.IsImmediate()) {
+        return std::nullopt;
+    }
+    const auto plan = PlanDynamicImageTable({
+        .base_pointer_location = low.location,
+        .byte_offset = byte_offset.U32(),
+        .byte_stride = byte_stride.U32(),
+        .is_r128 = is_r128,
+        .supports_nonuniform_indexing =
+            profile.supports_sampled_image_array_nonuniform_indexing,
+    });
+    if (!plan) {
+        return std::nullopt;
+    }
+    return DynamicImageTableMatch{.plan = *plan, .index = index};
 }
 
 void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& descriptors,
@@ -523,7 +597,8 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
         // Normal buffer resource.
         IR::Inst* buffer_handle = handle->Arg(0).InstRecursive();
         const auto inst_info = inst.Flags<IR::BufferInstInfo>();
-        const auto sharp_idx = TrackSharp(buffer_handle, block, inst_info.pc);
+        const auto sharp_idx =
+            StaticSharpLocation(TrackSharp(buffer_handle, block, inst_info.pc), inst_info.pc);
         const auto buffer = info.ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
         buffer_binding = descriptors.Add(BufferResource{
             .sharp_idx = sharp_idx,
@@ -547,7 +622,7 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     // Read image sharp.
     const auto inst_info = inst.Flags<IR::TextureInstInfo>();
     const IR::Inst* image_handle = inst.Arg(0).InstRecursive();
-    const auto tsharp = TrackSharp(image_handle, block, inst_info.pc);
+    const auto tsharp_source = TrackSharp(image_handle, block, inst_info.pc);
     const bool is_atomic = IsImageAtomicInstruction(inst);
     const bool is_written = inst.GetOpcode() == IR::Opcode::ImageWrite || is_atomic;
     const bool is_storage =
@@ -556,6 +631,19 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     // need fallback (TODO is this 100% true?)
     const bool needs_mip_storage_fallback =
         inst_info.has_lod && is_written && !profile.supports_image_load_store_lod;
+    std::optional<DynamicImageTableMatch> dynamic_table;
+    if (tsharp_source.kind == SharpSourceKind::Dynamic) {
+        ASSERT_MSG(!is_storage && !is_atomic,
+                   "Dynamic storage image tables are unsupported pc={:#x}",
+                   static_cast<u32>(inst_info.pc));
+        dynamic_table =
+            MatchDynamicImageTable(image_handle, bool(inst_info.is_r128), profile);
+        ASSERT_MSG(dynamic_table.has_value(),
+                   "Unsupported dynamic image descriptor expression pc={:#x}",
+                   static_cast<u32>(inst_info.pc));
+    }
+    const u32 tsharp = dynamic_table ? dynamic_table->plan.base_pointer_location
+                                     : StaticSharpLocation(tsharp_source, inst_info.pc);
     ImageResource image_res = {
         .sharp_idx = tsharp,
         .is_depth = bool(inst_info.is_depth),
@@ -565,9 +653,24 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
         .uses_integer_coordinates = is_storage,
         .queries_dimensions = inst.GetOpcode() == IR::Opcode::ImageQueryDimensions,
         .is_r128 = bool(inst_info.is_r128),
+        .is_dynamic_table = dynamic_table.has_value(),
+        .dynamic_table_count = dynamic_table ? dynamic_table->plan.descriptor_count : 0,
+        .dynamic_table_offset_dw = dynamic_table ? dynamic_table->plan.offset_dw : 0,
+        .dynamic_table_stride_dw = dynamic_table ? dynamic_table->plan.stride_dw : 0,
     };
 
-    auto image = image_res.GetSharp(info);
+    auto image = dynamic_table
+                     ? image_res.GetSharpIfMapped(
+                           info, 0,
+                           [](const VAddr address, void* const destination, const u64 size) {
+                               std::memcpy(destination, reinterpret_cast<const void*>(address),
+                                           size);
+                               return true;
+                           })
+                     : image_res.GetSharp(info);
+    if (dynamic_table) {
+        image_res.dynamic_table_template = image;
+    }
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
 
     if (needs_mip_storage_fallback) {
@@ -658,7 +761,8 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
             // Normal sampler resource.
             const auto& [sampler_handle, disable_aniso] =
                 TryDisableAnisoLod0(sampler->Arg(0).InstRecursive());
-            const auto ssharp = TrackSharp(sampler_handle, block, inst_info.pc);
+            const auto ssharp =
+                StaticSharpLocation(TrackSharp(sampler_handle, block, inst_info.pc), inst_info.pc);
             sampler_binding = descriptors.Add(SamplerResource{
                 .sharp_idx = ssharp,
                 .is_inline_sampler = false,
@@ -667,6 +771,9 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
             });
         }
         inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
+        if (dynamic_table) {
+            inst.SetArg(1, dynamic_table->index);
+        }
     } else {
         inst.SetArg(0, ir.Imm32(image_binding));
     }
@@ -775,11 +882,14 @@ void PatchGlobalDataShareAccess(IR::Block& block, IR::Inst& inst, Info& info,
     }
 }
 
-IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
-                               const AmdGpu::Buffer& buffer, u32 stride) {
+IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst,
+                               const AmdGpu::Buffer& buffer) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
     const auto is_inst_typed = inst_info.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
+    const bool is_mubuf_instruction = !is_inst_typed;
+    const bool is_format_instruction = inst_info.typed;
+    const u32 stride = buffer.GetStride(is_mubuf_instruction, is_format_instruction);
     const auto data_format = is_inst_typed
                                  ? AmdGpu::RemapDataFormat(inst_info.inst_data_fmt.Value())
                                  : buffer.GetDataFmt();
@@ -807,8 +917,6 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         index = ir.IAdd(index, vgpr_index);
     }
     if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.l_stage == LogicalStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
         const IR::U32 thread_id{ir.LaneId()};
         index = ir.IAdd(index, thread_id);
     }
@@ -864,7 +972,7 @@ void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     inst.SetArg(IR::LoadBufferArgs::Address,
-                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
+                CalculateBufferAddress(ir, inst, buffer));
 }
 
 IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR::Value& x,
@@ -884,6 +992,8 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
 void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
                           const ImageResource& image_res, const AmdGpu::Image& image) {
     const auto handle = inst.Arg(0);
+    const IR::U32 dynamic_index =
+        image_res.is_dynamic_table ? IR::U32{inst.Arg(1)} : IR::U32{};
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
 
@@ -943,6 +1053,7 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
+        case AmdGpu::ImageType::Color2DMsaaArray:
             return ir.CompositeConstruct(read(0), read(8));
         case AmdGpu::ImageType::Color3D:
             return ir.CompositeConstruct(read(0), read(8), read(16));
@@ -965,6 +1076,7 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
+        case AmdGpu::ImageType::Color2DMsaaArray:
             // (du/dx, dv/dx), (du/dy, dv/dy)
             addr_reg = addr_reg + 4;
             return {ir.CompositeConstruct(get_addr_reg(addr_reg - 4), get_addr_reg(addr_reg - 3)),
@@ -1020,7 +1132,8 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
         case AmdGpu::ImageType::Color2DMsaa:  // x, y
             addr_reg = addr_reg + 2;
             return ir.CompositeConstruct(get_coord(addr_reg - 2, 0), get_coord(addr_reg - 1, 1));
-        case AmdGpu::ImageType::Color2DArray: // x, y, slice
+        case AmdGpu::ImageType::Color2DArray:     // x, y, slice
+        case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice
             addr_reg = addr_reg + 3;
             // Note we can use FixCubeCoords with fallthrough cases since it checks for image type.
             return FixCubeCoords(ir, image, get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
@@ -1062,8 +1175,14 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             return ir.ImageSampleDrefImplicitLod(handle, coords, dref, bias, offset, inst_info);
         }
         if (explicit_lod) {
+            if (image_res.is_dynamic_table) {
+                return ir.ImageSampleExplicitLodDynamic(handle, dynamic_index, coords, lod, offset,
+                                                        inst_info);
+            }
             return ir.ImageSampleExplicitLod(handle, coords, lod, offset, inst_info);
         }
+        ASSERT_MSG(!image_res.is_dynamic_table,
+                   "Dynamic image tables currently require explicit LOD");
         return ir.ImageSampleImplicitLod(handle, coords, bias, offset, inst_info);
     }();
 
@@ -1105,27 +1224,46 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
             return {ir.CompositeConstruct(body->Arg(0), body->Arg(1)), body->Arg(2)};
         case AmdGpu::ImageType::Color2DMsaa: // x, y. (sample is passed on different argument)
         {
-            auto skip_lod = false;
-            if (inst_info.has_lod) {
-                const auto mipid = body->Arg(2);
-                if (mipid.IsImmediate() && mipid.U32() == 0) {
-                    // if image_x_mip refers to a MSAA image, and mipid is 0, it is safe to be
-                    // skipped and fragid is taken from the next arg
-                    LOG_WARNING(Render_Recompiler, "Encountered a _mip instruction with MSAA "
-                                                   "image, and mipid is 0, skipping LoD");
-                    inst_info.has_lod.Assign(false);
-                    skip_lod = true;
-                } else {
-                    UNREACHABLE_MSG(
-                        "Encountered a _mip instruction with MSAA image, and mipid is non-zero");
-                }
+            const auto mipid = inst_info.has_lod ? body->Arg(2) : IR::Value{};
+            const bool is_zero_mip =
+                inst_info.has_lod && mipid.IsImmediate() && mipid.U32() == 0;
+            const auto plan = PlanMsaaImageArgument(2, 4, inst_info.has_lod, is_zero_mip);
+            if (!plan.valid) {
+                UNREACHABLE_MSG(
+                    "Encountered a _mip instruction with MSAA image, and mipid is non-zero");
             }
-            return {ir.CompositeConstruct(body->Arg(0), body->Arg(1)), body->Arg(skip_lod ? 3 : 2)};
+            if (plan.drop_zero_mip) {
+                // MSAA images do not have mip levels. Some games still encode an explicit zero
+                // mip before the sample id; discard it and consume the following argument.
+                LOG_WARNING(Render_Recompiler, "Encountered a _mip instruction with MSAA "
+                                               "image, and mipid is 0, skipping LoD");
+                inst_info.has_lod.Assign(false);
+            }
+            const auto sample =
+                plan.force_zero_sample ? ir.Imm32(0U) : body->Arg(plan.sample_argument);
+            return {ir.CompositeConstruct(body->Arg(0), body->Arg(1)), sample};
         }
-        case AmdGpu::ImageType::Color2DArray:     // x, y, slice, [lod]
-        case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice. (sample is passed on different
-                                                  // argument)
-        case AmdGpu::ImageType::Color3D:          // x, y, z, [lod]
+        case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice, [lod], sample
+        {
+            const auto mipid = inst_info.has_lod ? body->Arg(3) : IR::Value{};
+            const bool is_zero_mip =
+                inst_info.has_lod && mipid.IsImmediate() && mipid.U32() == 0;
+            const auto plan = PlanMsaaImageArgument(3, 4, inst_info.has_lod, is_zero_mip);
+            if (!plan.valid) {
+                UNREACHABLE_MSG(
+                    "Encountered a _mip instruction with MSAA array image, and mipid is non-zero");
+            }
+            if (plan.drop_zero_mip) {
+                LOG_WARNING(Render_Recompiler, "Encountered a _mip instruction with MSAA array "
+                                               "image, and mipid is 0, skipping LoD");
+                inst_info.has_lod.Assign(false);
+            }
+            const auto sample =
+                plan.force_zero_sample ? ir.Imm32(0U) : body->Arg(plan.sample_argument);
+            return {ir.CompositeConstruct(body->Arg(0), body->Arg(1), body->Arg(2)), sample};
+        }
+        case AmdGpu::ImageType::Color2DArray: // x, y, slice, [lod]
+        case AmdGpu::ImageType::Color3D:      // x, y, z, [lod]
             return {ir.CompositeConstruct(body->Arg(0), body->Arg(1), body->Arg(2)), body->Arg(3)};
         default:
             UNREACHABLE_MSG("Unknown image type {}", view_type);

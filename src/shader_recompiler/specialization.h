@@ -30,12 +30,16 @@ struct BufferSpecialization {
     u32 num_format : 4;
     u32 index_stride : 2;
     u32 element_size : 2;
+    u32 add_tid_enable : 1;
+    u32 add_tid_stride_hi : 4;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
 
     bool operator==(const BufferSpecialization& other) const {
         return stride == other.stride && is_storage == other.is_storage &&
                is_formatted == other.is_formatted && swizzle_enable == other.swizzle_enable &&
+               add_tid_enable == other.add_tid_enable &&
+               (!add_tid_enable || add_tid_stride_hi == other.add_tid_stride_hi) &&
                (!is_formatted ||
                 (data_format == other.data_format && num_format == other.num_format &&
                  dst_select == other.dst_select && num_conversion == other.num_conversion)) &&
@@ -121,6 +125,10 @@ struct StageSpecialization {
                          spec.is_storage = desc.IsStorage(sharp);
                          spec.is_formatted = desc.is_formatted;
                          spec.swizzle_enable = sharp.swizzle_enable;
+                         spec.add_tid_enable = sharp.add_tid_enable;
+                         if (spec.add_tid_enable) {
+                             spec.add_tid_stride_hi = sharp.data_format;
+                         }
                          if (spec.is_formatted) {
                              spec.data_format = static_cast<u32>(sharp.GetDataFmt());
                              spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
@@ -190,6 +198,33 @@ struct StageSpecialization {
         }
     }
 
+    template <typename IsUsable>
+    void CanonicalizeUnusableGuestBuffers(IsUsable&& is_usable) {
+        for (u32 index = 0; index < info->buffers.size(); ++index) {
+            const auto& desc = info->buffers[index];
+            if (desc.IsSpecial()) {
+                continue;
+            }
+            if (!is_usable(index, desc)) {
+                // Runtime binding uses a null descriptor for this resource. Its unusable guest
+                // words must not create shader permutations or reach format specialization.
+                bitset.reset(index);
+                buffers[index] = {};
+            }
+        }
+    }
+
+    template <typename IsUsable>
+    void CanonicalizeUnusableGuestImages(IsUsable&& is_usable) {
+        const u32 binding_offset = static_cast<u32>(info->buffers.size());
+        for (u32 index = 0; index < info->images.size(); ++index) {
+            if (!is_usable(index, info->images[index])) {
+                bitset.reset(binding_offset + index);
+                images[index] = {};
+            }
+        }
+    }
+
     [[nodiscard]] bool Valid() const {
         return info != nullptr;
     }
@@ -219,7 +254,13 @@ struct StageSpecialization {
         // bindings still may change as they depend on previously processed FS. The check below
         // handles this case and prevents generation of redundant permutations. This is also safe
         // for other types of shaders with no bindings.
-        if (bitset.none() && other.bitset.none()) {
+        const bool has_no_bindings = info->buffers.empty() && info->images.empty() &&
+                                     info->fmasks.empty() && info->samplers.empty();
+        const bool other_has_no_bindings = other.info->buffers.empty() &&
+                                           other.info->images.empty() &&
+                                           other.info->fmasks.empty() &&
+                                           other.info->samplers.empty();
+        if (bitset.none() && other.bitset.none() && has_no_bindings && other_has_no_bindings) {
             return true;
         }
 
@@ -227,16 +268,29 @@ struct StageSpecialization {
             return false;
         }
 
+        if (buffers.size() != other.buffers.size() || images.size() != other.images.size() ||
+            samplers.size() != other.samplers.size()) {
+            return false;
+        }
+
         u32 binding{};
         for (u32 i = 0; i < buffers.size(); i++) {
-            if (other.bitset[binding++] && buffers[i] != other.buffers[i]) {
+            if (bitset[binding] != other.bitset[binding]) {
                 return false;
             }
+            if (bitset[binding] && buffers[i] != other.buffers[i]) {
+                return false;
+            }
+            binding++;
         }
         for (u32 i = 0; i < images.size(); i++) {
-            if (other.bitset[binding++] && images[i] != other.images[i]) {
+            if (bitset[binding] != other.bitset[binding]) {
                 return false;
             }
+            if (bitset[binding] && images[i] != other.images[i]) {
+                return false;
+            }
+            binding++;
         }
 
         for (u32 i = 0; i < samplers.size(); i++) {

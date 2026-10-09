@@ -388,6 +388,11 @@ public:
                                                const F32& lod, const Value& offset,
                                                TextureInstInfo info);
 
+    [[nodiscard]] Value ImageSampleExplicitLodDynamic(const Value& handle,
+                                                      const U32& descriptor_index,
+                                                      const Value& body, const F32& lod,
+                                                      const Value& offset, TextureInstInfo info);
+
     [[nodiscard]] Value ImageSampleDrefImplicitLod(const Value& handle, const Value& body,
                                                    const F32& dref, const F32& bias,
                                                    const Value& offset, TextureInstInfo info);

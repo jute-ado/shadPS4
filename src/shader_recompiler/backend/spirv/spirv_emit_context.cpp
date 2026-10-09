@@ -308,9 +308,14 @@ void EmitContext::DefineWorkgroupIndex() {
 
 void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
-        subgroup_local_invocation_id = DefineVariable(
-            U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (l_stage == LogicalStage::Compute && profile.subgroup_size < 64) {
+            local_invocation_index = DefineVariable(
+                U32[1], spv::BuiltIn::LocalInvocationIndex, spv::StorageClass::Input);
+        } else {
+            subgroup_local_invocation_id = DefineVariable(
+                U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -948,6 +953,8 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
         return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, false, sampled, format);
     case AmdGpu::ImageType::Color2DMsaa:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, true, sampled, format);
+    case AmdGpu::ImageType::Color2DMsaaArray:
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, true, sampled, format);
     case AmdGpu::ImageType::Color3D:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim3D, false, false, false, sampled, format);
     default:
@@ -969,14 +976,15 @@ void EmitContext::DefineImagesAndSamplers() {
 
         const u32 num_bindings = image_desc.NumBindings(info);
         Id pointee_type = image_type;
-        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
+        if (image_desc.is_dynamic_table ||
+            mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
             pointee_type = TypeArray(pointee_type, ConstU32(num_bindings));
         }
 
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding.unified);
-        binding.unified += num_bindings;
+        binding.unified++;
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         // TODO better naming for resources (flattened sharp_idx is not informative)
         Name(id, fmt::format("{}_{}{}", stage, "img", image_desc.sharp_idx));
@@ -988,6 +996,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .is_dynamic_table = image_desc.is_dynamic_table,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
@@ -1169,12 +1178,22 @@ Id EmitContext::DefineGetBdaPointer() {
     Name(func, "get_bda_pointer");
     AddLabel();
 
+    const auto valid_page_label{OpLabel()};
+    const auto invalid_page_label{OpLabel()};
     const auto fault_label{OpLabel()};
     const auto available_label{OpLabel()};
+    const auto lookup_merge_label{OpLabel()};
     const auto merge_label{OpLabel()};
 
-    // Get page BDA
+    // Keep the page index at guest-address width until it has been proven to fit the table.
     const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
+    const auto page_limit{Constant(U64, VideoCore::BufferCache::CACHING_NUMPAGES)};
+    const auto is_valid_page{OpULessThan(U1[1], page, page_limit)};
+    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(is_valid_page, valid_page_label, invalid_page_label);
+
+    // Get page BDA.
+    AddLabel(valid_page_label);
     const auto page32{OpUConvert(U32[1], page)};
     const auto& bda_buffer{buffers[bda_pagetable_index]};
     const auto [bda_buffer_id, bda_pointer_type] = bda_buffer.Alias(PointerType::U64);
@@ -1183,10 +1202,10 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Check if page is GPU cached
     const auto is_fault{OpIEqual(U1[1], bda, u64_zero_value)};
-    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpSelectionMerge(lookup_merge_label, spv::SelectionControlMask::MaskNone);
     OpBranchConditional(is_fault, fault_label, available_label);
 
-    // First time acces, mark as fault
+    // First access: atomically mark the missing page for the CPU fault processor.
     AddLabel(fault_label);
     const auto& fault_buffer{buffers[fault_buffer_index]};
     const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
@@ -1195,23 +1214,31 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
     const auto fault_ptr{
         OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, page_div32)};
-    const auto fault_value{OpLoad(U32[1], fault_ptr)};
-    const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
-    OpStore(fault_ptr, fault_value_masked);
+    const auto fault_scope{ConstU32(static_cast<u32>(spv::Scope::Device))};
+    OpAtomicOr(U32[1], fault_ptr, fault_scope, u32_zero_value, page_mask);
 
     // Return null pointer
     const auto fallback_result{u64_zero_value};
-    OpBranch(merge_label);
+    OpBranch(lookup_merge_label);
 
     // Value is available, compute address
     AddLabel(available_label);
     const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
     const auto addr{OpIAdd(U64, bda, offset_in_bda)};
+    OpBranch(lookup_merge_label);
+
+    AddLabel(lookup_merge_label);
+    const auto valid_result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    OpBranch(merge_label);
+
+    // An address outside the guest address space has no representable page or fault bit.
+    AddLabel(invalid_page_label);
     OpBranch(merge_label);
 
     // Merge
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    const auto result{
+        OpPhi(U64, valid_result, lookup_merge_label, u64_zero_value, invalid_page_label)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;
