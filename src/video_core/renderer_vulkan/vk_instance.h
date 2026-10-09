@@ -67,6 +67,10 @@ public:
         return queue_family_index;
     }
 
+    bool SupportsDiagnosticCheckpoints() const {
+        return diagnostic_checkpoints;
+    }
+
     vk::Queue GetGraphicsQueue() const {
         return graphics_queue;
     }
@@ -231,6 +235,12 @@ public:
     /// Returns true if the subgroup size can be set to match guest subgroup size
     bool IsSubgroupSize64Supported() const {
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
+    }
+
+    /// Returns true when shaders can request subgroup-uniform control flow semantics.
+    bool IsShaderSubgroupUniformControlFlowSupported() const {
+        return subgroup_uniform_control_flow &&
+               subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow;
     }
 
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
@@ -442,6 +452,9 @@ public:
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
+    /// Logs driver-provided details for a lost Vulkan device when supported.
+    void LogDeviceFault() const;
+
     /// Returns the total memory budget available to the device.
     [[nodiscard]] u64 GetTotalMemoryBudget() const {
         return total_memory_budget;
@@ -481,6 +494,8 @@ private:
     vk::PhysicalDeviceVulkan13Features vk13_features;
     vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT dynamic_state_3_features;
     vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT shader_atomic_float2_features;
+    vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR
+        subgroup_uniform_control_flow_features;
     vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
         workgroup_memory_explicit_layout_features;
     vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT image_2d_view_of_3d_features;
@@ -514,13 +529,16 @@ private:
     bool amd_mixed_attachment_samples{};
     bool shader_atomic_float{};
     bool shader_atomic_float2{};
+    bool subgroup_uniform_control_flow{};
     bool workgroup_memory_explicit_layout{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool supports_memory_budget{};
+    bool diagnostic_checkpoints{};
     bool supports_block_texel_view{};
+    bool supports_device_fault{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
 };
