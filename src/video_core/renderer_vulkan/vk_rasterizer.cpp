@@ -9,6 +9,7 @@
 #include "video_core/renderer_vulkan/image_descriptor.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -340,7 +341,21 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::Dispatch, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchComplete, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
 
     ResetBindings();
 }
@@ -372,7 +387,23 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchIndirect, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {address + offset, size, 0, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    if (instance.SupportsDiagnosticCheckpoints()) {
+        const auto& cs = pipeline->GetStage(Shader::LogicalStage::Compute);
+        const auto marker = RecordCommandCheckpoint(
+            CommandCheckpointType::DispatchIndirectComplete, cs.pgm_hash,
+            {cs.pgm_hash, 0, 0, 0, 0, 0},
+            {address + offset, size, 0, 0, 0, 0});
+        cmdbuf.setCheckpointNV(marker);
+    }
 
     ResetBindings();
 }
