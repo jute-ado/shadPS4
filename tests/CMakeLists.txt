@@ -13,6 +13,20 @@ set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
+    shadps4_test_lab_ipc_adapter_test
+)
+
+add_executable(shadps4_test_lab_ipc_adapter_test
+    test_test_lab_ipc_adapter.cpp
+)
+target_include_directories(shadps4_test_lab_ipc_adapter_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}
+)
+target_compile_features(shadps4_test_lab_ipc_adapter_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_test_lab_ipc_adapter_test PRIVATE
+    SDL3::SDL3
+    spdlog::spdlog
 )
 
 set(SETTINGS_TEST_SOURCES
