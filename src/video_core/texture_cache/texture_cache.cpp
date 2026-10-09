@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_alias_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -21,6 +22,16 @@ namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
+
+static void LogImageAliasAuthority(const ImageInfo& requested, const Image& cached) {
+    LOG_ERROR(Render_Vulkan,
+              "Image alias authority address={:#x} old_flags={:#x} image_only_write_seen={} "
+              "old_pow2={} new_pow2={} old_bank={} new_bank={} old_alt={} new_alt={}",
+              requested.guest_address, static_cast<u32>(cached.flags),
+              cached.write_history.MayHaveImageOnlyContents(), bool(cached.info.props.is_pow2),
+              bool(requested.props.is_pow2), cached.info.bank_swizzle, requested.bank_swizzle,
+              cached.info.alt_tile, requested.alt_tile);
+}
 
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            AmdGpu::Liverpool* liverpool_, BufferCache& buffer_cache_,
@@ -77,6 +88,16 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
                               image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
+    std::optional<Core::DeferredBackingWrite> publication;
+    if (!sync) {
+        const std::array destinations{
+            Core::ReadbackWriteRange{image.info.guest_address, download_size, 0}};
+        publication =
+            Core::Memory::Instance()->CaptureReadbackDestinations(destinations, download_size);
+        if (!publication) {
+            return;
+        }
+    }
     const auto [download, offset] = download_buffer.Map(download_size);
     download_buffer.Commit();
     const vk::BufferImageCopy image_download = {
@@ -106,9 +127,8 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                                                   download, download_size);
     } else {
         scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), download,
-                                                          download_size);
+            [token = std::move(*publication), download, download_size] {
+                Core::Memory::Instance()->TryPublishReadback(token, {download, download_size});
             });
     }
 }
@@ -252,6 +272,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
                                 vk::AccessFlagBits2::eShaderRead, {});
             new_image.Transit(vk::ImageLayout::eDepthAttachmentOptimal,
                               vk::AccessFlagBits2::eDepthStencilAttachmentWrite, {});
+            new_image.write_history.RecordImageOnlyWrite();
             blit_helper.ReinterpretColorAsMsDepth(
                 new_info.size.width, new_info.size.height, new_info.num_samples,
                 cache_image.info.pixel_format, new_info.pixel_format, cache_image.GetImage(),
@@ -279,6 +300,54 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
+        const auto alias = PlanSameBaseImageAlias(
+            image_info, cache_image.info, cache_image.write_history,
+            True(cache_image.flags & ImageFlagBits::GpuModified), safe_to_delete);
+        switch (alias) {
+        case ImageAliasDisposition::Compatible:
+            if (cache_image.info.resources.CanContain(image_info.resources)) {
+                return {merged_image_id ? merged_image_id : cache_image_id, -1, -1};
+            }
+            return {ExpandImage(image_info, cache_image_id), -1, -1};
+        case ImageAliasDisposition::RetireClean:
+        case ImageAliasDisposition::Separate:
+        {
+            // Only emitted for independent clean-alias creation, at most sixteen times on the
+            // GPU-owner thread and only when the existing Render.Vulkan Debug logger is enabled.
+            static thread_local ImageAliasDebugBudget debug_budget;
+            const auto logger = Common::Log::ALL_LOGGERS.find(Common::Log::Class::Render_Vulkan);
+            const bool debug_enabled = logger != Common::Log::ALL_LOGGERS.end() &&
+                                       logger->second &&
+                                       logger->second->should_log(spdlog::level::debug);
+            if (debug_budget.Take(debug_enabled)) {
+                LOG_DEBUG(Render_Vulkan,
+                          "Independent clean image alias address={:#x} old_pitch={} new_pitch={} "
+                          "old_size={:#x} new_size={:#x} old_flags={:#x} "
+                          "image_only_write_seen={} retire={}",
+                          image_info.guest_address, cache_image.info.pitch, image_info.pitch,
+                          cache_image.info.guest_size, image_info.guest_size,
+                          static_cast<u32>(cache_image.flags),
+                          cache_image.write_history.MayHaveImageOnlyContents(),
+                          alias == ImageAliasDisposition::RetireClean);
+            }
+            if (alias == ImageAliasDisposition::RetireClean) {
+                FreeImage(cache_image_id);
+            }
+            return {merged_image_id, -1, -1};
+        }
+        case ImageAliasDisposition::Unsupported:
+            LogImageAliasAuthority(image_info, cache_image);
+            UNREACHABLE_MSG("Unsupported equal-base image layout alias at {:#x}; "
+                            "image-only contents cannot be discarded",
+                            image_info.guest_address);
+        case ImageAliasDisposition::InvalidLayout:
+            LogImageAliasAuthority(image_info, cache_image);
+            UNREACHABLE_MSG("Invalid equal-base image physical mip layout at {:#x}",
+                            image_info.guest_address);
+        case ImageAliasDisposition::ExistingRules:
+            break;
+        }
+
         const u32 lhs_block_size = image_info.num_bits * image_info.num_samples;
         const u32 rhs_block_size = cache_image.info.num_bits * cache_image.info.num_samples;
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
@@ -330,6 +399,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {merged_image_id, -1, -1};
         }
 
+        LogImageAliasAuthority(image_info, cache_image);
         // Enhanced debug logging for unreachable case
         // Calculate expected size based on format and dimensions
         u64 expected_size =
@@ -520,6 +590,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (cache_image.info.guest_address != info.guest_address) {
             continue;
         }
+        const auto alias = PlanSameBaseImageAlias(
+            info, cache_image.info, cache_image.write_history,
+            True(cache_image.flags & ImageFlagBits::GpuModified), false);
+        // Another cached image may exactly match. Unsupported aliases only fail if overlap
+        // resolution is actually needed; candidate iteration order must not hide that match.
+        if (!CanConsiderPerfectImageAlias(alias)) {
+            continue;
+        }
         if (cache_image.info.guest_size != info.guest_size) {
             continue;
         }
@@ -621,6 +699,7 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
+        image.write_history.RecordImageOnlyWrite();
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
@@ -634,6 +713,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    image.write_history.RecordImageOnlyWrite();
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
@@ -660,6 +740,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    image.write_history.RecordImageOnlyWrite();
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
     UpdateImage(image_id);

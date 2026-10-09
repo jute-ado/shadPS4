@@ -4,6 +4,7 @@
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/texture_rejection_diagnostics.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
@@ -114,6 +115,32 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VkImage unsafe_image{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_info, &unsafe_image,
                                      &allocation, nullptr);
+    if (result != VK_SUCCESS && TextureRejectionDiagnosticsEnabled()) {
+        // The failed allocation has no valid image handle to query for memory requirements.
+        LOG_ERROR(Render_Vulkan,
+                  "Image allocation diagnostic result={} extent={}x{}x{} mips={} layers={} "
+                  "format={} type={} tiling={} samples={} usage={:#x} flags={:#x}; "
+                  "host_allocation_bytes=unavailable",
+                  vk::to_string(vk::Result{result}), image_ci.extent.width,
+                  image_ci.extent.height, image_ci.extent.depth, image_ci.mipLevels,
+                  image_ci.arrayLayers, vk::to_string(image_ci.format),
+                  vk::to_string(image_ci.imageType), vk::to_string(image_ci.tiling),
+                  static_cast<u32>(image_ci.samples), static_cast<VkImageUsageFlags>(image_ci.usage),
+                  static_cast<VkImageCreateFlags>(image_ci.flags));
+        if (const auto* context = ScopedTextureDiagnosticContext::Current()) {
+            const auto& words = context->words;
+            LOG_ERROR(Render_Vulkan,
+                      "Image allocation T# context stage={} logical_stage={} shader={:#x} "
+                      "sharp={} entry={} count={} stride_dw={} r128={} reasons={:#x} "
+                      "base_byte_logical_gpu_mapped={} raw=[{:08x} {:08x} {:08x} {:08x} "
+                      "{:08x} {:08x} {:08x} {:08x}]",
+                      context->stage, context->logical_stage, context->shader_hash,
+                      context->sharp_index, context->array_index, context->descriptor_count,
+                      context->descriptor_stride_dw, context->is_r128, context->reasons,
+                      context->base_byte_logical_gpu_mapped, words[0], words[1], words[2], words[3],
+                      words[4], words[5], words[6], words[7]);
+        }
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
@@ -344,6 +371,7 @@ bool Image::SetHostScale(const u32 scale_percent, const u32 display_width,
     add_blit(vk::ImageAspectFlagBits::eColor);
     add_blit(vk::ImageAspectFlagBits::eDepth);
     add_blit(vk::ImageAspectFlagBits::eStencil);
+    write_history.RecordImageOnlyWrite();
     cmdbuf.blitImage(old_backing->image.image, vk::ImageLayout::eTransferSrcOptimal,
                      new_backing->image.image, vk::ImageLayout::eTransferDstOptimal, blits,
                      vk::Filter::eNearest);
@@ -654,6 +682,7 @@ static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const I
 }
 
 void Image::CopyImage(Image& src_image) {
+    write_history.RecordImageOnlyWrite();
     if (GetHostScale() != src_image.GetHostScale()) {
         ASSERT(SetHostScale(100));
         ASSERT(src_image.SetHostScale(100));
@@ -760,6 +789,7 @@ void Image::CopyImage(Image& src_image) {
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
 }
 void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
+    write_history.RecordImageOnlyWrite();
     ASSERT(SetHostScale(100));
     ASSERT(src_image.SetHostScale(100));
     const auto& src_info = src_image.info;
@@ -842,6 +872,7 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
 }
 
 void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
+    write_history.RecordImageOnlyWrite();
     ASSERT(SetHostScale(100));
     ASSERT(src_image.SetHostScale(100));
     const auto& src_info = src_image.info;
@@ -890,6 +921,7 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
 
 void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
                     const VideoCore::SubresourceRange& mrt1_range) {
+    write_history.RecordImageOnlyWrite();
     if (GetHostScale() != src_image.GetHostScale()) {
         ASSERT(SetHostScale(100));
         ASSERT(src_image.SetHostScale(100));
@@ -951,6 +983,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
 }
 
 void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range) {
+    write_history.RecordImageOnlyWrite();
     const vk::ImageSubresourceRange vk_range = {
         .aspectMask = vk::ImageAspectFlagBits::eColor,
         .baseMipLevel = range.base.level,
@@ -996,6 +1029,7 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     }
 
     if (copy_backing) {
+        write_history.RecordImageOnlyWrite();
         scheduler->EndRendering();
         ASSERT(info.resources.levels == 1 && info.resources.layers == 1);
 

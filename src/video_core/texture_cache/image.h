@@ -10,6 +10,7 @@
 #include "video_core/texture_cache/host_image_scaling.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
+#include "video_core/texture_cache/image_write_history.h"
 
 #include <deque>
 #include <optional>
@@ -163,6 +164,7 @@ public:
     vk::ImageAspectFlags aspect_mask = vk::ImageAspectFlagBits::eColor;
     vk::SampleCountFlags supported_samples = vk::SampleCountFlagBits::e1;
     ImageFlagBits flags = ImageFlagBits::Dirty;
+    ImageWriteHistory write_history;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     ImageId depth_id{};
