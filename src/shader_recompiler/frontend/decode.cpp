@@ -412,6 +412,18 @@ void GcnDecodeContext::decodeInstruction64(InstEncoding encoding, GcnCodeSlice& 
 }
 
 void GcnDecodeContext::decodeLiteralConstant(InstEncoding encoding, GcnCodeSlice& code) {
+    // On GCN 1.1, SMRD uses OFFSET=0xff with IMM=0 to encode a trailing
+    // literal dword offset. This is distinct from an ordinary SGPR byte
+    // offset and must extend the instruction before the next dword is
+    // decoded as a separate instruction.
+    if (encoding == InstEncoding::SMRD && !m_instruction.control.smrd.imm &&
+        m_instruction.control.smrd.offset == static_cast<u32>(OperandField::LiteralConst)) {
+        m_instruction.src[1].field = OperandField::LiteralConst;
+        m_instruction.src[1].code = code.readu32();
+        m_instruction.length += sizeof(u32);
+        return;
+    }
+
     if (HasAdditionalLiteral(encoding, m_instruction.opcode)) {
         u32 encoding_op = mapEncodingOp(encoding, m_instruction.opcode);
         InstFormat instFormat = InstructionFormat(encoding, encoding_op);

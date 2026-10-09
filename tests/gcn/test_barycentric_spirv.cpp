@@ -106,6 +106,66 @@ bool HasBuiltIn(const std::vector<u32>& spirv, spv::BuiltIn builtin) {
     return false;
 }
 
+bool HasDecorationOnBuiltIn(const std::vector<u32>& spirv, spv::BuiltIn builtin,
+                            spv::Decoration decoration) {
+    std::optional<u32> target;
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        if (static_cast<spv::Op>(word & 0xffff) == spv::Op::OpDecorate && words >= 4 &&
+            spirv[offset + 2] == static_cast<u32>(spv::DecorationBuiltIn) &&
+            spirv[offset + 3] == static_cast<u32>(builtin)) {
+            target = spirv[offset + 1];
+            break;
+        }
+        offset += words;
+    }
+    if (!target) {
+        return false;
+    }
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 words = word >> 16;
+        if (static_cast<spv::Op>(word & 0xffff) == spv::Op::OpDecorate && words >= 3 &&
+            spirv[offset + 1] == *target && spirv[offset + 2] == static_cast<u32>(decoration)) {
+            return true;
+        }
+        offset += words;
+    }
+    return false;
+}
+
+std::vector<u32> EmitLaneIdShader(Stage stage, LogicalStage logical_stage) {
+    Info info{};
+    info.stage = stage;
+    info.l_stage = logical_stage;
+    info.uses_lane_id = true;
+
+    IR::Program program{info};
+    Pools pools{};
+    IR::Block* block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Block;
+    program.syntax_list.back().data.block = block;
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Return;
+    program.post_order_blocks = IR::PostOrder(program.syntax_list.front());
+
+    IR::IREmitter ir{*block};
+    ir.Prologue();
+    ir.Reference(ir.LaneId());
+    ir.Epilogue();
+
+    Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    RuntimeInfo runtime_info{};
+    runtime_info.Initialize(stage);
+    Backend::Bindings bindings{};
+    return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+}
+
 bool PushConstantAccessChainsUsePushConstantPointers(const std::vector<u32>& spirv) {
     const u32 id_bound = spirv.at(3);
     std::vector<std::optional<spv::StorageClass>> pointer_storage(id_bound);
@@ -174,6 +234,22 @@ TEST(FragmentCoordinateSpirv, PushDataAccessUsesPushConstantPointer) {
     const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::FragCoord);
 
     EXPECT_TRUE(PushConstantAccessChainsUsePushConstantPointers(spirv));
+}
+
+TEST(SubgroupLaneIdSpirv, ComputeInputHasNoFragmentInterpolationDecoration) {
+    const auto spirv = EmitLaneIdShader(Stage::Compute, LogicalStage::Compute);
+
+    EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
+    EXPECT_FALSE(
+        HasDecorationOnBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId, spv::DecorationFlat));
+}
+
+TEST(SubgroupLaneIdSpirv, FragmentInputPreservesFlatInterpolationDecoration) {
+    const auto spirv = EmitLaneIdShader(Stage::Fragment, LogicalStage::Fragment);
+
+    EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
+    EXPECT_TRUE(
+        HasDecorationOnBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId, spv::DecorationFlat));
 }
 
 } // namespace
