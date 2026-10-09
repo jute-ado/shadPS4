@@ -10,6 +10,7 @@
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/buffer_cache/buffer_access_state.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -47,14 +48,22 @@ struct UniqueBuffer {
     UniqueBuffer(const UniqueBuffer&) = delete;
     UniqueBuffer& operator=(const UniqueBuffer&) = delete;
 
-    UniqueBuffer(UniqueBuffer&& other)
-        : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+    UniqueBuffer(UniqueBuffer&& other) noexcept
+        : device{std::exchange(other.device, vk::Device{})},
+          allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
-          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)} {}
-    UniqueBuffer& operator=(UniqueBuffer&& other) {
+          buffer{std::exchange(other.buffer, VK_NULL_HANDLE)},
+          bda_addr{std::exchange(other.bda_addr, 0)} {}
+    UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        Reset();
+        device = std::exchange(other.device, vk::Device{});
         buffer = std::exchange(other.buffer, VK_NULL_HANDLE);
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+        bda_addr = std::exchange(other.bda_addr, 0);
         return *this;
     }
 
@@ -67,9 +76,12 @@ struct UniqueBuffer {
 
     vk::Device device;
     VmaAllocator allocator;
-    VmaAllocation allocation;
+    VmaAllocation allocation{};
     vk::Buffer buffer{};
     vk::DeviceAddress bda_addr = 0;
+
+private:
+    void Reset() noexcept;
 };
 
 class Buffer {
@@ -126,29 +138,19 @@ public:
     }
 
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
-                                                       vk::PipelineStageFlagBits2 dst_stage,
-                                                       u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
-            return {};
-        }
-
-        DEBUG_ASSERT(offset < size_bytes);
-
-        const auto barrier = vk::BufferMemoryBarrier2{
-            .srcStageMask = stage,
-            .srcAccessMask = access_mask,
-            .dstStageMask = dst_stage,
-            .dstAccessMask = dst_acess_mask,
-            .buffer = buffer.buffer,
-            .offset = offset,
-            .size = size_bytes - offset,
-        };
-        access_mask = dst_acess_mask;
-        stage = dst_stage;
+                                                     vk::PipelineStageFlagBits2 dst_stage,
+                                                     u32 offset = 0) {
+        BufferAccessState state{access_mask, stage};
+        auto barrier = state.GetBarrier(buffer.buffer, size_bytes, dst_acess_mask, dst_stage, offset);
+        access_mask = state.access_mask;
+        stage = state.stage;
         return barrier;
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
+
+    /// Makes device writes to a mapped range visible to the host.
+    [[nodiscard]] bool InvalidateMappedRange(u64 offset, u64 size) const;
 
 public:
     VAddr cpu_addr = 0;
