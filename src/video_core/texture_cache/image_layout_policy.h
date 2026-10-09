@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <tuple>
 
 #include "video_core/amdgpu/tiling.h"
 
@@ -11,6 +12,7 @@ namespace VideoCore {
 
 enum class ImageArrayLayoutKind {
     Invalid,
+    LinearGeneral,
     Linear,
     MicroTiled,
     MacroTiled,
@@ -26,6 +28,14 @@ struct ImageMipGeometry {
     u32 height;
 };
 
+// ARRAY_LINEAR_GENERAL is an unaligned linear surface. Unlike ARRAY_LINEAR_ALIGNED, its
+// encoded pitch and slice size are not rounded up to hardware alignment boundaries.
+[[nodiscard]] constexpr std::tuple<u32, u32, size_t> ImageSizeLinearGeneral(
+    const u32 pitch, const u32 height, const u32 bpp, const u32 num_samples) {
+    const size_t log_sz = size_t{pitch} * height * num_samples;
+    return {pitch, height, (log_sz * bpp + 7) / 8};
+}
+
 [[nodiscard]] constexpr ImageMipGeometry ToBlockCompressedMipGeometry(const u32 pitch,
                                                                        const u32 height) {
     return {.pitch = (pitch + 3) / 4, .height = (height + 3) / 4};
@@ -40,6 +50,8 @@ struct ImageMipGeometry {
     const AmdGpu::ArrayMode mode) {
     using enum AmdGpu::ArrayMode;
     switch (mode) {
+    case ArrayLinearGeneral:
+        return {.kind = ImageArrayLayoutKind::LinearGeneral, .thickness = 1};
     case ArrayLinearAligned:
         return {.kind = ImageArrayLayoutKind::Linear, .thickness = 1};
     case Array1DTiledThin1:
@@ -61,8 +73,6 @@ struct ImageMipGeometry {
     case Array2DTiledXThick:
     case Array3DTiledXThick:
         return {.kind = ImageArrayLayoutKind::MacroTiled, .thickness = 8};
-    case ArrayLinearGeneral:
-        return {};
     }
     return {};
 }

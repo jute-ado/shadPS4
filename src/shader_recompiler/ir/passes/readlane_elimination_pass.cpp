@@ -9,6 +9,11 @@ namespace Shader::Optimization {
 
 static IR::Inst* SearchChain(IR::Inst* inst, u32 lane) {
     while (inst->GetOpcode() == IR::Opcode::WriteLane) {
+        // A dynamic selector may write the lane being queried.  Its value cannot be proven from
+        // this pass, so stop conservatively instead of reading an instruction pointer as U32.
+        if (!inst->Arg(2).IsImmediate()) {
+            return nullptr;
+        }
         if (inst->Arg(2).U32() == lane) {
             // We found a possible write lane source, return it.
             return inst;
@@ -30,7 +35,11 @@ static bool IsPossibleToEliminate(IR::Inst* inst, u32 lane) {
         queue.pop();
 
         // If it's a WriteLane search for possible candidates
-        if (inst = SearchChain(inst, lane); inst->GetOpcode() == IR::Opcode::WriteLane) {
+        inst = SearchChain(inst, lane);
+        if (inst == nullptr) {
+            return false;
+        }
+        if (inst->GetOpcode() == IR::Opcode::WriteLane) {
             // We found a possible write lane source, stop looking here.
             continue;
         }
@@ -59,7 +68,11 @@ using PhiMap = std::unordered_map<IR::Inst*, IR::Inst*>;
 
 static IR::Value GetRealValue(PhiMap& phi_map, IR::Inst* inst, u32 lane) {
     // If this is a WriteLane op search the chain for a possible candidate.
-    if (inst = SearchChain(inst, lane); inst->GetOpcode() == IR::Opcode::WriteLane) {
+    inst = SearchChain(inst, lane);
+    if (inst == nullptr) {
+        UNREACHABLE_MSG("dynamic WriteLane reached GetRealValue after eliminability check");
+    }
+    if (inst->GetOpcode() == IR::Opcode::WriteLane) {
         return inst->Arg(1);
     }
 
@@ -114,13 +127,15 @@ void ReadLaneEliminationPass(IR::Program& program) {
             IR::Inst* prod = inst.Arg(0).InstRecursive();
 
             // Check simple case of no control flow and phis
-            if (prod = SearchChain(prod, lane); prod->GetOpcode() == IR::Opcode::WriteLane) {
+            prod = SearchChain(prod, lane);
+            if (prod != nullptr && prod->GetOpcode() == IR::Opcode::WriteLane) {
                 inst.ReplaceUsesWith(prod->Arg(1));
                 continue;
             }
 
             // Traverse the phi tree to see if it's possible to eliminate
-            if (prod->GetOpcode() == IR::Opcode::Phi && IsPossibleToEliminate(prod, lane)) {
+            if (prod != nullptr && prod->GetOpcode() == IR::Opcode::Phi &&
+                IsPossibleToEliminate(prod, lane)) {
                 inst.ReplaceUsesWith(GetRealValue(phi_map, prod, lane));
                 phi_map.clear();
             }
