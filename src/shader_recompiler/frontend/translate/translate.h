@@ -61,7 +61,8 @@ static constexpr size_t MaxInterpVgpr = 16;
 
 class Translator {
 public:
-    explicit Translator(Info& info, const RuntimeInfo& runtime_info, const Profile& profile);
+    explicit Translator(Info& info, const RuntimeInfo& runtime_info, const Profile& profile,
+                        SrtMemoryReader reader = {});
 
     void Translate(IR::Block* block, u32 pc, std::span<const GcnInst> inst_list);
     void TranslateInstruction(const GcnInst& inst);
@@ -386,6 +387,7 @@ private:
     Info& info;
     const RuntimeInfo& runtime_info;
     const Profile& profile;
+    SrtMemoryReader guest_memory_reader;
     u32 next_vgpr_num;
     std::unordered_map<u32, IR::VectorReg> vgpr_map;
     std::array<IR::Attribute, MaxInterpVgpr> vgpr_to_interp{};
