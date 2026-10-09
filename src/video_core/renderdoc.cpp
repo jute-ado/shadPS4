@@ -125,22 +125,42 @@ void TriggerCapture() {
     (void)capture_state.Trigger();
 }
 
-bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    if (!rdoc_api || !capture_state.ConsumePresentedFrameTrigger()) {
-        return false;
+GuestSubmissionCapture BeginGuestWorkCapture(void* vulkan_instance, const bool has_guest_work) {
+    RenderDocCaptureApi api{};
+    if (rdoc_api) {
+        api = {
+            .context = vulkan_instance,
+            .is_capturing = [](void*) { return rdoc_api->IsFrameCapturing() != 0; },
+            .start =
+                [](void* instance) {
+                    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(instance);
+                    // An app-controlled Vulkan capture need not contain a window presentation.
+                    rdoc_api->StartFrameCapture(device, nullptr);
+                },
+            .end =
+                [](void* instance) {
+                    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(instance);
+                    return rdoc_api->EndFrameCapture(device, nullptr) != 0;
+                },
+            .discard =
+                [](void* instance) {
+                    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(instance);
+                    return rdoc_api->DiscardFrameCapture(device, nullptr) != 0;
+                },
+        };
     }
-
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    rdoc_api->StartFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc capture started for presented frame");
-    return true;
+    return GuestSubmissionCapture{capture_state, api, has_guest_work};
 }
 
-void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle) {
-    ASSERT(rdoc_api);
-    const auto device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(vulkan_instance);
-    const u32 result = rdoc_api->EndFrameCapture(device, window_handle);
-    LOG_WARNING(Common, "RenderDoc presented-frame capture end result: {}", result);
+void CompleteGuestWorkCapture(GuestSubmissionCapture& capture, const bool submission_succeeded,
+                              bool& pending_guest_work) {
+    const auto result = capture.CompleteSubmission(submission_succeeded, pending_guest_work);
+    if (result == GuestCaptureResult::Captured) {
+        LOG_WARNING(Common, "RenderDoc guest-work submission capture completed");
+    } else if (result != GuestCaptureResult::NotRequested) {
+        LOG_ERROR(Common, "RenderDoc guest-work capture failed: reason={}, cleanup_failed={}",
+                  static_cast<u32>(result), capture.CleanupFailed());
+    }
 }
 
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix) {

@@ -6,13 +6,115 @@
 #include "core/libraries/libs.h"
 #include "core/libraries/ngs2/ngs2.h"
 #include "core/libraries/ngs2/ngs2_custom.h"
+#include "core/libraries/ngs2/ngs2_diagnostics.h"
 #include "core/libraries/ngs2/ngs2_error.h"
 #include "core/libraries/ngs2/ngs2_geom.h"
 #include "core/libraries/ngs2/ngs2_impl.h"
+#include "core/libraries/ngs2/ngs2_mastering.h"
 #include "core/libraries/ngs2/ngs2_pan.h"
 #include "core/libraries/ngs2/ngs2_report.h"
+#include "core/libraries/ngs2/ngs2_sampler.h"
+#include "core/libraries/ngs2/ngs2_submixer.h"
+#include "core/memory.h"
 
 namespace Libraries::Ngs2 {
+
+namespace {
+// The diagnostic reads only these established scalar ABI prefixes; no pointer payload is followed.
+static_assert(sizeof(OrbisNgs2VoiceParamHeader) == 8 &&
+              offsetof(OrbisNgs2VoiceParamHeader, next) == 2 &&
+              offsetof(OrbisNgs2VoiceParamHeader, id) == 4);
+static_assert(sizeof(OrbisNgs2SystemOption) == 64 &&
+              offsetof(OrbisNgs2SystemOption, flags) == 24 &&
+              offsetof(OrbisNgs2SystemOption, sampleRate) == 36);
+static_assert(sizeof(OrbisNgs2RackOption) == 128 &&
+              offsetof(OrbisNgs2RackOption, flags) == 24 &&
+              offsetof(OrbisNgs2RackOption, maxPorts) == 44);
+static_assert(sizeof(OrbisNgs2RenderBufferInfo) == 24 &&
+              offsetof(OrbisNgs2RenderBufferInfo, bufferSize) == 8 &&
+              offsetof(OrbisNgs2RenderBufferInfo, waveformType) == 16 &&
+              offsetof(OrbisNgs2RenderBufferInfo, numChannels) == 20);
+static_assert(sizeof(OrbisNgs2SamplerVoiceSetupParam) == 40 &&
+              offsetof(OrbisNgs2SamplerVoiceSetupParam, format) == 8 &&
+              offsetof(OrbisNgs2SamplerVoiceSetupParam, flags) == 32);
+static_assert(sizeof(OrbisNgs2SamplerVoiceWaveformBlocksParam) == 32 &&
+              offsetof(OrbisNgs2SamplerVoiceWaveformBlocksParam, flags) == 16 &&
+              offsetof(OrbisNgs2SamplerVoiceWaveformBlocksParam, numBlocks) == 20);
+static_assert(sizeof(OrbisNgs2SubmixerVoiceSetupParam) == 16 &&
+              sizeof(OrbisNgs2MasteringVoiceSetupParam) == 16 &&
+              sizeof(OrbisNgs2MasteringVoiceOutputParam) == 16);
+static_assert(sizeof(OrbisNgs2VoiceMatrixLevelsParam) == 24 &&
+              sizeof(OrbisNgs2VoicePortVolumeParam) == 16 &&
+              sizeof(OrbisNgs2VoicePortMatrixParam) == 16 &&
+              sizeof(OrbisNgs2VoicePortDelayParam) == 16 &&
+              sizeof(OrbisNgs2VoicePatchParam) == 24 &&
+              offsetof(OrbisNgs2VoicePatchParam, destHandle) == 16 &&
+              sizeof(OrbisNgs2VoiceEventParam) == 12);
+
+Diagnostic::Observer diagnostic_observer;
+
+template <typename Observe>
+void TraceNgs2(Observe&& observe) noexcept {
+    try {
+        const auto logger = Common::Log::ALL_LOGGERS.find(Common::Log::Class::Lib_Ngs2_Diagnostics);
+        if (logger == Common::Log::ALL_LOGGERS.end() || !logger->second ||
+            !logger->second->should_log(spdlog::level::debug)) {
+            return;
+        }
+        auto& space = Core::Memory::Instance()->GetAddressSpace();
+        const std::array reservations{
+            Diagnostic::AddressRange{space.SystemManagedVirtualBase(), space.SystemManagedVirtualSize()},
+            Diagnostic::AddressRange{space.SystemReservedVirtualBase(), space.SystemReservedVirtualSize()},
+            Diagnostic::AddressRange{space.UserVirtualBase(), space.UserVirtualSize()},
+        };
+        const Diagnostic::Reader reader = [&](u64 address, std::span<u8> output) {
+            return Diagnostic::ReadMetadata(address, output, reservations);
+        };
+        const Diagnostic::Sink sink = [](const Diagnostic::Record& record) {
+            std::string fields;
+            for (u32 i = 0; i < record.count; ++i) {
+                const auto& field = record.fields[i];
+                if (field.is_signed) {
+                    fmt::format_to(std::back_inserter(fields), " {}={}", field.name,
+                                   static_cast<s64>(field.value));
+                } else {
+                    fmt::format_to(std::back_inserter(fields), " {}={}", field.name, field.value);
+                }
+            }
+            LOG_DEBUG(Lib_Ngs2_Diagnostics, "ngs2_metadata kind={} status={} index={}{}",
+                      Diagnostic::Name(record.kind), Diagnostic::Name(record.status), record.index,
+                      fields);
+        };
+        observe(diagnostic_observer, reader, sink);
+    } catch (...) {
+        // Logging/allocation failures must not change guest audio API results.
+    }
+}
+
+void TraceNgs2System(const OrbisNgs2SystemOption* option, bool allocator) noexcept {
+    TraceNgs2([&](auto& observer, const auto& reader, const auto& sink) {
+        observer.System(true, reinterpret_cast<u64>(option), allocator, reader, sink);
+    });
+}
+void TraceNgs2Rack(u32 rack_id, const OrbisNgs2RackOption* option, bool allocator) noexcept {
+    TraceNgs2([&](auto& observer, const auto& reader, const auto& sink) {
+        observer.Rack(true, rack_id, reinterpret_cast<u64>(option), allocator, reader, sink);
+    });
+}
+void TraceNgs2Control(const OrbisNgs2VoiceParamHeader* list) noexcept {
+    TraceNgs2([&](auto& observer, const auto& reader, const auto& sink) {
+        observer.Control(true, reinterpret_cast<u64>(list), reader, sink);
+    });
+}
+void TraceNgs2Render(const OrbisNgs2RenderBufferInfo* buffers, u32 count) noexcept {
+    TraceNgs2([&](auto& observer, const auto& reader, const auto& sink) {
+        observer.Render(true, reinterpret_cast<u64>(buffers), count, reader, sink);
+    });
+}
+void TraceNgs2State(u64 size) noexcept {
+    TraceNgs2([&](auto& observer, const auto&, const auto& sink) { observer.State(true, size, sink); });
+}
+} // namespace
 
 // Ngs2
 
@@ -51,6 +153,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreate(OrbisNgs2Handle systemHandle, u32 rackId,
                                    const OrbisNgs2RackOption* option,
                                    const OrbisNgs2ContextBufferInfo* bufferInfo,
                                    OrbisNgs2Handle* outHandle) {
+    TraceNgs2Rack(rackId, option, false);
     LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
     if (!systemHandle) {
         LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
@@ -63,6 +166,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u3
                                                 const OrbisNgs2RackOption* option,
                                                 const OrbisNgs2BufferAllocator* allocator,
                                                 OrbisNgs2Handle* outHandle) {
+    TraceNgs2Rack(rackId, option, true);
     LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
     if (!systemHandle) {
         LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
@@ -118,6 +222,7 @@ s32 PS4_SYSV_ABI sceNgs2RackUnlock(OrbisNgs2Handle rackHandle) {
 s32 PS4_SYSV_ABI sceNgs2SystemCreate(const OrbisNgs2SystemOption* option,
                                      const OrbisNgs2ContextBufferInfo* bufferInfo,
                                      OrbisNgs2Handle* outHandle) {
+    TraceNgs2System(option, false);
     s32 result;
     OrbisNgs2ContextBufferInfo localInfo;
     if (!bufferInfo || !outHandle) {
@@ -151,6 +256,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemCreate(const OrbisNgs2SystemOption* option,
 s32 PS4_SYSV_ABI sceNgs2SystemCreateWithAllocator(const OrbisNgs2SystemOption* option,
                                                   const OrbisNgs2BufferAllocator* allocator,
                                                   OrbisNgs2Handle* outHandle) {
+    TraceNgs2System(option, true);
     s32 result;
     if (allocator && allocator->allocHandler != 0) {
         OrbisNgs2BufferAllocHandler hostAlloc = allocator->allocHandler;
@@ -249,6 +355,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemQueryBufferSize(const OrbisNgs2SystemOption* optio
 s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
                                      const OrbisNgs2RenderBufferInfo* aBufferInfo,
                                      u32 numBufferInfo) {
+    TraceNgs2Render(aBufferInfo, numBufferInfo);
     LOG_DEBUG(Lib_Ngs2, "(STUBBED) numBufferInfo = {}", numBufferInfo);
     if (!systemHandle) {
         LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
@@ -309,6 +416,7 @@ s32 PS4_SYSV_ABI sceNgs2SystemUnlock(OrbisNgs2Handle systemHandle) {
 
 s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
                                      const OrbisNgs2VoiceParamHeader* paramList) {
+    TraceNgs2Control(paramList);
     LOG_ERROR(Lib_Ngs2, "called");
     return ORBIS_OK;
 }
@@ -333,6 +441,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetPortInfo(OrbisNgs2Handle voiceHandle, u32 port,
 
 s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2VoiceState* outState,
                                       size_t stateSize) {
+    TraceNgs2State(stateSize);
     LOG_ERROR(Lib_Ngs2, "stateSize = {}", stateSize);
     return ORBIS_OK;
 }

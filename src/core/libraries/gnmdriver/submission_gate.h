@@ -56,6 +56,16 @@ public:
         boundary_completed.wait(lock, [this, boundary] { return completed_boundary >= boundary; });
     }
 
+    /// Waits for every boundary published before this call, then retains submission admission.
+    /// The caller may safely complete a GPU-visible address-space change before releasing the
+    /// returned guard; no later guest submission can overtake that change.
+    [[nodiscard]] Guard WaitForBoundaryAndEnter() {
+        Guard lock{mutex};
+        const auto boundary = current_boundary;
+        boundary_completed.wait(lock, [this, boundary] { return completed_boundary >= boundary; });
+        return lock;
+    }
+
 private:
     void CompleteBoundary(std::uint64_t boundary) {
         {

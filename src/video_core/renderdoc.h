@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include "video_core/renderdoc_submission_capture.h"
 #include "video_core/screenshot_request_queue.h"
 
 namespace VideoCore {
@@ -12,14 +13,16 @@ namespace VideoCore {
 /// Loads renderdoc dynamic library module.
 void LoadRenderDoc(bool allow_offline_loading = true);
 
-/// Schedules a capture for the next frame presented by the emulator.
+/// Schedules a capture of the next submission containing recorded guest draw/dispatch work.
 void TriggerCapture();
 
-/// Begins a scheduled capture immediately before presenting a frame.
-[[nodiscard]] bool BeginNextPresentedFrameCapture(void* vulkan_instance, void* window_handle);
+/// Begins a requested capture immediately before the owner submits recorded guest work.
+[[nodiscard]] GuestSubmissionCapture BeginGuestWorkCapture(void* vulkan_instance,
+                                                           bool has_guest_work);
 
-/// Ends a capture begun by BeginNextPresentedFrameCapture.
-void EndPresentedFrameCapture(void* vulkan_instance, void* window_handle);
+/// Reports the actual queue result before any fatal check; failed submissions are discarded.
+void CompleteGuestWorkCapture(GuestSubmissionCapture& capture, bool submission_succeeded,
+                              bool& pending_guest_work);
 
 /// Sets output directory for captures
 void SetOutputDir(const std::filesystem::path& path, const std::string& prefix);
