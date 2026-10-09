@@ -33,6 +33,7 @@ using BufferId = Common::SlotId;
 class TextureCache;
 class MemoryTracker;
 class PageManager;
+struct DiagnosticReadbackState;
 
 class BufferCache {
 public:
@@ -114,6 +115,9 @@ public:
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
                            boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
+
+    /// Captures one bounded diagnostic readback of the selected vertex range when enabled.
+    void CaptureDiagnosticVertexBufferReadback();
 
     /// Bind host index buffer for the current draw.
     void BindIndexBuffer(u32 index_offset,
@@ -216,6 +220,7 @@ private:
     Buffer bda_pagetable_buffer;
     CpuPageWriteTracker cpu_page_write_tracker;
     DmaDirtyRangeTracker dma_dirty_ranges;
+    std::shared_ptr<DiagnosticReadbackState> diagnostic_readback_state;
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
     u64 trigger_gc_memory = 0;

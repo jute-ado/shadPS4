@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -14,6 +16,27 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace Core {
+
+namespace {
+
+u64 DiagnosticMemoryTraceBoundary(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? 0 : std::strtoull(value, nullptr, 0);
+}
+
+bool ShouldTraceDiagnosticMemory(VAddr address, u64 size) {
+    static const u64 begin = DiagnosticMemoryTraceBoundary("SHADPS4_DIAGNOSTIC_MEMORY_BEGIN");
+    static const u64 end = DiagnosticMemoryTraceBoundary("SHADPS4_DIAGNOSTIC_MEMORY_END");
+    return begin < end && address < end && size > begin - std::min(begin, address);
+}
+
+s64 DiagnosticMemoryWallMilliseconds() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+} // namespace
 
 MemoryManager::MemoryManager() {
     LOG_INFO(Kernel_Vmm, "Virtual memory space initialized with regions:");
@@ -152,8 +175,17 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     }
 }
 
-bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size,
+                                    std::source_location source) {
     const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    const u64 requested_size = size;
+    if (ShouldTraceDiagnosticMemory(virtual_addr, requested_size)) {
+        LOG_INFO(Kernel_Vmm,
+                 "MemoryBackingTrace wall_ms={} guest={:#x} size={} source_file={} "
+                 "source_line={} source_function={}",
+                 DiagnosticMemoryWallMilliseconds(), virtual_addr, requested_size,
+                 source.file_name(), source.line(), source.function_name());
+    }
     std::shared_lock lk{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -454,6 +486,13 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
     if (IsValidGpuMapping(mapped_addr, size)) {
         rasterizer->MapMemory(mapped_addr, size);
     }
+    if (ShouldTraceDiagnosticMemory(mapped_addr, size)) {
+        LOG_INFO(Kernel_Vmm,
+                 "MemoryMappingTrace wall_ms={} operation=pool_commit guest={:#x} size={} "
+                 "protection={:#x} memory_type={}",
+                 DiagnosticMemoryWallMilliseconds(), mapped_addr, size, static_cast<u32>(prot),
+                 mtype);
+    }
 
     return ORBIS_OK;
 }
@@ -677,6 +716,13 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
             rasterizer->MapMemory(mapped_addr, size);
         }
     }
+    if (ShouldTraceDiagnosticMemory(mapped_addr, size)) {
+        LOG_INFO(Kernel_Vmm,
+                 "MemoryMappingTrace wall_ms={} operation=map guest={:#x} size={} physical={:#x} "
+                 "protection={:#x} vma_type={}",
+                 DiagnosticMemoryWallMilliseconds(), mapped_addr, size, phys_addr,
+                 static_cast<u32>(prot), static_cast<u32>(type));
+    }
 
     return ORBIS_OK;
 }
@@ -859,6 +905,10 @@ s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
     // Align address and size appropriately
     virtual_addr = Common::AlignDown(virtual_addr, 16_KB);
     size = Common::AlignUp(size, 16_KB);
+    if (ShouldTraceDiagnosticMemory(virtual_addr, size)) {
+        LOG_INFO(Kernel_Vmm, "MemoryMappingTrace wall_ms={} operation=unmap guest={:#x} size={}",
+                 DiagnosticMemoryWallMilliseconds(), virtual_addr, size);
+    }
     if (!IsValidMapping(virtual_addr, size)) {
         LOG_ERROR(Kernel_Vmm, "addr = {:#x} size = {:#x} is outside the memory map", virtual_addr,
                   size);
