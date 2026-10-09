@@ -280,8 +280,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_fp64_round_to_zero = bool(vk12_props.shaderRoundingModeRTZFloat64),
         .support_fp16_signed_zero_inf_nan_preserve =
             bool(vk12_props.shaderSignedZeroInfNanPreserveFloat16),
-        .support_fp32_signed_zero_inf_nan_preserve =
-            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat32),
+        .support_fp32_signed_zero_inf_nan_preserve = false,
         .support_fp64_signed_zero_inf_nan_preserve =
             bool(vk12_props.shaderSignedZeroInfNanPreserveFloat64),
         .supports_image_load_store_lod = instance_.IsImageLoadStoreLodSupported(),
