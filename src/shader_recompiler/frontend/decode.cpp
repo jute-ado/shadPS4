@@ -108,6 +108,33 @@ bool IsVop3BEncoding(Opcode opcode) {
            opcode == Opcode::V_MAD_U64_U32 || opcode == Opcode::V_MAD_I64_I32;
 }
 
+u32 GetEncodingLength(InstEncoding encoding) {
+    switch (encoding) {
+    case InstEncoding::SOP1:
+    case InstEncoding::SOPP:
+    case InstEncoding::SOPC:
+    case InstEncoding::SOPK:
+    case InstEncoding::SOP2:
+    case InstEncoding::VOP1:
+    case InstEncoding::VOPC:
+    case InstEncoding::VOP2:
+    case InstEncoding::SMRD:
+    case InstEncoding::VINTRP:
+        return sizeof(u32);
+
+    case InstEncoding::VOP3:
+    case InstEncoding::VOP3P:
+    case InstEncoding::MUBUF:
+    case InstEncoding::MTBUF:
+    case InstEncoding::MIMG:
+    case InstEncoding::DS:
+    case InstEncoding::EXP:
+        return sizeof(u64);
+    default:
+        return 0;
+    }
+}
+
 GcnInst GcnDecodeContext::decodeInstruction(GcnCodeSlice& code) {
     const uint32_t token = code.at(0);
 
@@ -141,35 +168,7 @@ GcnInst GcnDecodeContext::decodeInstruction(GcnCodeSlice& code) {
 }
 
 uint32_t GcnDecodeContext::getEncodingLength(InstEncoding encoding) {
-    uint32_t instLength = 0;
-
-    switch (encoding) {
-    case InstEncoding::SOP1:
-    case InstEncoding::SOPP:
-    case InstEncoding::SOPC:
-    case InstEncoding::SOPK:
-    case InstEncoding::SOP2:
-    case InstEncoding::VOP1:
-    case InstEncoding::VOPC:
-    case InstEncoding::VOP2:
-    case InstEncoding::SMRD:
-    case InstEncoding::VINTRP:
-        instLength = sizeof(uint32_t);
-        break;
-
-    case InstEncoding::VOP3:
-    case InstEncoding::VOP3P:
-    case InstEncoding::MUBUF:
-    case InstEncoding::MTBUF:
-    case InstEncoding::MIMG:
-    case InstEncoding::DS:
-    case InstEncoding::EXP:
-        instLength = sizeof(uint64_t);
-        break;
-    default:
-        break;
-    }
-    return instLength;
+    return GetEncodingLength(encoding);
 }
 
 uint32_t GcnDecodeContext::getOpMapOffset(InstEncoding encoding) {

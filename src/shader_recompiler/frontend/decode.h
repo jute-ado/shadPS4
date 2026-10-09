@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstring>
+
 #include "shader_recompiler/frontend/instruction.h"
 
 namespace Shader::Gcn {
@@ -31,15 +34,28 @@ public:
     ~GcnCodeSlice() = default;
 
     u32 at(u32 id) const {
+        if (id >= remaining()) {
+            m_valid = false;
+            return 0;
+        }
         return m_ptr[id];
     }
 
     u32 readu32() {
+        if (!canReadWords(1)) {
+            m_valid = false;
+            return 0;
+        }
         return *(m_ptr++);
     }
 
     u64 readu64() {
-        const u64 value = *(u64*)m_ptr;
+        if (!canReadWords(2)) {
+            m_valid = false;
+            return 0;
+        }
+        u64 value{};
+        std::memcpy(&value, m_ptr, sizeof(value));
         m_ptr += 2;
         return value;
     }
@@ -48,9 +64,22 @@ public:
         return m_ptr == m_end;
     }
 
+    [[nodiscard]] size_t remaining() const {
+        return static_cast<size_t>(m_end - m_ptr);
+    }
+
+    [[nodiscard]] bool canReadWords(size_t count) const {
+        return count <= remaining();
+    }
+
+    [[nodiscard]] bool valid() const {
+        return m_valid;
+    }
+
 private:
     const u32* m_ptr{};
     const u32* m_end{};
+    mutable bool m_valid{true};
 };
 
 class GcnDecodeContext {

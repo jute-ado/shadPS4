@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <vector>
 #include "common/types.h"
 #include "shader_recompiler/info.h"
@@ -13,6 +14,11 @@ struct Archive;
 }
 
 namespace Shader::Gcn {
+
+// A fetch shader is normally only a few hundred bytes. This bound is used by
+// the legacy pointer-based entry point; new callers should pass a validated
+// span to ParseFetchShader below.
+inline constexpr size_t MaxFetchShaderWords = 1024;
 
 struct VertexAttribute {
     enum InstanceIdType : u8 {
@@ -71,5 +77,9 @@ struct FetchShaderData {
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info);
+
+/// Parse only bytes owned by the caller. The span must cover the mapped fetch program.
+std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info,
+                                                std::span<const u32> code);
 
 } // namespace Shader::Gcn
