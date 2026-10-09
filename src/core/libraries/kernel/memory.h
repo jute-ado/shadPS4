@@ -21,6 +21,19 @@ class SymbolsResolver;
 
 namespace Libraries::Kernel {
 
+// PRT apertures live in a fixed guest-address window.  Keep the range check in a constexpr
+// helper so callers cannot accidentally reintroduce an overflowing `address + size` check.
+constexpr VAddr PRT_AREA_START_ADDR = 0x1000000000;
+constexpr u64 PRT_AREA_SIZE = 0xec00000000;
+constexpr VAddr PRT_AREA_END_ADDR = PRT_AREA_START_ADDR + PRT_AREA_SIZE;
+
+constexpr bool IsValidPrtApertureRange(VAddr address, u64 size) noexcept {
+    if (address < PRT_AREA_START_ADDR || address > PRT_AREA_END_ADDR) {
+        return false;
+    }
+    return size <= PRT_AREA_END_ADDR - address;
+}
+
 enum MemoryTypes : u32 {
     ORBIS_KERNEL_WB_ONION = 0,  // write - back mode (Onion bus)
     ORBIS_KERNEL_WC_GARLIC = 3, // write - combining mode (Garlic bus)

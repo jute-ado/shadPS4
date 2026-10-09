@@ -772,13 +772,31 @@ static auto surface_format_table = []() constexpr {
     return result;
 }();
 
-vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
-    vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    bool found =
-        result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
-    ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
-               static_cast<u32>(num_format));
+std::optional<vk::Format> TrySurfaceFormat(AmdGpu::DataFormat data_format,
+                                           AmdGpu::NumberFormat num_format) {
+    // The descriptor fields are guest-controlled. Keep the table index guarded
+    // here so diagnostics/admission can probe arbitrary enum values without
+    // tripping the debug assertion in GetSurfaceFormatTableIndex().
+    if (u32(data_format) >= (1U << amd_gpu_data_format_bit_size) ||
+        u32(num_format) >= (1U << amd_gpu_number_format_bit_size)) {
+        return std::nullopt;
+    }
+    const vk::Format result =
+        surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
+    if (result == vk::Format::eUndefined) {
+        return std::nullopt;
+    }
     return result;
+}
+
+vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
+    if (data_format == AmdGpu::DataFormat::FormatInvalid) {
+        return vk::Format::eUndefined;
+    }
+    const auto result = TrySurfaceFormat(data_format, num_format);
+    ASSERT_MSG(result.has_value(), "Unknown data_format={} and num_format={}",
+               static_cast<u32>(data_format), static_cast<u32>(num_format));
+    return *result;
 }
 
 static constexpr DepthFormatInfo CreateDepthFormatInfo(
@@ -1166,7 +1184,8 @@ vk::SampleCountFlagBits RawNumSamples(u32 num_samples) {
     case 16:
         return vk::SampleCountFlagBits::e16;
     default:
-        UNREACHABLE();
+        LOG_ERROR(Render_Vulkan, "Invalid sample count {}; falling back to one sample", num_samples);
+        return vk::SampleCountFlagBits::e1;
     }
 }
 

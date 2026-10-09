@@ -5,10 +5,7 @@
 
 #include "common/assert.h"
 #include "common/types.h"
-
-namespace AmdGpu {
-enum class TileMode : u32;
-}
+#include "video_core/amdgpu/tiling.h"
 
 namespace VideoCore {
 
@@ -289,11 +286,27 @@ constexpr std::array macro_tile_extents_alt{
 constexpr std::pair micro_tile_extent{8u, 8u};
 constexpr auto hw_pipe_interleave = 256u;
 
+// Rotated GFX8 modes use the same bank geometry as their corresponding P8
+// non-rotated modes. Rotation changes the micro-tile ordering, not the macro
+// tile dimensions. Keep the extent tables indexed by the canonical rows: the
+// tables intentionally contain rows 0..26, while modes 28 and 29 are valid
+// rotated encodings outside that range.
+constexpr u32 GetMacroTileExtentRow(AmdGpu::TileMode tile_mode) {
+    switch (tile_mode) {
+    case AmdGpu::TileMode::Rotated2DThin:
+        return static_cast<u32>(AmdGpu::TileMode::Thin2DThin);
+    case AmdGpu::TileMode::RotatedThinPrt:
+        return static_cast<u32>(AmdGpu::TileMode::ThinThinPrt);
+    default:
+        return static_cast<u32>(tile_mode);
+    }
+}
+
 constexpr std::pair<u32, u32> GetMacroTileExtents(AmdGpu::TileMode tile_mode, u32 bpp,
                                                   u32 num_samples, bool alt) {
     ASSERT(num_samples <= 8);
     const auto samples_log = static_cast<u32>(std::log2(num_samples));
-    const auto row = u32(tile_mode) * 5;
+    const auto row = GetMacroTileExtentRow(tile_mode) * 5;
     const auto column = std::bit_width(bpp) - 4; // bpps are 8, 16, 32, 64, 128
     return (alt ? macro_tile_extents_alt : macro_tile_extents)[samples_log][row + column];
 }
@@ -303,11 +316,11 @@ constexpr std::tuple<u32, u32, size_t> ImageSizeLinearAligned(u32 pitch, u32 hei
     const auto pitch_align = std::max(8u, 64u / ((bpp + 7) / 8));
     auto pitch_aligned = (pitch + pitch_align - 1) & ~(pitch_align - 1);
     const auto height_aligned = height;
-    size_t log_sz = pitch_aligned * height_aligned * num_samples;
+    size_t log_sz = size_t{pitch_aligned} * height_aligned * num_samples;
     const auto slice_align = std::max(64u, 256u / ((bpp + 7) / 8));
     while (log_sz % slice_align) {
         pitch_aligned += pitch_align;
-        log_sz = pitch_aligned * height_aligned * num_samples;
+        log_sz = size_t{pitch_aligned} * height_aligned * num_samples;
     }
     return {pitch_aligned, height_aligned, (log_sz * bpp + 7) / 8};
 }
@@ -317,10 +330,10 @@ constexpr std::tuple<u32, u32, size_t> ImageSizeMicroTiled(u32 pitch, u32 height
     const auto& [pitch_align, height_align] = micro_tile_extent;
     auto pitch_aligned = (pitch + pitch_align - 1) & ~(pitch_align - 1);
     const auto height_aligned = (height + height_align - 1) & ~(height_align - 1);
-    size_t log_sz = (pitch_aligned * height_aligned * bpp * num_samples + 7) / 8;
+    size_t log_sz = (size_t{pitch_aligned} * height_aligned * bpp * num_samples + 7) / 8;
     while ((log_sz * thickness) % 256) {
         pitch_aligned += pitch_align;
-        log_sz = (pitch_aligned * height_aligned * bpp * num_samples + 7) / 8;
+        log_sz = (size_t{pitch_aligned} * height_aligned * bpp * num_samples + 7) / 8;
     }
     return {pitch_aligned, height_aligned, log_sz};
 }
@@ -344,7 +357,7 @@ constexpr std::tuple<u32, u32, size_t> ImageSizeMacroTiled(u32 pitch, u32 height
 
     const auto pitch_aligned = (pitch + pitch_align - 1) & ~(pitch_align - 1);
     const auto height_aligned = (height + height_align - 1) & ~(height_align - 1);
-    const auto log_sz = pitch_aligned * height_aligned * num_samples;
+    const auto log_sz = size_t{pitch_aligned} * height_aligned * num_samples;
     return {pitch_aligned, height_aligned, (log_sz * bpp + 7) / 8};
 }
 

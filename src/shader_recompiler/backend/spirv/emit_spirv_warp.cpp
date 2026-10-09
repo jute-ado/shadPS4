@@ -26,8 +26,15 @@ Id EmitReadFirstLane(EmitContext& ctx, Id value) {
     return ctx.OpGroupNonUniformBroadcastFirst(ctx.U32[1], SubgroupScope(ctx), value);
 }
 
-Id EmitReadLane(EmitContext& ctx, Id value, Id lane) {
-    return ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, lane);
+Id EmitReadLane(EmitContext& ctx, IR::Inst* inst, Id value, Id lane) {
+    if (inst->Arg(1).IsImmediate()) {
+        return ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, lane);
+    }
+    // DS swizzles and other vector-selected reads can request a different source per lane.
+    // Broadcast requires a dynamically uniform invocation id, whereas Shuffle preserves each
+    // invocation's requested source without making an unsupported uniformity assumption.
+    ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
+    return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, lane);
 }
 
 Id EmitWriteLane(EmitContext& ctx, Id value, Id write_value, u32 lane) {
