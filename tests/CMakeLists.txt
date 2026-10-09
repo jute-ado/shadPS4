@@ -109,7 +109,10 @@ target_include_directories(shadps4_image_descriptor_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_features(shadps4_image_descriptor_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_image_descriptor_test PRIVATE GTest::gtest_main)
+target_link_libraries(shadps4_image_descriptor_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
 list(APPEND TEST_TARGETS shadps4_image_descriptor_test)
 
 set(SETTINGS_TEST_SOURCES

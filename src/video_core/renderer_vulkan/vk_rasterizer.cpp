@@ -759,18 +759,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                                       image.binding.is_target
                                   ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
                                   : vk::ImageLayout::eGeneral,
-                              vk::AccessFlagBits2::eShaderRead |
-                                  (image.info.props.is_depth
-                                       ? vk::AccessFlagBits2::eDepthStencilAttachmentWrite
-                                       : vk::AccessFlagBits2::eColorAttachmentWrite |
-                                             vk::AccessFlagBits2::eColorAttachmentRead),
+                              ImageAccessForBinding(ImageBindingAccess{
+                                  .is_storage = is_storage,
+                                  .is_target = image.binding.is_target,
+                              }),
                               {});
             } else {
                 if (is_storage) {
-                    image.Transit(vk::ImageLayout::eGeneral,
-                                  vk::AccessFlagBits2::eShaderRead |
-                                      vk::AccessFlagBits2::eShaderWrite,
-                                  desc.view_info.range);
+                    image.Transit(
+                        vk::ImageLayout::eGeneral,
+                        ImageAccessForBinding(ImageBindingAccess{
+                            .is_storage = true,
+                            .is_target = false,
+                        }),
+                        desc.view_info.range);
                 } else {
                     const auto new_layout = image.info.props.is_depth
                                                 ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
