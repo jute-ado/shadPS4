@@ -231,6 +231,16 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
                     event.TriggerTimer();
                 } else {
                     event.Trigger(trigger_data);
+                    if (filter == OrbisKernelEvent::Filter::GraphicsCore && ident == 0x40) {
+                        const auto produced = event.GraphicsTriggerTotal();
+                        const auto consumed = event.GraphicsConsumeTotal();
+                        const auto pending = event.PendingTriggerCount();
+                        if ((produced & 0xffu) == 0 || pending > 2) {
+                            LOG_WARNING(Kernel_Event,
+                                        "GfxEop event depth: produced={}, consumed={}, pending={}",
+                                        produced, consumed, pending);
+                        }
+                    }
                 }
                 has_found = true;
             }

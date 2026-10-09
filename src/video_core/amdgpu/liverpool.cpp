@@ -297,6 +297,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                        });
                                                    }),
                         "A patched flip could not be associated with its EOP packet");
+                    if (const auto count =
+                            eop_flip_tracker.ConsumeNonInterruptingFlipAssociations();
+                        count != 0) {
+                        LOG_WARNING(Lib_GnmDriver,
+                                    "Patched flip associated with {} non-interrupting EOP packet(s)",
+                                    count);
+                    }
                     break;
                 }
                 case PM4CmdNop::PayloadType::DebugMarkerPush: {
@@ -772,7 +779,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                auto complete_eop_flip = eop_flip_tracker.BeginEop();
+                auto complete_eop_flip =
+                    eop_flip_tracker.BeginEop(event_eop->int_sel != InterruptSelect::None);
+                if (const auto count =
+                        eop_flip_tracker.ConsumeNonInterruptingFlipAssociations();
+                    count != 0) {
+                    LOG_WARNING(Lib_GnmDriver,
+                                "Patched flip associated with {} non-interrupting EOP packet(s)",
+                                count);
+                }
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                     SubmitEop(

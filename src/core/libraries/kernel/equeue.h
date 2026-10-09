@@ -99,6 +99,7 @@ struct EqueueEvent {
 
     void Trigger(void* data) {
         if (event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+            ++graphics_trigger_total;
             auto triggered_event = event;
             ++triggered_event.fflags;
             triggered_event.data = reinterpret_cast<uintptr_t>(data);
@@ -115,6 +116,9 @@ struct EqueueEvent {
     }
 
     void ConsumeTrigger() {
+        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore) {
+            ++graphics_consume_total;
+        }
         if (pending_events.empty()) {
             Clear();
             return;
@@ -172,12 +176,26 @@ struct EqueueEvent {
         return is_triggered;
     }
 
+    [[nodiscard]] u64 GraphicsTriggerTotal() const {
+        return graphics_trigger_total;
+    }
+
+    [[nodiscard]] u64 GraphicsConsumeTotal() const {
+        return graphics_consume_total;
+    }
+
+    [[nodiscard]] size_t PendingTriggerCount() const {
+        return (is_triggered ? 1u : 0u) + pending_events.size();
+    }
+
     bool operator==(const EqueueEvent& ev) const {
         return ev.event.ident == event.ident && ev.event.filter == event.filter;
     }
 
 private:
     std::deque<OrbisKernelEvent> pending_events;
+    u64 graphics_trigger_total{};
+    u64 graphics_consume_total{};
     bool is_triggered = false;
 };
 

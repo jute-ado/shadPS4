@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -23,8 +24,9 @@ enum class FlipEopPosition {
 
 class EopFlipTracker {
 public:
-    [[nodiscard]] Common::UniqueFunction<void> BeginEop() {
-        auto eop = std::make_shared<Eop>();
+    [[nodiscard]] Common::UniqueFunction<void> BeginEop(bool signals_interrupt = false) {
+        auto eop =
+            std::make_shared<Eop>(signals_interrupt, non_interrupting_flip_associations);
         if (pending_flip) {
             (void)eop->Attach(std::move(pending_flip));
         }
@@ -44,10 +46,20 @@ public:
         return last_eop && last_eop->Attach(std::move(callback));
     }
 
+    [[nodiscard]] u64 ConsumeNonInterruptingFlipAssociations() {
+        return non_interrupting_flip_associations.exchange(0, std::memory_order_relaxed);
+    }
+
 private:
     class Eop {
     public:
+        explicit Eop(bool signals_interrupt_, std::atomic<u64>& association_counter_)
+            : signals_interrupt{signals_interrupt_}, association_counter{association_counter_} {}
+
         [[nodiscard]] bool Attach(Common::UniqueFunction<void>&& callback) {
+            if (!signals_interrupt) {
+                association_counter.fetch_add(1, std::memory_order_relaxed);
+            }
             Common::UniqueFunction<void> ready_callback;
             {
                 std::scoped_lock lock{mutex};
@@ -83,10 +95,13 @@ private:
 
     private:
         std::mutex mutex;
+        bool signals_interrupt{};
+        std::atomic<u64>& association_counter;
         bool completed{};
         Common::UniqueFunction<void> flip;
     };
 
+    std::atomic<u64> non_interrupting_flip_associations{};
     std::shared_ptr<Eop> last_eop;
     Common::UniqueFunction<void> pending_flip;
 };
