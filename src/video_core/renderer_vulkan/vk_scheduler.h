@@ -359,6 +359,11 @@ public:
     /// and increments the scheduler timeline semaphore.
     void Flush();
 
+    /// Registers successful submission on the caller before enabling the worker
+    /// wakeup after this exact GPU tick. Neither callback may wait for the owner.
+    void FlushWithGpuCompletion(Common::UniqueFunction<void, u64>&& on_submitted,
+                                Common::UniqueFunction<void>&& wake_owner);
+
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish();
 
@@ -387,6 +392,11 @@ public:
     /// Returns the current command buffer.
     vk::CommandBuffer CommandBuffer() const {
         return current_cmdbuf;
+    }
+
+    /// Called only after recording a guest draw/dispatch, never for presentation or copies.
+    void MarkGuestWork() noexcept {
+        pending_guest_work = true;
     }
 
     void BindPipeline(PipelineBindPoint point, vk::Pipeline pipeline) {
@@ -428,19 +438,22 @@ public:
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
-        {
-            std::unique_lock lk(priority_pending_ops_mutex);
-            priority_pending_ops.emplace(std::move(func), CurrentTick());
-        }
+        QueuePriorityOperationAtTick(std::move(func), CurrentTick());
         priority_pending_ops_cv.notify_one();
     }
 
     static std::mutex submit_mutex;
 
 private:
+    void QueuePriorityOperationAtTick(Common::UniqueFunction<void>&& func, u64 tick) {
+        std::unique_lock lk(priority_pending_ops_mutex);
+        priority_pending_ops.emplace(std::move(func), tick);
+    }
+
     void AllocateWorkerCommandBuffers();
 
     void SubmitExecution(SubmitInfo& info);
+    u64 SubmitExecutionWithSubmitLockHeld(SubmitInfo& info);
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
@@ -451,6 +464,7 @@ private:
     DynamicState dynamic_state;
     PipelineBindTracker<VkPipeline> pipeline_bind_tracker;
     vk::CommandBuffer current_cmdbuf;
+    bool pending_guest_work{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

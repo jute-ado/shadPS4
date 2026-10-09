@@ -411,11 +411,13 @@ uint32_t ComputeSurfaceAddrFromCoordMacroTiled(uint32_t x, uint32_t y, uint32_t 
 
 uint GetMipLevel(inout uint texel) {
     uint mip = 0;
-    uint mip_size = info.mips[mip].size / BYTES_PER_PIXEL;
-    while (texel >= mip_size && mip < info.num_mips) {
+    while (mip < info.num_mips) {
+        uint mip_size = info.mips[mip].size / BYTES_PER_PIXEL;
+        if (texel < mip_size) {
+            return mip;
+        }
         texel -= mip_size;
         ++mip;
-        mip_size = info.mips[mip].size / BYTES_PER_PIXEL;
     }
     return mip;
 }
@@ -423,6 +425,9 @@ uint GetMipLevel(inout uint texel) {
 void main() {
     uint texel = gl_GlobalInvocationID.x;
     uint mip = GetMipLevel(texel);
+    if (mip >= info.num_mips) {
+        return;
+    }
     uint pitch = info.mips[mip].pitch;
     uint height = info.mips[mip].height;
     uint tiled_offset = info.mips[mip].offset;
