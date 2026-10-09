@@ -143,6 +143,9 @@ add_executable(shadps4_pp_source_publication_test
 )
 target_include_directories(shadps4_pp_source_publication_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/externals/vulkan-headers/include
+    ${CMAKE_SOURCE_DIR}/externals/spdlog/include
+    ${CMAKE_SOURCE_DIR}/externals/fmt/include
 )
 target_compile_features(shadps4_pp_source_publication_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_pp_source_publication_test PRIVATE GTest::gtest_main)
@@ -397,6 +400,21 @@ target_link_libraries(shadps4_depth_association_test PRIVATE
     spdlog::spdlog
 )
 list(APPEND TEST_TARGETS shadps4_depth_association_test)
+
+add_executable(shadps4_image_access_test
+    test_image_access.cpp
+)
+target_include_directories(shadps4_image_access_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_image_access_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_image_access_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+    Vulkan::Headers
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_image_access_test)
 
 add_executable(shadps4_module_mapping_test
     test_module_mapping.cpp
