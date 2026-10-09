@@ -196,7 +196,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const bool convert_quad_list =
+        regs.primitive_type == AmdGpu::PrimitiveType::QuadList &&
+        regs.stage_enable.raw == AmdGpu::ShaderStageEnable::Vs &&
+        (regs.enable_primitive_restart & 1) == 0;
+    const auto primitive_type =
+        convert_quad_list ? AmdGpu::PrimitiveType::TriangleList : regs.primitive_type;
+    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(primitive_type);
     if (!pipeline) {
         return;
     }
@@ -208,7 +214,15 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
-    if (is_indexed) {
+    u32 index_count = regs.num_indices;
+    if (convert_quad_list) {
+        index_count = buffer_cache.BindQuadListIndexBuffer(is_indexed, index_offset);
+        if (index_count == 0) {
+            ResetBindings();
+            return;
+        }
+        is_indexed = true;
+    } else if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
     }
 
@@ -224,7 +238,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
     if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
+        cmdbuf.drawIndexed(index_count, regs.num_instances.NumInstances(), 0,
                            s32(vertex_offset), instance_offset);
     } else {
         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
@@ -244,7 +258,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const GraphicsPipeline* pipeline =
+        pipeline_cache.GetGraphicsPipeline(liverpool->regs.primitive_type);
     if (!pipeline) {
         return;
     }
@@ -1101,7 +1116,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
     UpdateViewportScissorState();
     UpdateDepthStencilState();
-    UpdatePrimitiveState(is_indexed);
+    UpdatePrimitiveState(pipeline, is_indexed);
     UpdateRasterizationState();
     UpdateColorBlendingState(pipeline);
 
@@ -1298,8 +1313,10 @@ void Rasterizer::UpdateDepthStencilState() const {
     }
 }
 
-void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
+void Rasterizer::UpdatePrimitiveState(const GraphicsPipeline* pipeline,
+                                      const bool is_indexed) const {
     const auto& regs = liverpool->regs;
+    const auto primitive_type = pipeline->GetGraphicsKey().prim_type;
     auto& dynamic_state = scheduler.GetDynamicState();
 
     const auto is_list_topology = [](const AmdGpu::PrimitiveType type) {
@@ -1318,13 +1335,13 @@ void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
 
     const auto prim_restart =
         (regs.enable_primitive_restart & 1) != 0 &&
-        (instance.IsListRestartSupported() || !is_list_topology(regs.primitive_type)) &&
-        (instance.IsPatchListRestartSupported() || !is_patch_list_topology(regs.primitive_type));
+        (instance.IsListRestartSupported() || !is_list_topology(primitive_type)) &&
+        (instance.IsPatchListRestartSupported() || !is_patch_list_topology(primitive_type));
     ASSERT_MSG(!is_indexed || !prim_restart || regs.primitive_restart_index == 0xFFFF ||
                    regs.primitive_restart_index == 0xFFFFFFFF,
                "Primitive restart index other than -1 is not supported yet");
 
-    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
+    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(primitive_type)
                                ? LiverpoolToVK::CullMode(regs.polygon_control.CullingMode())
                                : vk::CullModeFlagBits::eNone;
     const auto front_face = LiverpoolToVK::FrontFace(regs.polygon_control.front_face);
