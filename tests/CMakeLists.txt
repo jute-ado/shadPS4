@@ -163,6 +163,26 @@ target_compile_features(shadps4_fault_range_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_fault_range_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_fault_range_test)
 
+add_executable(shadps4_dma_publication_gate_test
+    test_dma_publication_gate.cpp
+)
+target_include_directories(shadps4_dma_publication_gate_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_dma_publication_gate_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_dma_publication_gate_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_dma_publication_gate_test)
+
+add_executable(shadps4_fault_download_test
+    test_fault_download.cpp
+)
+target_include_directories(shadps4_fault_download_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_fault_download_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_fault_download_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_fault_download_test)
+
 add_executable(shadps4_address_space_operation_gate_test
     test_address_space_operation_gate.cpp
 )
@@ -227,6 +247,7 @@ target_link_libraries(shadps4_sysmodule_requirement_test PRIVATE GTest::gtest_ma
 list(APPEND TEST_TARGETS shadps4_sysmodule_requirement_test)
 
 add_executable(shadps4_host_compilation_pause_test
+    test_async_compilation_queue.cpp
     test_host_compilation_pause.cpp
 )
 target_include_directories(shadps4_host_compilation_pause_test PRIVATE
@@ -234,6 +255,10 @@ target_include_directories(shadps4_host_compilation_pause_test PRIVATE
 )
 target_compile_definitions(shadps4_host_compilation_pause_test PRIVATE
     SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    SHADPS4_PIPELINE_CACHE_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.h"
+    SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp"
+    SHADPS4_EMULATOR_SETTINGS_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/core/emulator_settings.h"
+    SHADPS4_EMULATOR_SETTINGS_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp"
 )
 target_compile_features(shadps4_host_compilation_pause_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_host_compilation_pause_test PRIVATE GTest::gtest_main)

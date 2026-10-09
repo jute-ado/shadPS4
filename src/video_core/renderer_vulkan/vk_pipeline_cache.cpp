@@ -14,7 +14,6 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
-#include "video_core/renderer_vulkan/host_compilation_pause.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -321,20 +320,146 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+
+    if (EmulatorSettings.IsAsyncGraphicsPipelineCompilation()) {
+        async_graphics_compiler = std::make_unique<AsyncGraphicsPipelineQueue>(
+            [this](AsyncGraphicsPipelineJob job) {
+                return CompileGraphicsPipelineAsync(std::move(job));
+            });
+    }
 }
 
-PipelineCache::~PipelineCache() = default;
+PipelineCache::~PipelineCache() {
+    async_graphics_compiler.reset();
+}
+
+void AsyncGraphicsPipelineJob::RebindCompileInfo() noexcept {
+    for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
+        if (!retained_infos[stage]) {
+            compile_infos[stage] = nullptr;
+            continue;
+        }
+        info_copies[stage].user_data =
+            std::span{user_data_copies[stage]}.first(user_data_sizes[stage]);
+        compile_infos[stage] = &info_copies[stage];
+    }
+}
+
+AsyncGraphicsPipelineJob PipelineCache::MakeAsyncGraphicsPipelineJob() const {
+    AsyncGraphicsPipelineJob job{
+        .key = graphics_key,
+        .retained_infos = infos,
+        .runtime_infos = runtime_infos,
+        .fetch_shader = fetch_shader,
+        .modules = modules,
+    };
+    for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
+        if (!infos[stage]) {
+            continue;
+        }
+        job.info_copies[stage] = *infos[stage];
+        job.user_data_sizes[stage] = static_cast<u32>(infos[stage]->user_data.size());
+        ASSERT(job.user_data_sizes[stage] <= Shader::NUM_USER_DATA_REGS);
+        std::ranges::copy(infos[stage]->user_data, job.user_data_copies[stage].begin());
+    }
+    return job;
+}
+
+AsyncGraphicsPipelineResult PipelineCache::CompileGraphicsPipelineAsync(
+    AsyncGraphicsPipelineJob job) {
+    job.RebindCompileInfo();
+    GraphicsPipeline::SerializationSupport serialization{};
+    auto pipeline = std::make_unique<GraphicsPipeline>(
+        instance, scheduler, desc_heap, profile, job.key, vk::PipelineCache{}, job.compile_infos,
+        job.runtime_infos, job.fetch_shader, job.modules, serialization, false);
+    return {
+        .pipeline = std::move(pipeline),
+        .serialization = std::move(serialization),
+        .modules = job.modules,
+        .retained_infos = job.retained_infos,
+    };
+}
+
+void PipelineCache::PublishAsyncGraphicsPipeline(
+    AsyncGraphicsPipelineQueue::Completion completion) {
+    if (!completion.result) {
+        LOG_ERROR(Render_Vulkan, "Asynchronous graphics pipeline compilation failed");
+        return;
+    }
+
+    auto result = std::move(*completion.result);
+    const auto [it, is_new] = graphics_pipelines.try_emplace(completion.key);
+    if (!is_new) {
+        return;
+    }
+    result.pipeline->RebindStages(result.retained_infos);
+    it.value() = std::move(result.pipeline);
+    const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(completion.key);
+    RegisterPipelineData(completion.key, pipeline_hash, result.serialization);
+    ++num_new_pipelines;
+
+    if (EmulatorSettings.IsShaderCollect()) {
+        for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
+            if (completion.key.stage_hashes[stage]) {
+                module_related_pipelines[result.modules[stage]].emplace_back(completion.key);
+            }
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Published asynchronous graphics pipeline {:#x}", pipeline_hash);
+}
+
+void PipelineCache::PublishAsyncGraphicsPipelines() {
+    if (!async_graphics_compiler) {
+        return;
+    }
+    while (auto completion = async_graphics_compiler->TryTake()) {
+        PublishAsyncGraphicsPipeline(std::move(*completion));
+    }
+}
+
+const GraphicsPipeline* PipelineCache::WaitForAsyncGraphicsPipeline(
+    const GraphicsPipelineKey& key) {
+    for (;;) {
+        PublishAsyncGraphicsPipelines();
+        if (const auto it = graphics_pipelines.find(key); it != graphics_pipelines.end()) {
+            return it->second.get();
+        }
+
+        auto completion = async_graphics_compiler->WaitTake();
+        if (!completion) {
+            return nullptr;
+        }
+        const bool requested_pipeline_failed = completion->key == key && !completion->result;
+        PublishAsyncGraphicsPipeline(std::move(*completion));
+        if (requested_pipeline_failed) {
+            return nullptr;
+        }
+    }
+}
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
+    PublishAsyncGraphicsPipelines();
     if (!RefreshGraphicsKey()) {
         return nullptr;
     }
+    if (const auto it = graphics_pipelines.find(graphics_key); it != graphics_pipelines.end()) {
+        return it->second.get();
+    }
+
+    if (async_graphics_compiler) {
+        const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
+        if (async_graphics_compiler->Submit(graphics_key, MakeAsyncGraphicsPipelineJob())) {
+            LOG_INFO(Render_Vulkan, "Queued graphics pipeline {:#x} for asynchronous compilation",
+                     pipeline_hash);
+        }
+        fetch_shader.reset();
+        return WaitForAsyncGraphicsPipeline(graphics_key);
+    }
+
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
-        ScopedHostCompilationGuestPause pause{DebugState};
-
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
@@ -364,8 +489,6 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
-        ScopedHostCompilationGuestPause pause{DebugState};
-
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
@@ -609,7 +732,6 @@ bool PipelineCache::RefreshComputeKey() {
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
                                               Shader::Backend::Bindings& binding) {
-    ScopedHostCompilationGuestPause pause{DebugState};
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
