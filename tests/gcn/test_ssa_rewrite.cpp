@@ -31,3 +31,20 @@ TEST(SsaRewritePass, ReusesUndefinitionsAcrossDisconnectedBlocks) {
     EXPECT_EQ(first_undef, second_undef);
     EXPECT_EQ(first_undef.TryInstRecursive()->GetParent(), first);
 }
+
+TEST(DescriptorArrayBinding, CachedInfoAdvancesFollowingStageOrigins) {
+    Shader::Info first_stage;
+    first_stage.buffers.resize(1);
+    first_stage.samplers.resize(1);
+
+    Shader::Backend::Bindings cached;
+    first_stage.AddBindings(cached);
+    EXPECT_EQ(cached.unified, 2U);
+    EXPECT_EQ(cached.buffer, 1U);
+
+    Shader::Info following_stage;
+    following_stage.buffers.resize(1);
+    following_stage.AddBindings(cached);
+    EXPECT_EQ(cached.unified, 3U);
+    EXPECT_EQ(cached.buffer, 2U);
+}
