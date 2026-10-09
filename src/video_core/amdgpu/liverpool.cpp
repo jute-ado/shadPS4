@@ -90,6 +90,20 @@ void Liverpool::ProcessCommands() {
     }
 }
 
+bool Liverpool::SubmitPendingEopCompletions() {
+    if (!rasterizer) {
+        return false;
+    }
+    return eop_completion_batch.Submit(
+        [this](Common::UniqueFunction<void>&& completion) {
+            rasterizer->DeferGpuCompletion(std::move(completion));
+        },
+        [this] {
+            rasterizer->ProcessDownloadImages();
+            rasterizer->Flush();
+        });
+}
+
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
@@ -148,11 +162,15 @@ void Liverpool::Process(std::stop_token stoken) {
         if (has_submit_done) {
             if (rasterizer) {
                 rasterizer->OnSubmit();
-                rasterizer->Flush();
+                if (!SubmitPendingEopCompletions()) {
+                    rasterizer->Flush();
+                }
             }
             if (submit_done_callback) {
                 submit_done_callback();
             }
+        } else {
+            SubmitPendingEopCompletions();
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
@@ -729,10 +747,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                if (rasterizer) {
-                    rasterizer->ProcessDownloadImages();
-                }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
+                if (rasterizer) {
+                    event_eop->SignalFence(
+                        [](void* address, u64 data, u32 num_bytes) {
+                            auto* memory = Core::Memory::Instance();
+                            if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+                                memcpy(address, &data, num_bytes);
+                            }
+                        },
+                        [] {
+                            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                        });
+                    eop_completion_batch.Add(
+                        [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
+                            complete_eop_flip();
+                        });
+                    break;
+                }
                 PublishEop(
                     *event_eop,
                     [](void* address, u64 data, u32 num_bytes) {
@@ -834,6 +866,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+                if (rasterizer &&
+                    wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory) {
+                    SubmitPendingEopCompletions();
+                }
                 // Optimization: VO label waits are special because the emulator
                 // will write to the label when presentation is finished. So if
                 // there are no other submits to yield to we can sleep the thread
@@ -1158,6 +1194,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            if (rasterizer &&
+                wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory) {
+                SubmitPendingEopCompletions();
+            }
             while (!wait_reg_mem->Test(regs.reg_array)) {
                 YIELD_ASC(vqid);
             }
