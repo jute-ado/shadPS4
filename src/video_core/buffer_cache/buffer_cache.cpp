@@ -8,8 +8,11 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_fault_admission.h"
+#include "video_core/buffer_cache/buffer_readback_window.h"
 #include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
+#include "video_core/buffer_cache/readonly_stream_snapshot.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -68,32 +71,41 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
-    if (!IsRegionRegistered(device_addr, size)) {
-        return;
-    }
-    memory_tracker->InvalidateRegion(
-        device_addr, size,
-        [this, device_addr, size] {
-            cpu_page_write_tracker.Discard(device_addr, size);
-            ReadMemory(device_addr, size, true);
+    const bool is_registered = IsRegionRegistered(device_addr, size);
+    (void)ProcessTrackedBufferFault(
+        [this, device_addr, size, is_registered] {
+            return memory_tracker->InvalidateRegion(
+                device_addr, size, is_registered,
+                [this, device_addr, size] {
+                    cpu_page_write_tracker.Discard(device_addr, size);
+                    ReadMemory(device_addr, size, true);
+                },
+                [this](VAddr page_addr, size_t write_offset, size_t write_size) {
+                    const auto page = std::span<const u8, TRACKER_BYTES_PER_PAGE>{
+                        std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
+                    return cpu_page_write_tracker.Capture(page_addr, page, write_offset,
+                                                          write_size);
+                });
         },
-        [this](VAddr page_addr, size_t write_offset, size_t write_size) {
-            const auto page = std::span<const u8, TRACKER_BYTES_PER_PAGE>{
-                std::bit_cast<const u8*>(page_addr), TRACKER_BYTES_PER_PAGE};
-            return cpu_page_write_tracker.Capture(page_addr, page, write_offset, write_size);
-        });
-    dma_dirty_ranges.Mark(device_addr, size);
+        [this, device_addr, size] { dma_dirty_ranges.Mark(device_addr, size); });
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
     liverpool->SendCommand<true>([this, device_addr, size, is_write] {
         Buffer& buffer = slot_buffers[FindBuffer(device_addr, size)];
-        DownloadBufferMemory<false>(buffer, device_addr, size, is_write);
+        constexpr u64 ReadbackWindowSize = 512_KB;
+        const auto plan = PlanBufferReadbackWindow(buffer.CpuAddr(), buffer.SizeBytes(),
+                                                   device_addr, size, ReadbackWindowSize);
+        ASSERT_MSG(plan.valid, "Buffer readback request is outside the selected backing buffer");
+        DownloadBufferMemory<false>(buffer, plan.download_address, plan.download_size);
+        if (is_write) {
+            memory_tracker->MarkRegionAsCpuModified(plan.request_address, plan.request_size);
+        }
     });
 }
 
 template <bool async>
-void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size, bool is_write) {
+void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     memory_tracker->ForEachDownloadRange<false>(
@@ -129,17 +141,14 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
     const auto write_data = [&]() {
         auto* memory = Core::Memory::Instance();
-        cpu_page_write_tracker.Discard(device_addr, size);
         for (const auto& copy : copies) {
             const VAddr copy_device_addr = buffer.CpuAddr() + copy.srcOffset;
             const u64 dst_offset = copy.dstOffset - offset;
+            cpu_page_write_tracker.Discard(copy_device_addr, copy.size);
             memory->TryWriteBacking(std::bit_cast<u8*>(copy_device_addr), download + dst_offset,
                                     copy.size);
         }
         memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
-        if (is_write) {
-            memory_tracker->MarkRegionAsCpuModified(device_addr, size);
-        }
     };
     if constexpr (async) {
         scheduler.DeferOperation(write_data);
@@ -151,13 +160,14 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 
 void BufferCache::BindVertexBuffers(
     const Vulkan::GraphicsPipeline& pipeline,
+    const Shader::Gcn::VertexInputSnapshot& vertex_inputs,
     boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers) {
     const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
     Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
     Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
-    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers, vertex_inputs,
                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
     if (instance.IsVertexInputDynamicState()) {
@@ -395,8 +405,17 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size)) {
-        const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
-        return {&stream_buffer, offset};
+        const auto reservation = StageReadonlyStreamSnapshot(
+            [&] { return stream_buffer.Map(size, instance.UniformMinAlignment()); },
+            [&](auto&& snapshot) {
+                memory_tracker->WithReadonlyStreamSnapshot(
+                    device_addr, size, std::forward<decltype(snapshot)>(snapshot));
+            },
+            [&](const auto& reservation) {
+                memory->CopySparseMemory(device_addr, reservation.first, size);
+            },
+            [&] { stream_buffer.Commit(); });
+        return {&stream_buffer, reservation.second};
     }
     if (IsBufferInvalid(buffer_id)) {
         buffer_id = FindBuffer(device_addr, size);
@@ -923,7 +942,8 @@ void BufferCache::RunGarbageCollector() {
         --max_deletions;
         Buffer& buffer = slot_buffers[buffer_id];
         // InvalidateMemory(buffer.CpuAddr(), buffer.SizeBytes());
-        DownloadBufferMemory<true>(buffer, buffer.CpuAddr(), buffer.SizeBytes(), true);
+        DownloadBufferMemory<true>(buffer, buffer.CpuAddr(), buffer.SizeBytes());
+        memory_tracker->MarkRegionAsCpuModified(buffer.CpuAddr(), buffer.SizeBytes());
         DeleteBuffer(buffer_id);
     };
 }

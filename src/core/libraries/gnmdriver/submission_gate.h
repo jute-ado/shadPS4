@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <set>
 
 #include "common/unique_function.h"
 
@@ -15,23 +16,32 @@ class SubmissionGate {
 public:
     using Guard = std::unique_lock<std::mutex>;
 
+    struct GuardedBoundary {
+        Guard issuance;
+        Common::UniqueFunction<void> complete;
+    };
+
     [[nodiscard]] Guard Enter() {
+        return Guard{mutex};
+    }
+
+    [[nodiscard]] GuardedBoundary BeginGuardedBoundary() {
         Guard lock{mutex};
-        boundary_completed.wait(lock, [this] { return open; });
-        return lock;
+        const auto boundary = ++current_boundary;
+        return {
+            .issuance = std::move(lock),
+            .complete = [this, boundary] { CompleteBoundary(boundary); },
+        };
     }
 
     [[nodiscard]] Common::UniqueFunction<void> BeginBoundary() {
-        Guard lock{mutex};
-        boundary_completed.wait(lock, [this] { return open; });
-        open = false;
-        const auto boundary = ++current_boundary;
-        return [this, boundary] { CompleteBoundary(boundary); };
+        auto boundary = BeginGuardedBoundary();
+        return std::move(boundary.complete);
     }
 
     [[nodiscard]] bool IsBoundaryOpen() const {
         std::scoped_lock lock{mutex};
-        return open;
+        return completed_boundary == current_boundary;
     }
 
     // The gate models host backpressure. Reporting it through sceGnmAreSubmitsAllowed would make
@@ -42,17 +52,21 @@ public:
 
     void WaitForBoundary() {
         Guard lock{mutex};
-        boundary_completed.wait(lock, [this] { return open; });
+        const auto boundary = current_boundary;
+        boundary_completed.wait(lock, [this, boundary] { return completed_boundary >= boundary; });
     }
 
 private:
     void CompleteBoundary(std::uint64_t boundary) {
         {
             std::scoped_lock lock{mutex};
-            if (open || boundary != current_boundary) {
+            if (boundary <= completed_boundary || boundary > current_boundary) {
                 return;
             }
-            open = true;
+            completed_out_of_order.insert(boundary);
+            while (completed_out_of_order.erase(completed_boundary + 1) != 0) {
+                ++completed_boundary;
+            }
         }
         boundary_completed.notify_all();
     }
@@ -60,7 +74,8 @@ private:
     mutable std::mutex mutex;
     std::condition_variable boundary_completed;
     std::uint64_t current_boundary{};
-    bool open{true};
+    std::uint64_t completed_boundary{};
+    std::set<std::uint64_t> completed_out_of_order;
 };
 
 } // namespace Libraries::GnmDriver

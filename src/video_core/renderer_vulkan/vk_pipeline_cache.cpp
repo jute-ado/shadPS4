@@ -316,9 +316,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
-const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
+PipelineCache::GraphicsPipelineResult PipelineCache::GetGraphicsPipeline() {
     if (!RefreshGraphicsKey()) {
-        return nullptr;
+        return {};
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
@@ -328,7 +328,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false);
+            runtime_infos, fetch_shader, vertex_inputs, modules, sdata, false);
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -343,7 +343,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
         }
         fetch_shader.reset();
     }
-    return it->second.get();
+    return {it->second.get(), std::move(vertex_inputs)};
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
@@ -467,6 +467,7 @@ bool PipelineCache::RefreshGraphicsStages() {
     const auto& regs = liverpool->regs;
     auto& key = graphics_key;
     fetch_shader = std::nullopt;
+    vertex_inputs = {};
 
     Shader::Backend::Bindings binding{};
     const auto bind_stage = [&](Shader::Stage stage_in, Shader::LogicalStage stage_out) -> bool {
@@ -487,11 +488,13 @@ bool PipelineCache::RefreshGraphicsStages() {
 
         const auto params = AmdGpu::GetParams(*pgm);
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader_;
-        std::tie(infos[stage_out_idx], modules[stage_out_idx], fetch_shader_,
+        Shader::Gcn::VertexInputSnapshot vertex_inputs_;
+        std::tie(infos[stage_out_idx], modules[stage_out_idx], fetch_shader_, vertex_inputs_,
                  key.stage_hashes[stage_out_idx]) =
             GetProgram(stage_in, stage_out, params, binding);
         if (fetch_shader_) {
             fetch_shader = fetch_shader_;
+            vertex_inputs = std::move(vertex_inputs_);
         }
         return true;
     };
@@ -577,13 +580,16 @@ bool PipelineCache::RefreshGraphicsStages() {
     if (vs_info && fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
         // Stride will still be handled outside the pipeline using dynamic state.
-        u32 vertex_binding = 0;
-        for (const auto& attrib : fetch_shader->attributes) {
-            const auto& buffer = attrib.GetSharp(*vs_info);
+        ASSERT_MSG(fetch_shader->attributes.size() == vertex_inputs.buffers.size(),
+                   "Vertex input snapshot size mismatch: {} attributes, {} buffers",
+                   fetch_shader->attributes.size(), vertex_inputs.buffers.size());
+        for (u32 vertex_binding = 0; vertex_binding < vertex_inputs.buffers.size();
+             ++vertex_binding) {
+            const auto& buffer = vertex_inputs.buffers[vertex_binding];
             ASSERT_MSG(vertex_binding < MaxVertexBufferCount,
                        "Vertex attribute binding count exceeded limit: {} >= {}", vertex_binding,
                        MaxVertexBufferCount);
-            key.vertex_buffer_formats[vertex_binding++] =
+            key.vertex_buffer_formats[vertex_binding] =
                 Vulkan::LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
         }
     }
@@ -595,14 +601,25 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
-    std::tie(infos[0], modules[0], fetch_shader, compute_key.value) =
+    std::tie(infos[0], modules[0], fetch_shader, vertex_inputs, compute_key.value) =
         GetProgram(Shader::Stage::Compute, LogicalStage::Compute, cs_params, binding);
     return true;
 }
 
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
+                                              Shader::Backend::Bindings& binding,
+                                              const Shader::CompileResourceSnapshot*
+                                                  compile_resources,
+                                              const Shader::Gcn::FetchShaderData*
+                                                  compile_fetch_shader) {
+    if (compile_resources) {
+        ASSERT(compile_resources->valid);
+        info.UseCompileResourceSnapshot(*compile_resources);
+    }
+    if (compile_fetch_shader) {
+        info.UseCompileFetchShaderSnapshot(*compile_fetch_shader);
+    }
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
@@ -643,13 +660,15 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         auto& program = it_pgm.value();
         auto start = binding;
         const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
-        auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        Shader::Gcn::VertexInputSnapshot vertex_inputs;
+        auto spec =
+            Shader::StageSpecialization(program->info, runtime_info, profile, start, &vertex_inputs);
         const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
         program->AddPermut(module, std::move(spec));
         return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
-                               perm_hash);
+                               std::move(vertex_inputs), perm_hash);
     }
 
     auto& program = it_pgm.value();
@@ -657,7 +676,11 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    const auto compile_resources = Shader::CompileResourceSnapshot::Capture(info);
+    Shader::Gcn::VertexInputSnapshot vertex_inputs;
+    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding, &vertex_inputs);
+    const auto* compile_fetch_shader =
+        spec.fetch_shader_data ? &*spec.fetch_shader_data : nullptr;
 
     size_t perm_idx = program->modules.size();
     u64 perm_hash = HashCombine(params.hash, perm_idx);
@@ -667,7 +690,8 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
         auto new_info = Shader::Info(stage, l_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding,
+                               &compile_resources, compile_fetch_shader);
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         program->AddPermut(module, std::move(spec));
@@ -678,7 +702,8 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         perm_hash = HashCombine(params.hash, perm_idx);
     }
     return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+                           program->modules[perm_idx].spec.fetch_shader_data,
+                           std::move(vertex_inputs), perm_hash);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

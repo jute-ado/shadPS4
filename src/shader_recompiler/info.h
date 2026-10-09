@@ -25,6 +25,10 @@ struct Archive;
 
 namespace Shader {
 
+namespace Gcn {
+struct FetchShaderData;
+}
+
 enum class Qualifier : u8 {
     None,
     Smooth,
@@ -118,6 +122,10 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    // Compile-call-local replay state for a new permutation of an existing shader. These fields
+    // are intentionally excluded from InfoPersistent and the serialized shader-cache ABI.
+    std::span<const u32> compile_flattened_ud_snapshot;
+    const Gcn::FetchShaderData* compile_fetch_shader_snapshot{};
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -189,12 +197,36 @@ struct Info : InfoPersistent {
     }
 
     void RefreshFlatBuf() {
+        if (!compile_flattened_ud_snapshot.empty()) {
+            ASSERT_MSG(ReplayCompileResourceSnapshot(),
+                       "Cached shader permutation changed its flattened descriptor layout");
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
+    }
+
+    void UseCompileResourceSnapshot(const auto& snapshot) noexcept {
+        compile_flattened_ud_snapshot = snapshot.valid ? snapshot.flattened_user_data
+                                                       : std::span<const u32>{};
+    }
+
+    void UseCompileFetchShaderSnapshot(const Gcn::FetchShaderData& snapshot) noexcept {
+        compile_fetch_shader_snapshot = &snapshot;
+    }
+
+    bool ReplayCompileResourceSnapshot() {
+        if (compile_flattened_ud_snapshot.empty() ||
+            compile_flattened_ud_snapshot.size() != srt_info.flattened_bufsize_dw) {
+            return false;
+        }
+        flattened_ud_buf.assign(compile_flattened_ud_snapshot.begin(),
+                                compile_flattened_ud_snapshot.end());
+        return true;
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
@@ -209,6 +241,20 @@ struct Info : InfoPersistent {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+};
+
+// Short-lived descriptor image used only to compile a new permutation under the exact resource
+// generation that produced its specialization key.
+struct CompileResourceSnapshot {
+    std::vector<u32> flattened_user_data;
+    bool valid{};
+
+    static CompileResourceSnapshot Capture(const Info& info) {
+        return {
+            .flattened_user_data = info.flattened_ud_buf,
+            .valid = info.flattened_ud_buf.size() == info.srt_info.flattened_bufsize_dw,
+        };
+    }
 };
 DECLARE_ENUM_FLAG_OPERATORS(Info::ReadConstType);
 

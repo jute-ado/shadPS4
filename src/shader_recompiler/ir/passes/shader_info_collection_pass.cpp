@@ -4,6 +4,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/read_const_access_policy.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 
 namespace Shader::Optimization {
@@ -164,7 +165,8 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         }
     }
 
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+    const bool direct_memory_access_enabled = EmulatorSettings.IsDirectMemoryAccessEnabled();
+    if (!RetainsReadConstDescriptorMetadata(direct_memory_access_enabled)) {
         info.uses_dma = false;
         info.readconst_types = Info::ReadConstType::None;
     }

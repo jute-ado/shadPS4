@@ -11,6 +11,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/pending_operation_queue.h"
 #include "video_core/renderer_vulkan/pipeline_bind_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -421,7 +422,7 @@ public:
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Will be run when submitting or calling PopPendingOperations.
     void DeferOperation(Common::UniqueFunction<void>&& func) {
-        pending_ops.emplace(std::move(func), CurrentTick());
+        pending_ops.Push(PendingOp{std::move(func), CurrentTick()});
     }
 
     /// Defers an operation until the gpu has reached the current cpu tick.
@@ -455,7 +456,7 @@ private:
         Common::UniqueFunction<void> callback;
         u64 gpu_tick;
     };
-    std::queue<PendingOp> pending_ops;
+    PendingOperationQueue<PendingOp> pending_ops;
     std::queue<PendingOp> priority_pending_ops;
     std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;

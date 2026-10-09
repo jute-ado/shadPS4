@@ -258,10 +258,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 
-                constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                             vk::AccessFlagBits2::eShaderWrite |
-                                             vk::AccessFlagBits2::eMemoryWrite;
-                const bool is_write = static_cast<bool>(state.access_mask & write_flags);
+                const bool is_write = IsImageWriteAccess(state.access_mask);
                 if (state.layout != dst_layout || state.access_mask != dst_mask || is_write) {
                     barriers.emplace_back(vk::ImageMemoryBarrier2{
                         .srcStageMask = state.pl_stage,
@@ -292,10 +289,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
             subresource_states.clear();
         }
     } else { // Full resource transition
-        constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                     vk::AccessFlagBits2::eShaderWrite |
-                                     vk::AccessFlagBits2::eMemoryWrite;
-        const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
+        const bool is_write = IsImageWriteAccess(last_state.access_mask);
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             return {};
         }

@@ -6,6 +6,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/attachment_feedback_loop_access.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -196,7 +197,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const auto [pipeline, vertex_inputs] = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
     }
@@ -207,7 +208,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, vertex_inputs, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
     }
@@ -244,7 +245,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
+    const auto [pipeline, vertex_inputs] = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
     }
@@ -255,7 +256,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     const auto state = BeginRendering(pipeline);
 
-    buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
+    buffer_cache.BindVertexBuffers(*pipeline, vertex_inputs, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(0, buffer_barriers);
     }
@@ -755,15 +756,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // storage and feedback loop doesn't make sense for them
             if ((image.binding.force_general || image.binding.is_target) &&
                 !image.info.props.is_depth) {
-                image.Transit(instance.IsAttachmentFeedbackLoopLayoutSupported() &&
-                                      image.binding.is_target
-                                  ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
-                                  : vk::ImageLayout::eGeneral,
-                              vk::AccessFlagBits2::eShaderRead |
-                                  (image.info.props.is_depth
-                                       ? vk::AccessFlagBits2::eDepthStencilAttachmentWrite
-                                       : vk::AccessFlagBits2::eColorAttachmentWrite |
-                                             vk::AccessFlagBits2::eColorAttachmentRead),
+                const bool feedback =
+                    instance.IsAttachmentFeedbackLoopLayoutSupported() && image.binding.is_target;
+                image.Transit(feedback ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
+                                       : vk::ImageLayout::eGeneral,
+                              feedback ? AttachmentFeedbackLoopTextureAccess()
+                                       : vk::AccessFlagBits2::eShaderRead |
+                                             vk::AccessFlagBits2::eColorAttachmentWrite |
+                                             vk::AccessFlagBits2::eColorAttachmentRead,
                               {});
             } else {
                 if (is_storage) {
@@ -862,7 +862,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             image->Transit(instance.IsAttachmentFeedbackLoopLayoutSupported()
                                ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
                                : vk::ImageLayout::eGeneral,
-                           vk::AccessFlagBits2::eColorAttachmentWrite, {});
+                           AttachmentFeedbackLoopRenderTargetAccess(), {});
             attachment_feedback_loop = true;
         } else {
             image->Transit(vk::ImageLayout::eColorAttachmentOptimal,

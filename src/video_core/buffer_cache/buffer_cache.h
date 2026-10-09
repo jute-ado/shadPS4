@@ -26,6 +26,10 @@ namespace Vulkan {
 class GraphicsPipeline;
 }
 
+namespace Shader::Gcn {
+struct VertexInputSnapshot;
+}
+
 namespace VideoCore {
 
 using BufferId = Common::SlotId;
@@ -113,6 +117,7 @@ public:
 
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline,
+                           const Shader::Gcn::VertexInputSnapshot& vertex_inputs,
                            boost::container::small_vector<vk::BufferMemoryBarrier2, 16>& barriers);
 
     /// Bind host index buffer for the current draw.
@@ -172,7 +177,7 @@ private:
     }
 
     template <bool async>
-    void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size, bool is_write);
+    void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 

@@ -5,13 +5,18 @@
 
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <type_traits>
 #include <vector>
 
+#include <boost/container/static_vector.hpp>
+
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "video_core/buffer_cache/buffer_fault_admission.h"
+#include "video_core/buffer_cache/readonly_stream_snapshot.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -65,16 +70,27 @@ public:
     }
 
     /// Removes all protection from a page while preserving GPU-owned bytes before CPU mutation.
-    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush, auto&& on_preserve) noexcept {
+    [[nodiscard]] bool InvalidateRegion(VAddr cpu_addr, u64 size, bool is_registered,
+                                        auto&& on_flush, auto&& on_preserve) noexcept {
+        bool tracked = is_registered;
         IteratePages<false>(
             cpu_addr, size,
-            [&on_flush, &on_preserve](RegionManager* manager, u64 offset, size_t size) {
+            [is_registered, &tracked, &on_flush, &on_preserve](RegionManager* manager, u64 offset,
+                                                               size_t size) {
+                const bool owned_before_lock = manager->IsRegionCpuTracked(offset, size);
+                bool admitted = false;
                 const bool should_flush = [&] {
                     // Perform both the GPU modification check and CPU state change with the lock
                     // in case we are racing with GPU thread trying to mark the page as GPU
                     // modified. If we need to flush the flush function is going to perform CPU
                     // state change.
                     std::scoped_lock lk{manager->lock};
+                    if (!IsBufferFaultOwned(is_registered, owned_before_lock,
+                                            manager->IsRegionCpuTracked(offset, size))) {
+                        return false;
+                    }
+                    admitted = true;
+                    tracked = true;
                     if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
                         if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
                             return true;
@@ -106,10 +122,11 @@ public:
                         manager->GetCpuAddr() + offset, size);
                     return false;
                 }();
-                if (should_flush) {
+                if (admitted && should_flush) {
                     on_flush();
                 }
             });
+        return tracked;
     }
 
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
@@ -134,6 +151,50 @@ public:
                                     manager->GetCpuAddr() + offset, size);
                                 manager->lock.unlock();
                             });
+    }
+
+    /// Own a coherent CPU snapshot for a small read-only stream upload. Pages that were dirty on
+    /// entry are restored to the same dirty/writeable state before this transaction returns.
+    void WithReadonlyStreamSnapshot(VAddr query_cpu_range, u64 query_size, auto&& snapshot) {
+        static constexpr u64 MaxSnapshotSize = 64_KB;
+        static constexpr size_t MaxManagers = 2;
+        static constexpr size_t MaxDirtyRanges = MaxSnapshotSize / TRACKER_BYTES_PER_PAGE + 1;
+        ASSERT(query_size <= MaxSnapshotSize);
+
+        struct DirtyRange {
+            RegionManager* manager;
+            VAddr address;
+            u64 size;
+        };
+        boost::container::static_vector<RegionManager*, MaxManagers> locked_managers;
+        boost::container::static_vector<DirtyRange, MaxDirtyRanges> dirty_ranges;
+
+        WithReadonlyStreamPageTransaction(
+            [&] {
+                IteratePages<true>(query_cpu_range, query_size,
+                                   [&locked_managers, &dirty_ranges](RegionManager* manager,
+                                                                     u64 offset, size_t size) {
+                                       locked_managers.push_back(manager);
+                                       manager->lock.lock();
+                                       manager->template ForEachModifiedRange<Type::CPU, true>(
+                                           manager->GetCpuAddr() + offset, size,
+                                           [&dirty_ranges, manager](VAddr address, u64 dirty_size) {
+                                               dirty_ranges.push_back(
+                                                   {manager, address, dirty_size});
+                                           });
+                                   });
+            },
+            std::forward<decltype(snapshot)>(snapshot),
+            [&] {
+                for (const auto& range : dirty_ranges) {
+                    range.manager->template ChangeRegionState<Type::CPU, true>(range.address,
+                                                                               range.size);
+                }
+                for (auto manager = locked_managers.rbegin(); manager != locked_managers.rend();
+                     ++manager) {
+                    (*manager)->lock.unlock();
+                }
+            });
     }
 
     /// Call 'func' for each GPU modified range and unmark those pages as GPU modified

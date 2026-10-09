@@ -9,10 +9,19 @@ include(FetchContent)
 )
 FetchContent_MakeAvailable(googletest)
 
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.4")
+    # CMake 4.4 omits TEST_TARGET from its POST_BUILD GoogleTest discovery
+    # script, so parallel targets share the empty-name JSON file. Discover
+    # serially at CTest time until the upstream module supplies that key.
+    set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+endif()
+
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     # Clang 22 diagnoses a conversion inside GoogleTest 1.17 while this
     # project promotes dependency warnings to errors.
-    target_compile_options(gtest PRIVATE /clang:-Wno-character-conversion)
+    foreach(googletest_target IN ITEMS gtest gtest_main gmock gmock_main)
+        target_compile_options(${googletest_target} PRIVATE /clang:-Wno-character-conversion)
+    endforeach()
 endif()
 
 set(TEST_TARGETS
@@ -211,6 +220,20 @@ target_compile_features(shadps4_event_write_eop_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_event_write_eop_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_event_write_eop_test)
 
+add_executable(shadps4_pending_operation_queue_test
+    test_pending_operation_queue.cpp
+)
+target_include_directories(shadps4_pending_operation_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pending_operation_queue_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_pending_operation_queue_test PRIVATE
+    U3_SCHEDULER_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_scheduler.h"
+    U3_SCHEDULER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_scheduler.cpp"
+)
+target_link_libraries(shadps4_pending_operation_queue_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pending_operation_queue_test)
+
 add_executable(shadps4_videodec_packet_handle_test
     test_videodec_packet_handle.cpp
 )
@@ -247,6 +270,41 @@ target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
 
+add_executable(shadps4_stream_buffer_watch_test
+    test_stream_buffer_watch.cpp
+)
+target_include_directories(shadps4_stream_buffer_watch_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_stream_buffer_watch_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_stream_buffer_watch_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_stream_buffer_watch_test)
+
+add_executable(shadps4_read_const_access_policy_test
+    test_read_const_access_policy.cpp
+)
+target_include_directories(shadps4_read_const_access_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_read_const_access_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_read_const_access_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_read_const_access_policy_test)
+
+add_executable(shadps4_buffer_fault_admission_test
+    test_buffer_fault_admission.cpp
+)
+target_include_directories(shadps4_buffer_fault_admission_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_fault_admission_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_fault_admission_test PRIVATE
+    GTest::gtest_main
+    Tracy::TracyClient
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_buffer_fault_admission_test)
+
 add_executable(shadps4_buffer_access_range_test
     test_buffer_access_range.cpp
 )
@@ -266,6 +324,26 @@ target_include_directories(shadps4_cpu_page_write_snapshot_test PRIVATE
 target_compile_features(shadps4_cpu_page_write_snapshot_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_cpu_page_write_snapshot_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_cpu_page_write_snapshot_test)
+
+add_executable(shadps4_readonly_stream_snapshot_test
+    test_readonly_stream_snapshot.cpp
+)
+target_include_directories(shadps4_readonly_stream_snapshot_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_readonly_stream_snapshot_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_readonly_stream_snapshot_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_readonly_stream_snapshot_test)
+
+add_executable(shadps4_buffer_readback_window_test
+    test_buffer_readback_window.cpp
+)
+target_include_directories(shadps4_buffer_readback_window_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_readback_window_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_readback_window_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_buffer_readback_window_test)
 
 add_executable(shadps4_sparse_memory_test
     test_sparse_memory.cpp
@@ -473,12 +551,20 @@ set(GCN_TEST_SOURCES
 
     # Tests
     gcn/test_buffer_access_range_pass.cpp
+    gcn/test_compile_resource_snapshot.cpp
     gcn/test_gcn_instructions.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+target_compile_definitions(shadps4_gcn_test PRIVATE
+    U3_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    U3_GRAPHICS_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp"
+    U3_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    U3_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+    U3_IMAGE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image.cpp"
+)
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE
