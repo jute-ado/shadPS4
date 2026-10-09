@@ -4,6 +4,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -31,7 +32,12 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .pName = "main",
     };
 
-    u32 binding{};
+    VideoCore::DescriptorBindingCursor binding;
+    const auto add_binding = [&binding](u32 descriptor_count = 1) {
+        const auto result = binding.TryAdd(descriptor_count);
+        ASSERT_MSG(result.has_value(), "Invalid descriptor count or binding capacity overflow");
+        return *result;
+    };
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     for (const auto& buffer : info->buffers) {
         // During deserialization, we don't have access to the UD to fetch sharp data. To address
@@ -40,7 +46,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         // shortcut there.
         const auto sharp = preloading ? AmdGpu::Buffer{} : buffer.GetSharp(*info);
         bindings.push_back({
-            .binding = binding++,
+            .binding = add_binding(),
             .descriptorType = buffer.IsStorage(sharp) ? vk::DescriptorType::eStorageBuffer
                                                       : vk::DescriptorType::eUniformBuffer,
             .descriptorCount = 1,
@@ -50,17 +56,16 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     for (const auto& image : info->images) {
         const u32 num_bindings = image.NumBindings(*info);
         bindings.push_back({
-            .binding = binding,
+            .binding = add_binding(num_bindings),
             .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
                                                : vk::DescriptorType::eSampledImage,
             .descriptorCount = num_bindings,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });
-        binding += num_bindings;
     }
     for (const auto& sampler : info->samplers) {
         bindings.push_back({
-            .binding = binding++,
+            .binding = add_binding(),
             .descriptorType = vk::DescriptorType::eSampler,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
@@ -73,7 +78,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .size = sizeof(Shader::PushData),
     };
 
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors = binding.CanUsePushDescriptors(instance.MaxPushDescriptors());
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};
@@ -85,6 +90,12 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     const auto device = instance.GetDevice();
     auto [descriptor_set_result, descriptor_set] =
         device.createDescriptorSetLayoutUnique(desc_layout_ci);
+    if (descriptor_set_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignoring cached compute descriptor layout rejected by Vulkan: {}",
+                    vk::to_string(descriptor_set_result));
+        return;
+    }
     ASSERT_MSG(descriptor_set_result == vk::Result::eSuccess,
                "Failed to create compute descriptor set layout: {}",
                vk::to_string(descriptor_set_result));
@@ -98,6 +109,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .pPushConstantRanges = &push_constants,
     };
     auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
+    if (layout_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached compute pipeline layout rejected by Vulkan: {}",
+                    vk::to_string(layout_result));
+        return;
+    }
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create compute pipeline layout: {}", vk::to_string(layout_result));
     pipeline_layout = std::move(layout);
@@ -109,6 +125,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     };
     auto [pipeline_result, pipe] =
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+    if (pipeline_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached compute pipeline rejected by Vulkan: {}",
+                    vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
