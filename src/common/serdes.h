@@ -6,7 +6,12 @@
 #include "common/assert.h"
 #include "common/types.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <exception>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace Serialization {
@@ -41,6 +46,18 @@ struct Archive {
         return container.data() + offset;
     }
 
+    [[nodiscard]] size_t RemainingBytes() const {
+        return offset <= container.size() ? container.size() - offset : 0;
+    }
+
+    bool TryAdvance(size_t size) {
+        if (size > RemainingBytes()) {
+            return false;
+        }
+        offset += size;
+        return true;
+    }
+
     void Advance(size_t size) {
         ASSERT_MSG(offset + size <= container.size(),
                    "Invalid or corrupted deserialization container/shader cache");
@@ -60,7 +77,7 @@ struct Archive {
     explicit Archive(std::vector<u8>&& v) : container{v} {}
 
 private:
-    u32 offset{};
+    size_t offset{};
     std::vector<u8> container{};
 
     friend struct Writer;
@@ -70,8 +87,12 @@ private:
 struct Writer {
     template <typename T>
     void Write(const T* ptr, size_t size) {
-        if (ar.offset + size >= ar.container.size()) {
-            ar.Grow(size);
+        if (size > std::numeric_limits<size_t>::max() - ar.offset) {
+            throw std::length_error{"Serialization archive size overflow"};
+        }
+        const size_t end_offset = ar.offset + size;
+        if (end_offset > ar.container.size()) {
+            ar.container.resize(end_offset);
         }
         std::memcpy(ar.CurrPtr(), reinterpret_cast<const void*>(ptr), size);
         ar.Advance(size);
@@ -103,41 +124,100 @@ struct Writer {
 };
 
 struct Reader {
+    static constexpr size_t DefaultMaxContainerElements = 1U << 20;
+    static constexpr size_t DefaultMaxStringBytes = 1U << 20;
+
     template <typename T>
-    void Read(T* ptr, size_t size) {
-        ASSERT_MSG(ar.offset + size <= ar.container.size(),
-                   "Invalid or corrupted deserialization container/shader cache");
+    bool Read(T* ptr, size_t size) {
+        if (!valid || size > ar.RemainingBytes()) {
+            valid = false;
+            return false;
+        }
         std::memcpy(reinterpret_cast<void*>(ptr), ar.CurrPtr(), size);
-        ar.Advance(size);
+        valid = ar.TryAdvance(size);
+        return valid;
     }
 
     template <typename T>
         requires(!Container<T>)
-    void Read(T& value) {
+    bool Read(T& value) {
         const auto size = sizeof(value);
-        Read(&value, size);
+        return Read(&value, size);
     }
 
-    void Read(auto& v) {
-        size_t num_elements{};
-        Read(num_elements);
-        for (int i = 0; i < num_elements; ++i) {
-            v.emplace_back();
-            Read(v.back());
+    bool Read(bool& value) {
+        u8 encoded{};
+        if (!Read(encoded) || encoded > 1) {
+            valid = false;
+            value = false;
+            return false;
         }
+        value = encoded != 0;
+        return true;
     }
 
-    void Read(std::string& s) {
+    template <Container T>
+    bool Read(T& v, size_t max_elements = DefaultMaxContainerElements) {
+        size_t num_elements{};
+        if (!Read(num_elements)) {
+            return false;
+        }
+        using Value = typename T::value_type;
+        constexpr size_t MinEncodedElementBytes =
+            Container<Value> ? sizeof(size_t) : std::max<size_t>(sizeof(Value), 1);
+        const size_t remaining_capacity = ar.RemainingBytes() / MinEncodedElementBytes;
+        if (num_elements > max_elements || num_elements > remaining_capacity ||
+            num_elements > v.max_size()) {
+            valid = false;
+            return false;
+        }
+        v.clear();
+        try {
+            for (size_t i = 0; i < num_elements; ++i) {
+                v.emplace_back();
+                if (!Read(v.back())) {
+                    v.clear();
+                    return false;
+                }
+            }
+        } catch (const std::exception&) {
+            valid = false;
+            v.clear();
+            return false;
+        }
+        return true;
+    }
+
+    bool Read(std::string& s, size_t max_length = DefaultMaxStringBytes) {
         size_t length{};
-        Read(length);
-        s.resize(length);
-        Read(s.data(), length);
+        if (!Read(length) || length > max_length || length > ar.RemainingBytes()) {
+            valid = false;
+            s.clear();
+            return false;
+        }
+        try {
+            s.resize(length);
+        } catch (const std::exception&) {
+            valid = false;
+            s.clear();
+            return false;
+        }
+        if (!Read(s.data(), length)) {
+            s.clear();
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool IsValid() const {
+        return valid;
     }
 
     Reader() = delete;
     explicit Reader(Archive& ar_) : ar{ar_} {}
 
     Archive& ar;
+    bool valid{true};
 };
 
 } // namespace Serialization
