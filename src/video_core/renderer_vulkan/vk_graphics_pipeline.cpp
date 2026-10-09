@@ -2,15 +2,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "video_core/descriptor_binding_cursor.h"
+#include "video_core/renderer_vulkan/descriptor_layout_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -33,12 +37,29 @@ GraphicsPipeline::GraphicsPipeline(
     vk::PipelineCache pipeline_cache, std::span<const Shader::Info*, MaxShaderStages> infos,
     std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader_,
-    std::span<const vk::ShaderModule> modules, SerializationSupport& sdata, bool preloading)
+    std::span<const vk::ShaderModule> modules, SerializationSupport& sdata, bool preloading,
+    vk::PipelineCreateFlags creation_flags)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache}, key{key_},
       fetch_shader{std::move(fetch_shader_)} {
     const vk::Device device = instance.GetDevice();
+    const auto compile_auxiliary = [&](std::span<const u32> code) -> vk::ShaderModule {
+        vk::ShaderModule module{};
+        if (preloading) {
+            const auto cached_module = TryCompileSPV(code, device);
+            if (!cached_module) {
+                return {};
+            }
+            module = *cached_module;
+        } else {
+            module = CompileSPV(code, device);
+        }
+        owned_auxiliary_modules.push_back(module);
+        return module;
+    };
     std::ranges::copy(infos, stages.begin());
-    BuildDescSetLayout(preloading);
+    if (!BuildDescSetLayout(preloading)) {
+        return;
+    }
     const auto debug_str = GetDebugString();
 
     const vk::PushConstantRange push_constants = {
@@ -55,6 +76,12 @@ GraphicsPipeline::GraphicsPipeline(
         .pPushConstantRanges = &push_constants,
     };
     auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
+    if (layout_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignoring cached graphics pipeline layout rejected by Vulkan: {}",
+                    vk::to_string(layout_result));
+        return;
+    }
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create graphics pipeline layout: {}", vk::to_string(layout_result));
     pipeline_layout = std::move(layout);
@@ -197,9 +224,13 @@ GraphicsPipeline::GraphicsPipeline(
             const auto& fs_info = runtime_infos[u32(Shader::LogicalStage::Fragment)].fs_info;
             sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
         }
+        const auto auxiliary_module = compile_auxiliary(sdata.tcs);
+        if (!auxiliary_module) {
+            return;
+        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
-            .module = CompileSPV(sdata.tcs, instance.GetDevice()),
+            .module = auxiliary_module,
             .pName = "main",
         });
     }
@@ -216,9 +247,13 @@ GraphicsPipeline::GraphicsPipeline(
             sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
                 AuxShaderType::PassthroughTES, fs_info);
         }
+        const auto auxiliary_module = compile_auxiliary(sdata.tes);
+        if (!auxiliary_module) {
+            return;
+        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
-            .module = CompileSPV(sdata.tes, instance.GetDevice()),
+            .module = auxiliary_module,
             .pName = "main",
         });
     }
@@ -229,7 +264,9 @@ GraphicsPipeline::GraphicsPipeline(
             .module = modules[stage],
             .pName = "main",
         });
-    } else if (runtime_infos[u32(Shader::LogicalStage::Fragment)].fs_info.clip_distance_emulation) {
+    } else if ((!preloading && runtime_infos[u32(Shader::LogicalStage::Fragment)]
+                                   .fs_info.clip_distance_emulation) ||
+               (preloading && !sdata.fragment.empty())) {
         if (!preloading) {
             const auto vs_runtime_info =
                 runtime_infos[static_cast<u32>(Shader::LogicalStage::Vertex)].vs_info;
@@ -237,9 +274,13 @@ GraphicsPipeline::GraphicsPipeline(
             sdata.fragment =
                 Shader::Backend::SPIRV::EmitDiscardFragmentShader(vs_runtime_info.outputs);
         }
+        const auto auxiliary_module = compile_auxiliary(sdata.fragment);
+        if (!auxiliary_module) {
+            return;
+        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eFragment,
-            .module = CompileSPV(sdata.fragment, instance.GetDevice()),
+            .module = auxiliary_module,
             .pName = "main",
         });
     }
@@ -369,6 +410,7 @@ GraphicsPipeline::GraphicsPipeline(
 
     const vk::GraphicsPipelineCreateInfo pipeline_info = {
         .pNext = &pipeline_rendering_ci,
+        .flags = creation_flags,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
         .pVertexInputState = !instance.IsVertexInputDynamicState() ? &vertex_input_info : nullptr,
@@ -386,13 +428,23 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    if (pipeline_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached graphics pipeline rejected by Vulkan: {}",
+                    vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
 }
 
-GraphicsPipeline::~GraphicsPipeline() = default;
+GraphicsPipeline::~GraphicsPipeline() {
+    const auto device = instance.GetDevice();
+    for (const auto module : owned_auxiliary_modules) {
+        device.destroyShaderModule(module);
+    }
+}
 
 template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(
@@ -404,9 +456,15 @@ void GraphicsPipeline::GetVertexInputs(
         return;
     }
     const auto& vs_info = GetStage(Shader::LogicalStage::Vertex);
-    for (const auto& attrib : fetch_shader->attributes) {
+    if (vs_info.captured_vertex_buffers.size() != fetch_shader->attributes.size()) {
+        LOG_ERROR(Render_Vulkan,
+                  "Vertex descriptor snapshot count does not match fetch shader attributes");
+        return;
+    }
+    for (u32 index = 0; index < fetch_shader->attributes.size(); ++index) {
+        const auto& attrib = fetch_shader->attributes[index];
         const auto step_rate = attrib.GetStepRate();
-        const auto buffer = attrib.GetSharp(vs_info);
+        const auto& buffer = vs_info.captured_vertex_buffers[index];
         attributes.push_back(Attribute{
             .location = attrib.semantic,
             .binding = attrib.semantic,
@@ -446,9 +504,15 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
 
-void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
+bool GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
-    u32 binding{};
+    VideoCore::DescriptorBindingCursor binding;
+    bool valid_bindings = true;
+    const auto add_binding = [&binding, &valid_bindings](u32 descriptor_count = 1) {
+        const auto result = binding.TryAdd(descriptor_count);
+        valid_bindings &= result.has_value();
+        return result.value_or(0U);
+    };
 
     for (const auto* stage : stages) {
         if (!stage) {
@@ -460,7 +524,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 preloading ? AmdGpu::Buffer{}
                            : buffer.GetSharp(*stage); // See for the comment in compute PL creation
             bindings.push_back({
-                .binding = binding++,
+                .binding = add_binding(),
                 .descriptorType = buffer.IsStorage(sharp) ? vk::DescriptorType::eStorageBuffer
                                                           : vk::DescriptorType::eUniformBuffer,
                 .descriptorCount = 1,
@@ -470,24 +534,37 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);
             bindings.push_back({
-                .binding = binding,
+                .binding = add_binding(num_bindings),
                 .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
                                                    : vk::DescriptorType::eSampledImage,
                 .descriptorCount = num_bindings,
                 .stageFlags = stage_bit,
             });
-            binding += num_bindings;
         }
         for (const auto& sampler : stage->samplers) {
             bindings.push_back({
-                .binding = binding++,
+                .binding = add_binding(),
                 .descriptorType = vk::DescriptorType::eSampler,
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
         }
     }
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors = binding.CanUsePushDescriptors(instance.MaxPushDescriptors());
+    if (!valid_bindings) {
+        LOG_WARNING(Render_Vulkan, "Graphics descriptor binding capacity is malformed");
+        return false;
+    }
+    const auto failure = ValidateGraphicsDescriptorLayout(
+        bindings, instance.DescriptorLimits(), desc_heap.PoolSizes(), desc_heap.MaxSets(),
+        DescriptorHeap::DescriptorSetBatch, uses_push_descriptors, key.num_color_attachments,
+        std::popcount(key.mrt_mask));
+    if (failure) {
+        LOG_WARNING(Render_Vulkan,
+                    "Graphics descriptor layout rejected reason={} required={} limit={}",
+                    static_cast<u32>(failure->reason), failure->required, failure->limit);
+        return false;
+    }
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};
@@ -498,9 +575,16 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     };
     auto [layout_result, layout] =
         instance.GetDevice().createDescriptorSetLayoutUnique(desc_layout_ci);
+    if (layout_result != vk::Result::eSuccess && preloading) {
+        LOG_WARNING(Render_Vulkan,
+                    "Ignoring cached graphics descriptor layout rejected by Vulkan: {}",
+                    vk::to_string(layout_result));
+        return false;
+    }
     ASSERT_MSG(layout_result == vk::Result::eSuccess,
                "Failed to create graphics descriptor set layout: {}", vk::to_string(layout_result));
     desc_layout = std::move(layout);
+    return true;
 }
 
 } // namespace Vulkan
