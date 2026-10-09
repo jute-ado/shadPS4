@@ -1153,6 +1153,7 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto caching_pagebits{
         Constant(U64, static_cast<u64>(VideoCore::BufferCache::CACHING_PAGEBITS))};
     const auto caching_pagemask{Constant(U64, VideoCore::BufferCache::CACHING_PAGESIZE - 1)};
+    const auto caching_numpages{Constant(U64, VideoCore::BufferCache::CACHING_NUMPAGES)};
 
     const auto func_type{TypeFunction(U64, U64)};
     const auto func{OpFunction(U64, spv::FunctionControlMask::MaskNone, func_type)};
@@ -1160,12 +1161,23 @@ Id EmitContext::DefineGetBdaPointer() {
     Name(func, "get_bda_pointer");
     AddLabel();
 
+    const auto lookup_label{OpLabel()};
+    const auto invalid_label{OpLabel()};
     const auto fault_label{OpLabel()};
     const auto available_label{OpLabel()};
     const auto merge_label{OpLabel()};
 
-    // Get page BDA
+    // Reject addresses outside the guest GPU address space before indexing the page table.
     const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
+    const auto is_in_range{OpULessThan(U1[1], page, caching_numpages)};
+    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(is_in_range, lookup_label, invalid_label);
+
+    AddLabel(invalid_label);
+    OpBranch(merge_label);
+
+    // Get page BDA.
+    AddLabel(lookup_label);
     const auto page32{OpUConvert(U32[1], page)};
     const auto& bda_buffer{buffers[bda_pagetable_index]};
     const auto [bda_buffer_id, bda_pointer_type] = bda_buffer.Alias(PointerType::U64);
@@ -1202,7 +1214,8 @@ Id EmitContext::DefineGetBdaPointer() {
 
     // Merge
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label,
+                            fallback_result, invalid_label)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;

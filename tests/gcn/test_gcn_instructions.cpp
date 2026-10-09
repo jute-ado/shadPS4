@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +26,28 @@ struct F32x2 {
     float a;
     float b;
 };
+
+bool HasOpcode(std::span<const u32> spirv, spv::Op expected) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const u16 word_count = instruction >> 16;
+        const u16 opcode = instruction & 0xffff;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if (opcode == static_cast<u16>(expected)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+TEST_F(GcnTest, dma_helper_bounds_checks_page_table_lookup) {
+    const auto spirv = TranslateToSpirvWithDmaHelpers(0xbf800000); // s_nop 0
+
+    EXPECT_TRUE(HasOpcode(spirv, spv::Op::OpULessThan));
+}
 
 // Example
 // TEST_F(GcnTest, test_name) {
