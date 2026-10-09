@@ -709,35 +709,54 @@ void Translator::V_BCNT_U32_B32(const GcnInst& inst) {
 }
 
 void Translator::V_MBCNT_U32_B32(bool is_low, const GcnInst& inst) {
-    if (!is_low) {
-        // v_mbcnt_hi_u32_b32 vX, -1, 0
-        if (inst.src[0].field == OperandField::SignedConstIntNeg && inst.src[0].code == 193 &&
-            inst.src[1].field == OperandField::ConstZero) {
-            return;
+    // GCN counts the selected half of the 64-bit mask strictly below this lane,
+    // then adds SRC1. In particular, the low half contributes all 32 bits for
+    // lanes 32..63; the high half contributes nothing for lanes 0..32.
+    const IR::U32 source = [&]() -> IR::U32 {
+        if (inst.src[0].field == OperandField::ExecLo ||
+            inst.src[0].field == OperandField::ExecHi) {
+            const auto mask = ir.Ballot(ir.GetExec());
+            return IR::U32{ir.CompositeExtract(
+                mask, inst.src[0].field == OperandField::ExecLo ? 0U : 1U)};
         }
-        // v_mbcnt_hi_u32_b32 vX, exec_hi, 0/vZ
-        if ((inst.src[0].field == OperandField::ExecHi ||
-             inst.src[0].field == OperandField::VccHi ||
-             inst.src[0].field == OperandField::ScalarGPR) &&
-            (inst.src[1].field == OperandField::ConstZero ||
-             inst.src[1].field == OperandField::VectorGPR)) {
-            return SetDst(inst.dst[0], GetSrc(inst.src[1]));
+        return GetSrc(inst.src[0]);
+    }();
+    const IR::U32 addend{GetSrc(inst.src[1])};
+    const IR::U32 lane = [&]() -> IR::U32 {
+        // This is per-invocation arithmetic, not a subgroup exchange. A checked
+        // single guest-wave compute workgroup therefore retains its architectural
+        // lane position even inside partial EXEC, without changing unrelated
+        // native cross-lane instructions or inserting collective barriers.
+        if (info.stage == Stage::Compute && info.l_stage == LogicalStage::Compute &&
+            runtime_info.stage == Stage::Compute) {
+            const auto& shape = runtime_info.cs_info.workgroup_size;
+            u32 count = 1;
+            bool valid = true;
+            for (const u32 dimension : shape) {
+                if (dimension == 0 || count > 64U / dimension) {
+                    valid = false;
+                    break;
+                }
+                count *= dimension;
+            }
+            if (valid && count == 64U) {
+                const auto x = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 0);
+                const auto y = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 1);
+                const auto z = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 2);
+                return ir.IAdd(ir.IAdd(x, ir.IMul(y, ir.Imm32(shape[0]))),
+                               ir.IMul(z, ir.Imm32(shape[0] * shape[1])));
+            }
         }
-        UNREACHABLE();
-    } else {
-        // v_mbcnt_lo_u32_b32 vY, -1, vX
-        // used combined with above to fetch lane id in non-compute stages
-        if (inst.src[0].field == OperandField::SignedConstIntNeg && inst.src[0].code == 193) {
-            return SetDst(inst.dst[0], ir.LaneId());
-        }
-        // v_mbcnt_lo_u32_b32 vY, exec_lo, vX
-        // used combined with above for append buffer indexing.
-        if (inst.src[0].field == OperandField::ExecLo || inst.src[0].field == OperandField::VccLo ||
-            inst.src[0].field == OperandField::ScalarGPR) {
-            return SetDst(inst.dst[0], GetSrc(inst.src[1]));
-        }
-        UNREACHABLE();
-    }
+        return ir.LaneId();
+    }();
+    const IR::U32 in_half = ir.BitwiseAnd(lane, ir.Imm32(31));
+    const IR::U32 partial = ir.ISub(ir.ShiftLeftLogical(ir.Imm32(1), in_half), ir.Imm32(1));
+    const IR::U32 below = is_low
+                              ? IR::U32{ir.Select(ir.IGreaterThanEqual(lane, ir.Imm32(32), false),
+                                                ir.Imm32(~0U), partial)}
+                              : IR::U32{ir.Select(ir.IGreaterThan(lane, ir.Imm32(32), false),
+                                                partial, ir.Imm32(0))};
+    SetDst(inst.dst[0], ir.IAdd(ir.BitCount(ir.BitwiseAnd(source, below)), addend));
 }
 
 void Translator::V_ADD_I32(const GcnInst& inst) {
@@ -1188,15 +1207,7 @@ void Translator::V_CMP_F32(ConditionOp op, bool set_exec, const GcnInst& inst) {
             UNREACHABLE();
         }
     }();
-    if (set_exec) {
-        // V_CMPX evaluates on active lanes only; hardware writes exec & result to both EXEC
-        // and the VCC/SDST destination, zeroing inactive lanes' bits.
-        const IR::U1 masked{ir.LogicalAnd(ir.GetExec(), result)};
-        ir.SetExec(masked);
-        SetDst1(inst.dst[1], masked);
-        return;
-    }
-    SetDst1(inst.dst[1], result);
+    SetCompareMaskDst(inst.dst[1], result, set_exec);
 }
 
 void Translator::V_CMP_F64(ConditionOp op, bool set_exec, const GcnInst& inst) {
@@ -1224,14 +1235,7 @@ void Translator::V_CMP_F64(ConditionOp op, bool set_exec, const GcnInst& inst) {
             UNREACHABLE();
         }
     }();
-    if (set_exec) {
-        // See the V_CMPX note in V_CMP_F32.
-        const IR::U1 masked{ir.LogicalAnd(ir.GetExec(), result)};
-        ir.SetExec(masked);
-        SetDst1(inst.dst[1], masked);
-        return;
-    }
-    SetDst1(inst.dst[1], result);
+    SetCompareMaskDst(inst.dst[1], result, set_exec);
 }
 
 void Translator::V_CMP_U32(ConditionOp op, bool is_signed, bool set_exec, const GcnInst& inst) {
@@ -1259,14 +1263,7 @@ void Translator::V_CMP_U32(ConditionOp op, bool is_signed, bool set_exec, const 
             UNREACHABLE();
         }
     }();
-    if (set_exec) {
-        // See the V_CMPX note in V_CMP_F32.
-        const IR::U1 masked{ir.LogicalAnd(ir.GetExec(), result)};
-        ir.SetExec(masked);
-        SetDst1(inst.dst[1], masked);
-        return;
-    }
-    SetDst1(inst.dst[1], result);
+    SetCompareMaskDst(inst.dst[1], result, set_exec);
 }
 
 void Translator::V_CMP_U64(ConditionOp op, bool is_signed, bool set_exec, const GcnInst& inst) {
@@ -1308,7 +1305,7 @@ void Translator::V_CMP_U64(ConditionOp op, bool is_signed, bool set_exec, const 
     if (set_exec) {
         UNREACHABLE_MSG("Exec setting for V_CMP_U64 is not supported");
     }
-    SetDst1(inst.dst[1], result);
+    SetCompareMaskDst(inst.dst[1], result, false);
 }
 
 void Translator::V_CMP_CLASS_F32(const GcnInst& inst) {
@@ -1330,7 +1327,7 @@ void Translator::V_CMP_CLASS_F32(const GcnInst& inst) {
         // We don't know the type yet, delay its resolution.
         value = ir.FPCmpClass32(src0, src1);
     }
-    SetDst1(inst.dst[1], value);
+    SetCompareMaskDst(inst.dst[1], value, false);
 }
 
 // VOP3a

@@ -50,7 +50,13 @@ union PM4Type3Header {
     }
 
     u32 NumWords() const {
-        return (count + 1) & 0x3fff;
+        // A zero-body trailing NOP is emitted with COUNT=0x3fff (size - 1 underflow). For every
+        // real packet opcode, however, COUNT remains the 14-bit N - 1 body count and its maximum
+        // value describes 0x4000 dwords; do not let it wrap to zero and desynchronize the parser.
+        if (opcode == PM4ItOpcode::Nop && count == 0x3fffu) {
+            return 0;
+        }
+        return count + 1;
     }
 
     u32 raw;

@@ -3,19 +3,32 @@
 
 #pragma once
 
+#include <algorithm>
+#include <functional>
+#include <limits>
 #include <map>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include "common/enum.h"
 #include "common/shared_first_mutex.h"
 #include "common/singleton.h"
 #include "common/types.h"
+#include "common/unique_function.h"
 #include "core/address_space.h"
+#include "core/deferred_backing_write.h"
+#include "core/gpu_owner_lifetime.h"
+#include "core/memory_range_identity.h"
 #include "core/libraries/kernel/memory.h"
 
 namespace Vulkan {
 class Rasterizer;
+}
+
+namespace VideoCore {
+enum class GpuMappingKind : u8;
 }
 
 namespace Libraries::Kernel {
@@ -30,6 +43,16 @@ namespace Core {
 
 constexpr u64 DEFAULT_MAPPING_BASE = 0x200000000;
 
+// GPU virtual addresses are 40-bit.  The exclusive end of a range may equal the limit, but
+// the start itself must remain below it.  Keeping this check in one constexpr helper lets the
+// destructive VMM paths clip a request to the representable prefix without arithmetic wrap.
+inline constexpr VAddr GPU_ADDRESS_SPACE_LIMIT = 1ULL << 40;
+
+[[nodiscard]] constexpr bool IsValidGpuAddressRange(VAddr virtual_addr, u64 size) noexcept {
+    return virtual_addr < GPU_ADDRESS_SPACE_LIMIT &&
+           size <= GPU_ADDRESS_SPACE_LIMIT - virtual_addr;
+}
+
 enum class MemoryProt : u32 {
     NoAccess = 0,
     CpuRead = 1,
@@ -41,10 +64,6 @@ enum class MemoryProt : u32 {
     GpuReadWrite = 48,
 };
 DECLARE_ENUM_FLAG_OPERATORS(MemoryProt)
-
-constexpr bool RequiresSubmissionBoundaryBeforeMapping(MemoryProt prot) {
-    return True(prot & MemoryProt::GpuReadWrite);
-}
 
 enum class MemoryMapFlags : u32 {
     NoFlags = 0,
@@ -60,6 +79,7 @@ enum class MemoryMapFlags : u32 {
     NoCore = 0x20000,
     NoCoalesce = 0x400000,
 };
+
 DECLARE_ENUM_FLAG_OPERATORS(MemoryMapFlags)
 
 enum class PhysicalMemoryType : u32 {
@@ -138,6 +158,14 @@ struct VirtualMemoryArea {
         return IsMapped() && True(prot & (MemoryProt::CpuRead | MemoryProt::GpuRead));
     }
 
+    bool HasWritableBacking() const noexcept {
+        return IsMapped() && True(prot & (MemoryProt::CpuWrite | MemoryProt::GpuWrite));
+    }
+
+    bool HasPhysicalBacking() const noexcept {
+        return type == VMAType::Direct || type == VMAType::Flexible || type == VMAType::Pooled;
+    }
+
     bool CanMergeWith(VirtualMemoryArea& next) {
         if (disallow_merge || next.disallow_merge) {
             return false;
@@ -164,6 +192,159 @@ struct VirtualMemoryArea {
     }
 };
 
+struct GuestMemoryRange {
+    VAddr address;
+    u64 size;
+};
+
+struct GuestMemoryWrite {
+    VAddr address;
+    const void* data;
+    u64 size;
+};
+
+// A move-only token keeps submission admission held while a GPU-visible guest mapping is revoked
+// or replaced. The provider is invoked only for an existing GPU mapping; callers that merely
+// reserve or create a fresh range must not acquire it.
+using AcquireGpuAddressSpaceGuard = Common::UniqueFunction<Common::UniqueFunction<void>>;
+
+namespace Detail {
+
+template <typename VmaMap, typename HasBacking>
+bool IsCompleteBackingRange(const VmaMap& vma_map, VAddr virtual_addr, u64 size,
+                            HasBacking&& has_backing) {
+    if (size == 0) {
+        return true;
+    }
+    if (vma_map.empty() || size > std::numeric_limits<VAddr>::max() - virtual_addr) {
+        return false;
+    }
+
+    auto vma = vma_map.upper_bound(virtual_addr);
+    if (vma == vma_map.begin()) {
+        return false;
+    }
+    --vma;
+
+    VAddr current_addr = virtual_addr;
+    u64 remaining_size = size;
+    while (remaining_size != 0) {
+        const auto& area = vma->second;
+        if (!has_backing(area) || current_addr < area.base) {
+            return false;
+        }
+
+        const u64 offset = current_addr - area.base;
+        if (offset >= area.size) {
+            return false;
+        }
+        const u64 backed_size = std::min(area.size - offset, remaining_size);
+        current_addr += backed_size;
+        remaining_size -= backed_size;
+
+        if (remaining_size != 0) {
+            ++vma;
+            if (vma == vma_map.end() || vma->second.base != current_addr) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template <typename VmaMap>
+bool IsCompleteReadableBackingRange(const VmaMap& vma_map, VAddr virtual_addr, u64 size) {
+    return IsCompleteBackingRange(vma_map, virtual_addr, size,
+                                  [](const VirtualMemoryArea& area) {
+                                      return area.HasReadableBacking();
+                                  });
+}
+
+template <typename VmaMap, typename Range>
+bool AreCompleteReadableBackingRanges(const VmaMap& vma_map, const Range& ranges) {
+    return std::ranges::all_of(ranges, [&](const GuestMemoryRange& range) {
+        return IsCompleteBackingRange(vma_map, range.address, range.size,
+                                      [](const VirtualMemoryArea& area) {
+                                          return area.HasReadableBacking();
+                                      });
+    });
+}
+
+template <typename VmaMap, typename Range>
+bool AreCompleteWritableBackingRanges(const VmaMap& vma_map, const Range& ranges) {
+    return std::ranges::all_of(ranges, [&](const GuestMemoryRange& range) {
+        return IsCompleteBackingRange(vma_map, range.address, range.size,
+                                      [](const VirtualMemoryArea& area) {
+                                          return area.HasWritableBacking();
+                                      });
+    });
+}
+
+template <typename VmaMap, typename Range>
+bool AreCompleteWritableGuestWrites(const VmaMap& vma_map, const Range& writes) {
+    return std::ranges::all_of(writes, [&](const GuestMemoryWrite& write) {
+        return (write.size == 0 || write.data != nullptr) &&
+               IsCompleteBackingRange(vma_map, write.address, write.size,
+                                      [](const VirtualMemoryArea& area) {
+                                          return area.HasWritableBacking();
+                                      });
+    });
+}
+
+} // namespace Detail
+
+/// Visits a sparse guest range without assuming that its first byte belongs to a host VMA.
+/// Gaps and VMAs without readable backing are reported as unreadable so callers can zero-fill
+/// them, while readable VMAs may be copied directly from the guest address space.
+template <typename VmaMap, typename Visitor>
+[[nodiscard]] bool ForEachSparseMemorySegment(const VmaMap& areas, VAddr address, u64 size,
+                                              Visitor&& visitor) {
+    if (size == 0) {
+        return true;
+    }
+    if (size > std::numeric_limits<VAddr>::max() - address) {
+        return false;
+    }
+
+    const VAddr range_end = address + size;
+    VAddr cursor = address;
+    auto area = areas.upper_bound(cursor);
+    if (area != areas.begin()) {
+        auto previous = std::prev(area);
+        const VAddr previous_end = previous->second.base + previous->second.size;
+        if (previous->second.base <= cursor && cursor < previous_end) {
+            area = previous;
+        }
+    }
+
+    while (cursor < range_end) {
+        while (area != areas.end() && area->second.base + area->second.size <= cursor) {
+            ++area;
+        }
+        if (area == areas.end()) {
+            std::invoke(visitor, cursor, range_end - cursor, false);
+            break;
+        }
+
+        const auto& current = area->second;
+        if (cursor < current.base) {
+            const VAddr gap_end = std::min(range_end, current.base);
+            std::invoke(visitor, cursor, gap_end - cursor, false);
+            cursor = gap_end;
+            continue;
+        }
+
+        const VAddr area_end = current.base + current.size;
+        const VAddr segment_end = std::min(range_end, area_end);
+        std::invoke(visitor, cursor, segment_end - cursor, current.HasReadableBacking());
+        cursor = segment_end;
+        if (cursor == area_end) {
+            ++area;
+        }
+    }
+    return true;
+}
+
 class MemoryManager {
     using PhysMap = std::map<PAddr, PhysicalMemoryArea>;
     using PhysHandle = PhysMap::iterator;
@@ -177,6 +358,11 @@ public:
 
     void SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
+    }
+
+    // Installed once before guest submissions begin; retained closed after owner teardown.
+    void SetGpuOwnerLifetime(std::shared_ptr<GpuOwnerLifetime> lifetime) {
+        gpu_owner_lifetime = std::move(lifetime);
     }
 
     AddressSpace& GetAddressSpace() {
@@ -199,48 +385,14 @@ public:
         return impl.SystemReservedVirtualBase();
     }
 
-    bool IsValidGpuMapping(VAddr virtual_addr, u64 size) {
-        // The PS4's GPU can only handle 40 bit addresses.
-        const VAddr max_gpu_address{0x10000000000};
-        return virtual_addr + size < max_gpu_address;
+    bool IsValidGpuMapping(VAddr virtual_addr, u64 size) const {
+        return IsValidGpuAddressRange(virtual_addr, size);
     }
 
-    bool IsValidMapping(const VAddr virtual_addr, const u64 size = 0) {
-        const auto end_it = std::prev(vma_map.end());
-        const VAddr end_addr = end_it->first + end_it->second.size;
-
-        // If the address fails boundary checks, return early.
-        if (virtual_addr < vma_map.begin()->first || virtual_addr >= end_addr) {
-            return false;
-        }
-
-        // If size is zero and boundary checks succeed, then skip more robust checking
-        if (size == 0) {
-            return true;
-        }
-
-        // Now make sure the full address range is contained in vma_map.
-        auto vma_handle = FindVMA(virtual_addr);
-        auto addr_to_check = virtual_addr;
-        u64 size_to_validate = size;
-        while (vma_handle != vma_map.end() && size_to_validate > 0) {
-            const auto offset_in_vma = addr_to_check - vma_handle->second.base;
-            const auto size_in_vma =
-                std::min<u64>(vma_handle->second.size - offset_in_vma, size_to_validate);
-            size_to_validate -= size_in_vma;
-            addr_to_check += size_in_vma;
-            vma_handle++;
-
-            // Make sure there isn't any gap here
-            if (size_to_validate > 0 && vma_handle != vma_map.end() &&
-                addr_to_check != vma_handle->second.base) {
-                return false;
-            }
-        }
-
-        // If we reach this point and size to validate is not positive, then this mapping is valid.
-        return size_to_validate <= 0;
-    }
+    // Lock-taking query for callers outside MemoryManager's VMA critical sections.  Code that
+    // already holds mutex must call IsValidMappingLocked() instead of recursively acquiring the
+    // non-recursive SharedFirstMutex.
+    [[nodiscard]] bool IsValidMapping(const VAddr virtual_addr, const u64 size = 0);
 
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
 
@@ -248,11 +400,40 @@ public:
         return impl.SystemManagedVirtualBase();
     }
 
-    void SetPrtArea(u32 id, VAddr address, u64 size);
+    void SetPrtArea(u32 id, VAddr address, u64 size,
+                    AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard = {});
 
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
 
+    // Writes the physically backed prefix; false means the complete range was not written.
+    bool TryReadBacking(const void* address, void* data, u64 size);
+
+    // Returns true only when every byte of every range has readable guest backing.  This is the
+    // metadata-only companion to TryReadBacking for callers that must validate a guest span
+    // before taking a raw host-pointer snapshot.
+    bool CanReadBacking(std::span<const GuestMemoryRange> ranges);
+
+    bool CanWriteBacking(std::span<const GuestMemoryRange> ranges);
+
+    bool TryClearBacking(std::span<const GuestMemoryRange> ranges);
+
+    bool TryWriteGuest(std::span<const GuestMemoryWrite> writes);
+
     bool TryWriteBacking(void* address, const void* data, u64 size);
+
+    std::optional<DeferredBackingWrite> CaptureReadbackDestinations(
+        std::span<const ReadbackWriteRange> ranges, u64 source_size);
+
+    // False may still publish unchanged partitions. Cleanup receives only published ranges,
+    // while the mapping lock is held; it must not reenter the VMM or wait for guest/GPU work.
+    bool TryPublishReadback(
+        const DeferredBackingWrite& token, std::span<const u8> source,
+        Common::UniqueFunction<void, std::span<const ReadbackWriteRange>>&& on_published = {});
+
+    // Publish a fence only when every captured byte still belongs to the same physical backing
+    // incarnation.  Unlike readback publication this is all-or-nothing: a partial fence store can
+    // expose a value that was never submitted.
+    bool TryPublishFence(const DeferredBackingWrite& token, std::span<const u8> source);
 
     void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
 
@@ -260,20 +441,25 @@ public:
 
     PAddr Allocate(PAddr search_start, PAddr search_end, u64 size, u64 alignment, s32 memory_type);
 
-    s32 Free(PAddr phys_addr, u64 size, bool is_checked);
+    s32 Free(PAddr phys_addr, u64 size, bool is_checked,
+             AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard = {});
 
     s32 PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32 mtype);
 
     s32 MapMemory(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
                   MemoryMapFlags flags, VMAType type, std::string_view name = "anon",
-                  bool validate_dmem = false, PAddr phys_addr = -1, u64 alignment = 0);
+                  bool validate_dmem = false, PAddr phys_addr = -1, u64 alignment = 0,
+                  AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard = {});
 
     s32 MapFile(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
-                MemoryMapFlags flags, s32 fd, s64 phys_addr);
+                MemoryMapFlags flags, s32 fd, s64 phys_addr,
+                AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard = {});
 
-    s32 PoolDecommit(VAddr virtual_addr, u64 size);
+    s32 PoolDecommit(VAddr virtual_addr, u64 size,
+                     AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard = {});
 
-    s32 UnmapMemory(VAddr virtual_addr, u64 size);
+    s32 UnmapMemory(VAddr virtual_addr, u64 size,
+                    AcquireGpuAddressSpaceGuard acquire_gpu_address_space_guard = {});
 
     s32 QueryProtection(VAddr addr, void** start, void** end, u32* prot);
 
@@ -307,17 +493,15 @@ private:
         return std::prev(vma_map.upper_bound(target));
     }
 
+    // Requires the caller to hold mutex, shared or exclusively.
+    [[nodiscard]] bool IsValidMappingLocked(const VAddr virtual_addr, const u64 size = 0);
+
     PhysHandle FindDmemArea(PAddr target) {
         return std::prev(dmem_map.upper_bound(target));
     }
 
     PhysHandle FindFmemArea(PAddr target) {
         return std::prev(fmem_map.upper_bound(target));
-    }
-
-    bool HasPhysicalBacking(VirtualMemoryArea vma) {
-        return vma.type == VMAType::Direct || vma.type == VMAType::Flexible ||
-               vma.type == VMAType::Pooled;
     }
 
     VMAHandle CreateArea(VAddr virtual_addr, u64 size, MemoryProt prot, MemoryMapFlags flags,
@@ -341,13 +525,35 @@ private:
 
     s32 UnmapMemoryImpl(VAddr virtual_addr, u64 size);
 
+    // Address-width validity alone does not mean that the range is currently registered with
+    // the GPU page manager.  Destructive VMM operations must only issue an early GPU unmap for
+    // an existing logical mapping; fresh reservations otherwise underflow page watchers.
+    bool IsGpuMapped(VAddr virtual_addr, u64 size) const;
+
+    // Unlike IsGpuMapped(), this accepts a range containing holes and reports whether any visible
+    // GPU mapping exists. Destructive operations use it before clipping the early GPU unmap to
+    // the mapped subranges.
+    bool HasGpuMappedSubrange(VAddr virtual_addr, u64 size,
+                              VideoCore::GpuMappingKind kind) const;
+
+    // Revoke only the visible GPU-mapped subranges. A VMM operation can span holes or a range that
+    // has not yet been registered with the GPU page manager.
+    void UnmapGpuMappings(VAddr virtual_addr, u64 size, VideoCore::GpuMappingKind kind);
+
 private:
+    std::optional<GpuOwnerLifetime::Guard> AcquireGpuOwnerLease() const;
+
     AddressSpace impl;
     PhysMap dmem_map;
     PhysMap fmem_map;
     VMAMap vma_map;
     Common::SharedFirstMutex mutex{};
     std::mutex unmap_mutex{};
+    // Backing incarnation, not permission or VMA-object identity. An added physical alias or
+    // protection-only change must not invalidate a readback of an unchanged virtual binding.
+    MemoryRangeIdentity virtual_identity;
+    MemoryRangeIdentity physical_identity;
+    std::shared_ptr<GpuOwnerLifetime> gpu_owner_lifetime;
     u64 total_direct_size{};
     u64 total_flexible_size{};
     u64 flexible_usage{};

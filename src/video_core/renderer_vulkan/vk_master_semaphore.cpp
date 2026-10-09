@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <limits>
+#include "common/logging/log.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_result_retry.h"
+#include "video_core/renderer_vulkan/submit_wait_diagnostic.h"
 
 #include "common/assert.h"
 
@@ -34,6 +38,9 @@ void MasterSemaphore::Refresh() {
     do {
         this_tick = gpu_tick.load(std::memory_order_acquire);
         auto [counter_result, cntr] = instance.GetDevice().getSemaphoreCounterValue(*semaphore);
+        if (counter_result != vk::Result::eSuccess) {
+            instance.LogDeviceMemoryBudget("semaphore_counter", counter_result);
+        }
         ASSERT_MSG(counter_result == vk::Result::eSuccess,
                    "Failed to get master semaphore value: {}", vk::to_string(counter_result));
         counter = cntr;
@@ -45,14 +52,43 @@ void MasterSemaphore::Refresh() {
 }
 
 void MasterSemaphore::Wait(u64 tick) {
+    const bool trace_wait = SubmitWaitDiagnosticEnabled();
+    const u64 wait_id = trace_wait ? NextWaitDiagnosticId() : 0;
+    const u64 known_gpu_tick_before = KnownGpuTick();
+    if (trace_wait) {
+        LOG_INFO(Render_Vulkan,
+                 "submit_wait wait_begin id={} target_tick={} logical_tick={} "
+                 "known_gpu_tick={} fast_path={}",
+                 wait_id, tick, CurrentTick(), known_gpu_tick_before,
+                 known_gpu_tick_before >= tick);
+    }
     // No need to wait if the GPU is ahead of the tick
     if (IsFree(tick)) {
+        if (trace_wait) {
+            LOG_INFO(Render_Vulkan,
+                     "submit_wait wait_end id={} target_tick={} result=already_free "
+                     "logical_tick={} known_gpu_tick={}",
+                     wait_id, tick, CurrentTick(), KnownGpuTick());
+        }
         return;
     }
     // Update the GPU tick and try again
     Refresh();
     if (IsFree(tick)) {
+        if (trace_wait) {
+            LOG_INFO(Render_Vulkan,
+                     "submit_wait wait_end id={} target_tick={} result=free_after_refresh "
+                     "logical_tick={} known_gpu_tick={}",
+                     wait_id, tick, CurrentTick(), KnownGpuTick());
+        }
         return;
+    }
+
+    if (trace_wait) {
+        LOG_INFO(Render_Vulkan,
+                 "submit_wait wait_block id={} target_tick={} logical_tick={} "
+                 "known_gpu_tick={}",
+                 wait_id, tick, CurrentTick(), KnownGpuTick());
     }
 
     // If none of the above is hit, fallback to a regular wait
@@ -62,9 +98,26 @@ void MasterSemaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
+    const auto result = RetryOnTimeout([&] {
+        return instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT);
+    });
+    if (trace_wait) {
+        LOG_INFO(Render_Vulkan,
+                 "submit_wait wait_result id={} target_tick={} result={} "
+                 "logical_tick={} known_gpu_tick_before_refresh={}",
+                 wait_id, tick, vk::to_string(result), CurrentTick(), KnownGpuTick());
     }
+    if (result != vk::Result::eSuccess) {
+        instance.LogDeviceMemoryBudget("semaphore_wait", result);
+    }
+    Check<"wait for master semaphore">(result);
     Refresh();
+    if (trace_wait) {
+        LOG_INFO(Render_Vulkan,
+                 "submit_wait wait_end id={} target_tick={} result=completed "
+                 "logical_tick={} known_gpu_tick={}",
+                 wait_id, tick, CurrentTick(), KnownGpuTick());
+    }
 }
 
 } // namespace Vulkan

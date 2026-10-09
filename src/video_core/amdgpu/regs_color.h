@@ -231,8 +231,8 @@ struct ColorBuffer {
         return view.slice_max + 1;
     }
 
-    u32 GetColorSliceSize() const {
-        const auto num_bytes_per_element = NumBitsPerBlock(DataFormat(info.format)) / 8u;
+    u64 GetColorSliceSize() const {
+        const u64 num_bytes_per_element = NumBitsPerBlock(DataFormat(info.format)) / 8u;
         const auto slice_size = num_bytes_per_element * (slice.tile_max + 1) * 64u * NumSamples();
         return slice_size;
     }

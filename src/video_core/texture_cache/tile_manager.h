@@ -6,6 +6,7 @@
 #include "common/types.h"
 #include "video_core/amdgpu/tiling.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/texture_cache/tiling_pipeline_key.h"
 
 namespace VideoCore {
 
@@ -14,8 +15,6 @@ struct Image;
 class StreamBuffer;
 
 class TileManager {
-    static constexpr size_t NUM_BPPS = 5;
-
 public:
     using ScratchBuffer = std::pair<vk::Buffer, VmaAllocation>;
     using Result = std::pair<vk::Buffer, u32>;
@@ -24,8 +23,8 @@ public:
                          StreamBuffer& stream_buffer);
     ~TileManager();
 
-    void TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                   vk::Buffer out_buffer, u32 out_offset, u32 copy_size);
+    [[nodiscard]] bool TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
+                                 vk::Buffer out_buffer, u64 out_offset, u64 out_size);
 
     Result DetileImage(vk::Buffer in_buffer, u32 in_offset, const ImageInfo& info);
 
@@ -39,8 +38,8 @@ private:
     StreamBuffer& stream_buffer;
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pl_layout;
-    std::array<vk::UniquePipeline, AmdGpu::NUM_TILE_MODES * NUM_BPPS> detilers{};
-    std::array<vk::UniquePipeline, AmdGpu::NUM_TILE_MODES * NUM_BPPS> tilers{};
+    std::array<vk::UniquePipeline, TilingPipelineCacheSize> detilers{};
+    std::array<vk::UniquePipeline, TilingPipelineCacheSize> tilers{};
 };
 
 } // namespace VideoCore

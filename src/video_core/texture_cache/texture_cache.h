@@ -5,8 +5,10 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 #include <queue>
 #include <tsl/robin_map.h>
@@ -55,6 +57,15 @@ public:
         VideoOut,
     };
 
+    // An asynchronous unmap must identify the image generation that was visible when the
+    // request was issued.  ImageId slots can be reused after an eviction, so the slot alone is
+    // insufficient to prevent an old callback from deleting a replacement image at the same VA.
+    struct ImageUnmapTarget {
+        ImageId id{};
+        u64 image_uid{};
+    };
+    using ImageUnmapTargets = std::vector<ImageUnmapTarget>;
+
     struct ImageDesc {
         ImageInfo info;
         ImageViewInfo view_info;
@@ -92,6 +103,12 @@ public:
 
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);
+
+    /// Captures the live image generations overlapping a range for later GPU-thread retirement.
+    [[nodiscard]] ImageUnmapTargets CaptureUnmapTargets(VAddr cpu_addr, size_t size);
+
+    /// Evicts only the image generations captured by CaptureUnmapTargets.
+    void UnmapMemory(std::span<const ImageUnmapTarget> targets);
 
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
@@ -145,6 +162,17 @@ public:
         auto& image = slot_images[id];
         TouchImage(image);
         return image;
+    }
+
+    /// Returns the same live image generation without changing cache identity or LRU state.
+    [[nodiscard]] Image* TryGetImage(ImageId id, u64 image_uid) noexcept {
+        if (!id || !slot_images.is_allocated(id)) {
+            return nullptr;
+        }
+        auto& image = slot_images[id];
+        return image.image_uid == image_uid && True(image.flags & ImageFlagBits::Registered)
+                   ? &image
+                   : nullptr;
     }
 
     /// Retrieves the image view with the specified id.

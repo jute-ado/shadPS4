@@ -1,21 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/scope_exit.h"
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/specialization_identity.h"
+#include "shader_recompiler/specialization_serialization.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache_serialization.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
-
-namespace Serialization {
-/* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 4u;
-static constexpr u32 ShaderMetaVersion = 4u;
-static constexpr u32 PipelineKeyVersion = 3u;
-} // namespace Serialization
 
 namespace Vulkan {
 
@@ -28,7 +25,7 @@ void RegisterPipelineData(const ComputePipelineKey& key,
     Serialization::Archive ar{};
     Serialization::Writer pldata{ar};
 
-    pldata.Write(Serialization::PipelineKeyVersion);
+    pldata.Write(PipelineKeyVersion);
     pldata.Write(u32{1}); // compute
 
     key.Serialize(ar);
@@ -47,7 +44,7 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
     Serialization::Archive ar{};
     Serialization::Writer pldata{ar};
 
-    pldata.Write(Serialization::PipelineKeyVersion);
+    pldata.Write(PipelineKeyVersion);
     pldata.Write(u32{0}); // graphics
 
     key.Serialize(ar);
@@ -57,66 +54,28 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
                                        fmt::format("g_{:#018x}", hash), ar.TakeOff());
 }
 
-void RegisterShaderMeta(const Shader::Info& info,
-                        const std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
-                        const Shader::StageSpecialization& spec, size_t perm_hash,
-                        size_t perm_idx) {
+bool RegisterShaderMeta(const Shader::Info& info, const Shader::StageSpecialization& spec,
+                        u64 permutation_id) {
     if (!Storage::DataBase::Instance().IsOpened()) {
-        return;
+        return false;
     }
 
     Serialization::Archive ar;
-    Serialization::Writer meta{ar};
+    if (!Shader::SerializeShaderCacheMetadata(ar, info, spec, permutation_id)) {
+        return false;
+    }
 
-    meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(Serialization::ShaderBinaryVersion);
-
-    meta.Write(perm_hash);
-    meta.Write(perm_idx);
-
-    spec.Serialize(ar);
-    info.Serialize(ar);
-
-    Storage::DataBase::Instance().Save(Storage::BlobType::ShaderMeta,
-                                       fmt::format("{:#018x}", perm_hash), ar.TakeOff());
+    return Storage::DataBase::Instance().Save(
+        Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", permutation_id), ar.TakeOff());
 }
 
-void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
+void RegisterShaderBinary(std::vector<u32>&& spv, u64 permutation_id) {
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
-                                       std::move(spv));
-}
-
-bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
-                    std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
-                    Shader::StageSpecialization& spec, size_t& perm_idx) {
-    Serialization::Reader meta{ar};
-
-    u32 meta_version{};
-    meta.Read(meta_version);
-    if (meta_version != Serialization::ShaderMetaVersion) {
-        return false;
-    }
-
-    u32 binary_version{};
-    meta.Read(binary_version);
-    if (binary_version != Serialization::ShaderBinaryVersion) {
-        return false;
-    }
-
-    u64 perm_hash_ar{};
-    meta.Read(perm_hash_ar);
-    meta.Read(perm_idx);
-
-    spec.Deserialize(ar);
-    info.Deserialize(ar);
-
-    fetch_shader_data = spec.fetch_shader_data;
-    return true;
+                                       fmt::format("{:#018x}", permutation_id), std::move(spv));
 }
 
 void ComputePipelineKey::Serialize(Serialization::Archive& ar) const {
@@ -126,8 +85,7 @@ void ComputePipelineKey::Serialize(Serialization::Archive& ar) const {
 
 bool ComputePipelineKey::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader key{ar};
-    key.Read(value);
-    return true;
+    return key.Read(value) && key.IsValid();
 }
 
 void ComputePipeline::SerializationSupport::Serialize(Serialization::Archive& ar) const {
@@ -140,11 +98,36 @@ bool ComputePipeline::SerializationSupport::Deserialize(Serialization::Archive& 
     return true;
 }
 
+void PipelineCache::ResetPipelineLoadScratch() {
+    infos.fill(nullptr);
+    runtime_infos.fill({});
+    modules.fill(nullptr);
+    fetch_shader.reset();
+}
+
 bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
-    compute_key.Deserialize(ar);
+    ResetPipelineLoadScratch();
+    std::vector<PendingProgramPermutation> pending_programs;
+    std::vector<vk::ShaderModule> created_modules;
+    bool remove_pipeline_on_failure{};
+    SCOPE_EXIT {
+        if (remove_pipeline_on_failure) {
+            compute_pipelines.erase(compute_key);
+        }
+        ResetPipelineLoadScratch();
+        for (const auto module : created_modules) {
+            instance.GetDevice().destroyShaderModule(module);
+        }
+    };
+    if (!compute_key.Deserialize(ar)) {
+        return false;
+    }
 
     ComputePipeline::SerializationSupport sdata{};
-    sdata.Deserialize(ar);
+    if (!sdata.Deserialize(ar) || !ar.IsEoS() || compute_key.value == 0 ||
+        compute_pipelines.contains(compute_key)) {
+        return false;
+    }
 
     std::vector<u8> meta_blob;
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
@@ -155,64 +138,53 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
 
     Serialization::Archive meta_ar{std::move(meta_blob)};
 
-    if (!LoadPipelineStage(meta_ar, 0)) {
+    if (!LoadPipelineStage(meta_ar, 0, compute_key.value, Shader::LogicalStage::Compute,
+                           pending_programs, created_modules)) {
         return false;
     }
 
-    const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
-    ASSERT(is_new);
-
-    it.value() =
+    auto pipeline =
         std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
                                           compute_key, *infos[0], modules[0], sdata, true);
+    if (!pipeline->IsValid()) {
+        return false;
+    }
+    const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
+    if (!is_new) {
+        return false;
+    }
+    it.value() = std::move(pipeline);
+    remove_pipeline_on_failure = true;
+    if (!PublishPreloadedPrograms(program_cache, pending_programs)) {
+        return false;
+    }
+    created_modules.clear();
+    remove_pipeline_on_failure = false;
 
-    infos.fill(nullptr);
-    modules.fill(nullptr);
-
-    return true;
-}
-
-void GraphicsPipelineKey::Serialize(Serialization::Archive& ar) const {
-    Serialization::Writer key{ar};
-
-    key.Write(this, sizeof(*this));
-}
-
-bool GraphicsPipelineKey::Deserialize(Serialization::Archive& ar) {
-    Serialization::Reader key{ar};
-
-    key.Read(this, sizeof(*this));
-    return true;
-}
-
-void GraphicsPipeline::SerializationSupport::Serialize(Serialization::Archive& ar) const {
-    Serialization::Writer sdata{ar};
-
-    sdata.Write(&vertex_attributes, sizeof(vertex_attributes));
-    sdata.Write(&vertex_bindings, sizeof(vertex_bindings));
-    sdata.Write(&divisors, sizeof(divisors));
-    sdata.Write(multisampling);
-    sdata.Write(tcs);
-    sdata.Write(tes);
-}
-
-bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive& ar) {
-    Serialization::Reader sdata{ar};
-
-    sdata.Read(&vertex_attributes, sizeof(vertex_attributes));
-    sdata.Read(&vertex_bindings, sizeof(vertex_bindings));
-    sdata.Read(&divisors, sizeof(divisors));
-    sdata.Read(multisampling);
-    sdata.Read(tcs);
-    sdata.Read(tes);
     return true;
 }
 
 bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
-    graphics_key.Deserialize(ar);
-
+    ResetPipelineLoadScratch();
+    std::vector<PendingProgramPermutation> pending_programs;
+    std::vector<vk::ShaderModule> created_modules;
+    bool remove_pipeline_on_failure{};
+    SCOPE_EXIT {
+        if (remove_pipeline_on_failure) {
+            graphics_pipelines.erase(graphics_key);
+        }
+        ResetPipelineLoadScratch();
+        for (const auto module : created_modules) {
+            instance.GetDevice().destroyShaderModule(module);
+        }
+    };
     GraphicsPipeline::SerializationSupport sdata{};
-    sdata.Deserialize(ar);
+    if (!DeserializeGraphicsPipelineCacheRecord(ar, graphics_key, sdata)) {
+        return false;
+    }
+    if (graphics_pipelines.contains(graphics_key)) {
+        return false;
+    }
 
     for (int stage_idx = 0; stage_idx < MaxShaderStages; ++stage_idx) {
         const auto& hash = graphics_key.stage_hashes[stage_idx];
@@ -229,74 +201,177 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
         Serialization::Archive meta_ar{std::move(meta_blob)};
 
-        if (!LoadPipelineStage(meta_ar, stage_idx)) {
+        if (!LoadPipelineStage(meta_ar, stage_idx, hash,
+                               static_cast<Shader::LogicalStage>(stage_idx), pending_programs,
+                               created_modules)) {
             return false;
         }
     }
 
-    const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
-    ASSERT(is_new);
+    const auto tcs_slot = static_cast<u32>(Shader::LogicalStage::TessellationControl);
+    const auto tes_slot = static_cast<u32>(Shader::LogicalStage::TessellationEval);
+    const auto fragment_slot = static_cast<u32>(Shader::LogicalStage::Fragment);
+    const bool is_aux_tess_primitive = graphics_key.prim_type == AmdGpu::PrimitiveType::RectList ||
+                                       graphics_key.prim_type == AmdGpu::PrimitiveType::QuadList;
+    const bool needs_aux_tess = is_aux_tess_primitive && !graphics_key.stage_hashes[tcs_slot] &&
+                                !graphics_key.stage_hashes[tes_slot];
+    if (needs_aux_tess != (!sdata.tcs.empty() && !sdata.tes.empty()) ||
+        (!needs_aux_tess && (!sdata.tcs.empty() || !sdata.tes.empty())) ||
+        (graphics_key.stage_hashes[fragment_slot] && !sdata.fragment.empty())) {
+        return false;
+    }
 
-    it.value() = std::make_unique<GraphicsPipeline>(
+    auto pipeline = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
         runtime_infos, fetch_shader, modules, sdata, true);
-
-    infos.fill(nullptr);
-    modules.fill(nullptr);
-    fetch_shader.reset();
+    if (!pipeline->IsValid()) {
+        return false;
+    }
+    const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
+    if (!is_new) {
+        return false;
+    }
+    it.value() = std::move(pipeline);
+    remove_pipeline_on_failure = true;
+    if (!PublishPreloadedPrograms(program_cache, pending_programs)) {
+        return false;
+    }
+    created_modules.clear();
+    remove_pipeline_on_failure = false;
 
     return true;
 }
 
-bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) {
+bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t output_slot,
+                                      u64 expected_pipeline_permutation_id,
+                                      Shader::LogicalStage expected_logical_stage,
+                                      std::vector<PendingProgramPermutation>& pending_programs,
+                                      std::vector<vk::ShaderModule>& created_modules) {
+    if (output_slot >= infos.size() ||
+        static_cast<u32>(expected_logical_stage) >=
+            static_cast<u32>(Shader::LogicalStage::NumLogicalStages)) {
+        return false;
+    }
     auto program = std::make_unique<Program>();
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
-    size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, fetch_shader, spec, perm_idx)) {
+    std::optional<Shader::Gcn::FetchShaderData> stage_fetch_shader;
+    u64 permutation_id{};
+    if (!Shader::DeserializeShaderCacheMetadata(ar, program->info, stage_fetch_shader, spec,
+                                                permutation_id)) {
         return false;
     }
+
+    const u64 expected_permutation_id = Shader::ComputeShaderPermutationIdentity(
+        program->info.pgm_hash, program->info.l_stage, spec);
+    if (permutation_id != expected_permutation_id) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation identity {:#x} of {}_{:x} does not match its metadata "
+                    "({:#x}), skipping preload",
+                    permutation_id, program->info.stage, program->info.pgm_hash,
+                    expected_permutation_id);
+        return false;
+    }
+    if (permutation_id != expected_pipeline_permutation_id) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation identity {:#x} does not match pipeline stage key {:#x}, "
+                    "skipping preload",
+                    permutation_id, expected_pipeline_permutation_id);
+        return false;
+    }
+    if (program->info.l_stage != expected_logical_stage) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation identity {:#x} belongs to logical stage {} instead of "
+                    "pipeline stage {}, skipping preload",
+                    permutation_id, static_cast<u32>(program->info.l_stage),
+                    static_cast<u32>(expected_logical_stage));
+        return false;
+    }
+    if (spec.runtime_info.stage != program->info.stage) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation identity {:#x} has runtime physical stage {} instead of "
+                    "metadata stage {}, skipping preload",
+                    permutation_id, static_cast<u32>(spec.runtime_info.stage),
+                    static_cast<u32>(program->info.stage));
+        return false;
+    }
+    if (!Shader::IsPhysicalStageCompatible(program->info.stage, program->info.l_stage)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation identity {:#x} has incompatible physical stage {} and "
+                    "logical stage {}, skipping preload",
+                    permutation_id, static_cast<u32>(program->info.stage),
+                    static_cast<u32>(program->info.l_stage));
+        return false;
+    }
+    auto module_info = program->info;
 
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
-                                       spv);
-    if (spv.empty()) {
+                                       fmt::format("{:#018x}", permutation_id), spv);
+    if (!IsValidCachedSpirv(spv)) {
         return false;
     }
 
-    // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
-    // at the exact position rather than append
+    const auto cache_draw_user_data = spec.runtime_info.stage == Shader::Stage::Vertex &&
+                                              program->info.l_stage == Shader::LogicalStage::Vertex
+                                          ? spec.runtime_info.vs_info.draw_user_data
+                                          : Shader::DrawUserDataLocations{};
+    const auto cache_key = Shader::MakeProgramCacheKey(program->info.pgm_hash, program->info.stage,
+                                                       program->info.l_stage, cache_draw_user_data);
+    auto it_pgm = program_cache.find(cache_key);
+    const bool new_program = it_pgm == program_cache.end();
+    Program* cached_program = new_program ? program.get() : it_pgm.value().get();
+    const auto preload = cached_program->InspectPreloadPermutation(spec, permutation_id);
+    if (preload.action == Program::PreloadAction::Conflict) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation identity {:#x} of {}_{:x} conflicts with an already "
+                    "loaded permutation, skipping preload",
+                    permutation_id, cached_program->info.stage, cached_program->info.pgm_hash);
+        return false;
+    }
 
-    vk::ShaderModule module{};
-
-    auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
-    if (new_program) {
-        module = CompileSPV(spv, instance.GetDevice());
-        it_pgm.value() = std::move(program);
+    const Program::Module* selected{};
+    if (preload.action == Program::PreloadAction::Reuse) {
+        if (!preload.module) {
+            return false;
+        }
+        selected = preload.module;
     } else {
-        const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
-        if (it != it_pgm.value()->modules.end()) {
-            // A matching permutation is valid only at its original index. A different index means
-            // the store holds entries from more than one cache generation, so this pipeline is
-            // left to compile at runtime.
-            const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            if (perm_idx != idx) {
-                LOG_WARNING(Render_Vulkan,
-                            "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
-                            "preload",
-                            perm_idx, program->info.stage, program->info.pgm_hash, idx);
-                return false;
+        const auto compiled_module = TryCompileSPV(spv, instance.GetDevice());
+        if (!compiled_module) {
+            return false;
+        }
+        const vk::ShaderModule module = *compiled_module;
+        bool tracked{};
+        SCOPE_EXIT {
+            if (!tracked) {
+                instance.GetDevice().destroyShaderModule(module);
             }
-            module = it->module;
-        } else {
-            module = CompileSPV(spv, instance.GetDevice());
+        };
+        created_modules.push_back(module);
+        tracked = true;
+        pending_programs.push_back(PendingProgramPermutation{
+            .cache_key = cache_key,
+            .existing_program = new_program ? nullptr : cached_program,
+            .new_program = new_program ? std::move(program) : nullptr,
+            .module =
+                Program::Module{module, std::move(spec), std::move(module_info), permutation_id},
+        });
+        selected = &pending_programs.back().module;
+        if (!selected->info) {
+            return false;
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
 
-    infos[stage] = &it_pgm.value()->info;
-    modules[stage] = module;
+    if (!selected || !selected->info || selected->permutation_id != permutation_id) {
+        return false;
+    }
+    infos[output_slot] = selected->info.get();
+    runtime_infos[output_slot] = selected->spec.runtime_info;
+    modules[output_slot] = selected->module;
+    if (selected->spec.fetch_shader_data) {
+        fetch_shader = selected->spec.fetch_shader_data;
+    }
 
     return true;
 }
@@ -344,27 +419,34 @@ void PipelineCache::WarmUp() {
         Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
             ++num_total_pipelines;
 
-            Serialization::Archive ar{std::move(data)};
-            Serialization::Reader pldata{ar};
+            try {
+                Serialization::Archive ar{std::move(data)};
+                Serialization::Reader pldata{ar};
 
-            u32 version{};
-            pldata.Read(version);
-            if (version != Serialization::PipelineKeyVersion) {
-                return;
-            }
+                u32 version{};
+                if (!pldata.Read(version) || version != PipelineKeyVersion) {
+                    return;
+                }
 
-            u32 is_compute{};
-            pldata.Read(is_compute);
+                u32 is_compute{};
+                if (!pldata.Read(is_compute) || is_compute > 1) {
+                    return;
+                }
 
-            bool result{};
-            if (is_compute) {
-                result = LoadComputePipeline(ar);
-            } else {
-                result = LoadGraphicsPipeline(ar);
-            }
+                bool result{};
+                if (is_compute) {
+                    result = LoadComputePipeline(ar);
+                } else {
+                    result = LoadGraphicsPipeline(ar);
+                }
 
-            if (result) {
-                ++num_pipelines;
+                if (result) {
+                    ++num_pipelines;
+                }
+            } catch (const std::exception& exception) {
+                LOG_WARNING(Render, "Ignoring malformed cached pipeline: {}", exception.what());
+            } catch (...) {
+                LOG_WARNING(Render, "Ignoring malformed cached pipeline with unknown error");
             }
         });
 
@@ -382,117 +464,3 @@ void PipelineCache::Sync() {
 }
 
 } // namespace Vulkan
-
-namespace Shader {
-
-void Info::Serialize(Serialization::Archive& ar) const {
-    Serialization::Writer info{ar};
-
-    info.Write(this, sizeof(InfoPersistent));
-    info.Write(flattened_ud_buf);
-    srt_info.Serialize(ar);
-}
-
-bool Info::Deserialize(Serialization::Archive& ar) {
-    Serialization::Reader info{ar};
-
-    info.Read(this, sizeof(Shader::InfoPersistent));
-    info.Read(flattened_ud_buf);
-
-    return srt_info.Deserialize(ar);
-}
-
-void Gcn::FetchShaderData::Serialize(Serialization::Archive& ar) const {
-    Serialization::Writer fetch{ar};
-    ar.Grow(6 + attributes.size() * sizeof(VertexAttribute));
-
-    fetch.Write(size);
-    fetch.Write(vertex_offset_sgpr);
-    fetch.Write(instance_offset_sgpr);
-    fetch.Write(attributes);
-}
-
-bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
-    Serialization::Reader fetch{ar};
-
-    fetch.Read(size);
-    fetch.Read(vertex_offset_sgpr);
-    fetch.Read(instance_offset_sgpr);
-    fetch.Read(attributes);
-
-    return true;
-}
-
-void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
-    Serialization::Writer srt{ar};
-
-    srt.Write(this, sizeof(*this));
-    if (walker_func_size) {
-        srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
-    }
-}
-
-bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
-    Serialization::Reader srt{ar};
-
-    srt.Read(this, sizeof(*this));
-
-    if (walker_func_size) {
-        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
-        ar.Advance(walker_func_size);
-    }
-
-    return true;
-}
-
-void StageSpecialization::Serialize(Serialization::Archive& ar) const {
-    Serialization::Writer spec{ar};
-
-    spec.Write(start);
-    spec.Write(runtime_info);
-
-    spec.Write(bitset.to_string());
-
-    if (fetch_shader_data) {
-        spec.Write(sizeof(*fetch_shader_data));
-        fetch_shader_data->Serialize(ar);
-    } else {
-        spec.Write(size_t{0});
-    }
-
-    spec.Write(vs_attribs);
-    spec.Write(buffers);
-    spec.Write(images);
-    spec.Write(fmasks);
-    spec.Write(samplers);
-}
-
-bool StageSpecialization::Deserialize(Serialization::Archive& ar) {
-    Serialization::Reader spec{ar};
-
-    spec.Read(start);
-    spec.Read(runtime_info);
-
-    std::string bits{};
-    spec.Read(bits);
-    bitset = std::bitset<MaxStageResources>(bits);
-
-    u64 fetch_data_size{};
-    spec.Read(fetch_data_size);
-
-    if (fetch_data_size) {
-        Gcn::FetchShaderData fetch_data;
-        fetch_data.Deserialize(ar);
-        fetch_shader_data = fetch_data;
-    }
-
-    spec.Read(vs_attribs);
-    spec.Read(buffers);
-    spec.Read(images);
-    spec.Read(fmasks);
-    spec.Read(samplers);
-
-    return true;
-}
-
-} // namespace Shader

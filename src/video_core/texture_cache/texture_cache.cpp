@@ -12,8 +12,13 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_memory_diagnostics.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/image_alias_policy.h"
+#include "video_core/texture_cache/image_buffer_transfer_policy.h"
+#include "video_core/texture_cache/image_gc_policy.h"
+#include "video_core/texture_cache/image_usage_policy.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -73,11 +78,59 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         return;
     }
+    if (!SupportsImageBufferTransfer(image.info.num_samples)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping guest readback for multisampled image ({} samples)",
+                    image.info.num_samples);
+        return;
+    }
+    if (!image.IsValid()) {
+        LOG_WARNING(Render_Vulkan, "Skipping guest readback for invalid image backing");
+        return;
+    }
+    if (image.backing->num_samples != 1) {
+        if (image.info.props.is_depth || image.info.resources.levels != 1 ||
+            image.info.resources.layers != 1) {
+            LOG_WARNING(Render_Vulkan,
+                        "Skipping guest readback because the backing cannot be resolved for "
+                        "buffer transfer (samples={}, levels={}, layers={})",
+                        image.backing->num_samples, image.info.resources.levels,
+                        image.info.resources.layers);
+            return;
+        }
+        image.SetBackingSamples(1);
+    }
+    if (!image.IsValid() || image.backing->num_samples != 1) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping guest readback because a single-sample backing is unavailable");
+        return;
+    }
     auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
-    const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
-                              image.info.resources.layers * (image.info.num_bits / 8);
-    ASSERT(download_size <= image.info.guest_size);
-    const auto [download, offset] = download_buffer.Map(download_size);
+    const auto download_size = CheckedImageBufferTransferSize(
+        image.info.pitch, image.info.size.height, image.info.size.depth,
+        image.info.resources.layers, image.info.num_bits);
+    if (!download_size || *download_size > image.info.guest_size ||
+        *download_size > download_buffer.SizeBytes()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping guest readback with unrepresentable transfer footprint: "
+                    "pitch={} height={} depth={} layers={} bits={} guest_size={} "
+                    "utility_capacity={}",
+                    image.info.pitch, image.info.size.height, image.info.size.depth,
+                    image.info.resources.layers, image.info.num_bits, image.info.guest_size,
+                    download_buffer.SizeBytes());
+        return;
+    }
+    std::optional<Core::DeferredBackingWrite> publication;
+    if (!sync) {
+        const std::array destinations{
+            Core::ReadbackWriteRange{image.info.guest_address, *download_size, 0}};
+        publication =
+            Core::Memory::Instance()->CaptureReadbackDestinations(destinations, *download_size);
+        if (!publication) {
+            return;
+        }
+    }
+    const auto [download, offset] = download_buffer.Map(*download_size);
     download_buffer.Commit();
     const vk::BufferImageCopy image_download = {
         .bufferOffset = offset,
@@ -102,14 +155,20 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
 
     if (sync) {
         scheduler.Finish();
+        ASSERT_MSG(download_buffer.InvalidateMappedRange(offset, *download_size),
+                   "Failed to invalidate synchronous image download range {:#x}:{:#x}", offset,
+                   *download_size);
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
-                                                  download, download_size);
+                                                  download, *download_size);
     } else {
-        scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), download,
-                                                          download_size);
-            });
+        Buffer* const download_buffer_ptr = &download_buffer;
+        scheduler.DeferPriorityOperation([download_buffer_ptr, token = std::move(*publication),
+                                          download, offset, download_size = *download_size] {
+            ASSERT_MSG(download_buffer_ptr->InvalidateMappedRange(offset, download_size),
+                       "Failed to invalidate asynchronous image download range {:#x}:{:#x}", offset,
+                       download_size);
+            Core::Memory::Instance()->TryPublishReadback(token, {download, download_size});
+        });
     }
 }
 
@@ -168,13 +227,28 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 }
 
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
+    const auto targets = CaptureUnmapTargets(cpu_addr, size);
+    UnmapMemory(targets);
+}
+
+TextureCache::ImageUnmapTargets TextureCache::CaptureUnmapTargets(VAddr cpu_addr, size_t size) {
     std::scoped_lock lk{mutex};
 
-    ImageIds deleted_images;
-    ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
-    for (const ImageId id : deleted_images) {
-        // TODO: Download image data back to host.
-        FreeImage(id);
+    ImageUnmapTargets targets;
+    ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image& image) {
+        targets.push_back({.id = id, .image_uid = image.image_uid});
+    });
+    return targets;
+}
+
+void TextureCache::UnmapMemory(std::span<const ImageUnmapTarget> targets) {
+    std::scoped_lock lk{mutex};
+
+    for (const auto& target : targets) {
+        if (TryGetImage(target.id, target.image_uid)) {
+            // TODO: Download image data back to host.
+            FreeImage(target.id);
+        }
     }
 }
 
@@ -225,10 +299,19 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 
     if (recreate) {
         auto new_info = requested_info;
-        new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
-        const auto new_image_id =
-            slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info);
-        RegisterImage(new_image_id);
+        new_info.resources = MergeSubresourceExtents(requested_info.resources,
+                                                      cache_image.info.resources);
+        // The requested descriptor's mip table/footprint was derived for its original resource
+        // extent.  Recompute it after expanding the union before InsertImage validates or
+        // publishes a host image; otherwise a layer-only expansion can advertise more Vulkan
+        // layers while retaining a footprint for fewer layers.
+        new_info.UpdateSize();
+        const auto new_image_id = InsertImage(new_info, new_info.guest_address);
+        if (!new_image_id) {
+            // Do not fall back to the incompatible cached depth image.  The caller treats an
+            // empty ID as a failed overlap resolution and can bind a null target safely.
+            return {};
+        }
 
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
@@ -243,7 +326,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
                 new_image.CopyImage(cache_image);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
-                new_image.CopyImageWithBuffer(cache_image, copy_buffer.Handle(), 0);
+                new_image.CopyImageWithBuffer(cache_image, copy_buffer.Handle(), 0,
+                                              copy_buffer.SizeBytes());
             }
         } else if (cache_image.info.num_samples == 1 && new_info.props.is_depth &&
                    new_info.num_samples > 1) {
@@ -303,6 +387,17 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             (image_info.type == AmdGpu::ImageType::Color3D ||
              cache_image.info.type == AmdGpu::ImageType::Color3D)) {
             return {ExpandImage(image_info, cache_image_id), -1, -1};
+        }
+
+        // A same-address cache hit is not necessarily a valid view.  In particular, block
+        // compressed encoded pitches can round to different physical tile footprints while
+        // BlockDim() and even the total guest size still look compatible.  Keep the old explicit
+        // reinterpretation paths above, but never sample a cached image whose requested mip
+        // offsets/footprints differ.
+        if (image_info.resources.levels <= cache_image.info.resources.levels &&
+            ComparePhysicalImageLayout(image_info, cache_image.info) ==
+                ImageLayoutCompatibility::Incompatible) {
+            return {merged_image_id, -1, -1};
         }
 
         // Size and resources are less than or equal, use image view.
@@ -482,9 +577,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 }
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
-    const auto new_image_id =
-        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
-    RegisterImage(new_image_id);
+    const auto new_image_id = InsertImage(info, info.guest_address);
+    if (!new_image_id) {
+        return {};
+    }
 
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
@@ -503,14 +599,81 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     return new_image_id;
 }
 
+ImageId TextureCache::InsertImage(const ImageInfo& info, VAddr cpu_addr) {
+    static_cast<void>(cpu_addr);
+    if (!info.HasValidMipChain()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Discarding guest image with mip chain exceeding its extent at address={:#x}",
+                    info.guest_address);
+        return {};
+    }
+    if (!info.HasValidTileMode()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Discarding guest image with unknown tile mode {:#x} at address={:#x}",
+                    static_cast<u32>(info.tile_mode), info.guest_address);
+        return {};
+    }
+    const auto image_id =
+        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+    auto& image = slot_images[image_id];
+    if (!image.IsValid()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Discarding unsupported guest image address={:#x} size={:#x} format={} "
+                    "type={} levels={} layers={} samples={}",
+                    info.guest_address, info.guest_size, vk::to_string(info.pixel_format),
+                    static_cast<u32>(info.type), info.resources.levels, info.resources.layers,
+                    info.num_samples);
+        slot_images.erase(image_id);
+        return {};
+    }
+    RegisterImage(image_id);
+    return image_id;
+}
+
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
+    if (!info.HasValidMipChain()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Rejecting guest image with mip chain exceeding its extent at address={:#x}",
+                    info.guest_address);
+        return {};
+    }
+    if (!info.HasValidTileMode()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Rejecting guest image with unknown tile mode {:#x} at address={:#x}",
+                    static_cast<u32>(info.tile_mode), info.guest_address);
+        return {};
+    }
+    if (!IsValidSubresourceRange(desc.view_info.range, info.resources)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Rejecting image view range before cache lookup: base={}+{} extent={}x{} "
+                    "available={}x{} address={:#x}",
+                    desc.view_info.range.base.level, desc.view_info.range.base.layer,
+                    desc.view_info.range.extent.levels, desc.view_info.range.extent.layers,
+                    info.resources.levels, info.resources.layers, info.guest_address);
+        return {};
+    }
     ASSERT(info.guest_address != 0);
 
     std::scoped_lock lock{mutex};
     ImageIds image_ids;
-    ForEachImageInRegion(info.guest_address, info.guest_size,
-                         [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
+    ForEachImageInRegion(info.guest_address, info.guest_size, [&](ImageId image_id, Image& image) {
+        // Stencil association records and failed host allocations remain registered for their
+        // guest range, but they do not own a Vulkan image.  Exclude them before overlap
+        // resolution so a backing-less cache hit cannot be returned to a dereferencing caller.
+        if (!image.IsValid()) {
+            return;
+        }
+        // A read-only multisampled image may intentionally omit optional storage usage on a
+        // device without shaderStorageImageMultisample.  Do not reuse it for a shader image write;
+        // the required-storage admission must reach ImageUsageFlags and fail closed instead.
+        if (info.storage_required &&
+            !SelectImageUsageForSamples(image.usage_flags, info.num_samples, true,
+                                        instance.IsShaderStorageImageMultisampleSupported())) {
+            return;
+        }
+        image_ids.push_back(image_id);
+    });
 
     ImageId image_id{};
 
@@ -531,6 +694,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             continue;
         }
         if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
+            continue;
+        }
+        if (info.resources.levels <= cache_image.info.resources.levels &&
+            ComparePhysicalImageLayout(info, cache_image.info) ==
+                ImageLayoutCompatibility::Incompatible) {
             continue;
         }
         image_id = cache_id;
@@ -569,8 +737,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
-        image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
-        RegisterImage(image_id);
+        image_id = InsertImage(info, info.guest_address);
+        if (!image_id) {
+            return {};
+        }
     }
 
     Image& image = slot_images[image_id];
@@ -585,12 +755,30 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         desc.view_info.range.base.layer = view_slice;
     }
 
+    if (!IsValidSubresourceRange(desc.view_info.range, image.info.resources)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Rejecting resolved image view range: base={}+{} extent={}x{} available={}x{} "
+                    "address={:#x}",
+                    desc.view_info.range.base.level, desc.view_info.range.base.layer,
+                    desc.view_info.range.extent.levels, desc.view_info.range.extent.layers,
+                    image.info.resources.levels, image.info.resources.layers,
+                    image.info.guest_address);
+        return {};
+    }
+
     return image_id;
 }
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
     ImageIds image_ids;
     ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
+        // Stencil association records are intentionally registered without a host backing image.
+        // They may overlap this address range, but range consumers below dereference the Vulkan
+        // image even when ensure_valid is false (compute image-copy/clear paths), so never expose
+        // a backing-less placeholder as a usable image ID.
+        if (!image.IsValid()) {
+            return;
+        }
         if (image.info.guest_address != address) {
             return;
         }
@@ -673,7 +861,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     }
 
     // If there is a stencil attachment, link depth and stencil.
-    if (desc.info.stencil_addr != 0) {
+    if (desc.info.stencil_addr != 0 && desc.info.stencil_size != 0) {
         ImageId stencil_id{};
         ForEachImageInRegion(desc.info.stencil_addr, desc.info.stencil_size,
                              [&](ImageId image_id, Image& image) {
@@ -786,6 +974,15 @@ void TextureCache::RefreshImage(Image& image) {
 
     const auto [buffer, offset] =
         tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
+    if (!buffer) {
+        // A malformed or unsupported tiling specialization must not publish a null buffer to
+        // Image::Upload. Leave the image dirty so a later valid route can retry the upload.
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping image upload because detile pipeline specialization is invalid "
+                    "at address={:#x}",
+                    image.info.guest_address);
+        return;
+    }
     for (auto& copy : image_copies) {
         copy.bufferOffset += offset;
     }
@@ -954,6 +1151,9 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
+    if (Vulkan::VulkanMemoryDiagnosticsEnabled() && total_used_memory >= trigger_gc_memory) {
+        instance.LogDeviceMemoryBudget("texture_gc");
+    }
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
@@ -974,21 +1174,15 @@ void TextureCache::GarbageCollectImages() {
         if (num_deletions == 0) {
             return true;
         }
-        --num_deletions;
         auto& image = slot_images[image_id];
         const bool download = image.SafeToDownload();
         const bool tiled = image.info.IsTiled();
-        if (tiled && download) {
-            // This is a workaround for now. We can't handle non-linear image downloads.
+        const auto collected = CollectImageForGc(
+            num_deletions, download, tiled, pressured, [&] { DownloadImageMemory(image_id); },
+            [&] { FreeImage(image_id); });
+        if (collected != ImageGcResult::Deleted) {
             return false;
         }
-        if (download && !pressured) {
-            return false;
-        }
-        if (download) {
-            DownloadImageMemory(image_id);
-        }
-        FreeImage(image_id);
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {
                 num_deletions >>= 2;
