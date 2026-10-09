@@ -14,10 +14,15 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/eop_completion.h"
+#include "video_core/amdgpu/index_draw_state.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/amdgpu/pm4_lod_stats.h"
+#include "video_core/amdgpu/pm4_predication.h"
+#include "video_core/indirect_draw_register_provenance.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace AmdGpu {
 
@@ -72,6 +77,12 @@ Liverpool::Liverpool() {
 }
 
 Liverpool::~Liverpool() {
+    // Refuse new memory/cache users, then let admitted operations finish while this owner
+    // can still service their cache work. The closed lifetime may outlive this object.
+    if (gpu_owner_lifetime) {
+        gpu_owner_lifetime->CloseAndWait();
+    }
+    eop_submission_batch.Cancel();
     process_thread.request_stop();
     process_thread.join();
 }
@@ -88,6 +99,21 @@ void Liverpool::ProcessCommands() {
         }
         callback();
     }
+}
+
+void Liverpool::FlushPendingEops() {
+    eop_submission_batch.Flush(
+        [this] { rasterizer->ProcessDownloadImages(); },
+        [this](Common::UniqueFunction<void, u64>&& on_submitted,
+               Common::UniqueFunction<void>&& wake_owner) {
+            rasterizer->FlushWithGpuCompletion(std::move(on_submitted), std::move(wake_owner));
+        },
+        [this] { SendCommand([this] { DrainCompletedEops(); }); });
+}
+
+void Liverpool::DrainCompletedEops() {
+    eop_submission_batch.DrainCompleted(
+        [this](u64 tick) { return rasterizer->GetScheduler().IsFree(tick); });
 }
 
 void Liverpool::Process(std::stop_token stoken) {
@@ -108,7 +134,7 @@ void Liverpool::Process(std::stop_token stoken) {
         curr_qid = -1;
         submission_completions.DrainReadyBoundaries();
 
-        while (num_submits || num_commands) {
+        while (!stoken.stop_requested() && (num_submits || num_commands)) {
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
@@ -144,7 +170,9 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
-        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        if (!stoken.stop_requested()) {
+            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+        }
     }
 }
 
@@ -237,10 +265,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
-        ProcessCommands();
-
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
+        const bool is_eop = type == 3 && header->type3.opcode == PM4ItOpcode::EventWriteEop;
+        const bool continues_eop_batch = is_eop && eop_submission_batch.HasPending();
+        if (!is_eop && rasterizer) {
+            FlushPendingEops();
+        }
+        if (!continues_eop_batch) {
+            ProcessCommands();
+        }
 
         switch (type) {
         default:
@@ -419,7 +453,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
-                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
+                const auto packet = DecodeLiverpoolSetPredication(dcb.subspan(1, count));
+                if (!packet) {
+                    LOG_WARNING(Render, "Ignoring truncated IT_SET_PREDICATION packet");
+                    break;
+                }
+                LOG_WARNING(Render,
+                            "Unimplemented IT_SET_PREDICATION address={:#x} operation={} "
+                            "draw_if_visible={} wait={} continue={}",
+                            packet->address, static_cast<u32>(packet->operation),
+                            packet->draw_if_visible, packet->wait_for_results,
+                            packet->continue_predicate);
                 break;
             }
             case PM4ItOpcode::IndexType: {
@@ -429,10 +473,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::DrawIndex2: {
                 const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndex2*>(header);
-                regs.max_index_size = draw_index->max_size;
+                ApplyDirectIndexDrawSize(regs, draw_index->max_size, draw_index->index_count);
                 regs.index_base_address.base_addr_lo = draw_index->index_base_lo;
                 regs.index_base_address.base_addr_hi = draw_index->index_base_hi;
-                regs.num_indices = draw_index->index_count;
                 regs.draw_initiator = draw_index->draw_initiator;
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
@@ -452,8 +495,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::DrawIndexOffset2: {
                 const auto* draw_index_off =
                     reinterpret_cast<const PM4CmdDrawIndexOffset2*>(header);
-                regs.max_index_size = draw_index_off->max_size;
-                regs.num_indices = draw_index_off->index_count;
+                ApplyDirectIndexDrawSize(regs, draw_index_off->max_size,
+                                         draw_index_off->index_count);
                 regs.draw_initiator = draw_index_off->draw_initiator;
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
@@ -473,7 +516,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::DrawIndexAuto: {
                 const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
-                regs.num_indices = draw_index->index_count;
+                ApplyAutoIndexDrawSize(regs, draw_index->index_count);
                 regs.draw_initiator = draw_index->draw_initiator;
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
@@ -494,6 +537,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::DrawIndirect: {
                 const auto* draw_indirect = reinterpret_cast<const PM4CmdDrawIndirect*>(header);
                 const auto offset = draw_indirect->data_offset;
+                const auto register_locations =
+                    VideoCore::CaptureIndirectDrawRegisterLocations(*draw_indirect);
                 const auto stride = sizeof(DrawIndirectArgs);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
@@ -503,10 +548,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
                             fmt::format("gfx:{}:DrawIndirect", cmd_address));
-                        rasterizer->DrawIndirect(false, indirect_args_addr, offset, stride, 1, 0);
+                        rasterizer->DrawIndirect(false, indirect_args_addr, offset, stride, 1, 0,
+                                                 register_locations);
                         rasterizer->ScopeMarkerEnd();
                     } else {
-                        rasterizer->DrawIndirect(false, indirect_args_addr, offset, stride, 1, 0);
+                        rasterizer->DrawIndirect(false, indirect_args_addr, offset, stride, 1, 0,
+                                                 register_locations);
                     }
                 }
                 break;
@@ -515,6 +562,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_indirect =
                     reinterpret_cast<const PM4CmdDrawIndirectMulti*>(header);
                 const auto offset = draw_indirect->data_offset;
+                const auto register_locations =
+                    VideoCore::CaptureIndirectDrawRegisterLocations(*draw_indirect);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -524,11 +573,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         rasterizer->ScopeMarkerBegin(
                             fmt::format("gfx:{}:DrawIndirectMulti", cmd_address));
                         rasterizer->DrawIndirect(false, indirect_args_addr, offset,
-                                                 draw_indirect->stride, draw_indirect->count, 0);
+                                                 draw_indirect->stride, draw_indirect->count, 0,
+                                                 register_locations);
                         rasterizer->ScopeMarkerEnd();
                     } else {
                         rasterizer->DrawIndirect(false, indirect_args_addr, offset,
-                                                 draw_indirect->stride, draw_indirect->count, 0);
+                                                 draw_indirect->stride, draw_indirect->count, 0,
+                                                 register_locations);
                     }
                 }
                 break;
@@ -537,6 +588,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirect*>(header);
                 const auto offset = draw_index_indirect->data_offset;
+                const auto register_locations =
+                    VideoCore::CaptureIndirectDrawRegisterLocations(*draw_index_indirect);
                 const auto stride = sizeof(DrawIndexedIndirectArgs);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
@@ -546,10 +599,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (host_markers_enabled) {
                         rasterizer->ScopeMarkerBegin(
                             fmt::format("gfx:{}:DrawIndexIndirect", cmd_address));
-                        rasterizer->DrawIndirect(true, indirect_args_addr, offset, stride, 1, 0);
+                        rasterizer->DrawIndirect(true, indirect_args_addr, offset, stride, 1, 0,
+                                                 register_locations);
                         rasterizer->ScopeMarkerEnd();
                     } else {
-                        rasterizer->DrawIndirect(true, indirect_args_addr, offset, stride, 1, 0);
+                        rasterizer->DrawIndirect(true, indirect_args_addr, offset, stride, 1, 0,
+                                                 register_locations);
                     }
                 }
                 break;
@@ -558,6 +613,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirectMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
+                const auto register_locations =
+                    VideoCore::CaptureIndirectDrawRegisterLocations(*draw_index_indirect);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -568,12 +625,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             fmt::format("gfx:{}:DrawIndexIndirectMulti", cmd_address));
                         rasterizer->DrawIndirect(true, indirect_args_addr, offset,
                                                  draw_index_indirect->stride,
-                                                 draw_index_indirect->count, 0);
+                                                 draw_index_indirect->count, 0, register_locations);
                         rasterizer->ScopeMarkerEnd();
                     } else {
                         rasterizer->DrawIndirect(true, indirect_args_addr, offset,
                                                  draw_index_indirect->stride,
-                                                 draw_index_indirect->count, 0);
+                                                 draw_index_indirect->count, 0, register_locations);
                     }
                 }
                 break;
@@ -582,6 +639,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* draw_index_indirect =
                     reinterpret_cast<const PM4CmdDrawIndexIndirectCountMulti*>(header);
                 const auto offset = draw_index_indirect->data_offset;
+                const auto register_locations =
+                    VideoCore::CaptureIndirectDrawRegisterLocations(*draw_index_indirect);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -595,7 +654,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                  draw_index_indirect->count,
                                                  draw_index_indirect->count_indirect_enable.Value()
                                                      ? draw_index_indirect->count_addr
-                                                     : 0);
+                                                     : 0,
+                                                 register_locations);
                         rasterizer->ScopeMarkerEnd();
                     } else {
                         rasterizer->DrawIndirect(true, indirect_args_addr, offset,
@@ -603,7 +663,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                  draw_index_indirect->count,
                                                  draw_index_indirect->count_indirect_enable.Value()
                                                      ? draw_index_indirect->count_addr
-                                                     : 0);
+                                                     : 0,
+                                                 register_locations);
                     }
                 }
                 break;
@@ -636,6 +697,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* dispatch_indirect =
                     reinterpret_cast<const PM4CmdDispatchIndirect*>(header);
                 auto& cs_program = GetCsRegs();
+                cs_program.dispatch_initiator = dispatch_indirect->dispatch_initiator;
                 const auto offset = dispatch_indirect->data_offset;
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
                 if (DebugState.DumpingCurrentReg()) {
@@ -668,7 +730,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndexBufferSize: {
                 const auto* index_size = reinterpret_cast<const PM4CmdDrawIndexBufferSize*>(header);
-                regs.num_indices = index_size->num_indices;
+                ApplyIndexBufferSize(regs, index_size->num_indices);
                 break;
             }
             case PM4ItOpcode::SetBase: {
@@ -722,22 +784,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                if (rasterizer) {
-                    rasterizer->ProcessDownloadImages();
-                }
                 auto complete_eop_flip = eop_flip_tracker.BeginEop();
-                PublishEop(
-                    *event_eop,
-                    [](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                            memcpy(address, &data, num_bytes);
-                        }
-                    },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                    [complete_eop_flip = std::move(complete_eop_flip)]() mutable {
-                        complete_eop_flip();
-                    });
+                auto write_memory = [](void* address, u64 data, u32 num_bytes) {
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->TryWriteBacking(address, &data, num_bytes)) {
+                        memcpy(address, &data, num_bytes);
+                    }
+                };
+                auto signal_interrupt = [] {
+                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                };
+                if (rasterizer) {
+                    eop_submission_batch.Add(*event_eop, std::move(write_memory),
+                                             std::move(signal_interrupt),
+                                             std::move(complete_eop_flip));
+                } else {
+                    PublishEop(*event_eop, std::move(write_memory), std::move(signal_interrupt),
+                               std::move(complete_eop_flip));
+                }
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -827,16 +891,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                // Optimization: VO label waits are special because the emulator
-                // will write to the label when presentation is finished. So if
-                // there are no other submits to yield to we can sleep the thread
-                // instead and allow other tasks to run.
-                const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
+                // EOP completion queues flips back to this owner. A VO-label
+                // wait must yield too: sleeping the owner would prevent the
+                // queued flip which eventually releases that label.
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     YIELD_GFX();
                 }
@@ -882,7 +939,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS");
+                // The report schema and completion ordering are not established yet. Validate
+                // the packet syntax without touching the guest report destination; in
+                // particular, never reinterpret the guest VAddr as a host pointer here.
+                const auto packet_words = static_cast<size_t>(header->type3.NumWords());
+                if (packet_words != LodStatsPayloadDwords || dcb.size() < packet_words + 1) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Ignoring malformed IT_GET_LOD_STATS packet: payload_words={}, "
+                                "available_dwords={}",
+                                packet_words, dcb.size() > 0 ? dcb.size() - 1 : 0);
+                    break;
+                }
+                const auto packet = DecodeLodStatsPacket(dcb.subspan(1, packet_words));
+                if (!packet) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Ignoring invalid IT_GET_LOD_STATS packet (syntax-only)");
+                    break;
+                }
+                LOG_DEBUG(Render_Vulkan,
+                          "IT_GET_LOD_STATS accepted syntax-only packet: address={:#x}, size={:#x}, "
+                          "control={:#x}; report execution deferred",
+                          packet->address, packet->size, packet->control);
                 break;
             }
             case PM4ItOpcode::CondExec: {
@@ -905,6 +982,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
+    }
+
+    if (rasterizer) {
+        FlushPendingEops();
     }
 
     if (ce_task.handle) {
@@ -1109,6 +1190,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid,
             const auto* dispatch_indirect =
                 reinterpret_cast<const PM4CmdDispatchIndirectMec*>(header);
             auto& cs_program = GetCsRegs();
+            cs_program.dispatch_initiator = dispatch_indirect->dispatch_initiator;
             const auto ib_address = dispatch_indirect->Address<VAddr>();
             const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
             if (DebugState.DumpingCurrentReg()) {
@@ -1241,6 +1323,26 @@ void Liverpool::SubmitDone(Common::UniqueFunction<void>&& completion) noexcept {
     });
     std::scoped_lock lk{submit_mutex};
     submit_cv.notify_one();
+}
+
+SubmissionCompletionQueue::CompletionTicket Liverpool::CaptureRetirementTicket() {
+    auto ticket = submission_completions.CaptureCompletionTicket();
+    // The caller holds Gnm issuance. Never drain callbacks here: a same-sequence SubmitDone
+    // callback can itself need that gate. Wake the normal owner loop even for an idle ticket.
+    std::scoped_lock lock{submit_mutex};
+    submit_cv.notify_one();
+    return ticket;
+}
+
+void Liverpool::WaitGpuCompletion() {
+    SendCommand<true>([this] {
+        if (rasterizer) {
+            rasterizer->Finish();
+            // Physical retirement alone does not publish deferred host fences.
+            // Destructive memory barriers must not return before those writes.
+            DrainCompletedEops();
+        }
+    });
 }
 
 } // namespace AmdGpu

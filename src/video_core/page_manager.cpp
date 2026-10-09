@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
 #include <boost/container/small_vector.hpp>
 #include "common/assert.h"
 #include "common/debug.h"
@@ -9,8 +10,10 @@
 #include "common/signal_context.h"
 #include "core/memory.h"
 #include "core/signals.h"
+#include "video_core/mapped_page_protection.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/srt_snapshot_epoch_coordinator.h"
 
 #ifndef _WIN64
 #include <sys/mman.h>
@@ -105,7 +108,7 @@ struct PageManager::Impl {
         ufd_thread = std::jthread([&](std::stop_token token) { UffdHandler(token); });
     }
 
-    void OnMap(VAddr address, size_t size) {
+    void RegisterRange(VAddr address, size_t size) {
         uffdio_register reg;
         reg.range.start = address;
         reg.range.len = size;
@@ -114,7 +117,7 @@ struct PageManager::Impl {
         ASSERT_MSG(ret != -1, "Uffdio register failed");
     }
 
-    void OnUnmap(VAddr address, size_t size) {
+    void UnregisterRange(VAddr address, size_t size) {
         uffdio_range range;
         range.start = address;
         range.len = size;
@@ -190,11 +193,11 @@ struct PageManager::Impl {
                                                                   priority);
     }
 
-    void OnMap(VAddr address, size_t size) {
+    void RegisterRange(VAddr address, size_t size) {
         // No-op
     }
 
-    void OnUnmap(VAddr address, size_t size) {
+    void UnregisterRange(VAddr address, size_t size) {
         // No-op
     }
 
@@ -218,9 +221,107 @@ struct PageManager::Impl {
     }
 #endif
 
-    template <bool track, bool is_read>
-    void UpdatePageWatchers(VAddr addr, u64 size) {
+    void ProtectMapped(VAddr address, u64 size, Core::MemoryPermission perms) {
+        (void)protectable_mappings.ForEachMappedSubrange(
+            address, size, [this, perms](VAddr mapped_address, u64 mapped_size) {
+                Protect(mapped_address, mapped_size, perms);
+            });
+    }
+
+    void ReplayPageWatchers(VAddr address, u64 size) {
+        const bool replayed = ReplayActivePageProtectionRuns(
+            address, size, PM_PAGE_SIZE,
+            [this](VAddr page_address) -> std::optional<Core::MemoryPermission> {
+                const auto perms = cached_pages[page_address >> PM_PAGE_BITS].Perms();
+                if (perms == Core::MemoryPermission::ReadWrite) {
+                    return std::nullopt;
+                }
+                return perms;
+            },
+            [this](VAddr run_address, u64 run_size, Core::MemoryPermission perms) {
+                Protect(run_address, run_size, perms);
+            });
+        ASSERT_MSG(replayed, "Invalid GPU mapping range {:#x} - {:#x}", address, address + size);
+    }
+
+    void OnMap(VAddr address, size_t size, GpuMappingKind kind) {
+        ASSERT_MSG(Detail::IsValidAddressRange(address, size),
+                   "Invalid GPU mapping range {:#x} size {:#x}", address, size);
+        std::scoped_lock lifecycle_lock{mapping_lifecycle_mutex};
+
+        if (kind == GpuMappingKind::HostMapped) {
+            ASSERT_MSG(address % PM_PAGE_SIZE == 0 && size % PM_PAGE_SIZE == 0,
+                       "Host GPU mapping range must be page aligned");
+            ASSERT_MSG(Common::DivCeil(address + size, PM_PAGE_SIZE) <= NUM_ADDRESS_PAGES,
+                       "Host GPU mapping exceeds tracked address space");
+            constexpr u64 LockBytes = PAGES_PER_LOCK * PM_PAGE_SIZE;
+            const bool chunked = ForEachAddressRangeChunk(
+                address, size, LockBytes, [this](VAddr chunk_address, u64 chunk_size) {
+                    const size_t lock_index = (chunk_address >> PM_PAGE_BITS) / PAGES_PER_LOCK;
+                    std::scoped_lock page_lock{locks[lock_index]};
+                    const bool published = protectable_mappings.PublishMappedRange(
+                        chunk_address, chunk_size,
+                        [this](VAddr mapped_address, u64 mapped_size) {
+                            RegisterRange(mapped_address, mapped_size);
+                        },
+                        [this](VAddr mapped_address, u64 mapped_size) {
+                            ReplayPageWatchers(mapped_address, mapped_size);
+                        });
+                    ASSERT(published);
+                });
+            ASSERT(chunked);
+        }
+
+        const bool published = kind == GpuMappingKind::HostMapped
+                                   ? logical_mappings.PublishHostMappedRange(address, size)
+                                   : logical_mappings.PublishSparsePlaceholderRange(address, size);
+        ASSERT(published);
+    }
+
+    void OnUnmap(VAddr address, size_t size, GpuMappingKind kind) {
+        ASSERT_MSG(Detail::IsValidAddressRange(address, size),
+                   "Invalid GPU unmapping range {:#x} size {:#x}", address, size);
+        std::scoped_lock lifecycle_lock{mapping_lifecycle_mutex};
+
+        if (kind == GpuMappingKind::HostMapped) {
+            ASSERT_MSG(address % PM_PAGE_SIZE == 0 && size % PM_PAGE_SIZE == 0,
+                       "Host GPU unmapping range must be page aligned");
+            ASSERT_MSG(Common::DivCeil(address + size, PM_PAGE_SIZE) <= NUM_ADDRESS_PAGES,
+                       "Host GPU unmapping exceeds tracked address space");
+            constexpr u64 LockBytes = PAGES_PER_LOCK * PM_PAGE_SIZE;
+            const bool chunked = ForEachAddressRangeChunk(
+                address, size, LockBytes, [this](VAddr chunk_address, u64 chunk_size) {
+                    const size_t lock_index = (chunk_address >> PM_PAGE_BITS) / PAGES_PER_LOCK;
+                    std::scoped_lock page_lock{locks[lock_index]};
+                    const bool retired = protectable_mappings.RetireMappedRange(
+                        chunk_address, chunk_size, [this](VAddr mapped_address, u64 mapped_size) {
+                            UnregisterRange(mapped_address, mapped_size);
+                        });
+                    ASSERT(retired);
+                });
+            ASSERT(chunked);
+
+            const bool logically_retired = logical_mappings.RetireHostMappedRange(address, size);
+            ASSERT(logically_retired);
+        } else {
+            const bool logically_retired =
+                logical_mappings.RetireSparsePlaceholderRange(address, size);
+            ASSERT(logically_retired);
+        }
+    }
+
+    // Generic page tracking intentionally retains watcher ownership across logical GPU holes.
+    // Host protection is clipped by ProtectMapped, and a later host-map publication can replay
+    // the retained state. Snapshot pages opt into strict admission because their copy must never
+    // arm a watcher for a range that is not currently logically mapped.
+    template <bool track, bool is_read, bool require_gpu_mapping = false>
+    bool UpdatePageWatchers(VAddr addr, u64 size) {
         RENDERER_TRACE;
+
+        // Keep mapping visibility stable while the per-page watcher counts are updated. An
+        // unmap can retire the logical range between the admission check and AddDelta otherwise,
+        // leaving a stale untrack to underflow a page with no corresponding watcher.
+        std::scoped_lock lifecycle_lock{mapping_lifecycle_mutex};
 
         size_t page = addr >> PM_PAGE_BITS;
         const u64 page_end = Common::DivCeil(addr + size, PM_PAGE_SIZE);
@@ -239,7 +340,7 @@ struct PageManager::Impl {
             if (range_bytes > 0) {
                 RENDERER_TRACE;
                 // Perform pending (un)protect action
-                Protect(range_begin << PM_PAGE_BITS, range_bytes, perms);
+                ProtectMapped(range_begin << PM_PAGE_BITS, range_bytes, perms);
                 range_bytes = 0;
                 potential_range_bytes = 0;
             }
@@ -248,17 +349,35 @@ struct PageManager::Impl {
         // Iterate requested pages
         const u64 aligned_addr = page << PM_PAGE_BITS;
         const u64 aligned_end = page_end << PM_PAGE_BITS;
-        if (!rasterizer->IsMapped(aligned_addr, aligned_end - aligned_addr)) {
-            LOG_WARNING(Render,
-                        "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
-                        aligned_addr, aligned_end);
+        if constexpr (require_gpu_mapping) {
+            if (!logical_mappings.Contains(aligned_addr, aligned_end - aligned_addr)) {
+                LOG_WARNING(Render,
+                            "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
+                            aligned_addr, aligned_end);
+                return false;
+            }
         }
 
         for (; page != page_end; ++page) {
             PageState& state = cached_pages[page];
 
-            // Apply the change to the page state
-            const u8 new_count = state.AddDelta<track ? 1 : -1, is_read>();
+            // A snapshot release may be replayed after a mapping transition has already
+            // removed this watcher. Treat that stale untrack as an idempotent no-op instead of
+            // reaching AddDelta(-1), which would assert on a page with no corresponding watch.
+            bool watcher_updated = true;
+            u8 new_count{};
+            if constexpr (!track) {
+                const u8 current_count =
+                    is_read ? state.num_read_watchers : state.num_write_watchers;
+                if (current_count == 0) {
+                    watcher_updated = false;
+                    new_count = current_count;
+                } else {
+                    new_count = state.AddDelta<track ? 1 : -1, is_read>();
+                }
+            } else {
+                new_count = state.AddDelta<track ? 1 : -1, is_read>();
+            }
 
             if (auto new_perms = state.Perms(); new_perms != perms) [[unlikely]] {
                 // If the protection changed add pending (un)protect action
@@ -267,6 +386,10 @@ struct PageManager::Impl {
             } else if (range_bytes != 0) {
                 // If the protection did not change, extend the potential range
                 potential_range_bytes += PM_PAGE_SIZE;
+            }
+
+            if (!watcher_updated) {
+                continue;
             }
 
             // Only start a new range if the page must be (un)protected
@@ -283,6 +406,7 @@ struct PageManager::Impl {
 
         // Add pending (un)protect action
         release_pending();
+        return true;
     }
 
     template <bool track, bool is_read>
@@ -291,12 +415,22 @@ struct PageManager::Impl {
         auto start_range = mask.FirstRange();
         auto end_range = mask.LastRange();
 
+        if (start_range.first >= end_range.second) {
+            return;
+        }
+
         if (start_range.second == end_range.second) {
             // if all pages are contiguous, use the regular UpdatePageWatchers
             const VAddr start_addr = base_addr + (start_range.first << PM_PAGE_BITS);
             const u64 size = (start_range.second - start_range.first) << PM_PAGE_BITS;
-            return UpdatePageWatchers<track, is_read>(start_addr, size);
+            (void)UpdatePageWatchers<track, is_read>(start_addr, size);
+            return;
         }
+
+        // Keep the logical mapping view stable through AddDelta so a concurrent map/unmap cannot
+        // invalidate the watcher accounting decision. Generic tracking deliberately retains
+        // counts across logical holes; ProtectMapped clips host protection to mapped subranges.
+        std::scoped_lock lifecycle_lock{mapping_lifecycle_mutex};
 
         size_t base_page = (base_addr >> PM_PAGE_BITS);
         ASSERT(base_page % PAGES_PER_LOCK == 0);
@@ -310,7 +444,7 @@ struct PageManager::Impl {
             if (range_bytes > 0) {
                 RENDERER_TRACE;
                 // Perform pending (un)protect action
-                Protect((range_begin << PM_PAGE_BITS), range_bytes, perms);
+                ProtectMapped(range_begin << PM_PAGE_BITS, range_bytes, perms);
                 range_bytes = 0;
                 potential_range_bytes = 0;
             }
@@ -321,9 +455,27 @@ struct PageManager::Impl {
             PageState& state = cached_pages[base_page + page];
             const bool update = mask.Get(page);
 
-            // Apply the change to the page state
-            const u8 new_count =
-                update ? state.AddDelta<track ? 1 : -1, is_read>() : state.AddDelta<0, is_read>();
+            // Apply the change to the page state. A selected stale untrack can occur when a
+            // snapshot watcher was already removed during a mapping transition; keep it
+            // idempotent rather than asserting in AddDelta(-1).
+            bool watcher_updated = update;
+            u8 new_count{};
+            if (update) {
+                if constexpr (!track) {
+                    const u8 current_count =
+                        is_read ? state.num_read_watchers : state.num_write_watchers;
+                    if (current_count == 0) {
+                        watcher_updated = false;
+                        new_count = current_count;
+                    } else {
+                        new_count = state.AddDelta<track ? 1 : -1, is_read>();
+                    }
+                } else {
+                    new_count = state.AddDelta<track ? 1 : -1, is_read>();
+                }
+            } else {
+                new_count = state.AddDelta<0, is_read>();
+            }
 
             if (auto new_perms = state.Perms(); new_perms != perms) [[unlikely]] {
                 // If the protection changed add pending (un)protect action
@@ -335,7 +487,7 @@ struct PageManager::Impl {
             }
 
             // If the page is not being updated, skip it
-            if (!update) {
+            if (!watcher_updated) {
                 continue;
             }
 
@@ -355,6 +507,38 @@ struct PageManager::Impl {
         release_pending();
     }
 
+    [[nodiscard]] u64 BeginSnapshotEpoch() {
+        return snapshot_coordinator.BeginEpoch();
+    }
+
+    [[nodiscard]] bool BeginSnapshotPage(u64 id, VAddr address, u64 size) {
+        return snapshot_coordinator.BeginPageCopy(
+            id, address, size, [this](VAddr watcher_address, u64 watcher_size) {
+                return UpdatePageWatchers<true, false, true>(watcher_address, watcher_size);
+            });
+    }
+
+    [[nodiscard]] bool EndSnapshotPage(u64 id, VAddr address, u64 size, bool copied) {
+        return snapshot_coordinator.EndPageCopy(id, address, size, copied);
+    }
+
+    [[nodiscard]] bool IsSnapshotEpochValid(u64 id) const {
+        return snapshot_coordinator.IsEpochValid(id);
+    }
+
+    [[nodiscard]] bool SealSnapshotEpoch(u64 id) {
+        return snapshot_coordinator.SealEpoch(id, [this](VAddr address, u64 size) {
+            UpdatePageWatchers<false, false>(address, size);
+        });
+    }
+
+    void InvalidateSnapshotRange(VAddr address, u64 size) {
+        snapshot_coordinator.InvalidateRangeAndWait(
+            address, size, [this](VAddr watcher_address, u64 watcher_size) {
+                UpdatePageWatchers<false, false>(watcher_address, watcher_size);
+            });
+    }
+
     std::array<PageState, NUM_ADDRESS_PAGES> cached_pages{};
 #ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
     using LockType = Common::AdaptiveMutex;
@@ -362,6 +546,10 @@ struct PageManager::Impl {
     using LockType = Common::SpinLock;
 #endif
     std::array<LockType, NUM_ADDRESS_LOCKS> locks{};
+    LogicalGpuMappingState logical_mappings;
+    MappedPageProtectionState protectable_mappings;
+    std::mutex mapping_lifecycle_mutex;
+    SrtSnapshotEpochCoordinator snapshot_coordinator;
 };
 
 PageManager::PageManager(Vulkan::Rasterizer* rasterizer_)
@@ -369,16 +557,87 @@ PageManager::PageManager(Vulkan::Rasterizer* rasterizer_)
 
 PageManager::~PageManager() = default;
 
-void PageManager::OnGpuMap(VAddr address, size_t size) {
-    impl->OnMap(address, size);
+PageManager::SnapshotEpoch::SnapshotEpoch(SnapshotEpoch&& other) noexcept
+    : manager{std::exchange(other.manager, nullptr)}, id{std::exchange(other.id, 0)},
+      result{other.result} {}
+
+PageManager::SnapshotEpoch& PageManager::SnapshotEpoch::operator=(SnapshotEpoch&& other) noexcept {
+    if (this != &other) {
+        (void)Seal();
+        manager = std::exchange(other.manager, nullptr);
+        id = std::exchange(other.id, 0);
+        result = other.result;
+    }
+    return *this;
 }
 
-void PageManager::OnGpuUnmap(VAddr address, size_t size) {
-    impl->OnUnmap(address, size);
+PageManager::SnapshotEpoch::~SnapshotEpoch() {
+    (void)Seal();
+}
+
+bool PageManager::SnapshotEpoch::BeginPageCopy(VAddr address, u64 size) {
+    return manager && manager->BeginSnapshotPage(id, address, size);
+}
+
+bool PageManager::SnapshotEpoch::EndPageCopy(VAddr address, u64 size, bool copied) {
+    return manager && manager->EndSnapshotPage(id, address, size, copied);
+}
+
+bool PageManager::SnapshotEpoch::Valid() const {
+    return manager ? manager->IsSnapshotEpochValid(id) : result;
+}
+
+bool PageManager::SnapshotEpoch::Seal() {
+    if (manager) {
+        result = manager->SealSnapshotEpoch(id);
+        manager = nullptr;
+        id = 0;
+    }
+    return result;
+}
+
+PageManager::SnapshotEpoch PageManager::BeginSnapshotEpoch() {
+    return SnapshotEpoch{this, impl->BeginSnapshotEpoch()};
+}
+
+void PageManager::NotifyCpuWrite(VAddr address, u64 size) {
+    impl->InvalidateSnapshotRange(address, size);
+}
+
+void PageManager::PrepareForGpuUnmap(VAddr address, u64 size) {
+    impl->InvalidateSnapshotRange(address, size);
+}
+
+void PageManager::OnGpuMap(VAddr address, size_t size, GpuMappingKind kind) {
+    impl->OnMap(address, size, kind);
+}
+
+void PageManager::OnGpuUnmap(VAddr address, size_t size, GpuMappingKind kind) {
+    impl->OnUnmap(address, size, kind);
 }
 
 bool PageManager::IsGpuMapped(VAddr address, size_t size) const {
-    return impl->rasterizer->IsMapped(address, size);
+    return impl->logical_mappings.Contains(address, size);
+}
+
+u64 PageManager::GetGpuMappedExtent(VAddr address, u64 size) const {
+    return impl->logical_mappings.MappedExtent(address, size);
+}
+
+bool PageManager::BeginSnapshotPage(u64 id, VAddr address, u64 size) {
+    return id != 0 && impl->BeginSnapshotPage(id, address, size);
+}
+
+bool PageManager::EndSnapshotPage(u64 id, VAddr address, u64 size, bool copied) {
+    return id != 0 && impl->EndSnapshotPage(id, address, size, copied);
+}
+
+bool PageManager::IsSnapshotEpochValid(u64 id) const {
+    return id != 0 && impl->IsSnapshotEpochValid(id);
+}
+
+bool PageManager::SealSnapshotEpoch(u64 id) {
+    return id != 0 && impl->SealSnapshotEpoch(id);
 }
 
 template <bool track>
