@@ -537,6 +537,8 @@ set(HLE_LIBC_INTERNAL_LIB src/core/libraries/libc_internal/libc_internal.cpp
                  src/core/libraries/libc_internal/libc_internal_memory.h
                  src/core/libraries/libc_internal/libc_internal_str.cpp
                  src/core/libraries/libc_internal/libc_internal_str.h
+                 src/core/libraries/libc_internal/libc_internal_time.cpp
+                 src/core/libraries/libc_internal/libc_internal_time.h
                  src/core/libraries/libc_internal/libc_internal_math.cpp
                  src/core/libraries/libc_internal/libc_internal_math.h
                  src/core/libraries/libc_internal/libc_internal_threads.cpp
@@ -614,7 +616,9 @@ set(FIBER_LIB src/core/libraries/fiber/fiber_context.cpp
               src/core/libraries/fiber/fiber_error.h
 )
 
-set(VDEC_LIB src/core/libraries/videodec/videodec2_impl.cpp
+set(VDEC_LIB src/core/libraries/videodec/video_utils.cpp
+             src/core/libraries/videodec/video_utils.h
+             src/core/libraries/videodec/videodec2_impl.cpp
              src/core/libraries/videodec/videodec2_impl.h
              src/core/libraries/videodec/videodec2.cpp
              src/core/libraries/videodec/videodec2.h
@@ -779,12 +783,14 @@ set(COMMON src/common/logging/classes.h
            src/common/endian.h
            src/common/enum.h
            src/common/incremental_id.h
+           src/common/intrusive_ref.h
            src/common/io_file.cpp
            src/common/io_file.h
            src/common/lru_cache.h
            src/common/error.cpp
            src/common/error.h
            src/common/fixed_value.h
+           src/common/first_use_tracker.h
            src/common/func_traits.h
            src/common/native_clock.cpp
            src/common/native_clock.h
@@ -1069,6 +1075,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/amdgpu/tiling.h
                src/video_core/buffer_cache/buffer.cpp
                src/video_core/buffer_cache/buffer.h
+               src/video_core/buffer_cache/stream_buffer_copy.h
                src/video_core/buffer_cache/buffer_cache.cpp
                src/video_core/buffer_cache/buffer_cache.h
                src/video_core/buffer_cache/fault_manager.cpp
@@ -1169,6 +1176,8 @@ set(IMGUI src/imgui/imgui_config.h
           src/imgui/renderer/font_data.h
           src/imgui/renderer/font_stack.cpp
           src/imgui/renderer/font_stack.h
+          src/imgui/renderer/png_decode.cpp
+          src/imgui/renderer/png_decode.h
           src/imgui/renderer/texture_manager.cpp
           src/imgui/renderer/texture_manager.h
           src/imgui/big_picture/big_picture.cpp

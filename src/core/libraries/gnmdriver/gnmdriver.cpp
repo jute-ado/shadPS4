@@ -12,6 +12,7 @@
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/gnmdriver/graphics_event.h"
 #include "core/libraries/gnmdriver/gnm_error.h"
 #include "core/libraries/gnmdriver/gnmdriver_init.h"
 #include "core/libraries/gnmdriver/submission_gate.h"
@@ -118,14 +119,7 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
         return ORBIS_KERNEL_ERROR_EBADF;
     }
 
-    EqueueEvent kernel_event{};
-    kernel_event.event.ident = id;
-    kernel_event.event.filter = OrbisKernelEvent::Filter::GraphicsCore;
-    kernel_event.event.flags = OrbisKernelEvent::Flags::Add;
-    kernel_event.event.fflags = 0;
-    kernel_event.event.data = id;
-    kernel_event.event.udata = udata;
-
+    auto kernel_event = MakeGraphicsEvent(id, udata);
     equeue->AddEvent(kernel_event);
 
     Platform::IrqC::Instance()->Register(

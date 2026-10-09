@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/first_use_tracker.h"
 #include "common/number_utils.h"
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -301,6 +302,17 @@ vk::LogicOp LogicOp(AmdGpu::ColorControl::LogicOp logic_op) {
 
 // https://github.com/chaotic-cx/mesa-mirror/blob/0954afff5/src/amd/vulkan/radv_sampler.c#L21
 vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode) {
+    static Common::FirstUseTracker<8> logged_modes;
+    const auto log_unimplemented = [&] {
+        const auto value = static_cast<u32>(mode);
+        if (logged_modes.IsFirstUse(value)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Unimplemented clamp mode {}, using closest equivalent; suppressing "
+                        "repeated warnings for this mode.",
+                        value);
+        }
+    };
+
     switch (mode) {
     case AmdGpu::ClampMode::Wrap:
         return vk::SamplerAddressMode::eRepeat;
@@ -310,14 +322,12 @@ vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode) {
         return vk::SamplerAddressMode::eClampToEdge;
     case AmdGpu::ClampMode::MirrorOnceHalfBorder:
     case AmdGpu::ClampMode::MirrorOnceBorder:
-        LOG_WARNING(Render_Vulkan, "Unimplemented clamp mode {}, using closest equivalent.",
-                    static_cast<u32>(mode));
+        log_unimplemented();
         [[fallthrough]];
     case AmdGpu::ClampMode::MirrorOnceLastTexel:
         return vk::SamplerAddressMode::eMirrorClampToEdge;
     case AmdGpu::ClampMode::ClampHalfBorder:
-        LOG_WARNING(Render_Vulkan, "Unimplemented clamp mode {}, using closest equivalent.",
-                    static_cast<u32>(mode));
+        log_unimplemented();
         [[fallthrough]];
     case AmdGpu::ClampMode::ClampBorder:
         return vk::SamplerAddressMode::eClampToBorder;

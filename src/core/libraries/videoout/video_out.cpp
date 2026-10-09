@@ -347,13 +347,15 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
     if (!port) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
+    if (!driver->ReserveFlip(port, buf_id, true)) {
+        return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+    }
 
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
             ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
-            const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
-            ASSERT_MSG(result, "EOP flip submission failed");
+            driver->SubmitReservedFlip(port, buf_id, flip_arg, true);
         });
 
     return ORBIS_OK;

@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <condition_variable>
+#include <list>
 #include <mutex>
-#include <thread>
 
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/libraries/kernel/orbis_error.h"
+#include "core/libraries/kernel/sync/semaphore.h"
+#include "core/libraries/kernel/threads/event_flag_policy.h"
+#include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
 
 namespace Libraries::Kernel {
@@ -24,10 +26,10 @@ constexpr int ORBIS_KERNEL_EVF_WAITMODE_CLEAR_PAT = 0x20;
 
 class EventFlagInternal {
 public:
-    enum class ClearMode { None, All, Bits };
-    enum class WaitMode { And, Or };
+    using ClearMode = EventFlagClearMode;
+    using WaitMode = EventFlagWaitMode;
     enum class ThreadMode { Single, Multi };
-    enum class QueueMode { Fifo, ThreadPrio };
+    using QueueMode = EventFlagQueueMode;
 
     EventFlagInternal(const std::string& name, ThreadMode thread_mode, QueueMode queue_mode,
                       uint64_t bits)
@@ -36,65 +38,73 @@ public:
     int Wait(u64 bits, WaitMode wait_mode, ClearMode clear_mode, u64* result, u32* ptr_micros) {
         std::unique_lock lock{m_mutex};
 
-        uint32_t micros = 0;
-        bool infinitely = true;
-        if (ptr_micros != nullptr) {
-            micros = *ptr_micros;
-            infinitely = false;
+        const u32 micros = ptr_micros ? *ptr_micros : 0;
+        const bool infinitely = ptr_micros == nullptr;
+        const auto start = std::chrono::steady_clock::now();
+
+        if (IsEventFlagWaitSatisfied(m_bits, bits, wait_mode)) {
+            if (result) {
+                *result = m_bits;
+            }
+            m_bits = ApplyEventFlagClear(m_bits, bits, clear_mode);
+            return ORBIS_OK;
         }
 
-        if (m_thread_mode == ThreadMode::Single && m_waiting_threads > 0) {
+        if (m_thread_mode == ThreadMode::Single && !m_waiters.empty()) {
             return ORBIS_KERNEL_ERROR_EPERM;
         }
 
-        auto const start = std::chrono::system_clock::now();
-        m_waiting_threads++;
-        auto waitFunc = [this, wait_mode, bits] {
-            return (m_status == Status::Canceled || m_status == Status::Deleted ||
-                    (wait_mode == WaitMode::And && (m_bits & bits) == bits) ||
-                    (wait_mode == WaitMode::Or && (m_bits & bits) != 0));
-        };
-
-        if (infinitely) {
-            m_cond_var.wait(lock, waitFunc);
-        } else {
-            if (!m_cond_var.wait_for(lock, std::chrono::microseconds(micros), waitFunc)) {
-                if (result != nullptr) {
-                    *result = m_bits;
-                }
-                *ptr_micros = 0;
-                --m_waiting_threads;
-                return ORBIS_KERNEL_ERROR_ETIMEDOUT;
+        if (!infinitely && micros == 0) {
+            if (result) {
+                *result = m_bits;
             }
-        }
-        --m_waiting_threads;
-        if (result != nullptr) {
-            *result = m_bits;
+            return ORBIS_KERNEL_ERROR_ETIMEDOUT;
         }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::system_clock::now() - start)
-                           .count();
-        if (result != nullptr) {
-            *result = m_bits;
+        const u32 priority =
+            m_queue_mode == QueueMode::ThreadPriority && g_curthread ? g_curthread->attr.prio : 0;
+        WaitingThread waiter{
+            .priority = priority,
+            .bits = bits,
+            .wait_mode = wait_mode,
+            .clear_mode = clear_mode,
+        };
+        const auto position = InsertEventFlagWaiter(m_waiters, &waiter, m_queue_mode);
+
+        lock.unlock();
+        if (infinitely) {
+            waiter.semaphore.acquire();
+        } else {
+            waiter.semaphore.try_acquire_for(std::chrono::microseconds(micros));
+        }
+        lock.lock();
+
+        if (waiter.outcome == WaitOutcome::Waiting) {
+            m_waiters.erase(position);
+            if (result) {
+                *result = m_bits;
+            }
+            *ptr_micros = 0;
+            return ORBIS_KERNEL_ERROR_ETIMEDOUT;
         }
 
-        if (ptr_micros != nullptr) {
-            *ptr_micros = (elapsed >= micros ? 0 : micros - elapsed);
+        if (result) {
+            *result = waiter.result_bits;
         }
 
-        if (m_status == Status::Canceled) {
+        if (ptr_micros) {
+            const auto elapsed = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::steady_clock::now() - start)
+                                                      .count());
+            *ptr_micros = elapsed >= micros ? 0 : micros - static_cast<u32>(elapsed);
+        }
+
+        if (waiter.outcome == WaitOutcome::Canceled) {
             return ORBIS_KERNEL_ERROR_ECANCELED;
-        } else if (m_status == Status::Deleted) {
+        }
+        if (waiter.outcome == WaitOutcome::Deleted) {
             return ORBIS_KERNEL_ERROR_EACCES;
         }
-
-        if (clear_mode == ClearMode::All) {
-            m_bits = 0;
-        } else if (clear_mode == ClearMode::Bits) {
-            m_bits &= ~bits;
-        }
-
         return ORBIS_OK;
     }
 
@@ -109,63 +119,51 @@ public:
     }
 
     void Set(u64 bits) {
-        std::unique_lock lock{m_mutex};
-
-        while (m_status != Status::Set) {
-            m_mutex.unlock();
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-            m_mutex.lock();
-        }
+        std::scoped_lock lock{m_mutex};
 
         m_bits |= bits;
-        m_cond_var.notify_all();
+        WakeEligibleEventFlagWaiters(m_waiters, m_bits, [](WaitingThread* waiter) {
+            waiter->outcome = WaitOutcome::Signaled;
+            waiter->semaphore.release();
+        });
     }
 
     void Clear(u64 bits) {
-        std::unique_lock lock{m_mutex};
-        while (m_status != Status::Set) {
-            m_mutex.unlock();
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-            m_mutex.lock();
-        }
-
+        std::scoped_lock lock{m_mutex};
         m_bits &= bits;
     }
 
     void Cancel(u64 setPattern, int* numWaitThreads) {
-        std::unique_lock lock{m_mutex};
-
-        while (m_status != Status::Set) {
-            m_mutex.unlock();
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-            m_mutex.lock();
-        }
+        std::scoped_lock lock{m_mutex};
 
         if (numWaitThreads) {
-            *numWaitThreads = m_waiting_threads;
+            *numWaitThreads = static_cast<int>(m_waiters.size());
         }
 
-        m_status = Status::Canceled;
         m_bits = setPattern;
-
-        m_cond_var.notify_all();
-
-        while (m_waiting_threads > 0) {
-            m_mutex.unlock();
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-            m_mutex.lock();
+        for (auto* waiter : m_waiters) {
+            waiter->result_bits = m_bits;
+            waiter->outcome = WaitOutcome::Canceled;
+            waiter->semaphore.release();
         }
-
-        m_status = Status::Set;
+        m_waiters.clear();
     }
 
 private:
-    enum class Status { Set, Canceled, Deleted };
+    enum class WaitOutcome { Waiting, Signaled, Canceled, Deleted };
+
+    struct WaitingThread {
+        BinarySemaphore semaphore{0};
+        u32 priority;
+        u64 bits;
+        WaitMode wait_mode;
+        ClearMode clear_mode;
+        u64 result_bits{};
+        WaitOutcome outcome{WaitOutcome::Waiting};
+    };
 
     std::mutex m_mutex;
-    std::condition_variable m_cond_var;
-    Status m_status = Status::Set;
-    int m_waiting_threads = 0;
+    std::list<WaitingThread*> m_waiters;
     std::string m_name;
     ThreadMode m_thread_mode = ThreadMode::Single;
     QueueMode m_queue_mode = QueueMode::Fifo;
@@ -202,7 +200,7 @@ int PS4_SYSV_ABI sceKernelCreateEventFlag(OrbisKernelEventFlag* ef, const char* 
         queue_mode = EventFlagInternal::QueueMode::Fifo;
         break;
     case 0x02:
-        queue_mode = EventFlagInternal::QueueMode::ThreadPrio;
+        queue_mode = EventFlagInternal::QueueMode::ThreadPriority;
         break;
     case 0x00:
         break;
@@ -221,10 +219,6 @@ int PS4_SYSV_ABI sceKernelCreateEventFlag(OrbisKernelEventFlag* ef, const char* 
         break;
     default:
         UNREACHABLE();
-    }
-
-    if (queue_mode == EventFlagInternal::QueueMode::ThreadPrio) {
-        LOG_ERROR(Kernel_Event, "ThreadPriority attr is not supported!");
     }
 
     *ef = new EventFlagInternal(std::string(pName), thread_mode, queue_mode, initPattern);

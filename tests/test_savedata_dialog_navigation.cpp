@@ -3,9 +3,63 @@
 
 #include <gtest/gtest.h>
 
+#include "core/libraries/save_data/dialog/gamepad_input_capture.h"
 #include "core/libraries/save_data/dialog/savedatadialog_navigation.h"
 
 namespace SaveDataDialog = Libraries::SaveData::Dialog;
+
+namespace {
+
+int acquire_count;
+int release_count;
+
+void AcquireInput() {
+    ++acquire_count;
+}
+
+void ReleaseInput() {
+    ++release_count;
+}
+
+} // namespace
+
+TEST(SaveDataDialogInputCapture, ReleasesExactlyOnceWhenMovedAndReset) {
+    acquire_count = 0;
+    release_count = 0;
+
+    {
+        SaveDataDialog::GamepadInputCapture capture{AcquireInput, ReleaseInput};
+        EXPECT_EQ(acquire_count, 1);
+        EXPECT_EQ(release_count, 0);
+
+        SaveDataDialog::GamepadInputCapture moved{std::move(capture)};
+        EXPECT_EQ(acquire_count, 1);
+        EXPECT_EQ(release_count, 0);
+
+        capture.Reset();
+        EXPECT_EQ(release_count, 0);
+
+        moved.Reset();
+        EXPECT_EQ(release_count, 1);
+    }
+
+    EXPECT_EQ(release_count, 1);
+}
+
+TEST(SaveDataDialogInputCapture, MoveAssignmentReleasesThePreviousLease) {
+    acquire_count = 0;
+    release_count = 0;
+
+    SaveDataDialog::GamepadInputCapture first{AcquireInput, ReleaseInput};
+    SaveDataDialog::GamepadInputCapture second{AcquireInput, ReleaseInput};
+    EXPECT_EQ(acquire_count, 2);
+
+    second = std::move(first);
+    EXPECT_EQ(release_count, 1);
+
+    second.Reset();
+    EXPECT_EQ(release_count, 2);
+}
 
 TEST(SaveDataDialogNavigation, EstablishesInitialListFocusWithoutReplayingHeldConfirm) {
     EXPECT_EQ(SaveDataDialog::ChooseListFocusAction(true, false, false),

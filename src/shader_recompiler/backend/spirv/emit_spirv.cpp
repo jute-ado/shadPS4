@@ -11,6 +11,7 @@
 #include "common/func_traits.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/image_offset_policy.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -273,7 +274,9 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
             ctx.AddCapability(spv::Capability::ImageReadWriteLodAMD);
         }
     }
-    if (info.has_image_gather) {
+    const bool uses_dynamic_sample_offset =
+        profile.supports_maintenance8 && profile.supports_image_gather_extended;
+    if (NeedsImageGatherExtendedCapability(info.has_image_gather, uses_dynamic_sample_offset)) {
         ctx.AddCapability(spv::Capability::ImageGatherExtended);
     }
     if (info.has_image_query) {

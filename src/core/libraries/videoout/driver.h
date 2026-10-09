@@ -90,7 +90,9 @@ public:
     int ChangeBufferAttribute(VideoOutPort* port, s32 bufferIndex,
                               const BufferAttribute* attribute);
 
+    bool ReserveFlip(VideoOutPort* port, s32 index, bool is_eop);
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    void SubmitReservedFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop);
 
 private:
     struct Request {

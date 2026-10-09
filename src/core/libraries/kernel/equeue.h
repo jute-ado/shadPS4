@@ -4,7 +4,6 @@
 #pragma once
 
 #include <condition_variable>
-#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -92,24 +91,16 @@ struct EqueueEvent {
 
     void Clear() {
         is_triggered = false;
-        trigger_count = 0;
         event.fflags = 0;
         event.data = 0;
     }
 
     void Trigger(void* data) {
-        if (trigger_count != std::numeric_limits<u32>::max()) {
-            ++trigger_count;
-        }
         is_triggered = true;
         event.data = reinterpret_cast<uintptr_t>(data);
     }
 
     void ConsumeTrigger() {
-        if (event.filter == OrbisKernelEvent::Filter::GraphicsCore && trigger_count > 1) {
-            --trigger_count;
-            return;
-        }
         Clear();
     }
 
@@ -151,7 +142,6 @@ struct EqueueEvent {
 
 private:
     bool is_triggered = false;
-    u32 trigger_count = 0;
 };
 
 class EqueueInternal {
