@@ -1,0 +1,71 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <gtest/gtest.h>
+
+#include <vector>
+
+#include "video_core/buffer_cache/fault_range.h"
+
+namespace {
+
+enum class FaultRangeCacheCall {
+    Find,
+    Synchronize,
+};
+
+struct RecordedFaultRangeCacheCall {
+    FaultRangeCacheCall operation;
+    VAddr address;
+    u64 size;
+};
+
+class RecordingFaultRangeCache {
+public:
+    void FindBuffer(VAddr address, u32 size) {
+        calls.push_back({FaultRangeCacheCall::Find, address, size});
+    }
+
+    void SynchronizeBuffersInRange(VAddr address, u64 size) {
+        calls.push_back({FaultRangeCacheCall::Synchronize, address, size});
+    }
+
+    std::vector<RecordedFaultRangeCacheCall> calls;
+};
+
+} // namespace
+
+TEST(FaultRange, AcceptsMappedAddressSpaceRange) {
+    EXPECT_TRUE(VideoCore::IsCacheableFaultRange(0x4000, 0x8000, 1ULL << 40));
+}
+
+TEST(FaultRange, RejectsNullPage) {
+    EXPECT_FALSE(VideoCore::IsCacheableFaultRange(0, 0x4000, 1ULL << 40));
+}
+
+TEST(FaultRange, RejectsRangeOutsideAddressSpace) {
+    EXPECT_FALSE(VideoCore::IsCacheableFaultRange(1ULL << 40, (1ULL << 40) + 0x4000, 1ULL << 40));
+}
+
+TEST(FaultRange, RejectsEmptyOrReversedRange) {
+    EXPECT_FALSE(VideoCore::IsCacheableFaultRange(0x4000, 0x4000, 1ULL << 40));
+    EXPECT_FALSE(VideoCore::IsCacheableFaultRange(0x8000, 0x4000, 1ULL << 40));
+}
+
+TEST(FaultRange, RejectsRangeTooLargeForBufferCache) {
+    EXPECT_FALSE(VideoCore::IsCacheableFaultRange(0x4000, 0x4000 + (1ULL << 32), 1ULL << 40));
+}
+
+TEST(FaultRange, MakesDmaFaultRangeResidentBeforeDirectAccess) {
+    RecordingFaultRangeCache cache;
+
+    VideoCore::MakeDmaFaultRangeResident(cache, 0x101E600000, 0x4000);
+
+    ASSERT_EQ(cache.calls.size(), 2);
+    EXPECT_EQ(cache.calls[0].operation, FaultRangeCacheCall::Find);
+    EXPECT_EQ(cache.calls[0].address, 0x101E600000);
+    EXPECT_EQ(cache.calls[0].size, 0x4000);
+    EXPECT_EQ(cache.calls[1].operation, FaultRangeCacheCall::Synchronize);
+    EXPECT_EQ(cache.calls[1].address, 0x101E600000);
+    EXPECT_EQ(cache.calls[1].size, 0x4000);
+}
