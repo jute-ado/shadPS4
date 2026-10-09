@@ -186,7 +186,7 @@ private:
     void ChangeRegister(BufferId buffer_id);
 
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
-                           bool is_texel_buffer);
+                           bool is_texel_buffer, bool is_registered = true);
 
     vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
                             size_t total_size_bytes);

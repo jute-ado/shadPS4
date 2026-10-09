@@ -16,6 +16,7 @@
 #include "core/libraries/system/userservice.h"
 #include "core/user_settings.h"
 #include "input/controller.h"
+#include "input/controller_trace.h"
 
 namespace Input {
 
@@ -58,7 +59,8 @@ void CalculateOrientation(const Libraries::Pad::OrbisFVector3& angular_velocity,
 
 } // namespace
 
-GameController::GameController() : m_states_queue(64) {}
+GameController::GameController(bool record_test_lab_input)
+    : m_states_queue(64), m_record_test_lab_input{record_test_lab_input} {}
 
 State GameController::ReadState() {
     std::lock_guard lock{m_state_mutex};
@@ -155,6 +157,7 @@ void GameController::SetTouchpadState(int touch_index, bool touch_down, float x,
 void GameController::ConnectController(SDL_Gamepad* pad) {
     std::lock_guard lock{m_state_mutex};
     m_sdl_gamepad = pad;
+    m_connection.ConnectPhysical();
     m_states_queue.Clear();
     if (!m_state.connected) {
         ++m_state.connected_count;
@@ -167,10 +170,24 @@ void GameController::ConnectController(SDL_Gamepad* pad) {
     PushStateLocked();
 }
 
+void GameController::ConnectVirtualController() {
+    std::lock_guard lock{m_state_mutex};
+    m_connection.ConnectVirtual();
+    if (!m_state.connected) {
+        ++m_state.connected_count;
+        if (m_state.connected_count == 0) {
+            m_state.connected_count = 1;
+        }
+    }
+    m_state.connected = true;
+    PushStateLocked();
+}
+
 void GameController::DisconnectController() {
     std::lock_guard lock{m_state_mutex};
     m_states_queue.Clear();
     m_sdl_gamepad = nullptr;
+    m_connection.DisconnectPhysical();
 
     const u8 connected_count = m_state.connected_count;
     m_state = {};
@@ -180,7 +197,7 @@ void GameController::DisconnectController() {
     accel_buf[1] = 9.81f;
     m_next_touch_id = 1;
     m_touch_down_timestamp = 0;
-    m_state.connected = false;
+    m_state.connected = m_connection.IsConnected();
     m_last_orientation_update = 0;
     PushStateLocked();
 }
@@ -210,6 +227,9 @@ void GameController::PushStateLocked(u64 timestamp) {
     m_state.touch_time_since_held_down =
         m_touch_down_timestamp == 0 ? 0 : timestamp - m_touch_down_timestamp;
     m_states_queue.Push(m_state);
+    if (m_record_test_lab_input) {
+        RecordPrimaryControllerState(m_state);
+    }
 }
 
 void GameController::SetLightBarRGB(u8 const r, u8 const g, u8 const b) {

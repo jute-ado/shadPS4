@@ -8,6 +8,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -27,7 +28,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                          PageManager& tracker)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       memory{Core::Memory::Instance()}, texture_cache{texture_cache_},
-      fault_manager{instance, scheduler, *this, CACHING_PAGEBITS, CACHING_NUMPAGES},
+      fault_manager{instance, scheduler, *this, tracker, CACHING_PAGEBITS, CACHING_NUMPAGES},
       staging_buffer{instance, scheduler, MemoryUsage::Upload, StagingBufferSize},
       stream_buffer{instance, scheduler, MemoryUsage::Stream, UboStreamBufferSize},
       download_buffer{instance, scheduler, MemoryUsage::Download, DownloadBufferSize},
@@ -595,7 +596,12 @@ BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
     for (const BufferId overlap_id : overlap.ids) {
         JoinOverlap(new_buffer_id, overlap_id, !overlap.has_stream_leap);
     }
-    Register(new_buffer_id);
+    PublishDmaBufferAfterSynchronization(
+        new_buffer,
+        [this](Buffer& buffer, VAddr address, u32 size) {
+            SynchronizeBuffer(buffer, address, size, false, false, false);
+        },
+        [this, new_buffer_id] { Register(new_buffer_id); });
     return new_buffer_id;
 }
 
@@ -649,7 +655,7 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 }
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
-                                    bool is_texel_buffer) {
+                                    bool is_texel_buffer, bool is_registered) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes = 0;
     VAddr buffer_start = buffer.CpuAddr();
@@ -696,7 +702,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .bufferMemoryBarrierCount = 1,
             .pBufferMemoryBarriers = &post_barrier,
         });
-        TouchBuffer(buffer);
+        TouchBufferAfterUploadIfRegistered(is_registered, [&] { TouchBuffer(buffer); });
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeBufferFromImage(buffer, device_addr, size);
