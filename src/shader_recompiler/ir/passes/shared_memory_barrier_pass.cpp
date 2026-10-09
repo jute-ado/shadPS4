@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/ir/passes/shared_memory_barrier_policy.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
 
@@ -79,21 +80,17 @@ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
     }
 }
 
-static constexpr u32 GcnSubgroupSize = 64;
-
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile) {
-    if (program.info.stage != Stage::Compute) {
-        return;
-    }
     const auto& cs_info = runtime_info.cs_info;
     const u32 shared_memory_size = cs_info.shared_memory_size;
     const u32 threadgroup_size =
         cs_info.workgroup_size[0] * cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
-    // The compiler can only omit barriers when the local workgroup size is the same as the HW
-    // subgroup.
-    if (shared_memory_size == 0 || threadgroup_size != GcnSubgroupSize ||
-        !profile.needs_lds_barriers) {
+    // Guest shaders may omit barriers in a wave-synchronous tail even when the complete
+    // workgroup contains multiple wavefronts. Host subgroups narrower than GCN's 64 lanes need
+    // those barriers regardless of the complete workgroup size.
+    if (!NeedsSharedMemoryBarriers(program.info.stage == Stage::Compute, shared_memory_size,
+                                   threadgroup_size, profile.needs_lds_barriers)) {
         return;
     }
     using Type = IR::AbstractSyntaxNode::Type;

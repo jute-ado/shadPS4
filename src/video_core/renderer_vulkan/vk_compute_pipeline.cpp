@@ -4,6 +4,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
+#include "video_core/renderer_vulkan/descriptor_type.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -51,8 +52,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         const u32 num_bindings = image.NumBindings(*info);
         bindings.push_back({
             .binding = binding,
-            .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
-                                               : vk::DescriptorType::eSampledImage,
+            .descriptorType = ImageDescriptorType(image.is_written),
             .descriptorCount = num_bindings,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });

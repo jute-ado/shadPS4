@@ -19,6 +19,8 @@ import zlib
 from scripts.game_test_runner import (
     ManifestError,
     ScreenshotRegion,
+    _alternating_flicker_metrics,
+    _close_stream,
     _decode_png_rgb,
     _screenshot_difference,
     load_manifest,
@@ -650,6 +652,7 @@ class ManifestTests(unittest.TestCase):
                                 {
                                     "screenshotSha256": expected_hash,
                                     "button": "cross",
+                                    "delaySeconds": 0.2,
                                     "timeoutSeconds": 0.75,
                                     "pollSeconds": 0.05,
                                     "holdSeconds": 0.1,
@@ -664,9 +667,70 @@ class ManifestTests(unittest.TestCase):
 
             self.assertEqual(event.screenshot_sha256, expected_hash)
             self.assertEqual(event.button, "cross")
+            self.assertEqual(event.delay_seconds, 0.2)
             self.assertEqual(event.timeout_seconds, 0.75)
             self.assertEqual(event.poll_seconds, 0.05)
             self.assertEqual(event.hold_seconds, 0.1)
+
+    def test_load_manifest_accepts_visual_event_screenshot_source_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "overlay checkpoint",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "a" * 64,
+                                    "screenshotSource": "presented_frame",
+                                    "button": "cross",
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertEqual(event.screenshot_source, "presented_frame")
+
+    def test_load_manifest_accepts_visual_checkpoint_without_button(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "game").mkdir()
+            path = self.write_manifest(
+                root,
+                {
+                    "schemaVersion": 1,
+                    "cases": [
+                        {
+                            "name": "observe loading completion",
+                            "gamePath": "game",
+                            "timeoutSeconds": 2,
+                            "useIpc": True,
+                            "screenshotButtonEvents": [
+                                {
+                                    "screenshotSha256": "a" * 64,
+                                    "timeoutSeconds": 0.75,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            event = load_manifest(path).cases[0].screenshot_button_events[0]
+
+            self.assertIsNone(event.button)
 
     def test_load_manifest_accepts_visual_checkpoint_comparison_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1442,6 +1506,39 @@ class ManifestTests(unittest.TestCase):
 
 
 class PngComparisonTests(unittest.TestCase):
+    def test_alternating_flicker_metrics_detect_repeating_opposite_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frames = []
+            for index, intensity in enumerate((0, 255, 0, 255, 0, 255)):
+                frame = root / f"frame-{index}.png"
+                frame.write_bytes(
+                    test_png(1, 1, 2, bytes((0, intensity, intensity, intensity)))
+                )
+                frames.append(frame)
+
+            metrics = _alternating_flicker_metrics(frames)
+
+            self.assertEqual(metrics.adjacent_difference, 1.0)
+            self.assertEqual(metrics.two_frame_difference, 0.0)
+            self.assertTrue(metrics.detected)
+
+    def test_alternating_flicker_metrics_reject_forward_visual_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frames = []
+            for index, intensity in enumerate((0, 32, 64, 96, 128, 160)):
+                frame = root / f"frame-{index}.png"
+                frame.write_bytes(
+                    test_png(1, 1, 2, bytes((0, intensity, intensity, intensity)))
+                )
+                frames.append(frame)
+
+            metrics = _alternating_flicker_metrics(frames)
+
+            self.assertGreater(metrics.two_frame_difference, metrics.adjacent_difference)
+            self.assertFalse(metrics.detected)
+
     def test_screenshot_difference_can_ignore_pixels_outside_a_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1789,6 +1886,44 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(result.passed, result.failures)
             self.assertEqual(result.exit_code, 7)
 
+    def test_run_case_reports_ipc_process_that_exits_before_next_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = load_manifest(
+                self.make_manifest(
+                    root,
+                    case={
+                        "name": "early ipc exit",
+                        "args": [
+                            "--expect-ipc",
+                            "--exit-after-ipc-start",
+                            "--exit-code",
+                            "7",
+                        ],
+                        "useIpc": True,
+                        "allowedOutcomes": ["exited_nonzero"],
+                    },
+                )
+            )
+
+            result = run_case(
+                manifest.cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            self.assertEqual(result.outcome, "exited_nonzero")
+            self.assertEqual(result.exit_code, 7)
+
+    def test_close_stream_ignores_pipe_error_after_process_crash(self) -> None:
+        stream = mock.Mock()
+        stream.close.side_effect = OSError(22, "Invalid argument")
+
+        _close_stream(stream)
+
+        stream.close.assert_called_once_with()
+
     def test_run_case_fails_on_forbidden_log_pattern(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2049,6 +2184,86 @@ class RunnerTests(unittest.TestCase):
             )
             json.dumps(result.to_report())
 
+    def test_run_case_matches_visual_checkpoint_without_gamepad_or_button(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "expected.png"
+            reference.write_bytes(test_png(1, 1, 6, bytes((0, 0, 0, 0, 255))))
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "observe state",
+                    "timeoutSeconds": 0.5,
+                    "args": ["--expect-ipc", "--omit-gamepad-capability"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "timeoutSeconds": 0.2,
+                            "pollSeconds": 0.1,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotIn("GAMEPAD_BUTTON", observation["ipc_commands"])
+
+    def test_run_case_uses_visual_event_screenshot_source_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected_png = test_png(1, 1, 6, bytes((0, 0, 0, 0, 255)))
+            reference = root / "expected.png"
+            reference.write_bytes(expected_png)
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "overlay checkpoint",
+                    "timeoutSeconds": 1,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "screenshotSource": "presented_frame",
+                            "button": "cross",
+                            "timeoutSeconds": 0.5,
+                            "holdSeconds": 0.02,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("SCREENSHOT_WITH_OVERLAYS", observation["ipc_commands"])
+            self.assertNotIn("SCREENSHOT", observation["ipc_commands"])
+
     def test_run_case_scales_reference_before_matching_visual_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2139,6 +2354,51 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(
                 [attempt.matched for attempt in result.visual_checkpoint_attempts],
                 [True],
+            )
+
+    def test_visual_checkpoint_waits_before_first_screenshot_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "expected.png"
+            reference.write_bytes(test_png(1, 1, 6, bytes((0, 0, 0, 0, 255))))
+            manifest_path = self.make_manifest(
+                root,
+                case={
+                    "name": "delayed checkpoint start",
+                    "timeoutSeconds": 1.0,
+                    "args": ["--expect-ipc"],
+                    "useIpc": True,
+                    "screenshotButtonEvents": [
+                        {
+                            "referenceScreenshot": "expected.png",
+                            "maximumDifference": 0,
+                            "delaySeconds": 0.15,
+                            "timeoutSeconds": 0.5,
+                            "pollSeconds": 0.02,
+                            "holdSeconds": 0.01,
+                        }
+                    ],
+                    "allowedOutcomes": ["timed_out"],
+                },
+            )
+
+            result = run_case(
+                load_manifest(manifest_path).cases[0],
+                emulator_command=[sys.executable, str(FIXTURE)],
+                artifacts_root=root / "artifacts",
+            )
+
+            self.assertTrue(result.passed, result.failures)
+            observation = json.loads(
+                (result.artifact_directory / "observation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            commands = observation["ipc_commands"]
+            seconds = observation["ipc_command_seconds"]
+            self.assertGreaterEqual(
+                seconds[commands.index("SCREENSHOT")] - seconds[commands.index("START")],
+                0.14,
             )
 
     def test_run_case_matches_visual_checkpoint_inside_comparison_region(

@@ -10,8 +10,10 @@
 #include "common/string_util.h"
 #include "core/file_format/psf.h"
 #include "core/file_sys/fs.h"
+#include "core/libraries/ime/ime_ui_shared.h"
 #include "core/libraries/save_data/save_instance.h"
 #include "imgui/imgui_std.h"
+#include "save_dialog_input.h"
 #include "savedatadialog_ui.h"
 
 using namespace ImGui;
@@ -333,7 +335,12 @@ SaveDialogUi::~SaveDialogUi() {
 }
 
 SaveDialogUi::SaveDialogUi(SaveDialogUi&& other) noexcept
-    : Layer(other), state(other.state), status(other.status), result(other.result) {
+    : Layer(other), virtual_activate_pressed(other.virtual_activate_pressed),
+      virtual_focus_changed(other.virtual_focus_changed),
+      previous_virtual_buttons(other.previous_virtual_buttons),
+      virtual_selected_item(other.virtual_selected_item),
+      virtual_selection_delta(other.virtual_selection_delta), state(other.state),
+      status(other.status), result(other.result) {
     std::scoped_lock lock(draw_mutex, other.draw_mutex);
     other.state = nullptr;
     other.status = nullptr;
@@ -353,6 +360,11 @@ SaveDialogUi& SaveDialogUi::operator=(SaveDialogUi&& other) noexcept {
     other.status = nullptr;
     result = other.result;
     other.result = nullptr;
+    virtual_activate_pressed = other.virtual_activate_pressed;
+    virtual_focus_changed = other.virtual_focus_changed;
+    previous_virtual_buttons = other.previous_virtual_buttons;
+    virtual_selected_item = other.virtual_selected_item;
+    virtual_selection_delta = other.virtual_selection_delta;
     if (status && *status == Status::RUNNING) {
         first_render = true;
         AddLayer(this);
@@ -383,6 +395,21 @@ void SaveDialogUi::Draw() {
     if (status == nullptr || *status != Status::RUNNING || state == nullptr) {
         return;
     }
+
+    constexpr u32 cross = static_cast<u32>(Libraries::Pad::OrbisPadButtonDataOffset::Cross);
+    constexpr u32 up = static_cast<u32>(Libraries::Pad::OrbisPadButtonDataOffset::Up);
+    constexpr u32 down = static_cast<u32>(Libraries::Pad::OrbisPadButtonDataOffset::Down);
+    const auto virtual_pad = Libraries::Ime::ReadVirtualPadSnapshot(state->user_id, 0.0f, false);
+    const bool input_initialized = !first_render;
+    virtual_activate_pressed = IsNewButtonPressAfterInitialization(
+        input_initialized, virtual_pad.buttons, previous_virtual_buttons, cross);
+    virtual_selection_delta =
+        static_cast<int>(IsNewButtonPressAfterInitialization(input_initialized, virtual_pad.buttons,
+                                                             previous_virtual_buttons, down)) -
+        static_cast<int>(IsNewButtonPressAfterInitialization(input_initialized, virtual_pad.buttons,
+                                                             previous_virtual_buttons, up));
+    virtual_focus_changed = false;
+    previous_virtual_buttons = virtual_pad.buttons;
 
     const auto& ctx = *GetCurrentContext();
     const auto& io = ctx.IO;
@@ -484,6 +511,10 @@ void SaveDialogUi::DrawItem(int _id, const SaveDialogState::Item& item, bool cli
         return;
     }
 
+    if (virtual_focus_changed && virtual_selected_item == _id) {
+        SetItemCurrentNavFocus(id);
+    }
+
     window.DrawList->AddRectFilled(bb.Min + SAVE_ICON_PADDING, bb.Max - SAVE_ICON_PADDING,
                                    GetColorU32(ImVec4{0.3f}));
 
@@ -491,7 +522,7 @@ void SaveDialogUi::DrawItem(int _id, const SaveDialogState::Item& item, bool cli
     if (clickable) {
         bool held;
         bool pressed = ButtonBehavior(bb, id, &hovered, &held);
-        if (pressed) {
+        if (pressed || (virtual_activate_pressed && virtual_selected_item == _id)) {
             result->dir_name = item.dir_name;
             result->param = item.pfo;
             Finish(ButtonId::INVALID);
@@ -572,6 +603,53 @@ void SaveDialogUi::DrawList() {
     constexpr auto footerHeight = 30.0f;
     availableSize.y -= footerHeight + 1.0f;
 
+    const int item_count =
+        static_cast<int>(state->save_list.size()) + static_cast<int>(state->new_item.has_value());
+    if (first_render) {
+        virtual_selected_item = 0;
+        if (std::holds_alternative<FocusPos>(state->focus_pos)) {
+            const auto pos = std::get<FocusPos>(state->focus_pos);
+            if (pos == FocusPos::LISTTAIL || pos == FocusPos::DATATAIL) {
+                virtual_selected_item = item_count - 1;
+            } else if (pos != FocusPos::LISTHEAD && pos != FocusPos::DATAHEAD) {
+                int idx = state->new_item.has_value() ? 1 : 0;
+                int selected = 0;
+                const bool is_min = pos == FocusPos::DATAOLDEST;
+                std::chrono::system_clock::time_point selected_write{};
+                for (const auto& item : state->save_list) {
+                    if (item.last_write > selected_write ^ is_min) {
+                        selected_write = item.last_write;
+                        selected = idx;
+                    }
+                    ++idx;
+                }
+                virtual_selected_item = selected;
+            }
+        } else if (std::holds_alternative<std::string>(state->focus_pos)) {
+            const auto& dir_name = std::get<std::string>(state->focus_pos);
+            int idx = 0;
+            if (state->new_item.has_value()) {
+                if (dir_name == state->new_item->dir_name) {
+                    virtual_selected_item = idx;
+                }
+                ++idx;
+            }
+            for (const auto& item : state->save_list) {
+                if (dir_name == item.dir_name) {
+                    virtual_selected_item = idx;
+                    break;
+                }
+                ++idx;
+            }
+        }
+        virtual_selected_item = MoveSelection(virtual_selected_item, item_count, 0);
+        virtual_focus_changed = true;
+    } else if (virtual_selection_delta != 0) {
+        virtual_selected_item =
+            MoveSelection(virtual_selected_item, item_count, virtual_selection_delta);
+        virtual_focus_changed = true;
+    }
+
     BeginChild("##ScrollingRegion", availableSize, ImGuiChildFlags_NavFlattened);
     int i = 0;
     if (state->new_item.has_value()) {
@@ -579,52 +657,6 @@ void SaveDialogUi::DrawList() {
     }
     for (const auto& item : state->save_list) {
         DrawItem(i++, item);
-    }
-    if (first_render) { // Make the initial focus
-        if (std::holds_alternative<FocusPos>(state->focus_pos)) {
-            auto pos = std::get<FocusPos>(state->focus_pos);
-            if (pos == FocusPos::LISTHEAD || pos == FocusPos::DATAHEAD) {
-                SetItemCurrentNavFocus(GetID(0));
-            } else if (pos == FocusPos::LISTTAIL || pos == FocusPos::DATATAIL) {
-                SetItemCurrentNavFocus(GetID(std::max(i - 1, 0)));
-            } else { // Date
-                int idx = 0;
-                int max_idx = 0;
-                bool is_min = pos == FocusPos::DATAOLDEST;
-                std::chrono::system_clock::time_point max_write{};
-                if (state->new_item.has_value()) {
-                    idx++;
-                }
-                for (const auto& item : state->save_list) {
-                    if (item.last_write > max_write ^ is_min) {
-                        max_write = item.last_write;
-                        max_idx = idx;
-                    }
-                    idx++;
-                }
-                SetItemCurrentNavFocus(GetID(max_idx));
-            }
-        } else if (std::holds_alternative<std::string>(state->focus_pos)) {
-            auto dir_name = std::get<std::string>(state->focus_pos);
-            if (dir_name.empty()) {
-                SetItemCurrentNavFocus(GetID(0));
-            } else {
-                int idx = 0;
-                if (state->new_item.has_value()) {
-                    if (dir_name == state->new_item->dir_name) {
-                        SetItemCurrentNavFocus(GetID(idx));
-                    }
-                    idx++;
-                }
-                for (const auto& item : state->save_list) {
-                    if (item.dir_name == dir_name) {
-                        SetItemCurrentNavFocus(GetID(idx));
-                        break;
-                    }
-                    idx++;
-                }
-            }
-        }
     }
     EndChild();
 

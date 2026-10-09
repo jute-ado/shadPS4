@@ -66,6 +66,7 @@ def main() -> int:
     parser.add_argument("--emit-bytes", type=int, default=0)
     parser.add_argument("--spawn-child", action="store_true")
     parser.add_argument("--expect-ipc", action="store_true")
+    parser.add_argument("--exit-after-ipc-start", action="store_true")
     parser.add_argument("--ipc-handshake-delay", type=float, default=0)
     parser.add_argument("--omit-ipc-handshake", action="store_true")
     parser.add_argument("--omit-control-capability", action="store_true")
@@ -107,6 +108,8 @@ def main() -> int:
         for _ in range(2):
             ipc_commands.append(sys.stdin.readline().strip())
             ipc_command_seconds.append(time.monotonic() - launched)
+        if args.exit_after_ipc_start:
+            return args.exit_code
 
     if args.spawn_child:
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])

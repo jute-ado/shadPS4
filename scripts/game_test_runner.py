@@ -17,6 +17,7 @@ import re
 import signal
 import shutil
 import stat
+import statistics
 import subprocess
 import sys
 import threading
@@ -77,7 +78,9 @@ class ScreenshotButtonEvent:
     difference_mode: str
     comparison_region: ScreenshotRegion | None
     scale_reference_to_capture: bool
-    button: str
+    screenshot_source: str | None
+    button: str | None
+    delay_seconds: float
     timeout_seconds: float
     poll_seconds: float = 0.25
     hold_seconds: float = 0.1
@@ -92,6 +95,13 @@ class VisualCheckpointAttempt:
     mean_intensity: float | None
     non_black_fraction: float | None
     matched: bool
+
+
+@dataclass(frozen=True)
+class AlternatingFlickerMetrics:
+    adjacent_difference: float
+    two_frame_difference: float
+    detected: bool
 
 
 @dataclass(frozen=True)
@@ -415,6 +425,11 @@ def _require_screenshot_button_events(
         scale_reference_to_capture = item.get("scaleReferenceToCapture", False)
         if not isinstance(scale_reference_to_capture, bool):
             raise ManifestError(f"{field}.scaleReferenceToCapture must be a boolean")
+        screenshot_source = item.get("screenshotSource")
+        if screenshot_source is not None and screenshot_source not in VALID_SCREENSHOT_SOURCES:
+            raise ManifestError(
+                f"{field}.screenshotSource must be one of {sorted(VALID_SCREENSHOT_SOURCES)}"
+            )
         if screenshot_sha256 is not None:
             if scale_reference_to_capture:
                 raise ManifestError(
@@ -473,11 +488,23 @@ def _require_screenshot_button_events(
                     )
                 comparison_region = ScreenshotRegion(**region_values)
         button = item.get("button")
-        if button not in SUPPORTED_BUTTONS:
+        if button is not None and button not in SUPPORTED_BUTTONS:
             raise ManifestError(
                 f"{field} has unsupported button {button!r}; expected one of "
                 f"{sorted(SUPPORTED_BUTTONS)}"
             )
+
+        delay_seconds = item.get("delaySeconds", 0)
+        if (
+            not isinstance(delay_seconds, (int, float))
+            or isinstance(delay_seconds, bool)
+            or not math.isfinite(delay_seconds)
+            or delay_seconds < 0
+        ):
+            raise ManifestError(
+                f"{field}.delaySeconds must be a finite non-negative number"
+            )
+        delay_seconds = float(delay_seconds)
 
         values: dict[str, float] = {}
         for json_field, default in (
@@ -506,7 +533,9 @@ def _require_screenshot_button_events(
                 difference_mode=difference_mode,
                 comparison_region=comparison_region,
                 scale_reference_to_capture=scale_reference_to_capture,
+                screenshot_source=screenshot_source,
                 button=button,
+                delay_seconds=delay_seconds,
                 timeout_seconds=values["timeoutSeconds"],
                 poll_seconds=values["pollSeconds"],
                 hold_seconds=values["holdSeconds"],
@@ -514,7 +543,10 @@ def _require_screenshot_button_events(
         )
     if events and not use_ipc:
         raise ManifestError(f"{case_name}: screenshotButtonEvents requires useIpc")
-    if sum(event.timeout_seconds + event.hold_seconds for event in events) >= timeout:
+    if sum(
+        event.delay_seconds + event.timeout_seconds + event.hold_seconds
+        for event in events
+    ) >= timeout:
         raise ManifestError(
             f"{case_name}: screenshotButtonEvents must complete before timeoutSeconds"
         )
@@ -891,6 +923,16 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
+def _close_stream(stream: BinaryIO) -> None:
+    """Close a child-process pipe without masking the process result."""
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        # Windows can report EINVAL when a crashed child has already torn down
+        # the other end of a redirected pipe.
+        pass
+
+
 def _read_capped(path: Path, limit: int) -> tuple[str, bool]:
     if not path.exists():
         return "", False
@@ -1126,6 +1168,53 @@ def _screenshot_difference(
     return max(0.0, min(1.0, 1.0 - similarity))
 
 
+def _alternating_flicker_metrics(
+    screenshots: Sequence[Path],
+    *,
+    minimum_adjacent_difference: float = 0.005,
+    maximum_same_phase_ratio: float = 0.25,
+) -> AlternatingFlickerMetrics:
+    """Measure an A/B/A/B pattern without mistaking forward motion for flicker."""
+    if len(screenshots) < 4:
+        raise ValueError("alternating flicker analysis requires at least four frames")
+
+    decoded = [_decode_png_rgb(path) for path in screenshots]
+    dimensions = {(width, height) for width, height, _ in decoded}
+    if len(dimensions) != 1:
+        raise ValueError("screenshots have different dimensions")
+    pixel_count = decoded[0][0] * decoded[0][1]
+    pixel_stride = max(1, pixel_count // 32768)
+    sampled_frames = [
+        b"".join(
+            pixels[offset : offset + 3]
+            for offset in range(0, len(pixels), pixel_stride * 3)
+        )
+        for _, _, pixels in decoded
+    ]
+
+    def difference(first: bytes, second: bytes) -> float:
+        return sum(abs(left - right) for left, right in zip(first, second)) / (
+            len(first) * 255
+        )
+
+    adjacent = statistics.median(
+        difference(first, second)
+        for first, second in zip(sampled_frames, sampled_frames[1:])
+    )
+    two_frame = statistics.median(
+        difference(first, second)
+        for first, second in zip(sampled_frames, sampled_frames[2:])
+    )
+    return AlternatingFlickerMetrics(
+        adjacent_difference=adjacent,
+        two_frame_difference=two_frame,
+        detected=(
+            adjacent >= minimum_adjacent_difference
+            and two_frame <= adjacent * maximum_same_phase_ratio
+        ),
+    )
+
+
 @lru_cache(maxsize=16)
 def _scaled_reference_rgb(
     path: str,
@@ -1336,7 +1425,7 @@ def run_case(
             required_capabilities.append("ENABLE_RENDERDOC_CAPTURE")
         if (
             case.button_events
-            or case.screenshot_button_events
+            or any(event.button is not None for event in case.screenshot_button_events)
             or case.axis_events
             or case.touch_events
         ):
@@ -1363,6 +1452,18 @@ def run_case(
         if case.screenshot_button_events and ipc_ready:
             assert process.stdin is not None
             for index, event in enumerate(case.screenshot_button_events):
+                if event.delay_seconds:
+                    try:
+                        process.wait(
+                            timeout=min(
+                                event.delay_seconds,
+                                max(0, hard_deadline - time.monotonic()),
+                            )
+                        )
+                        process_exited = True
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
                 event_deadline = min(
                     hard_deadline, time.monotonic() + event.timeout_seconds
                 )
@@ -1372,7 +1473,8 @@ def run_case(
                     request_started = time.monotonic()
                     process.stdin.write(
                         b"SCREENSHOT_WITH_OVERLAYS\n"
-                        if case.screenshot_source == "presented_frame"
+                        if (event.screenshot_source or case.screenshot_source)
+                        == "presented_frame"
                         else b"SCREENSHOT\n"
                     )
                     process.stdin.flush()
@@ -1451,18 +1553,21 @@ def run_case(
                                 pass
                         continue
 
-                    process.stdin.write(
-                        (f"GAMEPAD_BUTTON\n{event.button}\n1\n").encode("ascii")
-                    )
-                    process.stdin.flush()
-                    try:
-                        process.wait(timeout=event.hold_seconds)
-                        process_exited = True
-                    except subprocess.TimeoutExpired:
+                    if event.button is not None:
                         process.stdin.write(
-                            (f"GAMEPAD_BUTTON\n{event.button}\n0\n").encode("ascii")
+                            (f"GAMEPAD_BUTTON\n{event.button}\n1\n").encode("ascii")
                         )
                         process.stdin.flush()
+                        try:
+                            process.wait(timeout=event.hold_seconds)
+                            process_exited = True
+                        except subprocess.TimeoutExpired:
+                            process.stdin.write(
+                                (f"GAMEPAD_BUTTON\n{event.button}\n0\n").encode(
+                                    "ascii"
+                                )
+                            )
+                            process.stdin.flush()
                     matched = True
                     break
 
@@ -1596,11 +1701,11 @@ def run_case(
             process.wait(timeout=5)
     finally:
         if process.stdin is not None:
-            process.stdin.close()
+            _close_stream(process.stdin)
         for reader in readers:
             reader.join(timeout=5)
-        process.stdout.close()
-        process.stderr.close()
+        _close_stream(process.stdout)
+        _close_stream(process.stderr)
     duration = time.monotonic() - started
 
     if timed_out:

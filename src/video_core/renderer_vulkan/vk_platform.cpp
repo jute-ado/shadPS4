@@ -21,6 +21,7 @@
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_layer_settings.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
 #ifdef __APPLE__
@@ -30,7 +31,7 @@
 namespace Vulkan {
 
 static const char* const VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
-static const char* const CRASH_DIAGNOSTIC_LAYER_NAME = "VK_LAYER_LUNARG_crash_diagnostic";
+static const char* const CRASH_DIAGNOSTIC_LAYER_NAME = LayerSettings::CrashDiagnosticLayer.data();
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT severity, vk::DebugUtilsMessageTypeFlagsEXT type,
@@ -311,6 +312,14 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
         Common::FS::GetUserPathString(Common::FS::PathType::LogDir);
     const char* log_path = crash_diagnostic_path.c_str();
     vk::Bool32 enable_force_barriers = vk::True;
+    vk::Bool32 instrument_all_commands = LayerSettings::InstrumentAllCrashCommands
+                                             ? vk::True
+                                             : vk::False;
+    const char* crash_shader_dump_mode = LayerSettings::CrashShaderDumpMode.data();
+    const char* crash_command_dump_mode = LayerSettings::CrashCommandDumpMode.data();
+    const char* crash_command_buffer_dump_mode =
+        LayerSettings::CrashCommandBufferDumpMode.data();
+    const char* crash_queue_submit_dump_mode = LayerSettings::CrashQueueSubmitDumpMode.data();
 
     const std::array layer_setings = {
         vk::LayerSettingEXT{
@@ -384,18 +393,53 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
             .pValues = &enable_gpuav,
         },
         vk::LayerSettingEXT{
-            .pLayerName = "lunarg_crash_diagnostic",
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
             .pSettingName = "output_path",
             .type = vk::LayerSettingTypeEXT::eString,
             .valueCount = 1,
             .pValues = &log_path,
         },
         vk::LayerSettingEXT{
-            .pLayerName = "lunarg_crash_diagnostic",
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
             .pSettingName = "sync_after_commands",
             .type = vk::LayerSettingTypeEXT::eBool32,
             .valueCount = 1,
             .pValues = &enable_force_barriers,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
+            .pSettingName = "instrument_all_commands",
+            .type = vk::LayerSettingTypeEXT::eBool32,
+            .valueCount = 1,
+            .pValues = &instrument_all_commands,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
+            .pSettingName = "dump_shaders",
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &crash_shader_dump_mode,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
+            .pSettingName = "dump_commands",
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &crash_command_dump_mode,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
+            .pSettingName = "dump_command_buffers",
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &crash_command_buffer_dump_mode,
+        },
+        vk::LayerSettingEXT{
+            .pLayerName = CRASH_DIAGNOSTIC_LAYER_NAME,
+            .pSettingName = "dump_queue_submits",
+            .type = vk::LayerSettingTypeEXT::eString,
+            .valueCount = 1,
+            .pValues = &crash_queue_submit_dump_mode,
         },
     };
 

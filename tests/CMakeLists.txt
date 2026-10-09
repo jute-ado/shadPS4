@@ -51,6 +51,7 @@ target_link_libraries(shadps4_renderdoc_path_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_renderdoc_path_test)
 
 add_executable(shadps4_presenter_sync_test
+    test_layer_settings.cpp
     test_presenter_sync.cpp
 )
 target_include_directories(shadps4_presenter_sync_test PRIVATE
@@ -72,6 +73,62 @@ target_include_directories(shadps4_fault_range_test PRIVATE
 target_compile_features(shadps4_fault_range_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_fault_range_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_fault_range_test)
+
+add_executable(shadps4_descriptor_type_test
+    test_descriptor_type.cpp
+)
+target_include_directories(shadps4_descriptor_type_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_descriptor_type_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_descriptor_type_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_descriptor_type_test)
+
+add_executable(shadps4_shared_memory_barrier_policy_test
+    test_shared_memory_barrier_policy.cpp
+)
+target_include_directories(shadps4_shared_memory_barrier_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_shared_memory_barrier_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_shared_memory_barrier_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_shared_memory_barrier_policy_test)
+
+add_executable(shadps4_compute_dispatch_diagnostics_test
+    test_compute_dispatch_diagnostics.cpp
+)
+target_include_directories(shadps4_compute_dispatch_diagnostics_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_compute_dispatch_diagnostics_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_compute_dispatch_diagnostics_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_compute_dispatch_diagnostics_test)
+
+add_executable(shadps4_buffer_barrier_policy_test
+    test_buffer_barrier_policy.cpp
+)
+target_include_directories(shadps4_buffer_barrier_policy_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_buffer_barrier_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_buffer_barrier_policy_test PRIVATE
+    GTest::gtest_main
+    Vulkan::Headers
+)
+list(APPEND TEST_TARGETS shadps4_buffer_barrier_policy_test)
+
+add_executable(shadps4_save_dialog_input_test
+    test_save_dialog_input.cpp
+)
+target_include_directories(shadps4_save_dialog_input_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_save_dialog_input_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_save_dialog_input_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_save_dialog_input_test)
 
 add_executable(shadps4_playgo_test
     test_playgo.cpp

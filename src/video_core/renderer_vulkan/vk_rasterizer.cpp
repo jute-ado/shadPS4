@@ -6,6 +6,9 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/buffer_barrier_policy.h"
+#include "video_core/renderer_vulkan/compute_dispatch_diagnostics.h"
+#include "video_core/renderer_vulkan/descriptor_type.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -332,6 +335,12 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    if (EmulatorSettings.IsDumpShaders() &&
+        IsLargeComputeWorkgroup(cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                                cs_program.num_thread_z.full)) {
+        LogComputeDispatch(cs, cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    }
+
     scheduler.EndRendering();
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
@@ -340,6 +349,51 @@ void Rasterizer::DispatchDirect() {
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
 
     ResetBindings();
+}
+
+void Rasterizer::LogComputeDispatch(const Shader::Info& stage, u32 group_x, u32 group_y,
+                                    u32 group_z) {
+    const auto& cs_program = liverpool->GetCsRegs();
+    LOG_INFO(Render_Vulkan,
+             "Compute dispatch shader={:#018x} groups=({}, {}, {}) threads=({}, {}, {})",
+             stage.pgm_hash, group_x, group_y, group_z, cs_program.num_thread_x.full,
+             cs_program.num_thread_y.full, cs_program.num_thread_z.full);
+
+    std::string user_data;
+    for (u32 i = 0; i < stage.user_data.size(); ++i) {
+        user_data += fmt::format("{}{}:{:#010x}", i == 0 ? "" : ",", i, stage.user_data[i]);
+    }
+    LOG_INFO(Render_Vulkan, "Compute user data [{}]", user_data);
+
+    for (u32 i = 0; i < stage.buffers.size(); ++i) {
+        const auto& desc = stage.buffers[i];
+        const auto buffer = desc.GetSharp(stage);
+        const bool gpu_modified =
+            !desc.IsSpecial() && buffer.base_address != 0 &&
+            buffer_cache.IsRegionGpuModified(buffer.base_address, buffer.GetSize());
+        if (ShouldSynchronizeDiagnosticPreview(desc.is_written, desc.IsSpecial(), gpu_modified,
+                                               buffer.GetSize())) {
+            buffer_cache.ReadMemory(buffer.base_address, buffer.GetSize());
+        }
+        DwordPreview preview{};
+        const u64 preview_size =
+            std::min<u64>(buffer.GetSize(), ComputeDiagnosticPreviewDwords * sizeof(u32));
+        if (!desc.IsSpecial() && !desc.is_written && buffer.base_address != 0 &&
+            memory->IsValidMapping(buffer.base_address, preview_size)) {
+            preview =
+                CopyDwordPreview(reinterpret_cast<const void*>(buffer.base_address), preview_size);
+        }
+
+        std::string words;
+        for (u32 word = 0; word < preview.size; ++word) {
+            words += fmt::format("{}{}:{:#010x}", word == 0 ? "" : ",", word, preview.words[word]);
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Compute buffer {} sharp={} address={:#014x} size={} stride={} written={} "
+                 "special={} gpu_modified={} words=[{}]",
+                 i, desc.sharp_idx, buffer.base_address, buffer.GetSize(), buffer.GetStride(),
+                 desc.is_written, desc.IsSpecial(), gpu_modified, words);
+    }
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -598,6 +652,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
+    boost::container::small_vector<std::pair<VideoCore::Buffer*, vk::AccessFlags2>, 16>
+        buffer_accesses;
 
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
@@ -652,11 +708,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
-            if (auto barrier =
-                    vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
-                                                          : vk::AccessFlagBits2::eShaderRead,
-                                          vk::PipelineStageFlagBits2::eAllCommands)) {
-                buffer_barriers.emplace_back(*barrier);
+            const auto access = ShaderBufferAccess(desc.is_written);
+            const auto access_it = std::ranges::find(buffer_accesses, vk_buffer,
+                                                     &decltype(buffer_accesses)::value_type::first);
+            if (access_it == buffer_accesses.end()) {
+                buffer_accesses.emplace_back(vk_buffer, access);
+            } else {
+                access_it->second |= access;
             }
             if (desc.is_written && desc.is_formatted) {
                 texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
@@ -673,6 +731,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
     }
+
+    for (const auto& [buffer, access] : buffer_accesses) {
+        if (auto barrier =
+                buffer->GetBarrier(access, vk::PipelineStageFlagBits2::eAllCommands)) {
+            buffer_barriers.emplace_back(*barrier);
+        }
+    }
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
@@ -684,9 +749,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // This array holds the size of each consecutive array with the number of bindings consumed.
     // This is currently always 1 for anything other than mip fallback arrays.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
+    boost::container::small_vector<vk::DescriptorType, 8> image_descriptor_types;
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
+        image_descriptor_types.push_back(ImageDescriptorType(image_desc.is_written));
         if (texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
         }
@@ -800,16 +867,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     u32 image_info_idx = first_image_idx;
     u32 image_binding_idx = 0;
-    for (u32 array_size : image_descriptor_array_sizes) {
-        const auto& [_, desc] = image_bindings[image_binding_idx];
-        const bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
+    for (u32 descriptor_index = 0; descriptor_index < image_descriptor_array_sizes.size();
+         ++descriptor_index) {
+        const u32 array_size = image_descriptor_array_sizes[descriptor_index];
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
         set_write.dstBinding = binding.unified;
         set_write.dstArrayElement = 0;
         set_write.descriptorCount = array_size;
-        set_write.descriptorType =
-            is_storage ? vk::DescriptorType::eStorageImage : vk::DescriptorType::eSampledImage;
+        set_write.descriptorType = image_descriptor_types[descriptor_index];
         set_write.pImageInfo = &image_infos[image_info_idx];
 
         image_info_idx += array_size;

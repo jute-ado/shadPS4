@@ -287,6 +287,11 @@ public:
 
 class SaveDialogUi final : public ImGui::Layer {
     bool first_render{false};
+    bool virtual_activate_pressed{false};
+    bool virtual_focus_changed{false};
+    u32 previous_virtual_buttons{};
+    int virtual_selected_item{-1};
+    int virtual_selection_delta{};
     SaveDialogState* state{};
     CommonDialog::Status* status{};
     SaveDialogResult* result{};

@@ -103,6 +103,7 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void LogComputeDispatch(const Shader::Info& stage, u32 group_x, u32 group_y, u32 group_z);
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {

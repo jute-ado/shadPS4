@@ -322,6 +322,10 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     } else {
         const auto& buffer = port->buffer_slots[index];
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
+        if (EmulatorSettings.IsDumpShaders()) {
+            LOG_INFO(Lib_VideoOut, "Flip diagnostic: index={} address={:#x} arg={} eop={}", index,
+                     buffer.address_left, flip_arg, is_eop);
+        }
         const auto& group = port->groups[buffer.group_index];
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
