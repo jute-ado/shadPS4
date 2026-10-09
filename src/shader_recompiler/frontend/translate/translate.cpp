@@ -919,7 +919,7 @@ void Translator::SetDst1(const InstOperand& operand, const IR::U1& value) {
         ir.SetVcc(value);
         break;
     case OperandField::ScalarGPR:
-        ir.SetThreadBitScalarReg(IR::ScalarReg(operand.code), value);
+        ir.SetThreadBitScalarRegPair(IR::ScalarReg(operand.code), value);
         break;
     case OperandField::ExecLo:
         ir.SetExec(value);

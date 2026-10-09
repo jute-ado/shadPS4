@@ -8,6 +8,7 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/resource_tracking.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -392,6 +393,10 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
         queue.pop();
         if (IsSharpSource(inst)) {
             sources.push_back(inst);
+            continue;
+        }
+        if (const IR::Inst* scalar_source = Detail::ReconstructedScalarSource(inst)) {
+            queue.push(scalar_source);
             continue;
         }
         found_read_const_buffer |= inst->GetOpcode() == IR::Opcode::ReadConstBuffer;
