@@ -261,6 +261,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
         .supports_compute_subgroup_size_64 = instance.IsSubgroupSize64Supported(),
+        .supports_subgroup_uniform_control_flow =
+            instance.IsShaderSubgroupUniformControlFlowSupported(),
         .support_int8 = instance.IsShaderInt8Supported(),
         .support_int16 = instance.IsShaderInt16Supported(),
         .support_int64 = instance.IsShaderInt64Supported(),

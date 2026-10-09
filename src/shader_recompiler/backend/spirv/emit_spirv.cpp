@@ -248,6 +248,10 @@ spv::ExecutionMode ExecutionMode(AmdGpu::TessellationPartitioning spacing) {
     UNREACHABLE_MSG("Tessellation spacing {}", magic_enum::enum_name(spacing));
 }
 
+bool UsesSubgroupOperations(const Info& info) {
+    return info.uses_group_quad || info.uses_group_ballot || info.uses_group_shuffle;
+}
+
 void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeInfo& runtime_info,
                        EmitContext& ctx) {
     ctx.AddCapability(spv::Capability::Image1D);
@@ -295,6 +299,9 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     }
     if (info.uses_group_shuffle) {
         ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
+    }
+    if (profile.supports_subgroup_uniform_control_flow && UsesSubgroupOperations(info)) {
+        ctx.AddExtension("SPV_KHR_subgroup_uniform_control_flow");
     }
     const auto stage = info.l_stage;
     if (stage == LogicalStage::Vertex) {
@@ -420,6 +427,9 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
         break;
     default:
         UNREACHABLE_MSG("Stage {}", u32(info.stage));
+    }
+    if (ctx.profile.supports_subgroup_uniform_control_flow && UsesSubgroupOperations(info)) {
+        ctx.AddExecutionMode(main, spv::ExecutionMode::SubgroupUniformControlFlowKHR);
     }
     ctx.AddEntryPoint(execution_model, main, "main", interfaces);
 }

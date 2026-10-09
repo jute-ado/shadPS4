@@ -10,6 +10,7 @@
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/recompiler.h"
@@ -54,6 +55,52 @@ bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
     return CountSpirvOpcode(spirv, opcode) != 0;
 }
 
+bool ContainsSpirvExecutionMode(std::span<const u32> spirv, spv::ExecutionMode mode) {
+    constexpr size_t SpirvHeaderWords = 5;
+    for (size_t offset = SpirvHeaderWords; offset < spirv.size();) {
+        const u32 instruction = spirv[offset];
+        const size_t word_count = instruction >> 16;
+        if (word_count == 0 || word_count > spirv.size() - offset) {
+            return false;
+        }
+        if ((instruction & 0xffffU) == static_cast<u32>(spv::Op::OpExecutionMode) &&
+            word_count >= 3 && spirv[offset + 2] == static_cast<u32>(mode)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+std::vector<u32> EmitMinimalSubgroupSpirv(bool feature_supported, bool uses_group_operations) {
+    Shader::Info info{};
+    info.stage = Shader::Stage::Compute;
+    info.l_stage = Shader::LogicalStage::Compute;
+    info.uses_group_ballot = uses_group_operations;
+
+    Shader::IR::Program program{info};
+    Shader::Pools pools{};
+    Shader::IR::Block* const block = pools.block_pool.Create(pools.inst_pool);
+    Shader::IR::IREmitter{*block}.Epilogue();
+    program.blocks.push_back(block);
+
+    auto& block_node = program.syntax_list.emplace_back();
+    block_node.type = Shader::IR::AbstractSyntaxNode::Type::Block;
+    block_node.data.block = block;
+    program.syntax_list.emplace_back().type = Shader::IR::AbstractSyntaxNode::Type::Return;
+
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.supports_subgroup_uniform_control_flow = feature_supported;
+
+    Shader::RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Shader::Stage::Compute);
+    runtime_info.cs_info.workgroup_size = {1, 1, 1};
+
+    Shader::Backend::Bindings bindings{};
+    return Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+}
+
 constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
     return u64{offset0} | (u64{offset1} << 8) |
            (u64{std::to_underlying(Shader::Gcn::OpcodeDS::DS_SWIZZLE_B32)} << 18) |
@@ -62,6 +109,19 @@ constexpr u64 MakeDsSwizzle(u8 source, u8 destination, u8 offset0, u8 offset1) {
 }
 
 } // Anonymous namespace
+
+TEST(GcnSpirv, requests_subgroup_uniform_control_flow_for_wave_operations) {
+    const auto supported = EmitMinimalSubgroupSpirv(true, true);
+    const auto without_wave_operations = EmitMinimalSubgroupSpirv(true, false);
+    const auto unsupported = EmitMinimalSubgroupSpirv(false, true);
+
+    EXPECT_TRUE(
+        ContainsSpirvExecutionMode(supported, spv::ExecutionMode::SubgroupUniformControlFlowKHR));
+    EXPECT_FALSE(ContainsSpirvExecutionMode(without_wave_operations,
+                                            spv::ExecutionMode::SubgroupUniformControlFlowKHR));
+    EXPECT_FALSE(
+        ContainsSpirvExecutionMode(unsupported, spv::ExecutionMode::SubgroupUniformControlFlowKHR));
+}
 
 TEST(GcnIrPass, devirtualizes_wave_serialized_vgpr_selector) {
     Shader::Info info{};

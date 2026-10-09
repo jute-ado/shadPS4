@@ -202,6 +202,7 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT,
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
+                          vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR,
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
                           vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
     features = feature_chain.get().features;
@@ -311,6 +312,13 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderImageFloat32AtomicMinMax: {}",
                  shader_atomic_float2_features.shaderImageFloat32AtomicMinMax);
     }
+    subgroup_uniform_control_flow_features =
+        feature_chain.get<vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
+    subgroup_uniform_control_flow =
+        subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow &&
+        add_extension(VK_KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_EXTENSION_NAME);
+    LOG_INFO(Render_Vulkan, "- shaderSubgroupUniformControlFlow: {}",
+             subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow);
     workgroup_memory_explicit_layout =
         add_extension(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME);
     if (workgroup_memory_explicit_layout) {
@@ -487,6 +495,9 @@ bool Instance::CreateDevice() {
             .shaderImageFloat32AtomicMinMax =
                 shader_atomic_float2_features.shaderImageFloat32AtomicMinMax,
         },
+        vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR{
+            .shaderSubgroupUniformControlFlow = true,
+        },
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR{
             .workgroupMemoryExplicitLayout =
                 workgroup_memory_explicit_layout_features.workgroupMemoryExplicitLayout,
@@ -538,6 +549,9 @@ bool Instance::CreateDevice() {
     }
     if (!shader_atomic_float2) {
         device_chain.unlink<vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT>();
+    }
+    if (!subgroup_uniform_control_flow) {
+        device_chain.unlink<vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR>();
     }
     if (!workgroup_memory_explicit_layout) {
         device_chain.unlink<vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR>();
