@@ -23,3 +23,5 @@ TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_
 TranslationResult TranslateToSpirvWithInfo(u64 raw_gcn_inst, bool direct_memory_access,
                                            u64 source_buffer_base);
 TranslationResult TranslateToSpirvWithInfo(std::span<const u64> raw_gcn_insts);
+TranslationResult TranslateToSpirvWithSubgroupUniformControlFlow(u64 raw_gcn_inst,
+                                                                 bool supported);

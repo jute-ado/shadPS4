@@ -15,6 +15,11 @@ struct SupportedImageUsage {
     bool dropped_optional_storage{};
 };
 
+[[nodiscard]] constexpr bool ShouldAllowDiagnosticIncompleteImageBacking(
+    const bool has_lod_feedback, const bool is_written, const bool diagnostic_enabled) {
+    return diagnostic_enabled && has_lod_feedback && !is_written;
+}
+
 template <typename SupportsUsage>
 [[nodiscard]] std::optional<SupportedImageUsage> SelectSupportedImageUsage(
     const bool is_block_encoded, const vk::ImageUsageFlags preferred_usage,

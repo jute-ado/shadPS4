@@ -8,6 +8,7 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/sharp_source_traversal.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -395,10 +396,11 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
             continue;
         }
         found_read_const_buffer |= inst->GetOpcode() == IR::Opcode::ReadConstBuffer;
-        if (inst->GetOpcode() != IR::Opcode::Phi) {
+        const auto range = SharpSourceTraversalRange(inst->GetOpcode(), inst->NumArgs());
+        if (range.begin == range.end) {
             continue;
         }
-        for (size_t arg = inst->NumArgs(); arg--;) {
+        for (size_t arg = range.end; arg-- > range.begin;) {
             const IR::Value arg_value = inst->Arg(arg);
             if (arg_value.IsImmediate()) {
                 continue;

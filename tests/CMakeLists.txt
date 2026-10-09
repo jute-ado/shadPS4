@@ -135,6 +135,27 @@ target_compile_definitions(shadps4_vulkan_device_features_test PRIVATE
 target_link_libraries(shadps4_vulkan_device_features_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_vulkan_device_features_test)
 
+add_executable(shadps4_device_fault_diagnostics_test
+    test_device_fault_diagnostics.cpp
+)
+target_compile_features(shadps4_device_fault_diagnostics_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_device_fault_diagnostics_test PRIVATE
+    SHADPS4_VK_INSTANCE_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_instance.h"
+    SHADPS4_VK_INSTANCE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_instance.cpp"
+    SHADPS4_VK_SCHEDULER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_scheduler.cpp"
+)
+target_link_libraries(shadps4_device_fault_diagnostics_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_device_fault_diagnostics_test)
+
+add_executable(shadps4_command_checkpoint_test test_command_checkpoint.cpp)
+target_include_directories(shadps4_command_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(shadps4_command_checkpoint_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_command_checkpoint_test PRIVATE
+    SHADPS4_VK_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+)
+target_link_libraries(shadps4_command_checkpoint_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_command_checkpoint_test)
+
 add_executable(shadps4_pipeline_bind_tracker_test
     test_pipeline_bind_tracker.cpp
 )
@@ -160,6 +181,37 @@ target_link_libraries(shadps4_texture_types_test PRIVATE
     spdlog::spdlog
 )
 list(APPEND TEST_TARGETS shadps4_texture_types_test)
+
+add_executable(shadps4_srt_memory_sync_test
+    test_srt_memory_sync.cpp
+    test_srt_pipeline_sync_source.cpp
+    test_srt_memory_sync_source.cpp
+)
+target_include_directories(shadps4_srt_memory_sync_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_srt_memory_sync_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_srt_memory_sync_test PRIVATE
+    SHADPS4_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+    SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    SHADPS4_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+)
+target_link_libraries(shadps4_srt_memory_sync_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_srt_memory_sync_test)
+
+add_executable(shadps4_download_readback_policy_test
+    test_download_readback_policy.cpp
+)
+target_include_directories(shadps4_download_readback_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_download_readback_policy_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_download_readback_policy_test PRIVATE
+    SHADPS4_BUFFER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer.cpp"
+    SHADPS4_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+)
+target_link_libraries(shadps4_download_readback_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_download_readback_policy_test)
 
 add_executable(shadps4_image_layout_policy_test
     test_image_layout_policy.cpp
@@ -346,6 +398,20 @@ target_compile_definitions(shadps4_buffer_residency_test PRIVATE
 )
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
+
+add_executable(shadps4_pixel_number_conversion_test
+    test_pixel_number_conversion.cpp
+)
+target_include_directories(shadps4_pixel_number_conversion_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pixel_number_conversion_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pixel_number_conversion_test PRIVATE
+    GTest::gtest_main
+    fmt::fmt
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_pixel_number_conversion_test)
 
 add_executable(shadps4_buffer_access_range_test
     test_buffer_access_range.cpp
@@ -568,10 +634,12 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/program.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ir_passes.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/buffer_access_range_pass.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/constant_propagation_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/identity_removal_pass.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/lower_buffer_format_to_raw.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/shader_info_collection_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ssa_rewrite_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/post_order.cpp
@@ -612,13 +680,20 @@ set(GCN_TEST_SOURCES
     # Tests
     gcn/test_buffer_access_range_pass.cpp
     gcn/test_barycentric_spirv.cpp
+    gcn/test_compile_resource_snapshot.cpp
     gcn/test_gcn_instructions.cpp
+    gcn/test_shared_memory_barriers.cpp
+    gcn/test_lower_buffer_format_to_raw.cpp
+    gcn/test_srt_walker.cpp
     gcn/test_ssa_rewrite.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+target_compile_definitions(shadps4_gcn_test PRIVATE
+    SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+)
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE

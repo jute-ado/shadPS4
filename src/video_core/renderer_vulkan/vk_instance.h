@@ -124,6 +124,14 @@ public:
         return attachment_feedback_loop;
     }
 
+    bool IsDeviceFaultSupported() const {
+        return device_fault;
+    }
+
+    bool SupportsDiagnosticCheckpoints() const {
+        return diagnostic_checkpoints;
+    }
+
     /// Returns true when VK_EXT_custom_border_color is supported
     bool IsCustomBorderColorSupported() const {
         return custom_border_color;
@@ -231,6 +239,11 @@ public:
     /// Returns true if the subgroup size can be set to match guest subgroup size
     bool IsSubgroupSize64Supported() const {
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
+    }
+
+    bool SupportsShaderSubgroupUniformControlFlow() const {
+        return shader_subgroup_uniform_control_flow &&
+               shader_subgroup_uniform_control_flow_features.shaderSubgroupUniformControlFlow;
     }
 
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
@@ -485,6 +498,8 @@ private:
         workgroup_memory_explicit_layout_features;
     vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT image_2d_view_of_3d_features;
     vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT list_restart_features;
+    vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR
+        shader_subgroup_uniform_control_flow_features;
     vk::DriverIdKHR driver_id;
     vk::UniqueDebugUtilsMessengerEXT debug_callback{};
     std::string vendor_name;
@@ -517,6 +532,9 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
+    bool device_fault{};
+    bool diagnostic_checkpoints{};
+    bool shader_subgroup_uniform_control_flow{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool supports_memory_budget{};

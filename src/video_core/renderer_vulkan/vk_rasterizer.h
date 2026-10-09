@@ -6,6 +6,7 @@
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/buffer_residency.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/descriptor_image_layout.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -102,6 +103,7 @@ private:
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
+    void RefreshGuestBufferBindings();
     void PrepareAddr64PointerResidency(const Shader::Info& stage);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
@@ -146,10 +148,19 @@ private:
     Pipeline::BufferBarriers buffer_barriers;
     Shader::PushData push_data;
 
-    using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
+    struct BufferBindingInfo {
+        VideoCore::BufferId buffer_id;
+        const Shader::Info* stage;
+        u32 descriptor_index;
+        AmdGpu::Buffer vsharp;
+        u64 size;
+        u32 buffer_info_index;
+        u32 push_binding;
+    };
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+    VideoCore::BoundedDiagnosticDeduplicator<1024> rejected_image_binding_diagnostics;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
     u32 prepared_host_scale{1};

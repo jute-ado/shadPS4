@@ -293,6 +293,9 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_group_ballot) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
     }
+    if (info.uses_group_shuffle) {
+        ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
+    }
     const auto stage = info.l_stage;
     if (stage == LogicalStage::Vertex) {
         ctx.AddExtension("SPV_KHR_shader_draw_parameters");
@@ -374,6 +377,14 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
         execution_model = spv::ExecutionModel::GLCompute;
         ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, workgroup_size[0],
                              workgroup_size[1], workgroup_size[2]);
+        if (ctx.profile.supports_subgroup_uniform_control_flow &&
+            (info.uses_lane_id || info.uses_group_quad || info.uses_group_ballot ||
+             info.uses_group_shuffle)) {
+            ctx.AddExtension("SPV_KHR_subgroup_uniform_control_flow");
+            // SPV_KHR_subgroup_uniform_control_flow assigns execution-mode value 4421. The
+            // vendored SPIR-V enum predates the symbolic name.
+            ctx.AddExecutionMode(main, static_cast<spv::ExecutionMode>(4421));
+        }
         break;
     }
     case LogicalStage::Vertex:

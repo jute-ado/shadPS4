@@ -33,6 +33,7 @@ private:
     u64 caching_pagesize;
     u64 caching_num_pages;
     u64 fault_buffer_size;
+    bool diagnostic_checkpoints{};
     Buffer fault_buffer;
     Buffer download_buffer;
     std::array<u64, MaxPendingFaults> fault_areas{};

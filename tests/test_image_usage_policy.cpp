@@ -74,5 +74,12 @@ TEST(ImageUsagePolicy, FailsClosedWhenEvenRequiredCompressedUsageIsUnsupported) 
               (std::vector<vk::ImageUsageFlags>{PreferredUsage, RequiredSampledUsage}));
 }
 
+TEST(ImageUsagePolicy, DiagnosticIncompleteBackingIsLimitedToReadOnlyLodFeedbackImages) {
+    EXPECT_TRUE(ShouldAllowDiagnosticIncompleteImageBacking(true, false, true));
+    EXPECT_FALSE(ShouldAllowDiagnosticIncompleteImageBacking(false, false, true));
+    EXPECT_FALSE(ShouldAllowDiagnosticIncompleteImageBacking(true, true, true));
+    EXPECT_FALSE(ShouldAllowDiagnosticIncompleteImageBacking(true, false, false));
+}
+
 } // namespace
 } // namespace VideoCore
