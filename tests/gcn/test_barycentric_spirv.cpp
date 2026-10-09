@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include <gtest/gtest.h>
 
 #include "common/object_pool.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/recompiler.h"
@@ -104,6 +107,58 @@ bool HasBuiltIn(const std::vector<u32>& spirv, spv::BuiltIn builtin) {
     return false;
 }
 
+struct InterpMovIrSummary {
+    std::vector<u32> per_vertex_indices;
+    std::size_t subtraction_count{};
+    Interpolation interpolation{};
+};
+
+InterpMovIrSummary TranslateInterpMov(const u32 parameter) {
+    Info info{};
+    info.stage = Stage::Fragment;
+    info.l_stage = LogicalStage::Fragment;
+    IR::Program program{info};
+    Pools pools{};
+    IR::Block* const block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+
+    Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    profile.supports_fragment_shader_barycentric = true;
+
+    RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Stage::Fragment);
+    runtime_info.fs_info.num_inputs = 1;
+    runtime_info.fs_info.inputs[0] = {
+        .param_index = 0,
+        .is_default = false,
+        .is_flat = true,
+        .default_value = 0,
+    };
+
+    Gcn::Translator translator{program.info, runtime_info, profile};
+    translator.EmitPrologue(block);
+    Gcn::GcnInst instruction{};
+    instruction.control.vintrp.attr = 0;
+    instruction.control.vintrp.chan = 0;
+    instruction.src[0].code = parameter;
+    instruction.dst[0].field = Gcn::OperandField::VectorGPR;
+    instruction.dst[0].code = 0;
+    translator.V_INTERP_MOV_F32(instruction);
+
+    InterpMovIrSummary summary{.interpolation = program.info.fs_interpolation[0]};
+    for (const IR::Inst& inst : *block) {
+        if (inst.GetOpcode() == IR::Opcode::GetAttribute) {
+            summary.per_vertex_indices.push_back(inst.Arg(2).U32());
+        } else if (inst.GetOpcode() == IR::Opcode::FPSub32) {
+            ++summary.subtraction_count;
+        }
+    }
+    std::ranges::sort(summary.per_vertex_indices);
+    return summary;
+}
+
 TEST(BarycentricSpirv, NonAmdSmoothUsesKhrInputDirectly) {
     const auto spirv = EmitNonAmdBarycentricShader(IR::Attribute::BaryCoordSmooth);
 
@@ -130,6 +185,30 @@ TEST(BarycentricSpirv, NonAmdSampleUsesSampleIdAndSampleRateShading) {
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInBaryCoordKHR));
     EXPECT_TRUE(HasBuiltIn(spirv, spv::BuiltInSampleId));
     EXPECT_EQ(CountGlslExtInst(spirv, GLSLstd450InterpolateAtSample), 1u);
+}
+
+TEST(VectorInterpolation, InterpMovP10UsesFirstVertexDelta) {
+    const auto summary = TranslateInterpMov(0);
+
+    EXPECT_EQ(summary.per_vertex_indices, (std::vector<u32>{0, 1}));
+    EXPECT_EQ(summary.subtraction_count, 1u);
+    EXPECT_EQ(summary.interpolation.primary, Qualifier::PerVertex);
+}
+
+TEST(VectorInterpolation, InterpMovP20UsesSecondVertexDelta) {
+    const auto summary = TranslateInterpMov(1);
+
+    EXPECT_EQ(summary.per_vertex_indices, (std::vector<u32>{0, 2}));
+    EXPECT_EQ(summary.subtraction_count, 1u);
+    EXPECT_EQ(summary.interpolation.primary, Qualifier::PerVertex);
+}
+
+TEST(VectorInterpolation, InterpMovP0UsesProvokingVertexValue) {
+    const auto summary = TranslateInterpMov(2);
+
+    EXPECT_EQ(summary.per_vertex_indices, (std::vector<u32>{0}));
+    EXPECT_EQ(summary.subtraction_count, 0u);
+    EXPECT_EQ(summary.interpolation.primary, Qualifier::PerVertex);
 }
 
 } // namespace
