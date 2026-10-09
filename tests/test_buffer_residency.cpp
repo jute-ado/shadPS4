@@ -5,6 +5,7 @@
 
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -14,6 +15,25 @@
 #include "video_core/buffer_cache/fault_range.h"
 
 namespace {
+
+std::string ReadFile(const char* path) {
+    std::ifstream input{path, std::ios::binary};
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+}
+
+std::string FunctionBody(const std::string& source, std::string_view begin_marker,
+                         std::string_view end_marker) {
+    const auto function_begin = source.find(begin_marker);
+    const auto function_end = source.find(end_marker, function_begin);
+    EXPECT_NE(function_begin, std::string::npos);
+    EXPECT_NE(function_end, std::string::npos);
+    if (function_begin == std::string::npos || function_end == std::string::npos) {
+        return {};
+    }
+    return source.substr(function_begin, function_end - function_begin);
+}
 
 enum class ResidencyCall {
     Synchronize,
@@ -53,10 +73,7 @@ public:
 } // namespace
 
 TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThread) {
-    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
-    std::ostringstream contents;
-    contents << input.rdbuf();
-    const std::string source = contents.str();
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
 
     const auto function_begin = source.find("void Rasterizer::UnmapMemory(");
     const auto function_end = source.find("void Rasterizer::UpdateDynamicState(", function_begin);
@@ -64,13 +81,14 @@ TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThrea
     ASSERT_NE(function_end, std::string::npos);
     const auto body = source.substr(function_begin, function_end - function_begin);
 
-    const auto buffer_unmap = body.find("buffer_cache.InvalidateMemory(addr, size)");
+    const auto buffer_unmap = body.find("buffer_cache.InvalidateMemory(");
     const auto queued = body.find("liverpool->SendCommand<false>([this, addr, size]");
     const auto texture_unmap = body.find("texture_cache.UnmapMemory(addr, size)", queued);
     const auto queued_end = body.find("});", queued);
-    const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size)");
+    const auto page_unmap = body.find("page_manager.OnGpuUnmap(addr, size");
     ASSERT_NE(queued, std::string::npos);
     ASSERT_NE(buffer_unmap, std::string::npos);
+    EXPECT_NE(body.find("MemoryInvalidationReason::MappingChange", buffer_unmap), std::string::npos);
     ASSERT_NE(texture_unmap, std::string::npos);
     ASSERT_NE(queued_end, std::string::npos);
     ASSERT_NE(page_unmap, std::string::npos);
@@ -81,15 +99,113 @@ TEST(GpuCacheUnmap, SynchronizesBuffersBeforeQueuingTextureEvictionOnTheGpuThrea
     EXPECT_EQ(body.find("SendCommand<true>"), std::string::npos);
 }
 
+TEST(PageWatcherProtection, ClipsContiguousUpdatesToMappedSubranges) {
+    const std::string source = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string body =
+        FunctionBody(source, "void UpdatePageWatchers(VAddr addr, u64 size)",
+                     "void UpdatePageWatchersForRegion(VAddr base_addr, RegionBits& mask)");
+
+    EXPECT_NE(body.find("ProtectMapped("), std::string::npos);
+    EXPECT_EQ(body.find("Protect(range_begin << PM_PAGE_BITS"), std::string::npos);
+}
+
+TEST(PageWatcherProtection, ClipsMaskedUpdatesToMappedSubranges) {
+    const std::string source = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string body =
+        FunctionBody(source, "void UpdatePageWatchersForRegion(VAddr base_addr, RegionBits& mask)",
+                     "[[nodiscard]] u64 BeginSnapshotEpoch()");
+
+    EXPECT_NE(body.find("ProtectMapped("), std::string::npos);
+    EXPECT_EQ(body.find("Protect((range_begin << PM_PAGE_BITS)"), std::string::npos);
+}
+
+TEST(GpuMappedRangeOwnership, RasterizerDelegatesToPageManager) {
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const std::string header = ReadFile(SHADPS4_RASTERIZER_HEADER_PATH);
+    const std::string body =
+        FunctionBody(source, "bool Rasterizer::IsMapped(", "void Rasterizer::UpdateDynamicState(");
+
+    EXPECT_NE(body.find("return page_manager.IsGpuMapped(addr, size);"), std::string::npos);
+    EXPECT_EQ(body.find("mapped_ranges"), std::string::npos);
+    EXPECT_EQ(header.find("mapped_ranges"), std::string::npos);
+}
+
+TEST(GpuMappedRangeOwnership, SeparatesSparseLogicalCoverageFromHostProtection) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string memory = ReadFile(SHADPS4_MEMORY_SOURCE_PATH);
+    const std::string map_body = FunctionBody(page_manager, "void OnMap(VAddr address, size_t size",
+                                              "void OnUnmap(VAddr address, size_t size");
+
+    EXPECT_NE(page_manager.find("logical_mappings.Contains(address, size)"), std::string::npos);
+    EXPECT_NE(page_manager.find("protectable_mappings.ForEachMappedSubrange"), std::string::npos);
+    EXPECT_NE(page_manager.find("if (!logical_mappings.Contains(aligned_addr"), std::string::npos);
+    EXPECT_NE(memory.find("GpuMappingKind::SparsePlaceholder"), std::string::npos);
+    EXPECT_NE(map_body.find("ForEachAddressRangeChunk("), std::string::npos);
+    EXPECT_EQ(map_body.find("Common::RangeLockGuard"), std::string::npos);
+}
+
+TEST(GpuMappedRangeOwnership, HostMapRegistersAndReplaysBeforeLogicalPublication) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string map_body = FunctionBody(page_manager, "void OnMap(VAddr address, size_t size",
+                                              "void OnUnmap(VAddr address, size_t size");
+
+    const auto protectable_publish = map_body.find("protectable_mappings.PublishMappedRange(");
+    const auto register_range =
+        map_body.find("RegisterRange(mapped_address, mapped_size)", protectable_publish);
+    const auto replay_watchers =
+        map_body.find("ReplayPageWatchers(mapped_address, mapped_size)", protectable_publish);
+    const auto logical_publish = map_body.find("logical_mappings.PublishHostMappedRange(");
+
+    ASSERT_NE(protectable_publish, std::string::npos);
+    ASSERT_NE(register_range, std::string::npos);
+    ASSERT_NE(replay_watchers, std::string::npos);
+    ASSERT_NE(logical_publish, std::string::npos);
+    EXPECT_LT(protectable_publish, register_range);
+    EXPECT_LT(register_range, replay_watchers);
+    EXPECT_LT(replay_watchers, logical_publish);
+}
+
+TEST(GpuMappedRangeOwnership, HostUnmapRetiresProtectionBeforeLogicalCoverage) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string unmap_body =
+        FunctionBody(page_manager, "void OnUnmap(VAddr address, size_t size",
+                     "template <bool track, bool is_read>");
+
+    const auto protectable_retire = unmap_body.find("protectable_mappings.RetireMappedRange(");
+    const auto unregister_range =
+        unmap_body.find("UnregisterRange(mapped_address, mapped_size)", protectable_retire);
+    const auto logical_retire = unmap_body.find("logical_mappings.RetireHostMappedRange(");
+
+    ASSERT_NE(protectable_retire, std::string::npos);
+    ASSERT_NE(unregister_range, std::string::npos);
+    ASSERT_NE(logical_retire, std::string::npos);
+    EXPECT_LT(protectable_retire, unregister_range);
+    EXPECT_LT(unregister_range, logical_retire);
+}
+
+TEST(GpuMappedRangeOwnership, SparsePlaceholderAllowsAbiGranularityAndZeroDisablesIt) {
+    const std::string page_manager = ReadFile(SHADPS4_PAGE_MANAGER_SOURCE_PATH);
+    const std::string memory = ReadFile(SHADPS4_MEMORY_SOURCE_PATH);
+    const std::string map_body = FunctionBody(page_manager, "void OnMap(VAddr address, size_t size",
+                                              "void OnUnmap(VAddr address, size_t size");
+    const std::string prt_body = FunctionBody(memory, "void MemoryManager::SetPrtArea(",
+                                              "void MemoryManager::CopySparseMemory(");
+
+    const auto host_branch = map_body.find("if (kind == GpuMappingKind::HostMapped)");
+    const auto alignment_check = map_body.find("address % PM_PAGE_SIZE");
+    ASSERT_NE(host_branch, std::string::npos);
+    ASSERT_NE(alignment_check, std::string::npos);
+    EXPECT_LT(host_branch, alignment_check);
+    EXPECT_NE(prt_body.find("area.mapped = size != 0"), std::string::npos);
+    EXPECT_NE(prt_body.find("if (!area.mapped)"), std::string::npos);
+}
+
 TEST(DescriptorBindingStorage, ReservesBackingBeforeWritesCaptureElementPointers) {
-    std::ifstream input{SHADPS4_RASTERIZER_SOURCE_PATH, std::ios::binary};
-    std::ostringstream contents;
-    contents << input.rdbuf();
-    const std::string source = contents.str();
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
 
     const auto function_begin = source.find("bool Rasterizer::BindResources(");
-    const auto function_end = source.find("void Rasterizer::PrepareAddr64PointerResidency(",
-                                          function_begin);
+    const auto function_end =
+        source.find("void Rasterizer::PrepareAddr64PointerResidency(", function_begin);
     ASSERT_NE(function_begin, std::string::npos);
     ASSERT_NE(function_end, std::string::npos);
     const auto body = source.substr(function_begin, function_end - function_begin);
@@ -144,12 +260,13 @@ TEST(BufferResidency, RecordsDrawStateAfterEveryPotentiallyFlushingBufferAcquisi
         PrepareIndirect,
         PrepareIndex,
         PrepareVertex,
+        Finalize,
         BindVertex,
         BindIndex,
     };
     constexpr std::array expected_operations{
         Operation::PrepareVertex, Operation::PrepareIndex, Operation::PrepareIndirect,
-        Operation::BindVertex,    Operation::BindIndex,
+        Operation::Finalize,      Operation::BindVertex,    Operation::BindIndex,
     };
 
     for (u32 flushing_acquisition = 0; flushing_acquisition < 3; ++flushing_acquisition) {
@@ -165,7 +282,7 @@ TEST(BufferResidency, RecordsDrawStateAfterEveryPotentiallyFlushingBufferAcquisi
             }
         };
 
-        VideoCore::PrepareDrawBuffersThenBindCommandState(
+        const bool finalized = VideoCore::PrepareDrawBuffersThenBindCommandState(
             [&] {
                 prepare(Operation::PrepareVertex, 0);
                 return Operation::PrepareVertex;
@@ -175,6 +292,12 @@ TEST(BufferResidency, RecordsDrawStateAfterEveryPotentiallyFlushingBufferAcquisi
                 return Operation::PrepareIndex;
             },
             [&] { prepare(Operation::PrepareIndirect, 2); },
+            [&](Operation vertex, Operation index) {
+                EXPECT_EQ(vertex, Operation::PrepareVertex);
+                EXPECT_EQ(index, Operation::PrepareIndex);
+                operations.push_back(Operation::Finalize);
+                return true;
+            },
             [&](Operation prepared_state) {
                 EXPECT_EQ(prepared_state, Operation::PrepareVertex);
                 operations.push_back(Operation::BindVertex);
@@ -186,9 +309,183 @@ TEST(BufferResidency, RecordsDrawStateAfterEveryPotentiallyFlushingBufferAcquisi
                 index_state_generation = command_buffer_generation;
             });
 
+        EXPECT_TRUE(finalized);
         EXPECT_EQ(operations, std::vector(expected_operations.begin(), expected_operations.end()));
         EXPECT_EQ(vertex_state_generation, command_buffer_generation);
         EXPECT_EQ(index_state_generation, command_buffer_generation);
+    }
+}
+
+TEST(BufferResidency, FailedFinalResolutionDoesNotPublishDrawState) {
+    u32 bind_calls = 0;
+    const bool finalized = VideoCore::PrepareDrawBuffersThenBindCommandState(
+        [] { return 1; }, [] { return 2; }, [] {}, [](int, int) { return false; },
+        [&](int) { ++bind_calls; }, [&](int) { ++bind_calls; });
+
+    EXPECT_FALSE(finalized);
+    EXPECT_EQ(bind_calls, 0);
+}
+
+TEST(BufferResidency, FinalizesCacheBackedBindingFromCurrentCanonicalAllocation) {
+    struct Endpoint {
+        u32 allocation;
+        u32 offset;
+        auto operator<=>(const Endpoint&) const = default;
+    };
+
+    const VideoCore::PreparedBufferBinding<Endpoint> prepared{
+        .address = 0x2000,
+        .size = 32,
+        .requires_final_resolution = true,
+    };
+    Endpoint canonical{.allocation = 1, .offset = 0};
+    canonical = {.allocation = 2, .offset = 64};
+
+    u32 resolve_calls = 0;
+    const auto finalized = VideoCore::FinalizePreparedBufferBinding(
+        prepared, [&](VAddr address, u32 size) -> std::optional<Endpoint> {
+            ++resolve_calls;
+            EXPECT_EQ(address, 0x2000);
+            EXPECT_EQ(size, 32);
+            return canonical;
+        });
+
+    ASSERT_TRUE(finalized.has_value());
+    EXPECT_EQ(*finalized, canonical);
+    EXPECT_EQ(resolve_calls, 1);
+}
+
+TEST(BufferResidency, KeepsStableStreamEndpointWithoutCanonicalLookup) {
+    struct Endpoint {
+        u32 allocation;
+        u32 offset;
+        auto operator<=>(const Endpoint&) const = default;
+    };
+    const Endpoint stream{.allocation = 9, .offset = 128};
+    const VideoCore::PreparedBufferBinding<Endpoint> prepared{
+        .address = 0x3000,
+        .size = 20,
+        .requires_final_resolution = false,
+        .stable_endpoint = stream,
+    };
+
+    u32 resolve_calls = 0;
+    const auto finalized = VideoCore::FinalizePreparedBufferBinding(
+        prepared, [&](VAddr, u32) -> std::optional<Endpoint> {
+            ++resolve_calls;
+            return std::nullopt;
+        });
+
+    ASSERT_TRUE(finalized.has_value());
+    EXPECT_EQ(*finalized, stream);
+    EXPECT_EQ(resolve_calls, 0);
+}
+
+TEST(BufferResidency, RefusesMissingCanonicalAllocationAtFinalResolution) {
+    struct Endpoint {
+        u32 allocation;
+        u32 offset;
+    };
+    const VideoCore::PreparedBufferBinding<Endpoint> prepared{
+        .address = 0x4000,
+        .size = 16,
+        .requires_final_resolution = true,
+    };
+
+    const auto finalized = VideoCore::FinalizePreparedBufferBinding(
+        prepared, [](VAddr, u32) -> std::optional<Endpoint> { return std::nullopt; });
+
+    EXPECT_FALSE(finalized.has_value());
+}
+
+TEST(BufferResidency, IndirectCommandsFinalizeLogicalBindingsAfterAllAcquisitions) {
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const std::string draw =
+        FunctionBody(source, "void Rasterizer::DrawIndirect(", "void Rasterizer::DispatchDirect(");
+    const std::string dispatch =
+        FunctionBody(source, "void Rasterizer::DispatchIndirect(", "u64 Rasterizer::Flush(");
+
+    const auto draw_prepare_argument = draw.find("PrepareBufferBinding(arg_address + offset");
+    const auto draw_prepare_count = draw.find("PrepareBufferBinding(count_address");
+    const auto draw_finalize = draw.find("FinalizeBufferBinding(");
+    ASSERT_NE(draw_prepare_argument, std::string::npos);
+    ASSERT_NE(draw_prepare_count, std::string::npos);
+    ASSERT_NE(draw_finalize, std::string::npos);
+    EXPECT_LT(draw_prepare_argument, draw_finalize);
+    EXPECT_LT(draw_prepare_count, draw_finalize);
+    EXPECT_EQ(draw.find("ObtainBuffer(arg_address"), std::string::npos);
+    EXPECT_EQ(draw.find("VideoCore::Buffer*"), std::string::npos);
+
+    const auto dispatch_prepare = dispatch.find("PrepareBufferBinding(address + offset");
+    const auto dispatch_finalize = dispatch.find("FinalizeBufferBinding(");
+    ASSERT_NE(dispatch_prepare, std::string::npos);
+    ASSERT_NE(dispatch_finalize, std::string::npos);
+    EXPECT_LT(dispatch_prepare, dispatch_finalize);
+    EXPECT_EQ(dispatch.find("ObtainBuffer(address + offset"), std::string::npos);
+    EXPECT_EQ(dispatch.find("VideoCore::Buffer*"), std::string::npos);
+}
+
+TEST(BufferResidency, ShaderBindingsFinalizeAfterLateCommandBufferAcquisitions) {
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const std::string draw =
+        FunctionBody(source, "void Rasterizer::Draw(bool", "void Rasterizer::DrawIndirect(");
+    const std::string draw_indirect =
+        FunctionBody(source, "void Rasterizer::DrawIndirect(", "void Rasterizer::DispatchDirect(");
+    const std::string dispatch_direct =
+        FunctionBody(source, "void Rasterizer::DispatchDirect(", "void Rasterizer::DispatchIndirect(");
+    const std::string dispatch_indirect =
+        FunctionBody(source, "void Rasterizer::DispatchIndirect(", "u64 Rasterizer::Flush(");
+    const std::string bind_buffers =
+        FunctionBody(source, "void Rasterizer::BindBuffers(", "void Rasterizer::BindTextures(");
+
+    for (const auto* body : {&draw, &draw_indirect}) {
+        const auto late_prepare = body->find("PrepareDrawBuffersThenBindCommandState(");
+        const auto finalize = body->find("FinalizeBufferBindings(binding_batch)");
+        const auto publish = body->find("pipeline->BindResources(");
+        ASSERT_NE(late_prepare, std::string::npos);
+        ASSERT_NE(finalize, std::string::npos);
+        ASSERT_NE(publish, std::string::npos);
+        EXPECT_LT(late_prepare, finalize);
+        EXPECT_LT(finalize, publish);
+    }
+
+    for (const auto* body : {&dispatch_direct, &dispatch_indirect}) {
+        const auto finalize = body->find("FinalizeBufferBindings(binding_batch)");
+        const auto publish = body->find("pipeline->BindResources(");
+        ASSERT_NE(finalize, std::string::npos);
+        ASSERT_NE(publish, std::string::npos);
+        EXPECT_LT(finalize, publish);
+    }
+    EXPECT_LT(dispatch_indirect.find("PrepareBufferBinding(address + offset"),
+              dispatch_indirect.find("FinalizeBufferBindings(binding_batch)"));
+
+    EXPECT_NE(bind_buffers.find("PrepareBufferBinding("), std::string::npos);
+    EXPECT_EQ(bind_buffers.find("ObtainBuffer("), std::string::npos);
+    EXPECT_EQ(bind_buffers.find("GetBarrier("), std::string::npos);
+}
+
+TEST(BufferResidency, EveryGuestCommandCommitsOneAtomicFinalBindingBatchBeforePublication) {
+    const std::string source = ReadFile(SHADPS4_RASTERIZER_SOURCE_PATH);
+    const std::string draw =
+        FunctionBody(source, "void Rasterizer::Draw(bool", "void Rasterizer::DrawIndirect(");
+    const std::string draw_indirect =
+        FunctionBody(source, "void Rasterizer::DrawIndirect(", "void Rasterizer::DispatchDirect(");
+    const std::string dispatch_direct =
+        FunctionBody(source, "void Rasterizer::DispatchDirect(", "void Rasterizer::DispatchIndirect(");
+    const std::string dispatch_indirect =
+        FunctionBody(source, "void Rasterizer::DispatchIndirect(", "u64 Rasterizer::Flush(");
+
+    for (const auto* body : {&draw, &draw_indirect, &dispatch_direct, &dispatch_indirect}) {
+        const auto create_batch = body->find("BufferBindingBatch binding_batch");
+        const auto commit = body->find("CommitBufferBindings(binding_batch");
+        const auto publish = body->find("pipeline->BindResources(");
+        ASSERT_NE(create_batch, std::string::npos);
+        ASSERT_NE(commit, std::string::npos);
+        ASSERT_NE(publish, std::string::npos);
+        EXPECT_LT(create_batch, commit);
+        EXPECT_LT(commit, publish);
+        EXPECT_EQ(body->find("FinalizeBufferBinding(\n", commit), std::string::npos)
+            << "No binding may be resolved after the atomic batch is committed";
     }
 }
 
@@ -215,8 +512,8 @@ TEST(BufferResidency, Addr64PointerRootSelectionIsBoundedDeduplicatedAndFailClos
     ASSERT_EQ(duplicate.count, 1U);
     EXPECT_EQ(duplicate.values[0].pointer_lo_flat_index, 20U);
 
-    constexpr std::array too_many_pairs{0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U,
-                                        10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U};
+    constexpr std::array too_many_pairs{0U, 1U,  2U,  3U,  4U,  5U,  6U,  7U,  8U,
+                                        9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U};
     const auto overflow = Shader::SelectAddr64PointerRoots(1, too_many_pairs);
     EXPECT_TRUE(overflow.overflow);
     EXPECT_EQ(overflow.count, 0U);
@@ -237,16 +534,13 @@ TEST(BufferResidency, Addr64PointerTraversalSetBoundsQueueGrowthAndDeduplicatesN
 TEST(BufferResidency, Addr64PointerResidencyPlansOneExactBoundedGuestTable) {
     constexpr u64 address_space_size = 1ULL << 40U;
 
-    const auto exact = Shader::PlanAddr64PointerResidency(0x06622E30U, 0x10U,
-                                                          address_space_size);
+    const auto exact = Shader::PlanAddr64PointerResidency(0x06622E30U, 0x10U, address_space_size);
     EXPECT_TRUE(exact.valid);
     EXPECT_EQ(exact.address, 0x1006622E30ULL);
     EXPECT_EQ(exact.size, Shader::Addr64PointerTableBytes);
 
     EXPECT_FALSE(Shader::PlanAddr64PointerResidency(0U, 0U, address_space_size).valid);
-    EXPECT_FALSE(Shader::PlanAddr64PointerResidency(
-                     0xFFFFFF80U, 0xFFU, address_space_size)
-                     .valid);
+    EXPECT_FALSE(Shader::PlanAddr64PointerResidency(0xFFFFFF80U, 0xFFU, address_space_size).valid);
 }
 
 TEST(BufferResidency, Addr64PointerResidencyUsesExistingFindThenSynchronizePathExactlyOnce) {

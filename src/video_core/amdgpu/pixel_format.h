@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string_view>
 #include <fmt/format.h>
 #include "common/assert.h"
@@ -106,6 +107,7 @@ enum class NumberConversion : u32 {
     Sint16ToSnormNz = 5,
     Uint32ToUnorm = 6,
     SrgbToNorm = 7,
+    Sint32ToSnormNz = 8,
 };
 
 union CompMapping {
@@ -314,8 +316,10 @@ constexpr CompMapping RemapSwizzle(const DataFormat format, const CompMapping sw
     }
 }
 
-constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
-                                               const DataFormat data_fmt) {
+// Guest descriptors are not trusted compiler inputs. Callers admitting a new specialization
+// must be able to refuse unsupported conversions without asserting or silently changing them.
+constexpr std::optional<NumberConversion> TryMapNumberConversion(const NumberFormat num_fmt,
+                                                                 const DataFormat data_fmt) {
     switch (num_fmt) {
     case NumberFormat::Unorm: {
         switch (data_fmt) {
@@ -355,13 +359,26 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16:
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
+        case DataFormat::Format32:
+        case DataFormat::Format32_32:
+        case DataFormat::Format32_32_32:
+        case DataFormat::Format32_32_32_32:
+            return NumberConversion::Sint32ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            return std::nullopt;
         }
     }
     default:
         return NumberConversion::None;
     }
+}
+
+constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
+                                               const DataFormat data_fmt) {
+    const auto conversion = TryMapNumberConversion(num_fmt, data_fmt);
+    ASSERT_MSG(conversion.has_value(), "Unsupported number conversion: data_fmt = {}",
+               u32(data_fmt));
+    return *conversion;
 }
 
 constexpr NumberClass GetNumberClass(const NumberFormat nfmt) {
