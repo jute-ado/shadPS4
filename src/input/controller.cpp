@@ -158,6 +158,11 @@ void GameController::ConnectController(SDL_Gamepad* pad) {
     std::lock_guard lock{m_state_mutex};
     m_sdl_gamepad = pad;
     m_connection.ConnectPhysical();
+    if (const auto reconnect_colour = LightBarColourForPhysicalReconnect(override_colour);
+        m_sdl_gamepad && reconnect_colour) {
+        SDL_SetGamepadLED(m_sdl_gamepad, reconnect_colour->r, reconnect_colour->g,
+                          reconnect_colour->b);
+    }
     m_states_queue.Clear();
     m_state.connected = m_connection.IsConnected();
     m_state.connected_count = static_cast<u8>(m_connection.ConnectedCount());
@@ -226,12 +231,13 @@ void GameController::PushStateLocked(u64 timestamp) {
 }
 
 void GameController::SetLightBarRGB(u8 const r, u8 const g, u8 const b) {
-    if (override_colour.has_value()) {
-        return;
+    const Colour requested_colour{r, g, b};
+    const Colour resolved_colour = ResolveLightBarColour(override_colour, requested_colour);
+    if (!override_colour) {
+        colour = requested_colour;
     }
-    colour = {r, g, b};
     if (m_sdl_gamepad != nullptr) {
-        SDL_SetGamepadLED(m_sdl_gamepad, r, g, b);
+        SDL_SetGamepadLED(m_sdl_gamepad, resolved_colour.r, resolved_colour.g, resolved_colour.b);
     }
 }
 

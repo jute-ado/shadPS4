@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -8,6 +12,8 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/addr64_pointer_residency_pass.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_matcher.h"
+#include "shader_recompiler/ir/passes/dynamic_image_table_policy.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -260,9 +266,7 @@ public:
 
     u32 Add(const ImageResource& desc) {
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
-            return desc.sharp_idx == existing.sharp_idx && desc.is_array == existing.is_array &&
-                   desc.mip_fallback_mode == existing.mip_fallback_mode &&
-                   desc.constant_mip_index == existing.constant_mip_index;
+            return CanAliasImageResources(desc, existing);
         })};
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
@@ -273,10 +277,8 @@ public:
     }
 
     u32 Add(const SamplerResource& desc) {
-        const u32 index{Add(sampler_resources, desc, [this, &desc](const auto& existing) {
-            return desc.sharp_idx == existing.sharp_idx &&
-                   desc.is_inline_sampler == existing.is_inline_sampler &&
-                   desc.inline_sampler == existing.inline_sampler;
+        const u32 index{Add(sampler_resources, desc, [&desc](const auto& existing) {
+            return CanAliasSamplerResources(desc, existing);
         })};
         return index;
     }
@@ -672,6 +674,273 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     }
 }
 
+struct PendingDynamicImage {
+    IR::Block* block{};
+    IR::Inst* inst{};
+    std::optional<DynamicImageTableMatch> match{};
+};
+
+using DynamicImageIndices = std::unordered_map<const IR::Inst*, IR::Value>;
+
+[[nodiscard]] bool HasDirectDynamicImageHandle(const IR::Inst& inst) {
+    if (inst.Arg(0).IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* const handle = inst.Arg(0).TryInstRecursive();
+    return handle && handle->GetOpcode() == IR::Opcode::ReadConst && !handle->Arg(1).IsImmediate();
+}
+
+[[nodiscard]] std::optional<u32> FlattenedPointerLocation(const IR::Inst& pointer) {
+    switch (pointer.GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        return static_cast<u32>(pointer.Arg(0).ScalarReg());
+    case IR::Opcode::ReadConst: {
+        const u32 location = pointer.Flags<u32>();
+        return location >= NUM_USER_DATA_REGS ? std::optional{location} : std::nullopt;
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] bool DeclineDynamicImageTable(IR::Inst& inst, std::string_view reason) {
+    const auto inst_info = inst.Flags<IR::TextureInstInfo>();
+    LOG_DEBUG(Render_Recompiler,
+              "Dynamic image-table activation at pc={:#x} was declined; preserving the ordinary "
+              "resource path: {}",
+              static_cast<u32>(inst_info.pc), reason);
+    return false;
+}
+
+struct DynamicSamplerCandidate {
+    SamplerResource resource{};
+    AmdGpu::Sampler sharp{};
+};
+
+[[nodiscard]] std::optional<DynamicSamplerCandidate> GetDynamicSamplerCandidate(
+    IR::Block& block, const IR::Inst& inst, const Info& info) {
+    const IR::Inst* const sampler = inst.Arg(1).TryInstRecursive();
+    if (!sampler || sampler->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
+        return std::nullopt;
+    }
+    if (sampler->AreAllArgsImmediates()) {
+        const auto inline_sampler = AmdGpu::Sampler{
+            .raw0 = u64(sampler->Arg(1).U32()) << 32 | u64(sampler->Arg(0).U32()),
+            .raw1 = u64(sampler->Arg(3).U32()) << 32 | u64(sampler->Arg(2).U32()),
+        };
+        return DynamicSamplerCandidate{
+            .resource =
+                SamplerResource{
+                    .sharp_idx = std::numeric_limits<u32>::max(),
+                    .inline_sampler = inline_sampler,
+                    .is_inline_sampler = true,
+                    .associated_image = 0,
+                    .disable_aniso = false,
+                },
+            .sharp = inline_sampler,
+        };
+    }
+
+    const IR::Inst* const sampler_dword = sampler->Arg(0).TryInstRecursive();
+    if (!sampler_dword) {
+        return std::nullopt;
+    }
+    const auto [sampler_handle, ignored_disable_aniso] = TryDisableAnisoLod0(sampler_dword);
+    (void)ignored_disable_aniso;
+    const u32 ssharp = TrackSharp(sampler_handle, block, inst.Flags<IR::TextureInstInfo>().pc);
+    constexpr u32 SamplerDwords = sizeof(AmdGpu::Sampler) / sizeof(u32);
+    if (ssharp > info.flattened_ud_buf.size() ||
+        SamplerDwords > info.flattened_ud_buf.size() - ssharp) {
+        return std::nullopt;
+    }
+    const auto sharp = info.ReadUdSharp<AmdGpu::Sampler>(ssharp);
+    return DynamicSamplerCandidate{
+        .resource =
+            SamplerResource{
+                .sharp_idx = ssharp,
+                .is_inline_sampler = false,
+                .associated_image = 0,
+                // One associated image cannot represent a descriptor table. Do not let entry
+                // zero control anisotropy for all entries.
+                .disable_aniso = false,
+            },
+        .sharp = sharp,
+    };
+}
+
+struct DynamicDescriptorUsage {
+    u64 sampled{};
+    u64 resources{};
+};
+
+[[nodiscard]] DynamicDescriptorUsage GetDynamicDescriptorUsage(const Info& info) {
+    DynamicDescriptorUsage usage{
+        .resources = info.buffers.size() + info.samplers.size(),
+    };
+    for (const auto& image : info.images) {
+        const u32 descriptors = image.NumBindings(info);
+        usage.resources += descriptors;
+        if (!image.is_written) {
+            // Read-only ImageRead resources also occupy sampled-image descriptors.
+            usage.sampled += descriptors;
+        }
+    }
+    return usage;
+}
+
+[[nodiscard]] u32 DynamicTableSpan(u32 descriptor_count, u32 stride_dw,
+                                   u32 descriptor_dw) noexcept {
+    const u64 span = u64{descriptor_count - 1U} * stride_dw + descriptor_dw;
+    return span <= std::numeric_limits<u32>::max() ? static_cast<u32>(span) : 0U;
+}
+
+[[nodiscard]] bool PatchDynamicImageSharp(IR::Block& block, IR::Inst& inst,
+                                          const DynamicImageTableMatch& match, Info& info,
+                                          Descriptors& descriptors, const Profile& profile,
+                                          bool coherent_reserved_ranges_ready,
+                                          DynamicImageIndices& dynamic_indices) {
+    if (!coherent_reserved_ranges_ready) {
+        return DeclineDynamicImageTable(inst,
+                                        "the coherent reserved-range snapshot is unavailable");
+    }
+    if (info.stage != Stage::Compute) {
+        return DeclineDynamicImageTable(inst, "only compute layouts can be budgeted exactly");
+    }
+    if (!info.srt_info.ValidateRangeReservations()) {
+        return DeclineDynamicImageTable(inst, "the reservation metadata is malformed");
+    }
+
+    const auto pointer_lo = FlattenedPointerLocation(*match.pointer_lo);
+    const auto pointer_hi = FlattenedPointerLocation(*match.pointer_hi);
+    if (!pointer_lo || !pointer_hi || *pointer_lo == std::numeric_limits<u32>::max() ||
+        *pointer_hi != *pointer_lo + 1U) {
+        return DeclineDynamicImageTable(inst, "the flattened pointer pair is malformed");
+    }
+
+    // A one-entry plan safely discovers the table's reserved destination without treating an
+    // ordinary ReadConst destination flag as reservation proof.
+    const auto model_plan = PlanDynamicImageTable(match.Pattern(*pointer_lo, 1U, true, true));
+    if (!model_plan) {
+        return DeclineDynamicImageTable(inst,
+                                        "the access is not explicit-LOD sampled-image table use");
+    }
+    const auto model_destination = info.srt_info.FindReservedRange(
+        *pointer_lo, model_plan->offset_dw, model_plan->snapshot_span_dw);
+    if (!model_destination) {
+        return DeclineDynamicImageTable(inst, "no reserved model descriptor exists");
+    }
+
+    const auto inst_info = inst.Flags<IR::TextureInstInfo>();
+    const auto sampler = GetDynamicSamplerCandidate(block, inst, info);
+    if (!sampler || sampler->sharp.force_unnormalized) {
+        return DeclineDynamicImageTable(inst, "the sampler shape is unsupported");
+    }
+    const bool sampler_will_add = std::ranges::none_of(info.samplers, [&](const auto& existing) {
+        return CanAliasSamplerResources(sampler->resource, existing);
+    });
+    if (sampler_will_add && info.samplers.size() >= NUM_SAMPLERS) {
+        return DeclineDynamicImageTable(inst, "the sampler resource list is full");
+    }
+
+    const auto existing = std::ranges::find_if(info.images, [&](const ImageResource& candidate) {
+        return candidate.sharp_idx == *model_destination &&
+               candidate.dynamic_descriptor_count != 0 &&
+               candidate.dynamic_descriptor_stride_dw == model_plan->stride_dw &&
+               candidate.is_array == bool(inst_info.is_array) &&
+               candidate.is_r128 == bool(inst_info.is_r128) && !candidate.is_depth &&
+               !candidate.is_atomic && !candidate.is_written &&
+               candidate.mip_fallback_mode == MipStorageFallbackMode::None;
+    });
+    if (existing == info.images.end() && info.images.size() >= NUM_IMAGES) {
+        return DeclineDynamicImageTable(inst, "the image resource list is full");
+    }
+
+    auto usage = GetDynamicDescriptorUsage(info);
+    if (existing != info.images.end()) {
+        if (usage.sampled < existing->dynamic_descriptor_count ||
+            usage.resources < existing->dynamic_descriptor_count) {
+            return DeclineDynamicImageTable(inst, "the existing descriptor usage is inconsistent");
+        }
+        usage.sampled -= existing->dynamic_descriptor_count;
+        usage.resources -= existing->dynamic_descriptor_count;
+    }
+    usage.resources += sampler_will_add ? 1U : 0U;
+    const u32 window = DynamicImageDescriptorWindow(
+        NUM_IMAGES, usage.sampled, usage.resources, profile.max_sampled_images_per_stage,
+        profile.max_sampled_images_per_set, profile.max_resources_per_stage,
+        profile.max_sampled_images_per_descriptor_heap_set);
+    const auto plan = PlanDynamicImageTable(match.Pattern(
+        *pointer_lo, window, profile.supports_sampled_image_array_nonuniform_indexing, true));
+    if (!plan) {
+        return DeclineDynamicImageTable(inst,
+                                        "host features or descriptor limits are insufficient");
+    }
+
+    const u32 target_count =
+        existing == info.images.end()
+            ? plan->descriptor_count
+            : std::max(existing->dynamic_descriptor_count, plan->descriptor_count);
+    if (target_count > window) {
+        return DeclineDynamicImageTable(inst,
+                                        "a reused table exceeds the remaining resource limits");
+    }
+    const u32 descriptor_dw = inst_info.is_r128 ? 4U : sizeof(AmdGpu::Image) / sizeof(u32);
+    const u32 target_span = DynamicTableSpan(target_count, plan->stride_dw, descriptor_dw);
+    const auto destination =
+        target_span == 0U
+            ? std::nullopt
+            : info.srt_info.FindReservedRange(*pointer_lo, plan->offset_dw, target_span);
+    if (!destination || *destination != *model_destination) {
+        return DeclineDynamicImageTable(inst,
+                                        "no reservation exactly covers the admitted table plan");
+    }
+    const u64 end_dw = u64{*destination} + target_span;
+    if (end_dw > info.srt_info.flattened_bufsize_dw || end_dw > info.flattened_ud_buf.size()) {
+        return DeclineDynamicImageTable(inst,
+                                        "the admitted table is outside the coherent snapshot");
+    }
+
+    ImageResource image_res{
+        .sharp_idx = *destination,
+        .dynamic_descriptor_count = target_count,
+        .dynamic_descriptor_stride_dw = plan->stride_dw,
+        .is_depth = false,
+        .is_atomic = false,
+        .is_array = bool(inst_info.is_array),
+        .is_written = false,
+        .uses_integer_coordinates = false,
+        .queries_dimensions = false,
+        .is_r128 = bool(inst_info.is_r128),
+        .requires_dynamic_oob_guard = plan->requires_oob_guard,
+        .mip_fallback_mode = MipStorageFallbackMode::None,
+    };
+    if (!image_res.HasValidDynamicRange(info) ||
+        !IsSupportedDynamicImageModel(image_res.ReadSharpUnchecked(info), image_res.is_array)) {
+        return DeclineDynamicImageTable(inst,
+                                        "the runtime model descriptor is invalid or unsupported");
+    }
+
+    u32 image_binding{};
+    if (existing == info.images.end()) {
+        image_binding = descriptors.Add(image_res);
+    } else {
+        image_binding = static_cast<u32>(std::distance(info.images.begin(), existing));
+        existing->dynamic_descriptor_count = target_count;
+        existing->requires_dynamic_oob_guard |= plan->requires_oob_guard;
+    }
+    auto sampler_resource = sampler->resource;
+    sampler_resource.associated_image = image_binding;
+    const u32 sampler_binding = descriptors.Add(sampler_resource);
+
+    // This rewrite is deliberately last: only an admitted, fully covered coherent reservation may
+    // turn the dynamic ReadConst into a flattened-table handle.
+    match.image_handle->SetFlags<u32>(*destination);
+    IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
+    inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
+    dynamic_indices.emplace(&inst, match.index);
+    return true;
+}
+
 void PatchGlobalDataShareAccess(IR::Block& block, IR::Inst& inst, Info& info,
                                 Descriptors& descriptors, const Profile& profile) {
     const u32 binding = descriptors.Add(BufferResource{
@@ -882,7 +1151,8 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
 }
 
 void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
-                          const ImageResource& image_res, const AmdGpu::Image& image) {
+                          const ImageResource& image_res, const AmdGpu::Image& image,
+                          const IR::Value& dynamic_index) {
     const auto handle = inst.Arg(0);
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
@@ -1062,6 +1332,10 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
             return ir.ImageSampleDrefImplicitLod(handle, coords, dref, bias, offset, inst_info);
         }
         if (explicit_lod) {
+            if (!dynamic_index.IsEmpty()) {
+                return ir.ImageSampleExplicitLodDynamic(handle, IR::U32{dynamic_index}, coords, lod,
+                                                        offset, inst_info);
+            }
             return ir.ImageSampleExplicitLod(handle, coords, lod, offset, inst_info);
         }
         return ir.ImageSampleImplicitLod(handle, coords, bias, offset, inst_info);
@@ -1074,7 +1348,8 @@ void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info,
+                    const DynamicImageIndices& dynamic_indices) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -1087,7 +1362,10 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     // Sample instructions must be handled separately using address register data.
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
-        return PatchImageSampleArgs(block, inst, info, image_res, image);
+        const auto dynamic = dynamic_indices.find(&inst);
+        const IR::Value dynamic_index =
+            dynamic != dynamic_indices.end() ? dynamic->second : IR::Value{};
+        return PatchImageSampleArgs(block, inst, info, image_res, image, dynamic_index);
     }
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
@@ -1170,19 +1448,46 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
     }
 }
 
-void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
+void ResourceTrackingPass(IR::Program& program, const Profile& profile,
+                          bool coherent_reserved_ranges_ready) {
     // Iterate resource instructions and patch them after finding the sharp.
     auto& info = program.info;
+    const bool can_attempt_dynamic_tables =
+        coherent_reserved_ranges_ready && info.stage == Stage::Compute &&
+        profile.supports_sampled_image_array_nonuniform_indexing &&
+        profile.max_sampled_images_per_stage != 0U && profile.max_sampled_images_per_set != 0U &&
+        profile.max_resources_per_stage != 0U &&
+        profile.max_sampled_images_per_descriptor_heap_set != 0U &&
+        !info.srt_info.range_reservations.empty() && info.srt_info.ValidateRangeReservations();
 
     // Pass 1: Track resource sharps
     Descriptors descriptors{info};
+    std::vector<PendingDynamicImage> pending_dynamic_images;
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (IsBufferInstruction(inst)) {
                 PatchBufferSharp(*block, inst, info, descriptors, profile);
             } else if (IsImageInstruction(inst)) {
-                PatchImageSharp(*block, inst, info, descriptors, profile);
+                if (can_attempt_dynamic_tables && HasDirectDynamicImageHandle(inst)) {
+                    pending_dynamic_images.push_back({
+                        .block = block,
+                        .inst = &inst,
+                        .match = MatchDynamicImageTable(inst),
+                    });
+                } else {
+                    PatchImageSharp(*block, inst, info, descriptors, profile);
+                }
             }
+        }
+    }
+    DynamicImageIndices dynamic_indices;
+    for (auto& pending : pending_dynamic_images) {
+        const bool activated =
+            pending.match &&
+            PatchDynamicImageSharp(*pending.block, *pending.inst, *pending.match, info, descriptors,
+                                   profile, coherent_reserved_ranges_ready, dynamic_indices);
+        if (!activated) {
+            PatchImageSharp(*pending.block, *pending.inst, info, descriptors, profile);
         }
     }
 
@@ -1192,7 +1497,7 @@ void ResourceTrackingPass(IR::Program& program, const Profile& profile) {
             if (IsBufferInstruction(inst)) {
                 PatchBufferArgs(*block, inst, info);
             } else if (IsImageInstruction(inst)) {
-                PatchImageArgs(*block, inst, info);
+                PatchImageArgs(*block, inst, info, dynamic_indices);
             } else if (IsDataRingInstruction(inst)) {
                 PatchGlobalDataShareAccess(*block, inst, info, descriptors, profile);
             }

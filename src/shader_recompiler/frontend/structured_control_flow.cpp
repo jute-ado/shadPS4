@@ -594,10 +594,11 @@ public:
                   Common::ObjectPool<IR::Block>& block_pool_,
                   Common::ObjectPool<Statement>& stmt_pool_, Statement& root_stmt,
                   IR::AbstractSyntaxList& syntax_list_, std::span<const GcnInst> inst_list_,
-                  Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_)
+                  Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_,
+                  SrtMemoryReader reader)
         : stmt_pool{stmt_pool_}, inst_pool{inst_pool_}, block_pool{block_pool_},
           syntax_list{syntax_list_}, inst_list{inst_list_}, runtime_info{runtime_info_},
-          profile{profile_}, translator{info_, runtime_info_, profile_} {
+          profile{profile_}, translator{info_, runtime_info_, profile_, reader} {
         Visit(root_stmt, nullptr, nullptr);
 
         IR::Block* first_block = syntax_list.front().data.block;
@@ -805,13 +806,14 @@ private:
 
 IR::AbstractSyntaxList BuildASL(Common::ObjectPool<IR::Inst>& inst_pool,
                                 Common::ObjectPool<IR::Block>& block_pool, CFG& cfg, Info& info,
-                                const RuntimeInfo& runtime_info, const Profile& profile) {
+                                const RuntimeInfo& runtime_info, const Profile& profile,
+                                SrtMemoryReader reader) {
     Common::ObjectPool<Statement> stmt_pool{64};
     GotoPass goto_pass{cfg, stmt_pool};
     Statement& root{goto_pass.RootStatement()};
     IR::AbstractSyntaxList syntax_list;
     TranslatePass{inst_pool,     block_pool, stmt_pool,    root,   syntax_list,
-                  cfg.inst_list, info,       runtime_info, profile};
+                  cfg.inst_list, info,       runtime_info, profile, reader};
     ASSERT_MSG(!info.translation_failed, "Shader translation has failed");
     return syntax_list;
 }

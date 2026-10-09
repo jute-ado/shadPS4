@@ -14,6 +14,7 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 namespace gcn_test {
@@ -42,7 +43,16 @@ struct ErrorInfo {
 class Runner {
 public:
     static std::expected<Runner*, ErrorInfo> instance();
+    static std::expected<Runner*, ErrorInfo> subgroup32_instance();
     static void DestroyInstance();
+
+    [[nodiscard]] std::uint32_t effective_compute_subgroup_size() const noexcept {
+        return effective_compute_subgroup_size_;
+    }
+
+    [[nodiscard]] std::string_view device_name() const noexcept {
+        return device_name_;
+    }
 
     std::expected<void, ErrorInfo> run_raw(
         std::span<const std::uint32_t> spirv,
@@ -92,7 +102,7 @@ public:
 
 private:
     Runner() = default;
-    std::expected<void, ErrorInfo> initialize();
+    std::expected<void, ErrorInfo> initialize(bool require_exact_subgroup32);
 
     vk::Instance            instance_;
     vk::PhysicalDevice      physical_device_;
@@ -106,6 +116,9 @@ private:
     vk::PipelineLayout      pipeline_layout_;
 
     std::uint32_t max_push_constant_size_ = 128;
+    std::uint32_t effective_compute_subgroup_size_ = 0;
+    bool use_required_subgroup_size_ = false;
+    std::string device_name_;
 };
 
 } // namespace gcn_test

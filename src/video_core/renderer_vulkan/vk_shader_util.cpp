@@ -266,4 +266,30 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
     return module;
 }
 
+std::optional<vk::ShaderModule> TryCompileSPV(std::span<const u32> code,
+                                              vk::Device device) noexcept {
+    if (!IsValidCachedSpirv(code)) {
+        LOG_WARNING(Render_Vulkan, "Ignoring malformed cached SPIR-V module");
+        return std::nullopt;
+    }
+    try {
+        const vk::ShaderModuleCreateInfo shader_info = {
+            .codeSize = code.size() * sizeof(u32),
+            .pCode = code.data(),
+        };
+        auto [module_result, module] = device.createShaderModule(shader_info);
+        if (module_result != vk::Result::eSuccess) {
+            LOG_WARNING(Render_Vulkan, "Ignoring cached SPIR-V module rejected by Vulkan: {}",
+                        vk::to_string(module_result));
+            return std::nullopt;
+        }
+        return module;
+    } catch (const std::exception& exception) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached SPIR-V module: {}", exception.what());
+    } catch (...) {
+        LOG_WARNING(Render_Vulkan, "Ignoring cached SPIR-V module after unknown Vulkan error");
+    }
+    return std::nullopt;
+}
+
 } // namespace Vulkan
