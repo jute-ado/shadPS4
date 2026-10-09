@@ -5,11 +5,16 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
+#include <array>
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/physical_device_selection.h"
+#include "video_core/renderer_vulkan/vk_memory_diagnostics.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -116,20 +121,6 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
         std::sort(properties2.begin(), properties2.end(), [](const auto& left, const auto& right) {
             const vk::PhysicalDeviceProperties& left_prop = std::get<1>(left).properties;
             const vk::PhysicalDeviceProperties& right_prop = std::get<1>(right).properties;
-            const bool left_supports_api = left_prop.apiVersion >= TargetVulkanApiVersion;
-            const bool right_supports_api = right_prop.apiVersion >= TargetVulkanApiVersion;
-            if (left_supports_api != right_supports_api) {
-                return left_supports_api;
-            }
-
-            const bool left_is_discrete =
-                left_prop.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
-            const bool right_is_discrete =
-                right_prop.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
-            if (left_is_discrete != right_is_discrete) {
-                return left_is_discrete;
-            }
-
             constexpr auto get_mem = [](const vk::PhysicalDeviceMemoryProperties& mem) -> size_t {
                 size_t max = 0;
                 for (u32 i = 0; i < mem.memoryHeapCount; i++) {
@@ -140,9 +131,29 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                 }
                 return max;
             };
-            size_t left_mem_size = get_mem(std::get<2>(left));
-            size_t right_mem_size = get_mem(std::get<2>(right));
-            return left_mem_size > right_mem_size;
+            constexpr auto get_device_class = [](vk::PhysicalDeviceType type) {
+                switch (type) {
+                case vk::PhysicalDeviceType::eDiscreteGpu:
+                    return PhysicalDeviceClass::Discrete;
+                case vk::PhysicalDeviceType::eIntegratedGpu:
+                    return PhysicalDeviceClass::Integrated;
+                case vk::PhysicalDeviceType::eCpu:
+                    return PhysicalDeviceClass::Cpu;
+                default:
+                    return PhysicalDeviceClass::Other;
+                }
+            };
+            const PhysicalDeviceSelectionTraits left_traits{
+                .supports_required_api = left_prop.apiVersion >= TargetVulkanApiVersion,
+                .device_class = get_device_class(left_prop.deviceType),
+                .largest_device_local_heap = get_mem(std::get<2>(left)),
+            };
+            const PhysicalDeviceSelectionTraits right_traits{
+                .supports_required_api = right_prop.apiVersion >= TargetVulkanApiVersion,
+                .device_class = get_device_class(right_prop.deviceType),
+                .largest_device_local_heap = get_mem(std::get<2>(right)),
+            };
+            return PreferPhysicalDevice(left_traits, right_traits);
         });
         physical_device = physical_devices[std::get<0>(properties2[0])];
     } else {
@@ -221,7 +232,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 33> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -336,6 +347,26 @@ bool Instance::CreateDevice() {
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    const char* fault_environment = std::getenv("SHADPS4_DEVICE_FAULT_DIAGNOSTICS");
+    const std::string_view fault_option = fault_environment ? fault_environment : "";
+    if (DeviceFaultDiagnosticsRequested(fault_option)) {
+        const bool fault_advertised =
+            std::ranges::find(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME) !=
+            available_extensions.end();
+        if (fault_advertised) {
+            const auto fault_features =
+                physical_device.getFeatures2<vk::PhysicalDeviceFeatures2,
+                                             vk::PhysicalDeviceFaultFeaturesEXT>();
+            device_fault_diagnostics = ShouldEnableDeviceFaultDiagnostics(
+                fault_option, fault_advertised,
+                fault_features.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault);
+            if (device_fault_diagnostics) {
+                add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Device fault text diagnostics requested: enabled={}",
+                 device_fault_diagnostics);
+    }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
@@ -420,6 +451,8 @@ bool Instance::CreateDevice() {
             .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
             .shaderFloat16 = vk12_features.shaderFloat16,
             .shaderInt8 = vk12_features.shaderInt8,
+            .shaderSampledImageArrayNonUniformIndexing =
+                vk12_features.shaderSampledImageArrayNonUniformIndexing,
             .scalarBlockLayout = vk12_features.scalarBlockLayout,
             .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
             .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,
@@ -504,6 +537,10 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
             .minLod = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = device_fault_diagnostics,
+            .deviceFaultVendorBinary = false,
+        },
     };
 
     if (!custom_border_color) {
@@ -548,6 +585,9 @@ bool Instance::CreateDevice() {
     }
     if (!image_view_min_lod) {
         device_chain.unlink<vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();
+    }
+    if (!device_fault_diagnostics) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
@@ -755,6 +795,67 @@ u64 Instance::GetDeviceMemoryUsage() const {
         total_usage += memory_budget_props.heapUsage[heap];
     }
     return total_usage;
+}
+
+void Instance::LogDeviceMemoryBudget(const std::string_view reason, const vk::Result result) const {
+    LogDeviceFault(reason, result);
+    if (!VulkanMemoryDiagnosticsEnabled()) {
+        return;
+    }
+
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(allocator, budgets.data());
+    LOG_WARNING(Render_Vulkan,
+                "Vulkan memory budget event={} result={} tracked_heaps={}", reason,
+                vk::to_string(result), valid_heaps.size());
+    for (const size_t heap : valid_heaps) {
+        const auto& budget = budgets[heap];
+        const u64 available = budget.budget > budget.usage ? budget.budget - budget.usage : 0;
+        LOG_WARNING(Render_Vulkan,
+                    "Vulkan memory budget heap={} usage={} budget={} available={} "
+                    "allocations={} allocation_bytes={} blocks={} block_bytes={}",
+                    heap, budget.usage, budget.budget, available, budget.statistics.allocationCount,
+                    budget.statistics.allocationBytes, budget.statistics.blockCount,
+                    budget.statistics.blockBytes);
+    }
+}
+
+void Instance::LogDeviceFault(const std::string_view reason, const vk::Result result) const {
+    const auto query = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
+    const auto status = device_fault_report.Run(
+        device_fault_diagnostics && query != nullptr, static_cast<VkResult>(result), [&] {
+            LOG_ERROR(Render_Vulkan, "DeviceFaultV1 event={} query=begin", reason);
+            const auto report = QueryBoundedDeviceFault(
+                [&](VkDeviceFaultCountsEXT* counts, VkDeviceFaultInfoEXT* info) {
+                    return query(static_cast<VkDevice>(*device), counts, info);
+                });
+            LOG_ERROR(Render_Vulkan,
+                      "DeviceFaultV1 event={} count_result={} payload_result={} "
+                      "payload_available={} truncated={} addresses={}/{} vendors={}/{} "
+                      "description={}",
+                      reason, static_cast<int>(report.count_result),
+                      static_cast<int>(report.payload_result), report.payload_available,
+                      report.truncated, report.address_count, report.advertised_address_count,
+                      report.vendor_count, report.advertised_vendor_count,
+                      BoundedDeviceFaultText(report.description));
+            for (uint32_t index = 0; index < report.address_count; ++index) {
+                const auto& address = report.addresses[index];
+                LOG_ERROR(Render_Vulkan,
+                          "DeviceFaultAddressV1 row={} type={} gpu_address={:#x} precision={}",
+                          index, static_cast<int>(address.addressType), address.reportedAddress,
+                          address.addressPrecision);
+            }
+            for (uint32_t index = 0; index < report.vendor_count; ++index) {
+                const auto& vendor = report.vendors[index];
+                LOG_ERROR(Render_Vulkan,
+                          "DeviceFaultVendorV1 row={} code={:#x} data={:#x} description={}", index,
+                          vendor.vendorFaultCode, vendor.vendorFaultData,
+                          BoundedDeviceFaultText(vendor.description));
+            }
+        });
+    if (status == DeviceFaultReportStatus::WaitTimedOut) {
+        LOG_ERROR(Render_Vulkan, "DeviceFaultV1 event={} query=concurrent_report_timeout", reason);
+    }
 }
 
 vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {

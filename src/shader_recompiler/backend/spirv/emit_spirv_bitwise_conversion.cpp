@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/logging/log.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/spirv_composite_extract.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
 namespace Shader::Backend::SPIRV {
@@ -11,6 +13,20 @@ struct R {
     u32 offset;
     u32 size;
 };
+
+template <u32 num_components>
+static bool ValidatePackedVector(EmitContext& ctx, const IR::Inst* inst) {
+    const u32 source_components = GetVectorComponentCount(inst->Arg(0).Type());
+    if (source_components >= num_components) {
+        return true;
+    }
+    LOG_WARNING(Render_Recompiler,
+                "Rejecting malformed packed-vector operation for shader {:#x}: operation "
+                "requires {} components but IR supplied {}",
+                ctx.info.pgm_hash, num_components, source_components);
+    return false;
+}
+
 template <bool is_signed, typename... Args>
 static std::array<Id, sizeof...(Args)> ExtractBitFields(EmitContext& ctx, const Id value,
                                                         const Args... args) {
@@ -47,9 +63,19 @@ static Id InsertBitFields(EmitContext& ctx, const std::initializer_list<Id> valu
 }
 
 template <u32 num_components>
-static std::array<Id, num_components> ExtractComposite(EmitContext& ctx, const VectorIds type,
-                                                       const Id value) {
+static std::array<Id, num_components> ExtractComposite(EmitContext& ctx, const IR::Inst* inst,
+                                                       const VectorIds type, const Id value,
+                                                       const Id fallback) {
     std::array<Id, num_components> result{};
+    result.fill(fallback);
+    const u32 source_components = GetVectorComponentCount(inst->Arg(0).Type());
+    if (source_components < num_components) {
+        LOG_WARNING(Render_Recompiler,
+                    "Skipping out-of-range packed-vector extract for shader {:#x}: operation "
+                    "requires {} components but IR supplied {}",
+                    ctx.info.pgm_hash, num_components, source_components);
+        return result;
+    }
     for (u32 i = 0; i < num_components; i++) {
         result[i] = ctx.OpCompositeExtract(type[1], value, i);
     }
@@ -104,9 +130,12 @@ Id EmitUnpackSnorm2x16(EmitContext& ctx, Id value) {
     return ctx.OpUnpackSnorm2x16(ctx.F32[2], value);
 }
 
-Id EmitPackUint2x16(EmitContext& ctx, Id value) {
+Id EmitPackUint2x16(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (!ValidatePackedVector<2>(ctx, inst)) {
+        return ctx.u32_zero_value;
+    }
     const auto unpacked{ctx.OpBitcast(ctx.U32[2], value)};
-    const auto [x, y] = ExtractComposite<2>(ctx, ctx.U32, unpacked);
+    const auto [x, y] = ExtractComposite<2>(ctx, inst, ctx.U32, unpacked, ctx.u32_zero_value);
     return InsertBitFields(ctx, {x, y}, R(0, 16), R(16, 16));
 }
 
@@ -116,8 +145,8 @@ Id EmitUnpackUint2x16(EmitContext& ctx, Id value) {
     return ctx.OpBitcast(ctx.F32[2], unpacked);
 }
 
-Id EmitPackSint2x16(EmitContext& ctx, Id value) {
-    return EmitPackUint2x16(ctx, value);
+Id EmitPackSint2x16(EmitContext& ctx, IR::Inst* inst, Id value) {
+    return EmitPackUint2x16(ctx, inst, value);
 }
 
 Id EmitUnpackSint2x16(EmitContext& ctx, Id value) {
@@ -150,9 +179,13 @@ Id EmitUnpackSnorm4x8(EmitContext& ctx, Id value) {
     return ctx.OpUnpackSnorm4x8(ctx.F32[4], value);
 }
 
-Id EmitPackUint4x8(EmitContext& ctx, Id value) {
+Id EmitPackUint4x8(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (!ValidatePackedVector<4>(ctx, inst)) {
+        return ctx.u32_zero_value;
+    }
     const auto unpacked{ctx.OpBitcast(ctx.U32[4], value)};
-    const auto [x, y, z, w] = ExtractComposite<4>(ctx, ctx.U32, unpacked);
+    const auto [x, y, z, w] =
+        ExtractComposite<4>(ctx, inst, ctx.U32, unpacked, ctx.u32_zero_value);
     return InsertBitFields(ctx, {x, y, z, w}, R(0, 8), R(8, 8), R(16, 8), R(24, 8));
 }
 
@@ -163,8 +196,8 @@ Id EmitUnpackUint4x8(EmitContext& ctx, Id value) {
     return ctx.OpBitcast(ctx.F32[4], unpacked);
 }
 
-Id EmitPackSint4x8(EmitContext& ctx, Id value) {
-    return EmitPackUint4x8(ctx, value);
+Id EmitPackSint4x8(EmitContext& ctx, IR::Inst* inst, Id value) {
+    return EmitPackUint4x8(ctx, inst, value);
 }
 
 Id EmitUnpackSint4x8(EmitContext& ctx, Id value) {
@@ -174,8 +207,12 @@ Id EmitUnpackSint4x8(EmitContext& ctx, Id value) {
     return ctx.OpBitcast(ctx.F32[4], unpacked);
 }
 
-Id EmitPackUfloat10_11_11(EmitContext& ctx, Id value) {
-    const auto [x, y, z] = ExtractComposite<3>(ctx, ctx.F32, value);
+Id EmitPackUfloat10_11_11(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (!ValidatePackedVector<3>(ctx, inst)) {
+        return ctx.u32_zero_value;
+    }
+    const auto [x, y, z] =
+        ExtractComposite<3>(ctx, inst, ctx.F32, value, ctx.f32_zero_value);
     const auto cvt_x{ctx.OpFunctionCall(ctx.U32[1], ctx.f32_to_uf11, x)};
     const auto cvt_y{ctx.OpFunctionCall(ctx.U32[1], ctx.f32_to_uf11, y)};
     const auto cvt_z{ctx.OpFunctionCall(ctx.U32[1], ctx.f32_to_uf10, z)};
@@ -190,7 +227,10 @@ Id EmitUnpackUfloat10_11_11(EmitContext& ctx, Id value) {
     return ctx.OpCompositeConstruct(ctx.F32[3], cvt_x, cvt_y, cvt_z);
 }
 
-Id EmitPackUnorm2_10_10_10(EmitContext& ctx, Id value) {
+Id EmitPackUnorm2_10_10_10(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (!ValidatePackedVector<4>(ctx, inst)) {
+        return ctx.u32_zero_value;
+    }
     const auto unorm_min{ctx.ConstantComposite(ctx.F32[4], ctx.ConstF32(0.f), ctx.ConstF32(0.f),
                                                ctx.ConstF32(0.f), ctx.ConstF32(0.f))};
     const auto unorm_max{ctx.ConstantComposite(ctx.F32[4], ctx.ConstF32(1.f), ctx.ConstF32(1.f),
@@ -201,7 +241,7 @@ Id EmitPackUnorm2_10_10_10(EmitContext& ctx, Id value) {
                                                ctx.ConstF32(3.f))};
     const auto as_float{ctx.OpFMul(ctx.F32[4], clamped, unorm_mul)};
     const auto as_uint{ctx.OpConvertFToU(ctx.U32[4], ctx.OpRoundEven(ctx.F32[4], as_float))};
-    return EmitPackUint2_10_10_10(ctx, ctx.OpBitcast(ctx.F32[4], as_uint));
+    return EmitPackUint2_10_10_10(ctx, inst, ctx.OpBitcast(ctx.F32[4], as_uint));
 }
 
 Id EmitUnpackUnorm2_10_10_10(EmitContext& ctx, Id value) {
@@ -213,7 +253,10 @@ Id EmitUnpackUnorm2_10_10_10(EmitContext& ctx, Id value) {
     return ctx.OpFDiv(ctx.F32[4], as_float, unorm_div);
 }
 
-Id EmitPackSnorm2_10_10_10(EmitContext& ctx, Id value) {
+Id EmitPackSnorm2_10_10_10(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (!ValidatePackedVector<4>(ctx, inst)) {
+        return ctx.u32_zero_value;
+    }
     const auto snorm_min{ctx.ConstantComposite(ctx.F32[4], ctx.ConstF32(-1.f), ctx.ConstF32(-1.f),
                                                ctx.ConstF32(-1.f), ctx.ConstF32(-1.f))};
     const auto snorm_max{ctx.ConstantComposite(ctx.F32[4], ctx.ConstF32(1.f), ctx.ConstF32(1.f),
@@ -223,7 +266,7 @@ Id EmitPackSnorm2_10_10_10(EmitContext& ctx, Id value) {
                                                ctx.ConstF32(511.f), ctx.ConstF32(1.f))};
     const auto as_float{ctx.OpFMul(ctx.F32[4], clamped, snorm_mul)};
     const auto as_sint{ctx.OpConvertFToS(ctx.U32[4], ctx.OpRoundEven(ctx.F32[4], as_float))};
-    return EmitPackSint2_10_10_10(ctx, ctx.OpBitcast(ctx.F32[4], as_sint));
+    return EmitPackSint2_10_10_10(ctx, inst, ctx.OpBitcast(ctx.F32[4], as_sint));
 }
 
 Id EmitUnpackSnorm2_10_10_10(EmitContext& ctx, Id value) {
@@ -234,9 +277,13 @@ Id EmitUnpackSnorm2_10_10_10(EmitContext& ctx, Id value) {
     return ctx.OpFDiv(ctx.F32[4], as_float, snorm_div);
 }
 
-Id EmitPackUint2_10_10_10(EmitContext& ctx, Id value) {
+Id EmitPackUint2_10_10_10(EmitContext& ctx, IR::Inst* inst, Id value) {
+    if (!ValidatePackedVector<4>(ctx, inst)) {
+        return ctx.u32_zero_value;
+    }
     const auto unpacked{ctx.OpBitcast(ctx.U32[4], value)};
-    const auto [x, y, z, w] = ExtractComposite<4>(ctx, ctx.U32, unpacked);
+    const auto [x, y, z, w] =
+        ExtractComposite<4>(ctx, inst, ctx.U32, unpacked, ctx.u32_zero_value);
     return InsertBitFields(ctx, {x, y, z, w}, R(0, 10), R(10, 10), R(20, 10), R(30, 2));
 }
 
@@ -247,8 +294,8 @@ Id EmitUnpackUint2_10_10_10(EmitContext& ctx, Id value) {
     return ctx.OpBitcast(ctx.F32[4], unpacked);
 }
 
-Id EmitPackSint2_10_10_10(EmitContext& ctx, Id value) {
-    return EmitPackUint2_10_10_10(ctx, value);
+Id EmitPackSint2_10_10_10(EmitContext& ctx, IR::Inst* inst, Id value) {
+    return EmitPackUint2_10_10_10(ctx, inst, value);
 }
 
 Id EmitUnpackSint2_10_10_10(EmitContext& ctx, Id value) {

@@ -7,6 +7,7 @@
 #include <ranges>
 #include <span>
 #include "common/types.h"
+#include "shader_recompiler/draw_user_data.h"
 #include "shader_recompiler/frontend/tessellation.h"
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/regs_shader.h"
@@ -105,6 +106,7 @@ struct VertexRuntimeInfo : protected CommonEsVsRuntimeInfo {
     u32 step_rate_1;
     /// UCP_ENA bits from PA_CL_CLIP_CNTL, lowered to clip distances in the shader.
     u32 user_clip_plane_mask{};
+    DrawUserDataLocations draw_user_data{};
 
     bool operator<=>(const VertexRuntimeInfo& other) const noexcept = default;
 };
@@ -151,11 +153,14 @@ struct GeometryRuntimeInfo {
     u64 vs_copy_hash;
 
     bool operator==(const GeometryRuntimeInfo& other) const {
-        return num_outputs == other.num_outputs && outputs == other.outputs && num_invocations &&
-               other.num_invocations && output_vertices == other.output_vertices &&
+        return num_outputs == other.num_outputs && outputs == other.outputs &&
+               num_invocations == other.num_invocations &&
+               output_vertices == other.output_vertices &&
+               in_vertex_data_size == other.in_vertex_data_size &&
+               out_vertex_data_size == other.out_vertex_data_size &&
                in_primitive == other.in_primitive &&
-               std::ranges::equal(out_primitive, other.out_primitive) &&
-               vs_copy_hash == other.vs_copy_hash;
+               std::ranges::equal(out_primitive, other.out_primitive) && mode == other.mode &&
+               vs_copy_hash == other.vs_copy_hash && std::ranges::equal(vs_copy, other.vs_copy);
     }
 };
 
@@ -172,6 +177,10 @@ struct PsColorBuffer {
     AmdGpu::NumberFormat num_format : 4;
     AmdGpu::NumberConversion num_conversion : 3;
     AmdGpu::ShaderExportFormat export_format : 4;
+    // GCN applies blend factors to min/max ops while Vulkan ignores them. For the self-scaled
+    // pattern min/max(src*src, dst*dst), the shader squares its color output and the attachment
+    // uses one/one factors so both APIs observe the same operation.
+    u32 blend_self_scale : 1;
     AmdGpu::CompMapping swizzle;
 
     bool operator==(const PsColorBuffer& other) const = default;
@@ -217,7 +226,8 @@ struct ComputeRuntimeInfo {
     std::array<bool, 3> tgid_enable;
 
     bool operator==(const ComputeRuntimeInfo& other) const noexcept {
-        return workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
+        return shared_memory_size == other.shared_memory_size &&
+               workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
     }
 };
 
@@ -252,9 +262,21 @@ struct RuntimeInfo {
     void Initialize(Stage stage_) {
         memset(this, 0, sizeof(*this));
         stage = stage_;
+        if (stage == Stage::Vertex) {
+            vs_info.draw_user_data = {};
+        }
     }
 
     bool operator==(const RuntimeInfo& other) const noexcept {
+        if (stage != other.stage || num_user_data != other.num_user_data ||
+            num_input_vgprs != other.num_input_vgprs ||
+            num_allocated_vgprs != other.num_allocated_vgprs ||
+            fp_denorm_mode32 != other.fp_denorm_mode32 ||
+            fp_denorm_mode16_64 != other.fp_denorm_mode16_64 ||
+            fp_round_mode32 != other.fp_round_mode32 ||
+            fp_round_mode16_64 != other.fp_round_mode16_64) {
+            return false;
+        }
         switch (stage) {
         case Stage::Fragment:
             return fs_info == other.fs_info;
