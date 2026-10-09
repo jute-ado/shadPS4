@@ -154,6 +154,9 @@ GraphicsPipeline::GraphicsPipeline(
     if (instance.IsDynamicColorWriteMaskSupported()) {
         dynamic_states.push_back(vk::DynamicState::eColorWriteMaskEXT);
     }
+    if (instance.IsAttachmentFeedbackLoopLayoutSupported()) {
+        dynamic_states.push_back(vk::DynamicState::eAttachmentFeedbackLoopEnableEXT);
+    }
     if (instance.IsVertexInputDynamicState()) {
         dynamic_states.push_back(vk::DynamicState::eVertexInputEXT);
     } else if (!sdata.vertex_bindings.empty()) {
