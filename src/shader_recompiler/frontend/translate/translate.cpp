@@ -61,8 +61,10 @@ static IR::VectorReg IterateBarycentrics(const RuntimeInfo& runtime_info, auto&&
     return IR::VectorReg(dst_vreg);
 }
 
-Translator::Translator(Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_)
+Translator::Translator(Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_,
+                       SrtMemoryReader reader)
     : info{info_}, runtime_info{runtime_info_}, profile{profile_},
+      guest_memory_reader{reader},
       next_vgpr_num{runtime_info.num_allocated_vgprs} {
     IterateBarycentrics(runtime_info, [this](u32 vreg, IR::Attribute attrib, u32) {
         vgpr_to_interp[vreg] = attrib;
@@ -73,12 +75,62 @@ void Translator::EmitPrologue(IR::Block* first_block) {
     ir = IR::IREmitter(*first_block, first_block->begin());
 
     ir.Prologue();
-    ir.SetExec(ir.Imm1(true));
+    const auto initial_exec = [&]() -> IR::U1 {
+        if (info.stage != Stage::Compute || info.l_stage != LogicalStage::Compute ||
+            runtime_info.stage != Stage::Compute) {
+            return ir.Imm1(true);
+        }
+        const auto& shape = runtime_info.cs_info.workgroup_size;
+        u32 invocation_count = 1;
+        for (const u32 dimension : shape) {
+            // Only a single partial guest wave is modeled here. This bound also prevents
+            // zero/overflowing dimensions from manufacturing a plausible active-lane mask.
+            if (dimension == 0 || invocation_count > 63U / dimension) {
+                return ir.Imm1(true);
+            }
+            invocation_count *= dimension;
+        }
+        const IR::U32 x = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 0);
+        const IR::U32 y = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 1);
+        const IR::U32 z = ir.GetAttributeU32(IR::Attribute::LocalInvocationId, 2);
+        const IR::U32 linear = ir.IAdd(
+            ir.IAdd(x, ir.IMul(y, ir.Imm32(shape[0]))),
+            ir.IMul(z, ir.Imm32(shape[0] * shape[1])));
+        // This is true for every real host invocation. Unlike literal true, it retains the
+        // initial inactive guest lanes when the shader saves EXEC and later enables all lanes.
+        // It does not launch extra invocations or define arbitrary inactive register contents.
+        return ir.ILessThan(linear, ir.Imm32(invocation_count), false);
+    };
+    ir.SetExec(initial_exec());
 
     // Initialize user data.
+    const DrawUserDataLocations* draw_user_data =
+        info.stage == Stage::Vertex && info.l_stage == LogicalStage::Vertex &&
+                runtime_info.stage == Stage::Vertex
+            ? &runtime_info.vs_info.draw_user_data
+            : nullptr;
+    if (draw_user_data && !draw_user_data->IsValid()) {
+        LOG_ERROR(Render_Recompiler, "Rejecting invalid or colliding draw user-data destinations");
+        info.translation_failed = true;
+        return;
+    }
     IR::ScalarReg dst_sreg = IR::ScalarReg::S0;
     for (u32 i = 0; i < runtime_info.num_user_data; i++) {
-        ir.SetScalarReg(dst_sreg, ir.GetUserData(dst_sreg));
+        const IR::U32 value = [&] {
+            if (draw_user_data) {
+                if (draw_user_data->base_vertex == i) {
+                    return ir.GetAttributeU32(IR::Attribute::BaseVertex);
+                }
+                if (draw_user_data->base_instance == i) {
+                    return ir.GetAttributeU32(IR::Attribute::BaseInstance);
+                }
+                if (draw_user_data->draw_index == i) {
+                    return ir.GetAttributeU32(IR::Attribute::DrawIndex);
+                }
+            }
+            return ir.GetUserData(dst_sreg);
+        }();
+        ir.SetScalarReg(dst_sreg, value);
         ++dst_sreg;
     }
 
@@ -929,6 +981,37 @@ void Translator::SetDst1(const InstOperand& operand, const IR::U1& value) {
     }
 }
 
+void Translator::SetCompareMaskDst(const InstOperand& operand, const IR::U1& result,
+                                   bool set_exec) {
+    if (operand.field == OperandField::ScalarGPR && operand.code >= IR::NumScalarRegs - 1U) {
+        LOG_ERROR(Render_Recompiler, "Vector compare destination does not fit an SGPR pair: {}",
+                  operand.code);
+        info.translation_failed = true;
+        return;
+    }
+    // Vector comparisons fully replace their 64-bit destination, including zero bits for
+    // inactive guest lanes. Capture the mask at this write site: a later numeric read may
+    // happen under a different EXEC or control-flow region. Unused numeric aliases are DCE'd.
+    const IR::U1 masked = ir.LogicalAnd(ir.GetExec(), result);
+    if (operand.field == OperandField::ScalarGPR || operand.field == OperandField::VccLo) {
+        const auto ballot = ir.Ballot(masked);
+        const IR::U32 low{ir.CompositeExtract(ballot, 0)};
+        const IR::U32 high{ir.CompositeExtract(ballot, 1)};
+        if (operand.field == OperandField::ScalarGPR) {
+            ir.SetScalarReg(IR::ScalarReg(operand.code), low);
+            ir.SetScalarReg(IR::ScalarReg(operand.code + 1), high);
+        } else {
+            ir.SetVccLo(low);
+            ir.SetVccHi(high);
+        }
+    }
+    SetDst1(operand, masked);
+    // Keep the Ballot before this marker so full-wave lowering sees the original EXEC.
+    if (set_exec) {
+        ir.SetExec(masked);
+    }
+}
+
 void Translator::SetDst(const InstOperand& operand, const IR::U32F32& value) {
     IR::U32F32 result = value;
     if (value.Type() == IR::Type::F32) {
@@ -1096,6 +1179,18 @@ template void Translator::SetDstPk<IR::F32, false>(const InstOperand& operand,
 
 void Translator::EmitFetch(const GcnInst& inst) {
     const auto code_sgpr_base = inst.src[0].code;
+    const DrawUserDataLocations* draw_user_data =
+        info.stage == Stage::Vertex && info.l_stage == LogicalStage::Vertex &&
+                runtime_info.stage == Stage::Vertex
+            ? &runtime_info.vs_info.draw_user_data
+            : nullptr;
+    if (draw_user_data &&
+        (!draw_user_data->IsValid() || draw_user_data->OverlapsSpan(code_sgpr_base, 2))) {
+        LOG_ERROR(Render_Recompiler,
+                  "Rejecting host fetch code pointer that depends on dynamic draw user data");
+        info.translation_failed = true;
+        return;
+    }
 
 #if 0
     // Translate fetch shader inline using regular buffer bindings; useful for debugging.
@@ -1118,8 +1213,29 @@ void Translator::EmitFetch(const GcnInst& inst) {
     info.has_fetch_shader = true;
     info.fetch_shader_sgpr_base = code_sgpr_base;
 
-    const auto fetch_data = ParseFetchShader(info);
-    ASSERT(fetch_data.has_value());
+    const auto fetch_data = ParseFetchShader(info, guest_memory_reader);
+    if (!fetch_data) {
+        if (!guest_memory_reader.Valid()) {
+            return;
+        }
+        ASSERT_MSG(false, "Failed to parse a readable fetch shader");
+        info.translation_failed = true;
+        return;
+    }
+
+    // Optimized fetch descriptor reads bypass IR flattening. Validate the complete source list
+    // before reading any descriptor or publishing attributes derived from stale CPU user data.
+    if (draw_user_data) {
+        for (const auto& attrib : fetch_data->attributes) {
+            if (attrib.HasDynamicUserDataSource(*draw_user_data)) {
+                LOG_ERROR(Render_Recompiler,
+                          "Rejecting host fetch descriptor source that depends on dynamic draw "
+                          "user data");
+                info.translation_failed = true;
+                return;
+            }
+        }
+    }
 
     if (EmulatorSettings.IsDumpShaders()) {
         using namespace Common::FS;
@@ -1129,8 +1245,17 @@ void Translator::EmitFetch(const GcnInst& inst) {
         }
         const auto filename = fmt::format("vs_{:#018x}.fetch.bin", info.pgm_hash);
         const auto file = IOFile{dump_dir / filename, FileAccessMode::Create};
-        const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-        file.WriteRaw<u8>(code, fetch_data->size);
+        const auto code =
+            ReadFetchShaderProgram(info, guest_memory_reader, code_sgpr_base, fetch_data->size);
+        if (!code) {
+            if (!guest_memory_reader.Valid()) {
+                return;
+            }
+            ASSERT_MSG(false, "Failed to capture a readable fetch shader for dumping");
+            info.translation_failed = true;
+            return;
+        }
+        file.WriteRaw<u8>(code->data(), code->size());
     }
 
     for (const auto& attrib : fetch_data->attributes) {
@@ -1138,12 +1263,29 @@ void Translator::EmitFetch(const GcnInst& inst) {
         IR::VectorReg dst_reg{attrib.dest_vgpr};
 
         // Read the V# of the attribute to figure out component number and type.
-        const auto buffer = attrib.GetSharp(info);
+        const auto buffer = attrib.GetSharp(info, guest_memory_reader);
+        if (!guest_memory_reader.Valid()) {
+            info.translation_failed = true;
+            return;
+        }
+        // GetSharp has already applied any fetch-instruction format override. Conversion
+        // consumes those effective raw bits, not the remapped Vulkan number format.
+        const auto number_conversion = AmdGpu::TryMapNumberConversion(
+            AmdGpu::NumberFormat(buffer.num_format), AmdGpu::DataFormat(buffer.data_format));
+        if (!number_conversion) {
+            LOG_WARNING(Render_Recompiler,
+                        "Unsupported fetch number conversion: shader {:#x}, attribute {}, "
+                        "raw formats {}/{}",
+                        info.pgm_hash, attrib.semantic, u32(buffer.data_format),
+                        u32(buffer.num_format));
+            info.translation_failed = true;
+            return;
+        }
         const auto values =
             ir.CompositeConstruct(ir.GetAttribute(attr, 0), ir.GetAttribute(attr, 1),
                                   ir.GetAttribute(attr, 2), ir.GetAttribute(attr, 3));
         const auto converted =
-            IR::ApplyReadNumberConversionVec4(ir, values, buffer.GetNumberConversion());
+            IR::ApplyReadNumberConversionVec4(ir, values, *number_conversion);
         const auto swizzled = ApplySwizzle(ir, converted, buffer.DstSelect());
         for (u32 i = 0; i < 4; i++) {
             ir.SetVectorReg(dst_reg++, IR::F32{ir.CompositeExtract(swizzled, i)});

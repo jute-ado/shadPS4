@@ -20,6 +20,9 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 namespace gcn_test {
 namespace {
 
+constexpr std::uint32_t kRequiredComputeSubgroupSize = 32;
+constexpr std::uint32_t kGuestWaveSize = 64;
+
 constexpr bool kEnableValidation =
 #ifdef NDEBUG
     false;
@@ -105,6 +108,8 @@ auto create_host_buffer(vk::Device dev, vk::PhysicalDevice pd, vk::DeviceSize si
 
 std::mutex g_runner_mutex;
 std::unique_ptr<Runner> g_runner;
+bool g_runner_requires_exact_subgroup32{};
+bool g_runner_requires_explicit_workgroup_layout{};
 
 } // namespace
 
@@ -127,21 +132,46 @@ Runner::~Runner() {
 
 std::expected<Runner*, ErrorInfo> Runner::instance() {
     std::lock_guard lock{g_runner_mutex};
-    if (g_runner)
+    if (g_runner && !g_runner_requires_exact_subgroup32)
         return g_runner.get();
+    // Vulkan-Hpp's test dispatcher is process-global. Keep only one live Runner so changing its
+    // instance/device dispatch table cannot invalidate another Runner's handles.
+    g_runner.reset();
     auto r = std::unique_ptr<Runner>(new Runner{});
-    if (auto init = r->initialize(); !init)
+    if (auto init = r->initialize(false); !init)
         return std::unexpected(init.error());
     g_runner = std::move(r);
+    g_runner_requires_exact_subgroup32 = false;
+    g_runner_requires_explicit_workgroup_layout = false;
+    return g_runner.get();
+}
+
+std::expected<Runner*, ErrorInfo> Runner::subgroup32_instance(
+    bool require_explicit_workgroup_layout) {
+    std::lock_guard lock{g_runner_mutex};
+    if (g_runner && g_runner_requires_exact_subgroup32 &&
+        g_runner_requires_explicit_workgroup_layout == require_explicit_workgroup_layout)
+        return g_runner.get();
+    // Do not keep a default Runner alive while rebinding the process-global Vulkan dispatcher.
+    g_runner.reset();
+    auto r = std::unique_ptr<Runner>(new Runner{});
+    if (auto init = r->initialize(true, require_explicit_workgroup_layout); !init)
+        return std::unexpected(init.error());
+    g_runner = std::move(r);
+    g_runner_requires_exact_subgroup32 = true;
+    g_runner_requires_explicit_workgroup_layout = require_explicit_workgroup_layout;
     return g_runner.get();
 }
 
 void Runner::DestroyInstance() {
     std::lock_guard lock{g_runner_mutex};
     g_runner.reset();
+    g_runner_requires_exact_subgroup32 = false;
+    g_runner_requires_explicit_workgroup_layout = false;
 }
 
-std::expected<void, ErrorInfo> Runner::initialize() {
+std::expected<void, ErrorInfo> Runner::initialize(bool require_exact_subgroup32,
+                                                bool require_explicit_workgroup_layout) {
     VULKAN_HPP_DEFAULT_DISPATCHER.init();
 
     // ---- Instance ------------------------------------------------------
@@ -172,11 +202,14 @@ std::expected<void, ErrorInfo> Runner::initialize() {
     if (pr != vk::Result::eSuccess || devs.empty())
         return make_error(Error::NoSuitableDevice, "no Vulkan devices");
 
-    constexpr std::array required_exts{
+    std::vector<const char*> required_exts{
         VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
         VK_KHR_MAINTENANCE_6_EXTENSION_NAME,
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
     };
+    if (require_explicit_workgroup_layout) {
+        required_exts.push_back(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME);
+    }
 
     for (auto pd : devs) {
         auto [er, exts] = pd.enumerateDeviceExtensionProperties();
@@ -190,21 +223,81 @@ std::expected<void, ErrorInfo> Runner::initialize() {
         if (!std::ranges::all_of(required_exts, has_ext))
             continue;
 
+        const auto properties_chain =
+            pd.getProperties2<vk::PhysicalDeviceProperties2,
+                              vk::PhysicalDeviceVulkan11Properties,
+                              vk::PhysicalDeviceVulkan13Properties>();
+        const auto& properties = properties_chain.get<vk::PhysicalDeviceProperties2>().properties;
+        const auto& subgroup = properties_chain.get<vk::PhysicalDeviceVulkan11Properties>();
+        const auto& subgroup_control =
+            properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
+        const auto features_chain =
+            pd.getFeatures2<vk::PhysicalDeviceFeatures2,
+                            vk::PhysicalDeviceVulkan13Features,
+                            vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR>();
+        const auto& subgroup_features =
+            features_chain.get<vk::PhysicalDeviceVulkan13Features>();
+        const auto& workgroup_features =
+            features_chain.get<vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR>();
+        if (require_explicit_workgroup_layout &&
+            (!workgroup_features.workgroupMemoryExplicitLayout ||
+             !workgroup_features.workgroupMemoryExplicitLayout16BitAccess)) {
+            continue;
+        }
+
+        const auto required_operations =
+            vk::SubgroupFeatureFlagBits::eBasic | vk::SubgroupFeatureFlagBits::eBallot;
+        const bool supports_compute =
+            bool(subgroup.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute);
+        const bool supports_operations =
+            (subgroup.subgroupSupportedOperations & required_operations) == required_operations;
+        const bool supports_workgroup =
+            properties.limits.maxComputeWorkGroupInvocations >= kGuestWaveSize &&
+            properties.limits.maxComputeWorkGroupSize[0] >= kGuestWaveSize;
+        const bool can_require_subgroup32 =
+            subgroup_features.subgroupSizeControl &&
+            subgroup_control.minSubgroupSize <= kRequiredComputeSubgroupSize &&
+            subgroup_control.maxSubgroupSize >= kRequiredComputeSubgroupSize &&
+            bool(subgroup_control.requiredSubgroupSizeStages &
+                 vk::ShaderStageFlagBits::eCompute) &&
+            subgroup_control.maxComputeWorkgroupSubgroups >=
+                kGuestWaveSize / kRequiredComputeSubgroupSize;
+        const bool has_exact_subgroup32 =
+            subgroup.subgroupSize == kRequiredComputeSubgroupSize || can_require_subgroup32;
+        if (require_exact_subgroup32 &&
+            (!supports_compute || !supports_operations || !supports_workgroup ||
+             !has_exact_subgroup32)) {
+            continue;
+        }
+
         auto families = pd.getQueueFamilyProperties();
         for (std::uint32_t i = 0; i < families.size(); ++i) {
             if (families[i].queueFlags & vk::QueueFlagBits::eCompute) {
                 physical_device_ = pd;
                 queue_family_ = i;
+                effective_compute_subgroup_size_ = require_exact_subgroup32
+                                                        ? kRequiredComputeSubgroupSize
+                                                        : subgroup.subgroupSize;
+                use_required_subgroup_size_ = require_exact_subgroup32 && can_require_subgroup32;
+                explicit_workgroup_layout_enabled_ = require_explicit_workgroup_layout;
+                device_name_ = properties.deviceName.data();
                 break;
             }
         }
         if (physical_device_)
             break;
     }
-    if (!physical_device_)
-        return make_error(Error::NoSuitableDevice,
-                          "no device with compute + shader_object + maintenance6 + "
-                          "push_descriptor");
+    if (!physical_device_) {
+        return make_error(
+            Error::NoSuitableDevice,
+            require_explicit_workgroup_layout
+                ? "explicit workgroup layout unsupported: requires the advertised extension, "
+                  "workgroupMemoryExplicitLayout, 16BitAccess and exact compute subgroup32"
+                : require_exact_subgroup32
+                ? "no device with compute + exact subgroup32 + BASIC/BALLOT + shader_object + "
+                      "maintenance6 + push_descriptor"
+                : "no device with compute + shader_object + maintenance6 + push_descriptor");
+    }
 
     max_push_constant_size_ = sizeof(Shader::PushData);
     // physical_device_.getProperties().limits.maxPushConstantsSize;
@@ -216,7 +309,14 @@ std::expected<void, ErrorInfo> Runner::initialize() {
         .queueCount = 1,
         .pQueuePriorities = &priority,
     };
-    vk::PhysicalDeviceShaderObjectFeaturesEXT so_feat{.shaderObject = VK_TRUE};
+    vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup_feat{
+        .workgroupMemoryExplicitLayout = VK_TRUE,
+        .workgroupMemoryExplicitLayout16BitAccess = VK_TRUE,
+    };
+    vk::PhysicalDeviceShaderObjectFeaturesEXT so_feat{
+        .pNext = require_explicit_workgroup_layout ? &workgroup_feat : nullptr,
+        .shaderObject = VK_TRUE,
+    };
     vk::PhysicalDeviceMaintenance6FeaturesKHR m6_feat{
         .pNext = &so_feat,
         .maintenance6 = VK_TRUE,
@@ -231,16 +331,21 @@ std::expected<void, ErrorInfo> Runner::initialize() {
         .shaderFloat16 = VK_TRUE,
         .shaderInt8 = VK_TRUE,
     };
+    vk::PhysicalDeviceVulkan13Features v13_feat{
+        .pNext = &v12_feat,
+        .subgroupSizeControl = use_required_subgroup_size_ ? VK_TRUE : VK_FALSE,
+    };
     vk::PhysicalDeviceFeatures phys_feat{
         .shaderInt64 = VK_TRUE,
         .shaderInt16 = VK_TRUE,
     };
 
     auto [dr, dev] = physical_device_.createDevice({
-        .pNext = &v12_feat,
+        .pNext = use_required_subgroup_size_ ? static_cast<const void*>(&v13_feat)
+                                             : static_cast<const void*>(&v12_feat),
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &qci,
-        .enabledExtensionCount = required_exts.size(),
+        .enabledExtensionCount = static_cast<std::uint32_t>(required_exts.size()),
         .ppEnabledExtensionNames = required_exts.data(),
         .pEnabledFeatures = &phys_feat,
     });
@@ -338,7 +443,11 @@ std::expected<void, ErrorInfo> Runner::run_raw(std::span<const std::uint32_t> sp
         // .size = static_cast<std::uint32_t>(push_constants.size()),
         .size = sizeof(Shader::PushData),
     };
+    vk::ShaderRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
+        .requiredSubgroupSize = effective_compute_subgroup_size_,
+    };
     vk::ShaderCreateInfoEXT sci{
+        .pNext = use_required_subgroup_size_ ? &subgroup_size_ci : nullptr,
         .stage = vk::ShaderStageFlagBits::eCompute,
         .codeType = vk::ShaderCodeTypeEXT::eSpirv,
         .codeSize = spirv.size() * sizeof(std::uint32_t),
@@ -346,8 +455,10 @@ std::expected<void, ErrorInfo> Runner::run_raw(std::span<const std::uint32_t> sp
         .pName = "main",
         .setLayoutCount = 1,
         .pSetLayouts = &descriptor_set_layout_,
-        .pushConstantRangeCount = push_constants.empty() ? 0u : 1u,
-        .pPushConstantRanges = push_constants.empty() ? nullptr : &shader_pc,
+        // Shader-object push-constant ranges must be compatible with the command pipeline
+        // layout even when this dispatch does not write any push-constant bytes.
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &shader_pc,
     };
     auto [sr, shaders] = device_.createShadersEXT(sci);
     if (sr != vk::Result::eSuccess)

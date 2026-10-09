@@ -114,6 +114,12 @@ std::string NameOf(Attribute attribute) {
         return "PrimitiveId";
     case Attribute::InstanceId:
         return "InstanceId";
+    case Attribute::BaseVertex:
+        return "BaseVertex";
+    case Attribute::BaseInstance:
+        return "BaseInstance";
+    case Attribute::DrawIndex:
+        return "DrawIndex";
     case Attribute::IsFrontFace:
         return "IsFrontFace";
     case Attribute::SampleIndex:

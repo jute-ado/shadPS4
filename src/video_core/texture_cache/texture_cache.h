@@ -147,6 +147,17 @@ public:
         return image;
     }
 
+    /// Returns the same live image generation without changing cache identity or LRU state.
+    [[nodiscard]] Image* TryGetImage(ImageId id, u64 image_uid) noexcept {
+        if (!id || !slot_images.is_allocated(id)) {
+            return nullptr;
+        }
+        auto& image = slot_images[id];
+        return image.image_uid == image_uid && True(image.flags & ImageFlagBits::Registered)
+                   ? &image
+                   : nullptr;
+    }
+
     /// Retrieves the image view with the specified id.
     [[nodiscard]] ImageView& GetImageView(ImageId id) {
         return slot_image_views[id];

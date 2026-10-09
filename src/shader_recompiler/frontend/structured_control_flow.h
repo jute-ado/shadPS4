@@ -12,6 +12,7 @@ namespace Shader {
 struct Info;
 struct Profile;
 struct RuntimeInfo;
+struct SrtMemoryReader;
 } // namespace Shader
 
 namespace Shader::Gcn {
@@ -19,6 +20,7 @@ namespace Shader::Gcn {
 [[nodiscard]] IR::AbstractSyntaxList BuildASL(Common::ObjectPool<IR::Inst>& inst_pool,
                                               Common::ObjectPool<IR::Block>& block_pool, CFG& cfg,
                                               Info& info, const RuntimeInfo& runtime_info,
-                                              const Profile& profile);
+                                              const Profile& profile,
+                                              SrtMemoryReader reader);
 
 } // namespace Shader::Gcn
