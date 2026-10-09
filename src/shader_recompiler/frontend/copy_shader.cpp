@@ -12,7 +12,9 @@ CopyShaderData ParseCopyShader(std::span<const u32> code) {
     Gcn::GcnDecodeContext decoder;
 
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
-    ASSERT_MSG(code[0] == token_mov_vcchi, "First instruction is not s_mov_b32 vcc_hi, #imm");
+    if (code.empty() || code[0] != token_mov_vcchi) {
+        return {};
+    }
 
     std::array<s32, 64> offsets{};
     offsets.fill(-1);
@@ -24,6 +26,9 @@ CopyShaderData ParseCopyShader(std::span<const u32> code) {
     auto last_attr{IR::Attribute::Position0};
     while (!code_slice.atEnd()) {
         auto inst = decoder.decodeInstruction(code_slice);
+        if (decoder.HasError()) {
+            return {};
+        }
         switch (inst.opcode) {
         case Gcn::Opcode::S_LSHL_B32: {
             ASSERT(inst.src[0].field == Gcn::OperandField::SignedConstIntPos &&

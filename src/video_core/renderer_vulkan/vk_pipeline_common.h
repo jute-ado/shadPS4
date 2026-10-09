@@ -57,6 +57,10 @@ public:
         return is_compute;
     }
 
+    [[nodiscard]] bool IsValid() const noexcept {
+        return static_cast<bool>(pipeline);
+    }
+
     // Async compilation uses immutable Info snapshots. Before publication, the owner restores the
     // stable program-cache pointers used by resource binding during draws.
     void RebindStages(std::span<const Shader::Info* const, Shader::MaxStageTypes> new_stages) {
