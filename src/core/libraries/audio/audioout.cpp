@@ -14,6 +14,7 @@
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/audio/audioout_error.h"
+#include "core/libraries/audio/audio_pipeline_metadata_trace.h"
 #include "core/libraries/audio/test_lab_audio_capture.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
@@ -186,6 +187,31 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
                         .channel_layout = port->format_info.channel_layout,
                     },
                     port->type == OrbisAudioOutPort::Main);
+                if (AudioPipelineTrace::IsEnabled()) {
+                    AudioPipelineTrace::SignalAnalyzer analyzer;
+                    const size_t sample_count =
+                        static_cast<size_t>(port->buffer_frames) * port->format_info.num_channels;
+                    if (port->format_info.is_float) {
+                        const auto* samples = static_cast<const float*>(port->output_buffer);
+                        for (size_t index = 0; index < sample_count; ++index) {
+                            analyzer.ObserveFloat32(samples[index]);
+                        }
+                    } else {
+                        const auto* samples = static_cast<const s16*>(port->output_buffer);
+                        for (size_t index = 0; index < sample_count; ++index) {
+                            analyzer.ObservePcmS16(samples[index]);
+                        }
+                    }
+                    AudioPipelineTrace::RecordAudioOutput({
+                        .format = port->format_info.is_float
+                                      ? AudioPipelineTrace::SampleFormat::Float32
+                                      : AudioPipelineTrace::SampleFormat::PcmS16,
+                        .channels = port->format_info.num_channels,
+                        .sample_rate = port->sample_rate,
+                        .frames = port->buffer_frames,
+                        .signal = analyzer.Result(),
+                    });
+                }
                 port->impl->Output(port->output_buffer);
                 port->output_ready = false;
                 port->last_output_time =

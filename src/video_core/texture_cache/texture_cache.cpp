@@ -77,6 +77,16 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
                               image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
+    std::optional<Core::DeferredBackingWrite> publication;
+    if (!sync) {
+        const std::array destinations{
+            Core::ReadbackWriteRange{image.info.guest_address, download_size, 0}};
+        publication =
+            Core::Memory::Instance()->CaptureReadbackDestinations(destinations, download_size);
+        if (!publication) {
+            return;
+        }
+    }
     const auto [download, offset] = download_buffer.Map(download_size);
     download_buffer.Commit();
     const vk::BufferImageCopy image_download = {
@@ -106,9 +116,8 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                                                   download, download_size);
     } else {
         scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), download,
-                                                          download_size);
+            [token = std::move(*publication), download, download_size] {
+                Core::Memory::Instance()->TryPublishReadback(token, {download, download_size});
             });
     }
 }
