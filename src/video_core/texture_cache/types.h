@@ -70,12 +70,33 @@ struct SubresourceExtent {
     auto operator<=>(const SubresourceExtent&) const = default;
 };
 
+// Return the resource union used when an image is recreated for an overlapping view.  The
+// defaulted comparison above is lexicographic, which is useful for ordering but is not a
+// component-wise containment/union operation.
+[[nodiscard]] constexpr SubresourceExtent MergeSubresourceExtents(
+    const SubresourceExtent& lhs, const SubresourceExtent& rhs) noexcept {
+    return {
+        .levels = lhs.levels >= rhs.levels ? lhs.levels : rhs.levels,
+        .layers = lhs.layers >= rhs.layers ? lhs.layers : rhs.layers,
+    };
+}
+
 struct SubresourceRange {
     SubresourceBase base;
     SubresourceExtent extent;
 
     auto operator<=>(const SubresourceRange&) const = default;
 };
+
+// Returns whether a subresource range is fully contained by an image's available levels/layers.
+// Keep this check overflow-safe: callers use ranges originating in guest descriptors.
+constexpr bool IsValidSubresourceRange(const SubresourceRange& range,
+                                       const SubresourceExtent& available) noexcept {
+    return range.extent.levels != 0 && range.extent.layers != 0 &&
+           range.base.level <= available.levels && range.base.layer <= available.layers &&
+           range.extent.levels <= available.levels - range.base.level &&
+           range.extent.layers <= available.layers - range.base.layer;
+}
 
 struct ImageCopy {
     SubresourceLayers src_subresource;

@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <shared_mutex>
 #include <stop_token>
 #include <thread>
+#include <vector>
 #include <core/emulator_settings.h>
 #include <magic_enum/magic_enum.hpp>
 #include "common/assert.h"
@@ -14,6 +17,7 @@
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/audio/audioout_error.h"
+#include "core/libraries/audio/audio_pipeline_metadata_trace.h"
 #include "core/libraries/audio/test_lab_audio_capture.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
@@ -127,6 +131,10 @@ static s32 GetPortType(s32 handle) {
     return (handle >> 16) & 0xFF;
 }
 
+static bool PortMatchesHandleType(const PortOut& port, s32 port_type) {
+    return static_cast<s32>(port.type) == port_type;
+}
+
 static int AllocatePort(OrbisAudioOutPort type) {
     int range_idx = GetPortRange(type);
     if (range_idx < 0) {
@@ -153,9 +161,31 @@ void AdjustVol() {
         if (auto port = port_table[i]) {
             std::unique_lock lock{port->mutex, std::try_to_lock};
             if (lock.owns_lock()) {
+                std::scoped_lock backend_lock{port->backend_mutex};
                 port->impl->SetVolume(port->volume);
             }
         }
+    }
+}
+
+static void RecordAudioOutputWorkerFailure(const std::shared_ptr<PortOut>& port,
+                                           AudioWorkerFailureStage stage) {
+    bool report_failure = false;
+    {
+        std::unique_lock lock{port->mutex};
+        if (!port->worker_failure) {
+            port->worker_failure = AudioWorkerFailureReceipt{.stage = stage};
+            port->worker_failed = true;
+            // Do not leave a guest producer blocked behind a mailbox that no
+            // longer has a worker to consume it.
+            port->output_ready = false;
+            report_failure = true;
+        }
+    }
+    port->output_cv.notify_all();
+    if (report_failure) {
+        LOG_ERROR(Lib_AudioOut, "Audio output worker failed at {}",
+                  magic_enum::enum_name(stage));
     }
 }
 
@@ -165,41 +195,102 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
         Common::SetCurrentThreadName(thread_name.c_str());
     }
 
-    Common::AccurateTimer timer(
-        std::chrono::nanoseconds(1000000000ULL * port->buffer_frames / port->sample_rate));
+    AudioWorkerFailureStage failure_stage = AudioWorkerFailureStage::CaptureSetup;
+    try {
+        const auto port_capture =
+            CreateTestLabPortPcm16Capture(static_cast<u32>(port->type), port->sample_rate);
 
-    while (true) {
-        timer.Start();
+        // Keep a private worker-owned copy. Once output_ready is cleared the
+        // guest is allowed to refill output_buffer immediately; backend timing,
+        // conversion, capture and file I/O must not read that shared mailbox.
+        std::vector<u8> output_snapshot(port->BufferSize());
 
-        {
-            std::unique_lock lock{port->mutex};
-            if (!port->impl || stop.stop_requested()) {
+        Common::AccurateTimer timer(
+            std::chrono::nanoseconds(1000000000ULL * port->buffer_frames / port->sample_rate));
+
+        while (true) {
+            timer.Start();
+
+            bool output_consumed = false;
+            {
+                std::unique_lock lock{port->mutex};
+                if (!port->impl || stop.stop_requested()) {
+                    break;
+                }
+
+                if (port->output_ready) {
+                    std::memcpy(output_snapshot.data(), port->output_buffer, port->BufferSize());
+                    port->output_ready = false;
+                    // This is the worker-consumption timestamp. Publish it while
+                    // holding the state mutex, before backend pacing is allowed
+                    // to block or a producer refills the mailbox.
+                    port->last_output_time = Kernel::sceKernelGetProcessTime();
+                    output_consumed = true;
+                }
+            }
+
+            // Wake producers as soon as ownership has moved to the private
+            // snapshot. They must not wait for backend pacing or diagnostics.
+            port->output_cv.notify_all();
+
+            if (output_consumed) {
+                failure_stage = AudioWorkerFailureStage::Processing;
+                const TestLabAudioFormat capture_format{
+                    .is_float = port->format_info.is_float,
+                    .num_channels = port->format_info.num_channels,
+                    .channel_layout = port->format_info.channel_layout,
+                };
+                CaptureTestLabMainPortAudio(
+                    output_snapshot.data(), port->buffer_frames, capture_format,
+                    port->type == OrbisAudioOutPort::Main);
+                if (port_capture) {
+                    port_capture->Append(ConvertTestLabStereoPcm16(
+                        output_snapshot.data(), port->buffer_frames, capture_format));
+                }
+                if (AudioPipelineTrace::IsEnabled()) {
+                    AudioPipelineTrace::SignalAnalyzer analyzer;
+                    const size_t sample_count =
+                        static_cast<size_t>(port->buffer_frames) * port->format_info.num_channels;
+                    if (port->format_info.is_float) {
+                        const auto* samples =
+                            reinterpret_cast<const float*>(output_snapshot.data());
+                        for (size_t index = 0; index < sample_count; ++index) {
+                            analyzer.ObserveFloat32(samples[index]);
+                        }
+                    } else {
+                        const auto* samples =
+                            reinterpret_cast<const s16*>(output_snapshot.data());
+                        for (size_t index = 0; index < sample_count; ++index) {
+                            analyzer.ObservePcmS16(samples[index]);
+                        }
+                    }
+                    AudioPipelineTrace::RecordAudioOutput({
+                        .format = port->format_info.is_float
+                                      ? AudioPipelineTrace::SampleFormat::Float32
+                                      : AudioPipelineTrace::SampleFormat::PcmS16,
+                        .channels = port->format_info.num_channels,
+                        .sample_rate = port->sample_rate,
+                        .frames = port->buffer_frames,
+                        .signal = analyzer.Result(),
+                    });
+                }
+                failure_stage = AudioWorkerFailureStage::Backend;
+                std::scoped_lock backend_lock{port->backend_mutex};
+                port->impl->Output(output_snapshot.data());
+            }
+
+            if (stop.stop_requested()) {
                 break;
             }
 
-            if (port->output_ready) {
-                CaptureTestLabMainPortAudio(
-                    port->output_buffer, port->buffer_frames,
-                    TestLabAudioFormat{
-                        .is_float = port->format_info.is_float,
-                        .num_channels = port->format_info.num_channels,
-                        .channel_layout = port->format_info.channel_layout,
-                    },
-                    port->type == OrbisAudioOutPort::Main);
-                port->impl->Output(port->output_buffer);
-                port->output_ready = false;
-                port->last_output_time =
-                    Kernel::sceKernelGetProcessTime(); // moved from sceAudioOutOutput TOOD recheck
-            }
+            timer.End();
         }
-
-        port->output_cv.notify_all();
-
-        if (stop.stop_requested()) {
-            break;
-        }
-
-        timer.End();
+    } catch (const std::exception&) {
+        RecordAudioOutputWorkerFailure(port, failure_stage);
+        return;
+    } catch (...) {
+        RecordAudioOutputWorkerFailure(port, AudioWorkerFailureStage::Unknown);
+        return;
     }
 
     {
@@ -348,7 +439,10 @@ s32 PS4_SYSV_ABI sceAudioOutOpen(UserService::OrbisUserServiceUserId user_id,
         port->output_thread.Run([port](std::stop_token stop) { AudioOutputThread(port, stop); });
 
         // Set initial volume
-        port->impl->SetVolume(port->volume);
+        {
+            std::scoped_lock backend_lock{port->backend_mutex};
+            port->impl->SetVolume(port->volume);
+        }
 
     } catch (const std::bad_alloc&) {
         return ORBIS_AUDIO_OUT_ERROR_OUT_OF_MEMORY;
@@ -399,6 +493,16 @@ s32 PS4_SYSV_ABI sceAudioOutClose(s32 handle) {
     std::shared_ptr<PortOut> port;
     {
         std::unique_lock write_lock{port_table_mutex};
+        const auto& open_port = port_table[port_id];
+        if (!open_port) {
+            LOG_ERROR(Lib_AudioOut, "Port wasn't open {}", port_id);
+            return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
+        }
+        if (!PortMatchesHandleType(*open_port, port_type)) {
+            LOG_ERROR(Lib_AudioOut, "Handle port type {} does not match open port type {}",
+                      port_type, static_cast<s32>(open_port->type));
+            return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+        }
         port = std::move(port_table[port_id]);
         port_table[port_id].reset();
     }
@@ -457,6 +561,13 @@ s32 PS4_SYSV_ABI sceAudioOutGetLastOutputTime(s32 handle, u64* output_time) {
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
     }
 
+    const s32 port_type = GetPortType(handle);
+    if (!PortMatchesHandleType(*port, port_type)) {
+        LOG_ERROR(Lib_AudioOut, "Handle port type {} does not match open port type {}", port_type,
+                  static_cast<s32>(port->type));
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+    }
+
     std::unique_lock lock{port->mutex};
     *output_time = port->last_output_time;
 
@@ -489,6 +600,13 @@ s32 PS4_SYSV_ABI sceAudioOutGetPortState(s32 handle, OrbisAudioOutPortState* sta
     if (!port) {
         LOG_ERROR(Lib_AudioOut, "Port is not open {}", port_id);
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
+    }
+
+    const s32 port_type = GetPortType(handle);
+    if (!PortMatchesHandleType(*port, port_type)) {
+        LOG_ERROR(Lib_AudioOut, "Handle port type {} does not match open port type {}", port_type,
+                  static_cast<s32>(port->type));
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
     }
 
     std::unique_lock lock{port->mutex};
@@ -572,10 +690,23 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
     }
 
+    if (!PortMatchesHandleType(*port, port_type)) {
+        LOG_ERROR(Lib_AudioOut, "Handle port type {} does not match open port type {}", port_type,
+                  static_cast<s32>(port->type));
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+    }
+
     s32 samples_sent = 0;
     {
         std::unique_lock lock{port->mutex};
-        port->output_cv.wait(lock, [&] { return !port->output_ready || port->closing; });
+        port->output_cv.wait(lock, [&] {
+            return !port->output_ready || port->closing || port->worker_failed;
+        });
+
+        if (port->worker_failed) {
+            LOG_DEBUG(Lib_AudioOut, "Port {} worker failed while waiting for drain", port_id);
+            return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT;
+        }
 
         if (port->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port {} closed while waiting for drain", port_id);
@@ -618,8 +749,10 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     }
 
     std::vector<std::shared_ptr<PortOut>> ports;
+    std::vector<int> port_ids;
     std::vector<std::unique_lock<std::mutex>> locks;
     ports.reserve(num);
+    port_ids.reserve(num);
     locks.reserve(num);
 
     u32 buffer_frames = 0;
@@ -662,8 +795,22 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
                 return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
             }
 
+            if (!PortMatchesHandleType(*port, port_type)) {
+                LOG_ERROR(Lib_AudioOut,
+                          "Handle port type {} does not match open port type {}", port_type,
+                          static_cast<s32>(port->type));
+                return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+            }
+
+            for (const auto previous_port_id : port_ids) {
+                if (previous_port_id == port_id) {
+                    LOG_ERROR(Lib_AudioOut, "Duplicate audio port slot: {}", port_id);
+                    return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+                }
+            }
+
             ports.push_back(port);
-            locks.emplace_back(port->mutex);
+            port_ids.push_back(port_id);
 
             // Check consistent buffer size
             if (i == 0) {
@@ -675,12 +822,57 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
         }
     }
 
-    // Wait for all ports to be ready
-    for (u32 i = 0; i < num; i++) {
-        ports[i]->output_cv.wait(locks[i],
-                                 [&] { return !ports[i]->output_ready || ports[i]->closing; });
+    // Acquire every port mutex in slot order, independent of the guest's
+    // parameter order. The guest order remains the order used for waits and
+    // payload copies below. This prevents two concurrent batch calls that
+    // name the same ports in opposite orders from cross-holding their locks.
+    std::vector<u32> lock_order(num);
+    std::iota(lock_order.begin(), lock_order.end(), 0);
+    std::sort(lock_order.begin(), lock_order.end(), [&](u32 lhs, u32 rhs) {
+        return port_ids[lhs] < port_ids[rhs];
+    });
 
-        if (ports[i]->closing) {
+    // Wait for all ports without holding unrelated port mutexes while a
+    // worker drains the selected port. The final scan and payload copy still
+    // happen with every mutex held, preserving the batch's all-or-nothing
+    // publication. If a port is busy, release the whole set, wait on that
+    // one port, then reacquire canonically and revalidate every port.
+    while (true) {
+        locks.resize(num);
+        for (const u32 index : lock_order) {
+            locks[index] = std::unique_lock<std::mutex>{ports[index]->mutex};
+        }
+
+        u32 wait_index = num;
+        for (u32 i = 0; i < num; i++) {
+            if (ports[i]->worker_failed) {
+                LOG_DEBUG(Lib_AudioOut, "Port worker failed while waiting for batch drain");
+                return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT;
+            }
+            if (ports[i]->closing) {
+                LOG_DEBUG(Lib_AudioOut, "Port closed while waiting for drain");
+                return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
+            }
+            if (ports[i]->output_ready) {
+                wait_index = i;
+                break;
+            }
+        }
+        if (wait_index == num) {
+            break;
+        }
+
+        locks.clear();
+        std::unique_lock<std::mutex> wait_lock{ports[wait_index]->mutex};
+        ports[wait_index]->output_cv.wait(wait_lock, [&] {
+            return !ports[wait_index]->output_ready || ports[wait_index]->closing ||
+                   ports[wait_index]->worker_failed;
+        });
+        if (ports[wait_index]->worker_failed) {
+            LOG_DEBUG(Lib_AudioOut, "Port worker failed while waiting for batch drain");
+            return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT;
+        }
+        if (ports[wait_index]->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port closed while waiting for drain");
             return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
         }
@@ -744,6 +936,12 @@ s32 PS4_SYSV_ABI sceAudioOutSetVolume(s32 handle, s32 flag, s32* vol) {
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
     }
 
+    if (!PortMatchesHandleType(*port, port_type)) {
+        LOG_ERROR(Lib_AudioOut, "Handle port type {} does not match open port type {}", port_type,
+                  static_cast<s32>(port->type));
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+    }
+
     std::unique_lock lock{port->mutex};
 
     // Set volumes based on flags
@@ -764,7 +962,10 @@ s32 PS4_SYSV_ABI sceAudioOutSetVolume(s32 handle, s32 flag, s32* vol) {
     if (flag & ORBIS_AUDIO_VOLUME_FLAG_RE_CH)
         port->volume[7] = *vol;
 
-    port->impl->SetVolume(port->volume);
+    {
+        std::scoped_lock backend_lock{port->backend_mutex};
+        port->impl->SetVolume(port->volume);
+    }
 
     return ORBIS_OK;
 }
@@ -782,7 +983,8 @@ s32 PS4_SYSV_ABI sceAudioOutSetMixLevelPadSpk(s32 handle, s32 mixLevel) {
         return port_id;
     }
 
-    if (GetPortType(handle) != 4) { // PadSpk
+    const s32 port_type = GetPortType(handle);
+    if (port_type != 4) { // PadSpk
         LOG_ERROR(Lib_AudioOut, "Invalid port type");
         return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT_TYPE;
     }
@@ -801,6 +1003,12 @@ s32 PS4_SYSV_ABI sceAudioOutSetMixLevelPadSpk(s32 handle, s32 mixLevel) {
     if (!port) {
         LOG_ERROR(Lib_AudioOut, "Port not opened");
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
+    }
+
+    if (!PortMatchesHandleType(*port, port_type)) {
+        LOG_ERROR(Lib_AudioOut, "Handle port type {} does not match open port type {}", port_type,
+                  static_cast<s32>(port->type));
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
     }
 
     std::unique_lock lock{port->mutex};
