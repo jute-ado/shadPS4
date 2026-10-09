@@ -75,6 +75,7 @@ protected:
     vk::UniqueDescriptorSetLayout desc_layout;
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
+    bool uses_pp_upstream_sample_tee_push_data{};
     bool is_compute;
 };
 

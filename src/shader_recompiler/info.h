@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -24,6 +25,10 @@ struct Archive;
 }
 
 namespace Shader {
+
+namespace Gcn {
+struct FetchShaderData;
+}
 
 enum class Qualifier : u8 {
     None,
@@ -81,6 +86,43 @@ struct InfoPersistent {
 };
 
 struct Info : InfoPersistent {
+    // Diagnostic-only compiler metadata. Keep this out of InfoPersistent because that
+    // structure is serialized verbatim as the shader-meta cache ABI.
+    struct PpUpstreamFragmentExportDependencies {
+        u64 image_binding_mask{};
+        u64 buffer_binding_mask{};
+        u32 parameter_mask{};
+        u32 user_data_mask{};
+        u32 component_mask{};
+        u32 image_component_mask{};
+        u32 buffer_component_mask{};
+        u32 parameter_component_mask{};
+        u32 user_data_component_mask{};
+        u32 other_attribute_component_mask{};
+        u32 read_const_component_mask{};
+        u32 undef_component_mask{};
+        u32 unknown_component_mask{};
+        bool frag_coord{};
+        bool front_face{};
+        bool other_attribute{};
+        bool read_const{};
+        bool undef{};
+        bool unknown{};
+        bool observed{};
+        bool valid{};
+        bool overflowed{};
+    };
+    PpUpstreamFragmentExportDependencies pp_upstream_fragment_export_dependencies{};
+    std::array<u32, NUM_IMAGES> pp_upstream_sample_tee_results{};
+    std::array<u32, NUM_IMAGES> pp_upstream_image_operation_use_masks{};
+    std::array<std::array<u32, NUM_IMAGES>, NUM_SAMPLERS>
+        pp_upstream_sampler_image_operation_use_masks{};
+    std::array<u64, NUM_SAMPLERS> pp_upstream_sampler_image_association_masks{};
+    std::array<u64, NUM_SAMPLERS> pp_upstream_sampler_image_disable_aniso_masks{};
+    std::array<u64, NUM_SAMPLERS> pp_upstream_sampler_image_keep_aniso_masks{};
+    bool is_pp_upstream_sample_tee_target{};
+    bool pp_upstream_sample_tee_capture_fragment_export{};
+
     struct AttributeFlags {
         bool Get(IR::Attribute attrib, u32 comp = 0) const {
             return flags[Index(attrib)] & (1 << comp);
@@ -118,6 +160,12 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    // Transient, compile-call-local replay of an already captured flattened descriptor image.
+    // This is intentionally excluded from InfoPersistent and never serialized.
+    std::span<const u32> compile_flattened_ud_snapshot;
+    // Transient replay of the fetch program parsed for the specialization that selected this
+    // permutation. The pointed-to snapshot is owned by the synchronous compile caller.
+    const Gcn::FetchShaderData* compile_fetch_shader_snapshot{};
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -189,12 +237,39 @@ struct Info : InfoPersistent {
     }
 
     void RefreshFlatBuf() {
+        if (!compile_flattened_ud_snapshot.empty()) {
+            ASSERT_MSG(ReplayCompileResourceSnapshot(),
+                       "Cached shader permutation changed its flattened descriptor layout");
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
+    }
+
+    void UseCompileResourceSnapshot(const auto& snapshot) noexcept {
+        compile_flattened_ud_snapshot = snapshot.flattened_user_data;
+    }
+
+    void UseCompileFetchShaderSnapshot(const Gcn::FetchShaderData& snapshot) noexcept {
+        compile_fetch_shader_snapshot = &snapshot;
+    }
+
+    const Gcn::FetchShaderData* CompileFetchShaderSnapshot() const noexcept {
+        return compile_fetch_shader_snapshot;
+    }
+
+    bool ReplayCompileResourceSnapshot() {
+        if (compile_flattened_ud_snapshot.empty() ||
+            compile_flattened_ud_snapshot.size() != srt_info.flattened_bufsize_dw) {
+            return false;
+        }
+        flattened_ud_buf.assign(compile_flattened_ud_snapshot.begin(),
+                                compile_flattened_ud_snapshot.end());
+        return true;
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
@@ -209,6 +284,21 @@ struct Info : InfoPersistent {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+};
+
+// Exact, short-lived flattened descriptor image used only while compiling a new permutation of an
+// already discovered shader. Keeping this separate from StageResourceSnapshot avoids retaining raw
+// guest descriptor words in the draw/pipeline binding result.
+struct CompileResourceSnapshot {
+    std::vector<u32> flattened_user_data;
+    bool valid{};
+
+    static CompileResourceSnapshot Capture(const Info& info) {
+        return {
+            .flattened_user_data = info.flattened_ud_buf,
+            .valid = info.flattened_ud_buf.size() == info.srt_info.flattened_bufsize_dw,
+        };
+    }
 };
 DECLARE_ENUM_FLAG_OPERATORS(Info::ReadConstType);
 

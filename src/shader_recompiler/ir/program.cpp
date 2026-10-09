@@ -16,10 +16,17 @@
 
 namespace Shader::IR {
 
+bool ShouldDumpProgram(bool global_dump_enabled, const Info& info) noexcept {
+    return global_dump_enabled || info.pgm_hash == 0xf8139f04 || info.pgm_hash == 0x14bd455a ||
+           info.pgm_hash == 0x144934aa ||
+           (info.l_stage == LogicalStage::Fragment && info.is_pp_upstream_sample_tee_target &&
+            info.pp_upstream_sample_tee_capture_fragment_export);
+}
+
 void DumpProgram(const Program& program, const Info& info, const std::string& type) {
     using namespace Common::FS;
 
-    if (!EmulatorSettings.IsDumpShaders()) {
+    if (!ShouldDumpProgram(EmulatorSettings.IsDumpShaders(), info)) {
         return;
     }
 

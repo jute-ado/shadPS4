@@ -20,6 +20,14 @@ void ConstantPropagationPass(IR::BlockList& program);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);
 void ResourceTrackingPass(IR::Program& program, const Profile& profile);
+void AnalyzePpUpstreamFragmentExportDependencies(IR::Program& program) noexcept;
+[[nodiscard]] bool RecordPpUpstreamImageOperationUseAtBinding(
+    Info& info, u32 binding_index, IR::Opcode opcode,
+    const IR::TextureInstInfo& inst_info) noexcept;
+[[nodiscard]] bool RecordPpUpstreamSamplerImagePairAtBindings(
+    Info& info, u32 sampler_binding_index, u32 image_binding_index,
+    IR::Opcode opcode, const IR::TextureInstInfo& inst_info,
+    bool disable_aniso) noexcept;
 void BufferAccessRangePass(IR::Program& program);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
 void LowerBufferFormatToRaw(IR::Program& program);

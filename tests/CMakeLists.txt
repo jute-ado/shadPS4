@@ -138,14 +138,75 @@ target_compile_features(shadps4_pp_source_reconstruction_test PRIVATE cxx_std_23
 target_link_libraries(shadps4_pp_source_reconstruction_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_pp_source_reconstruction_test)
 
-add_executable(shadps4_pp_source_publication_test
-    test_pp_source_publication.cpp
+add_executable(shadps4_vertex_input_snapshot_test
+    test_vertex_input_snapshot.cpp
 )
-target_include_directories(shadps4_pp_source_publication_test PRIVATE
+target_include_directories(shadps4_vertex_input_snapshot_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
+target_compile_features(shadps4_vertex_input_snapshot_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_vertex_input_snapshot_test PRIVATE
+      STAGE_RESOURCE_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+      STAGE_RESOURCE_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    FETCH_SHADER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/frontend/fetch_shader.cpp"
+)
+target_link_libraries(shadps4_vertex_input_snapshot_test PRIVATE
+    GTest::gtest_main
+    Boost::headers
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_vertex_input_snapshot_test)
+
+add_executable(shadps4_pp_source_publication_test
+    test_pp_source_publication.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/microinstruction.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/opcodes.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/pp_upstream_image_operation_use.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/host_compatibility.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image_subresource.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image_view_creation_observation.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/sampler_observation.cpp
+    stubs/pp_sample_tee_ir_stub.cpp
+)
+
+add_executable(shadps4_quad_list_indices_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/quad_list_indices.cpp
+    test_quad_list_indices.cpp
+)
+target_include_directories(shadps4_quad_list_indices_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_quad_list_indices_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_quad_list_indices_test PRIVATE
+    QUAD_LIST_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    QUAD_LIST_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+)
+target_link_libraries(shadps4_quad_list_indices_test PRIVATE
+    GTest::gtest_main
+    spdlog::spdlog
+)
+list(APPEND TEST_TARGETS shadps4_quad_list_indices_test)
+target_include_directories(shadps4_pp_source_publication_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/externals/tracy/public
+)
 target_compile_features(shadps4_pp_source_publication_test PRIVATE cxx_std_23)
-target_link_libraries(shadps4_pp_source_publication_test PRIVATE GTest::gtest_main)
+target_compile_definitions(shadps4_pp_source_publication_test PRIVATE
+    STAGE_RESOURCE_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    COLOR_EXPORT_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/shader_recompiler/frontend/translate/export.cpp"
+    PP_UPSTREAM_SAMPLE_TEE_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+    PP_UPSTREAM_TARGET_COLOR_REUSE_HEADER_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/host_passes/pp_upstream_target_color_reuse.h"
+    PP_GRAPHICS_PIPELINE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp"
+    PP_IMAGE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/texture_cache/image.cpp"
+)
+target_link_libraries(shadps4_pp_source_publication_test PRIVATE
+    GTest::gtest_main
+    magic_enum::magic_enum
+    spdlog::spdlog
+    Boost::headers
+    tsl::robin_map
+    Vulkan::Headers
+)
 list(APPEND TEST_TARGETS shadps4_pp_source_publication_test)
 
 add_executable(shadps4_submit_info_test
@@ -157,6 +218,9 @@ target_include_directories(shadps4_submit_info_test PRIVATE
 target_compile_features(shadps4_submit_info_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_submit_info_test PRIVATE
     GTest::gtest_main
+    Boost::headers
+    spdlog::spdlog
+    tsl::robin_map
     Vulkan::Headers
 )
 list(APPEND TEST_TARGETS shadps4_submit_info_test)
@@ -325,6 +389,49 @@ target_include_directories(shadps4_buffer_residency_test PRIVATE
 target_compile_features(shadps4_buffer_residency_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_buffer_residency_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_buffer_residency_test)
+
+add_executable(shadps4_pending_operation_queue_test
+    test_pending_operation_queue.cpp
+)
+target_include_directories(shadps4_pending_operation_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_pending_operation_queue_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_pending_operation_queue_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_pending_operation_queue_test)
+
+add_executable(shadps4_stream_buffer_copy_test
+    test_stream_buffer_copy.cpp
+)
+target_include_directories(shadps4_stream_buffer_copy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_stream_buffer_copy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_stream_buffer_copy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_stream_buffer_copy_test)
+
+
+add_executable(shadps4_readonly_stream_snapshot_test
+    test_readonly_stream_snapshot.cpp
+)
+target_include_directories(shadps4_readonly_stream_snapshot_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_readonly_stream_snapshot_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_readonly_stream_snapshot_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_readonly_stream_snapshot_test)
+
+add_executable(shadps4_stream_buffer_watch_test test_stream_buffer_watch.cpp)
+target_include_directories(shadps4_stream_buffer_watch_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(shadps4_stream_buffer_watch_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_stream_buffer_watch_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_stream_buffer_watch_test)
+
+add_executable(shadps4_read_const_access_policy_test test_read_const_access_policy.cpp)
+target_include_directories(shadps4_read_const_access_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(shadps4_read_const_access_policy_test PRIVATE cxx_std_23)
+target_link_libraries(shadps4_read_const_access_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_read_const_access_policy_test)
 
 add_executable(shadps4_buffer_access_range_test
     test_buffer_access_range.cpp
@@ -525,8 +632,10 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/identity_removal_pass.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/resource_tracking_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/shader_info_collection_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ssa_rewrite_pass.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/pp_upstream_image_operation_use.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/post_order.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/post_order.h
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/type.cpp
@@ -563,6 +672,8 @@ set(GCN_TEST_SOURCES
     # Tests
     gcn/test_buffer_access_range_pass.cpp
     gcn/test_gcn_instructions.cpp
+    gcn/test_pp_upstream_sample_tee_spirv.cpp
+    gcn/test_color_export_rounding.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})

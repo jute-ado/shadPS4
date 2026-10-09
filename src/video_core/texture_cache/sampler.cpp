@@ -61,6 +61,13 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         .borderColor = border_color,
         .unnormalizedCoordinates = false, // Handled in shader due to Vulkan limitations.
     };
+    creation_observation = ObserveSamplerRealizationOnce({
+        .effective_sampler = sampler,
+        .actual_create_info = &sampler_ci,
+        .pair_operation_use_known = false,
+        .sampler_filter_minmax_supported = instance.IsSamplerFilterMinmaxSupported(),
+        .sampler_filter_minmax_enabled = instance.IsSamplerFilterMinmaxEnabled(),
+    }).fact;
     auto [sampler_result, smplr] = instance.GetDevice().createSamplerUnique(sampler_ci);
     ASSERT_MSG(sampler_result == vk::Result::eSuccess, "Failed to create sampler: {}",
                vk::to_string(sampler_result));

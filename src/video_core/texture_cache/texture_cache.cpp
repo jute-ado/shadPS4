@@ -240,7 +240,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         if (cache_image.info.num_samples == 1 && new_info.num_samples == 1) {
             // Perform depth<->color copy using the intermediate copy buffer.
             if (instance.IsMaintenance8Supported()) {
-                new_image.CopyImage(cache_image);
+                new_image.CopyImage(cache_image, ImageTransferOrigin::DepthOverlap,
+                                    cache_image_id);
             } else {
                 const auto& copy_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
                 new_image.CopyImageWithBuffer(cache_image, copy_buffer.Handle(), 0);
@@ -272,8 +273,19 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& image_info,
                                                            BindingType binding,
                                                            ImageId cache_image_id,
-                                                           ImageId merged_image_id) {
+                                                           ImageId merged_image_id,
+                                                           ImageSubresourceLookupObservation*
+                                                               lookup_observation) {
     auto& cache_image = slot_images[cache_image_id];
+    const bool cache_gpu_authoritative = lookup_observation && cache_image.SafeToDownload();
+    const bool merged_gpu_authoritative =
+        lookup_observation && merged_image_id && slot_images[merged_image_id].SafeToDownload();
+    if (lookup_observation) {
+        *lookup_observation = {};
+        SetImageSubresourceLookupObservationFact(
+            *lookup_observation, {.parent_gpu_authoritative = cache_gpu_authoritative,
+                                  .observed = true});
+    }
     const bool safe_to_delete =
         scheduler.CurrentTick() - cache_image.tick_accessed_last > NumFramesBeforeRemoval;
 
@@ -440,8 +452,20 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
     // Right overlap, the image requested is a possible subresource of the image from cache.
     if (image_info.guest_address > cache_image.info.guest_address) {
-        if (auto mip = image_info.MipOf(cache_image.info); mip >= 0) {
-            if (auto slice = image_info.SliceOf(cache_image.info, mip); slice >= 0) {
+        const auto mip = image_info.MipOf(cache_image.info);
+        const auto slice = mip >= 0 ? image_info.SliceOf(cache_image.info, mip) : -1;
+        if (lookup_observation) {
+            auto compared = CompareImageSubresourceLookup(
+                image_info, cache_image.info, {.mip = mip, .slice = slice});
+            compared.fact.path = ImageSubresourceLookupPath::RightOverlap;
+            compared.fact.overlap_candidate_count = 1;
+            compared.fact.parent_gpu_authoritative = cache_gpu_authoritative;
+            compared.fact.provenance_current = mip >= 0 && slice >= 0;
+            SetImageSubresourceLookupObservationFact(compared, compared.fact);
+            *lookup_observation = compared;
+        }
+        if (mip >= 0) {
+            if (slice >= 0) {
                 return {cache_image_id, mip, slice};
             }
         }
@@ -454,8 +478,20 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         return {{}, -1, -1};
     } else {
         // Left overlap, the image from cache is a possible subresource of the image requested
-        if (auto mip = cache_image.info.MipOf(image_info); mip >= 0) {
-            if (auto slice = cache_image.info.SliceOf(image_info, mip); slice >= 0) {
+        const auto mip = cache_image.info.MipOf(image_info);
+        const auto slice = mip >= 0 ? cache_image.info.SliceOf(image_info, mip) : -1;
+        if (lookup_observation) {
+            auto compared = CompareImageSubresourceLookup(
+                cache_image.info, image_info, {.mip = mip, .slice = slice});
+            compared.fact.path = ImageSubresourceLookupPath::LeftOverlap;
+            compared.fact.overlap_candidate_count = 1;
+            compared.fact.parent_gpu_authoritative = merged_gpu_authoritative;
+            compared.fact.provenance_current = mip >= 0 && slice >= 0;
+            SetImageSubresourceLookupObservationFact(compared, compared.fact);
+            *lookup_observation = compared;
+        }
+        if (mip >= 0) {
+            if (slice >= 0) {
                 // We have a larger image created and a separate one, representing a subres of it
                 // bound as render target. In this case we need to rebind render target.
                 if (cache_image.binding.is_target) {
@@ -490,7 +526,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     auto& new_image = slot_images[new_image_id];
 
     RefreshImage(new_image);
-    new_image.CopyImage(src_image);
+    new_image.CopyImage(src_image, ImageTransferOrigin::ExpandImage, image_id);
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
         src_image.binding.needs_rebind = 1u;
@@ -503,7 +539,8 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     return new_image_id;
 }
 
-ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt,
+                                ImageSubresourceLookupObservation* lookup_observation) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
@@ -513,6 +550,15 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
 
     ImageId image_id{};
+    u8 perfect_candidate_count{};
+    bool perfect_candidate_overflow{};
+    std::optional<boost::container::small_vector<ImageSubresourceLookupFact, 16>>
+        overlap_candidates;
+    std::optional<ImageSubresourceLookupObservation> last_overlap_observation;
+    if (lookup_observation) {
+        overlap_candidates.emplace();
+        last_overlap_observation.emplace();
+    }
 
     // Check for a perfect match first
     for (const auto& cache_id : image_ids) {
@@ -533,6 +579,13 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
             continue;
         }
+        if (lookup_observation) {
+            if (perfect_candidate_count == std::numeric_limits<u8>::max()) {
+                perfect_candidate_overflow = true;
+            } else {
+                ++perfect_candidate_count;
+            }
+        }
         image_id = cache_id;
     }
 
@@ -540,13 +593,33 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     int view_mip{-1};
     int view_slice{-1};
     if (!image_id) {
+        bool accepted_overlap_before{};
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;
 
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
-            auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
-                ResolveOverlap(merged_info, desc.type, cache_id, image_id);
+            ImageId overlap_image_id{};
+            int overlap_view_mip{-1};
+            int overlap_view_slice{-1};
+            if (lookup_observation) {
+                ImageSubresourceLookupObservation candidate_observation{};
+                std::tie(overlap_image_id, overlap_view_mip, overlap_view_slice) = ResolveOverlap(
+                    merged_info, desc.type, cache_id, image_id, &candidate_observation);
+                if (accepted_overlap_before && !candidate_observation.fact.actual_accepted) {
+                    candidate_observation.fact.candidate_drift = true;
+                    candidate_observation.fact.provenance_current = false;
+                    SetImageSubresourceLookupObservationFact(candidate_observation,
+                                                             candidate_observation.fact);
+                }
+                accepted_overlap_before =
+                    accepted_overlap_before || candidate_observation.fact.actual_accepted;
+                overlap_candidates->push_back(candidate_observation.fact);
+                *last_overlap_observation = candidate_observation;
+            } else {
+                std::tie(overlap_image_id, overlap_view_mip, overlap_view_slice) =
+                    ResolveOverlap(merged_info, desc.type, cache_id, image_id);
+            }
             if (overlap_image_id) {
                 image_id = overlap_image_id;
                 view_mip = overlap_view_mip;
@@ -567,13 +640,52 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             LOG_WARNING(Render_Vulkan, "Image overlap resolve failed");
         }
     }
+    ImageSubresourceLookupFact final_lookup{};
+    if (lookup_observation) {
+        if (perfect_candidate_count != 0 || perfect_candidate_overflow) {
+            final_lookup = {
+                .path = ImageSubresourceLookupPath::Perfect,
+                .relation = ImageSubresourceLookupRelation::None,
+                .perfect_candidate_count = perfect_candidate_count,
+                .overflowed = perfect_candidate_overflow,
+                .observed = true,
+            };
+        } else if (!overlap_candidates->empty()) {
+            final_lookup = CollectImageSubresourceLookupCandidates(*overlap_candidates);
+        } else {
+            final_lookup.observed = true;
+        }
+    }
+
     // Create and register a new image
+    bool created_standalone{};
     if (!image_id) {
         image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
         RegisterImage(image_id);
+        created_standalone = true;
+        if (lookup_observation) {
+            final_lookup.path = ImageSubresourceLookupPath::CreatedStandalone;
+            final_lookup.created_standalone = true;
+            final_lookup.provenance_current = true;
+        }
     }
 
     Image& image = slot_images[image_id];
+    ImageSubresourceLookupFact selected_origin{};
+    if (lookup_observation && !created_standalone &&
+        final_lookup.path == ImageSubresourceLookupPath::Perfect &&
+        final_lookup.perfect_candidate_count == 1 && !final_lookup.overflowed) {
+        selected_origin = image.PeekDiagnosticSubresourceLookupProvenance();
+    }
+    if (lookup_observation) {
+        final_lookup.disposition = ClassifyImageSubresourceLookup(final_lookup);
+        if (created_standalone) {
+            image.SetDiagnosticSubresourceLookupProvenance(final_lookup);
+        }
+        *lookup_observation = *last_overlap_observation;
+        SetImageSubresourceLookupObservationFact(*lookup_observation, final_lookup);
+        lookup_observation->selected_origin = selected_origin;
+    }
     image.tick_accessed_last = scheduler.CurrentTick();
     TouchImage(image);
 
@@ -618,7 +730,8 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
-ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc,
+                                     ImageTextureObservation* texture_observation) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
@@ -628,8 +741,12 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
             download_images.emplace(image_id);
         }
     }
-    UpdateImage(image_id);
-    return image.FindView(desc.view_info);
+    return RefreshAndFindTextureOnce(
+        [&] { return UpdateImage(image_id); },
+        [&](bool* view_owner_exact) -> ImageView& {
+            return image.FindView(desc.view_info, true, view_owner_exact);
+        },
+        texture_observation);
 }
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
@@ -797,7 +914,8 @@ ImageRefreshResult TextureCache::RefreshImage(Image& image) {
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
-                                     AmdGpu::BorderColorBuffer border_color_base) {
+                                     AmdGpu::BorderColorBuffer border_color_base,
+                                     SamplerCacheObservation* observation) {
     const u64 hash = XXH3_64bits(&sampler, sizeof(sampler));
 
     std::scoped_lock lock{samplers_mutex};
@@ -808,7 +926,20 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
         sampler_lru_cache.Touch(it->second.lru_id, gc_tick);
     }
 
-    return it->second.Handle();
+    const vk::Sampler result = it->second.Handle();
+    if (observation != nullptr) {
+        observation->sampler = result;
+        observation->returned_sampler = result;
+        observation->fact = {
+            .path = new_sampler ? SamplerCachePath::Inserted : SamplerCachePath::Hit,
+            .creation = it->second.CreationObservation(),
+            .returned_handle_exact = result == it->second.Handle(),
+            .provenance_current = true,
+            .observed = true,
+        };
+        observation->fact.disposition = ClassifySamplerCacheFact(observation->fact);
+    }
+    return result;
 }
 
 void TextureCache::RegisterImage(ImageId image_id) {

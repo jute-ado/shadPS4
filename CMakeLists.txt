@@ -962,7 +962,9 @@ set(SHADER_RECOMPILER src/shader_recompiler/buffer_access_range.h
                       src/shader_recompiler/resource.h
                       src/shader_recompiler/info.h
                       src/shader_recompiler/params.h
-                      src/shader_recompiler/runtime_info.h
+                       src/shader_recompiler/pp_upstream_image_operation_use.cpp
+                       src/shader_recompiler/pp_upstream_sample_tee.h
+                       src/shader_recompiler/runtime_info.h
                       src/shader_recompiler/specialization.h
                       src/shader_recompiler/backend/bindings.h
                       src/shader_recompiler/backend/spirv/emit_spirv.cpp
@@ -1079,16 +1081,22 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/amdgpu/tiling.h
                src/video_core/buffer_cache/buffer.cpp
                src/video_core/buffer_cache/buffer.h
+               src/video_core/buffer_cache/stream_buffer_copy.h
+               src/video_core/buffer_cache/stream_buffer_watch.h
                src/video_core/buffer_cache/buffer_cache.cpp
                src/video_core/buffer_cache/buffer_cache.h
                src/video_core/buffer_cache/fault_manager.cpp
                src/video_core/buffer_cache/fault_manager.h
                src/video_core/buffer_cache/memory_tracker.h
+               src/video_core/buffer_cache/readonly_stream_snapshot.h
                src/video_core/buffer_cache/range_set.h
                src/video_core/buffer_cache/region_definitions.h
                src/video_core/buffer_cache/region_manager.h
+               src/video_core/quad_list_indices.cpp
+               src/video_core/quad_list_indices.h
                src/video_core/renderer_vulkan/liverpool_to_vk.cpp
                src/video_core/renderer_vulkan/liverpool_to_vk.h
+               src/video_core/renderer_vulkan/pending_operation_queue.h
                src/video_core/renderer_vulkan/vk_common.cpp
                src/video_core/renderer_vulkan/vk_common.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
@@ -1134,10 +1142,15 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/texture_cache/image.h
                src/video_core/texture_cache/image_info.cpp
                src/video_core/texture_cache/image_info.h
+               src/video_core/texture_cache/image_subresource.cpp
+               src/video_core/texture_cache/image_subresource_lookup.h
                src/video_core/texture_cache/image_view.cpp
                src/video_core/texture_cache/image_view.h
+               src/video_core/texture_cache/image_view_creation_observation.cpp
                src/video_core/texture_cache/sampler.cpp
                src/video_core/texture_cache/sampler.h
+               src/video_core/texture_cache/sampler_observation.cpp
+               src/video_core/texture_cache/sampler_observation.h
                src/video_core/texture_cache/texture_cache.cpp
                src/video_core/texture_cache/texture_cache.h
                src/video_core/texture_cache/tile_manager.cpp

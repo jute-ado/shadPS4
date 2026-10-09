@@ -24,6 +24,8 @@ class EmitContext;
 Id EmitPhi(EmitContext& ctx, IR::Inst* inst);
 void EmitVoid(EmitContext& ctx);
 Id EmitIdentity(EmitContext& ctx, const IR::Value& value);
+void EmitPpUpstreamSampleTee(EmitContext& ctx, Id value, u32 resource_index,
+                             Id cube_metadata, Id dependency_metadata);
 Id EmitConditionRef(EmitContext& ctx, const IR::Value& value);
 void EmitReference(EmitContext&);
 void EmitPhiMove(EmitContext&);

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <limits>
 #include <string_view>
 
 #include "common/types.h"
@@ -29,6 +30,7 @@ class ImageProducerState {
 public:
     void Mark(const ImageProducerClass classification) noexcept {
         last_class = classification;
+        AdvanceMutationEpoch();
         ++producer_epoch;
     }
 
@@ -51,7 +53,16 @@ public:
         };
     }
 
+    [[nodiscard]] u64 Epoch() const noexcept {
+        return producer_epoch;
+    }
+
+    [[nodiscard]] u64 MutationEpoch() const noexcept {
+        return mutation_overflow ? 0 : mutation_epoch;
+    }
+
     void Reset() noexcept {
+        AdvanceMutationEpoch();
         last_class = ImageProducerClass::Unknown;
         producer_epoch = 0;
         observed_epoch = 0;
@@ -59,10 +70,24 @@ public:
     }
 
 private:
+    void AdvanceMutationEpoch() noexcept {
+        if (mutation_overflow) {
+            return;
+        }
+        if (mutation_epoch == std::numeric_limits<u64>::max()) {
+            mutation_epoch = 0;
+            mutation_overflow = true;
+            return;
+        }
+        ++mutation_epoch;
+    }
+
     ImageProducerClass last_class{ImageProducerClass::Unknown};
     u64 producer_epoch{};
     u64 observed_epoch{};
     u64 sampled_input_observed_epoch{};
+    u64 mutation_epoch{};
+    bool mutation_overflow{};
 };
 
 [[nodiscard]] inline bool IsPpSourceProducerTrackingEnabled() noexcept {

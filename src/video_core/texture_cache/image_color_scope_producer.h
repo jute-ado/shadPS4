@@ -31,6 +31,33 @@ struct ImageColorScopePrivateLink {
     auto operator<=>(const ImageColorScopePrivateLink&) const = default;
 };
 
+struct ImageColorScopeTrackedView {
+    ImageColorScopePrivateLink link{};
+    u64 backing_generation{};
+    u64 mutation_epoch{};
+    u32 width{};
+    u32 height{};
+    u32 bytes_per_texel{};
+    u32 type{};
+    u32 format{};
+    u32 base_mip{};
+    u32 mip_count{};
+    u32 base_layer{};
+    u32 layer_count{};
+    std::array<u32, 4> mapping{};
+    u32 min_lod{};
+    u32 samples{};
+    u32 aspect_mask{};
+    bool color{};
+    bool type_2d{};
+    bool uniform_state{};
+    bool view_conflict{};
+    bool storage{};
+    bool valid{};
+
+    auto operator<=>(const ImageColorScopeTrackedView&) const = default;
+};
+
 [[nodiscard]] constexpr bool ValidateImageColorScopePrivateLink(ImageColorScopePrivateLink link,
                                                                 ImageId id, u64 uid) noexcept {
     return link.Valid() && link.id == id && link.uid == uid;
@@ -133,6 +160,21 @@ struct ImageColorScopeDrawDescriptor {
     bool indexed{};
     u32 element_count{};
     u32 instance_count{};
+    u64 fragment_pgm_hash{};
+    u32 user_clip_plane_mask{};
+    u8 guest_primitive_type{};
+    u8 effective_primitive_type{};
+    u8 cull_mode{};
+    u8 front_face{};
+    u8 fragment_mrt_mask{};
+    u8 depth_compare_op{};
+    bool quad_list_converted{};
+    bool fragment_writes_depth{};
+    bool fragment_has_discard{};
+    bool depth_test_enabled{};
+    bool depth_bounds_test_enabled{};
+    bool depth_bias_enabled{};
+    bool stencil_test_enabled{};
     u32 sampled_bindings{};
     u32 sampled_images{};
     u32 storage_writes{};
@@ -141,6 +183,8 @@ struct ImageColorScopeDrawDescriptor {
     bool sampled_input_alias{};
     bool sampled_input_valid{};
     ImageColorScopePrivateLink sampled_input_image{};
+    ImageColorScopeTrackedView sampled_input_view{};
+    ImageColorScopeTrackedView output_view{};
     u32 sampled_input_scope_draw_count{};
     ImageColorScopeDrawKind sampled_input_scope_last_draw{ImageColorScopeDrawKind::Unknown};
     bool sampled_input_scope_indexed{};
@@ -164,6 +208,7 @@ struct ImageColorScopeProducerObservation {
     bool indexed{};
     u32 element_count{};
     u32 instance_count{};
+    u64 fragment_pgm_hash{};
     u32 sampled_bindings{};
     u32 sampled_images{};
     u32 storage_writes{};
@@ -172,6 +217,8 @@ struct ImageColorScopeProducerObservation {
     bool sampled_input_alias{};
     bool sampled_input_valid{};
     ImageColorScopePrivateLink sampled_input_image{};
+    ImageColorScopeTrackedView sampled_input_view{};
+    ImageColorScopeTrackedView output_view{};
     u32 sampled_input_scope_draw_count{};
     ImageColorScopeDrawKind sampled_input_scope_last_draw{ImageColorScopeDrawKind::Unknown};
     bool sampled_input_scope_indexed{};
@@ -326,6 +373,7 @@ public:
         observation.indexed = descriptor.indexed;
         observation.element_count = descriptor.element_count;
         observation.instance_count = descriptor.instance_count;
+        observation.fragment_pgm_hash = descriptor.fragment_pgm_hash;
         observation.sampled_bindings = descriptor.sampled_bindings;
         observation.sampled_images = descriptor.sampled_images;
         observation.storage_writes = descriptor.storage_writes;
@@ -336,6 +384,10 @@ public:
         observation.sampled_input_image = descriptor.sampled_images == 1
                                               ? descriptor.sampled_input_image
                                               : ImageColorScopePrivateLink{};
+        observation.sampled_input_view = descriptor.sampled_images == 1
+                                             ? descriptor.sampled_input_view
+                                             : ImageColorScopeTrackedView{};
+        observation.output_view = descriptor.output_view;
         observation.sampled_input_scope_draw_count = descriptor.sampled_input_scope_draw_count;
         observation.sampled_input_scope_last_draw = descriptor.sampled_input_scope_last_draw;
         observation.sampled_input_scope_indexed = descriptor.sampled_input_scope_indexed;

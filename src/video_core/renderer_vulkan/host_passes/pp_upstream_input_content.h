@@ -7,6 +7,7 @@
 #include <array>
 #include <limits>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "common/types.h"
@@ -33,6 +34,7 @@ struct PpUpstreamInputContentView {
 
 struct PpUpstreamInputContentDescriptor {
     bool enabled{};
+    bool allow_all_unavailable{};
     u32 logical_width{};
     u32 logical_height{};
     u32 base_offset{};
@@ -83,6 +85,7 @@ struct PpUpstreamInputContentPlan {
     FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
     FinalGuestSurfaceLoss loss{};
     bool copy{};
+    bool unavailable_only{};
     bool cpu_wait{};
     bool finish{};
     bool retains_image{};
@@ -91,6 +94,39 @@ struct PpUpstreamInputContentPlan {
 
 [[nodiscard]] constexpr bool IsPpUpstreamInputBytesPerTexelSupported(u32 value) noexcept {
     return value == 1 || value == 2 || value == 4 || value == 8 || value == 16;
+}
+
+[[nodiscard]] constexpr bool IsPpUpstreamInputContentPlanRecordable(
+    const PpUpstreamInputContentPlan& plan) noexcept {
+    if (plan.status != FinalGuestSurfaceStatus::Complete || plan.loss.Any() ||
+        plan.input_count == 0 || plan.input_count > plan.MaxInputs) {
+        return false;
+    }
+    const u32 valid_mask = (1u << plan.input_count) - 1;
+    const u32 classified_mask = plan.capture_mask | plan.unavailable_mask | plan.alias_mask;
+    if (classified_mask != valid_mask || (plan.capture_mask & plan.unavailable_mask) != 0 ||
+        (plan.capture_mask & plan.alias_mask) != 0 ||
+        (plan.unavailable_mask & plan.alias_mask) != 0) {
+        return false;
+    }
+    if (!plan.unavailable_only) {
+        return plan.copy && plan.capture_mask != 0;
+    }
+    if (plan.copy || plan.capture_mask != 0 || plan.unavailable_mask != valid_mask ||
+        plan.alias_mask != 0 || plan.copy_region_count != 0) {
+        return false;
+    }
+    for (u32 input_index = 0; input_index < plan.input_count; ++input_index) {
+        const auto& input = plan.inputs[input_index];
+        const bool terminal_unavailable =
+            input.status == FinalGuestSurfaceStatus::Unsupported ||
+            input.status == FinalGuestSurfaceStatus::InvalidationLoss;
+        if (!terminal_unavailable || !input.loss.Any() ||
+            input.region_count != 0 || input.plane_bytes != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 [[nodiscard]] inline PpUpstreamInputContentPlan PlanPpUpstreamInputContent(
@@ -262,6 +298,18 @@ struct PpUpstreamInputContentPlan {
         next_offset += local_offset;
     }
     if (result.capture_mask == 0) {
+        const u32 valid_mask = (1u << result.input_count) - 1;
+        if (descriptor.allow_all_unavailable && result.unavailable_mask == valid_mask &&
+            result.alias_mask == 0) {
+            if (descriptor.base_offset > descriptor.max_bytes) {
+                return reject(FinalGuestSurfaceStatus::CapacityLoss,
+                              &FinalGuestSurfaceLoss::byte_capacity);
+            }
+            result.total_bytes = descriptor.base_offset;
+            result.status = FinalGuestSurfaceStatus::Complete;
+            result.unavailable_only = true;
+            return result;
+        }
         return reject(FinalGuestSurfaceStatus::Unsupported,
                       &FinalGuestSurfaceLoss::unsupported_format);
     }
@@ -290,8 +338,7 @@ struct PpUpstreamInputContentCompactResult {
         .status = plan.status,
         .loss = plan.loss,
     };
-    if (!plan.copy || plan.status != FinalGuestSurfaceStatus::Complete || plan.loss.Any() ||
-        plan.total_bytes > slot.size()) {
+    if (!IsPpUpstreamInputContentPlanRecordable(plan) || plan.total_bytes > slot.size()) {
         result.status = FinalGuestSurfaceStatus::InvalidationLoss;
         result.loss = {.invalidation = 1};
         return result;
@@ -363,16 +410,212 @@ struct PpUpstreamInputPublication {
     bool copy{};
 };
 
+enum class PpUpstreamInputPublicationDisposition : u8 {
+    Disabled = 0,
+    BaseNotPublishable = 1,
+    InputNotReady = 2,
+    CandidateMismatch = 3,
+    Published = 4,
+};
+
+struct PpUpstreamInputPublicationEvaluation {
+    PpUpstreamInputPublication publication{};
+    PpUpstreamInputPublicationDisposition disposition{
+        PpUpstreamInputPublicationDisposition::Disabled};
+    bool input_enabled{};
+    bool input_ready{};
+    bool candidate_equal{};
+};
+
+[[nodiscard]] constexpr PpUpstreamInputPublicationEvaluation
+EvaluatePpUpstreamInputPublication(bool enabled, bool input_ready, u32 candidate_index,
+                                   u32 expected_candidate_index,
+                                   FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss,
+                                   bool copy) noexcept {
+    const PpUpstreamInputPublication base{.status = status, .loss = loss, .copy = copy};
+    const bool candidate_equal = candidate_index == expected_candidate_index;
+    if (!enabled) {
+        return {.publication = base,
+                .disposition = PpUpstreamInputPublicationDisposition::Disabled,
+                .input_enabled = false,
+                .input_ready = input_ready,
+                .candidate_equal = candidate_equal};
+    }
+    if (status != FinalGuestSurfaceStatus::Complete || loss.Any() || !copy) {
+        return {.publication = base,
+                .disposition = PpUpstreamInputPublicationDisposition::BaseNotPublishable,
+                .input_enabled = true,
+                .input_ready = input_ready,
+                .candidate_equal = candidate_equal};
+    }
+    if (!input_ready) {
+        return {.publication = {.status = FinalGuestSurfaceStatus::GapLoss,
+                                .loss = {.gap = 1}},
+                .disposition = PpUpstreamInputPublicationDisposition::InputNotReady,
+                .input_enabled = true,
+                .input_ready = false,
+                .candidate_equal = candidate_equal};
+    }
+    if (!candidate_equal) {
+        return {.publication = {.status = FinalGuestSurfaceStatus::GapLoss,
+                                .loss = {.gap = 1}},
+                .disposition = PpUpstreamInputPublicationDisposition::CandidateMismatch,
+                .input_enabled = true,
+                .input_ready = true,
+                .candidate_equal = false};
+    }
+    return {.publication = base,
+            .disposition = PpUpstreamInputPublicationDisposition::Published,
+            .input_enabled = true,
+            .input_ready = true,
+            .candidate_equal = true};
+}
+
 [[nodiscard]] constexpr PpUpstreamInputPublication ReconcilePpUpstreamInputPublication(
     bool enabled, bool input_ready, u32 candidate_index, u32 expected_candidate_index,
     FinalGuestSurfaceStatus status, FinalGuestSurfaceLoss loss, bool copy) noexcept {
-    if (!enabled || status != FinalGuestSurfaceStatus::Complete || loss.Any() || !copy) {
-        return {.status = status, .loss = loss, .copy = copy};
+    return EvaluatePpUpstreamInputPublication(enabled, input_ready, candidate_index,
+                                              expected_candidate_index, status, loss, copy)
+        .publication;
+}
+
+enum class PpUpstreamInputPublicationFrameFirstFailure : u8 {
+    Idle = 0,
+    CaptureCardinality = 1,
+    PrePublication = 2,
+    InputDisabled = 3,
+    InputNotReady = 4,
+    CandidateMismatch = 5,
+    LaterFinalLoss = 6,
+    InvalidFinalTransition = 7,
+    Exact = 8,
+};
+
+struct PpUpstreamInputPublicationFrameDescriptor {
+    u64 sequence{};
+    u32 candidate_index{};
+    u32 recorded_plane_mask{};
+    u32 region_count{};
+    PpUpstreamInputPublication take{};
+    PpUpstreamInputPublicationEvaluation evaluation{};
+    PpUpstreamInputPublication final{};
+};
+
+struct PpUpstreamInputPublicationFrameReport {
+    u64 sequence{};
+    u32 candidate_index{};
+    u32 recorded_plane_mask{};
+    u32 region_count{};
+    PpUpstreamInputPublication take{};
+    PpUpstreamInputPublication publication{};
+    PpUpstreamInputPublication final{};
+    PpUpstreamInputPublicationDisposition disposition{
+        PpUpstreamInputPublicationDisposition::Disabled};
+    PpUpstreamInputPublicationFrameFirstFailure first_failure{
+        PpUpstreamInputPublicationFrameFirstFailure::Idle};
+    u32 additional_gpu_copy_count{};
+    u32 additional_slot_count{};
+    u32 additional_invalidation_count{};
+    u32 additional_release_count{};
+    u32 additional_ownership_transfer_count{};
+    bool input_enabled{};
+    bool input_ready{};
+    bool candidate_equal{};
+    bool retains_private_state{};
+    bool retains_image{};
+    bool retains_vk_image{};
+    bool affects_capture_behavior{};
+    bool affects_renderer_behavior{};
+};
+
+[[nodiscard]] constexpr PpUpstreamInputPublicationFrameReport
+MakePpUpstreamInputPublicationFrameReport(
+    const PpUpstreamInputPublicationFrameDescriptor& descriptor) noexcept {
+    using Disposition = PpUpstreamInputPublicationDisposition;
+    using FirstFailure = PpUpstreamInputPublicationFrameFirstFailure;
+    const auto& evaluation = descriptor.evaluation;
+    const bool idle =
+        descriptor.sequence == 0 && descriptor.candidate_index == 0 &&
+        descriptor.recorded_plane_mask == 0 && descriptor.region_count == 0 &&
+        descriptor.take.status == FinalGuestSurfaceStatus::AlreadyConsumed &&
+        !descriptor.take.loss.Any() && !descriptor.take.copy &&
+        evaluation.publication.status == FinalGuestSurfaceStatus::AlreadyConsumed &&
+        !evaluation.publication.loss.Any() && !evaluation.publication.copy &&
+        evaluation.disposition == Disposition::Disabled && !evaluation.input_enabled &&
+        !evaluation.input_ready && !evaluation.candidate_equal &&
+        descriptor.final.status == FinalGuestSurfaceStatus::AlreadyConsumed &&
+        !descriptor.final.loss.Any() && !descriptor.final.copy;
+
+    FirstFailure first_failure{FirstFailure::Idle};
+    if (!idle) {
+        if (descriptor.recorded_plane_mask != 0x3u) {
+            first_failure = FirstFailure::CaptureCardinality;
+        } else if (descriptor.region_count == 0) {
+            first_failure = FirstFailure::InvalidFinalTransition;
+        } else if (descriptor.take.status != FinalGuestSurfaceStatus::Complete ||
+                   descriptor.take.loss.Any() || !descriptor.take.copy) {
+            first_failure = FirstFailure::PrePublication;
+        } else if (evaluation.disposition == Disposition::Disabled) {
+            first_failure = FirstFailure::InputDisabled;
+        } else if (evaluation.disposition == Disposition::InputNotReady) {
+            first_failure = FirstFailure::InputNotReady;
+        } else if (evaluation.disposition == Disposition::CandidateMismatch) {
+            first_failure = FirstFailure::CandidateMismatch;
+        } else if (evaluation.disposition != Disposition::Published ||
+                   evaluation.publication.status != FinalGuestSurfaceStatus::Complete ||
+                   evaluation.publication.loss.Any() || !evaluation.publication.copy) {
+            first_failure = FirstFailure::InvalidFinalTransition;
+        } else if (descriptor.final.status == FinalGuestSurfaceStatus::GapLoss ||
+                   descriptor.final.loss.gap != 0) {
+            first_failure = FirstFailure::InvalidFinalTransition;
+        } else if (descriptor.final.status == FinalGuestSurfaceStatus::InvalidationLoss &&
+                   descriptor.final.loss == FinalGuestSurfaceLoss{.invalidation = 1} &&
+                   !descriptor.final.copy) {
+            first_failure = FirstFailure::LaterFinalLoss;
+        } else if (descriptor.final.status == FinalGuestSurfaceStatus::Complete &&
+                   !descriptor.final.loss.Any() && descriptor.final.copy) {
+            first_failure = FirstFailure::Exact;
+        } else {
+            first_failure = FirstFailure::InvalidFinalTransition;
+        }
     }
-    if (!input_ready || candidate_index != expected_candidate_index) {
-        return {.status = FinalGuestSurfaceStatus::GapLoss, .loss = {.gap = 1}};
-    }
-    return {.status = status, .loss = loss, .copy = true};
+
+    return {
+        .sequence = descriptor.sequence,
+        .candidate_index = descriptor.candidate_index,
+        .recorded_plane_mask = descriptor.recorded_plane_mask,
+        .region_count = descriptor.region_count,
+        .take = descriptor.take,
+        .publication = evaluation.publication,
+        .final = descriptor.final,
+        .disposition = evaluation.disposition,
+        .first_failure = first_failure,
+        .input_enabled = evaluation.input_enabled,
+        .input_ready = evaluation.input_ready,
+        .candidate_equal = evaluation.candidate_equal,
+    };
+}
+
+[[nodiscard]] inline std::string FormatPpUpstreamInputPublicationFrameReport(
+    const PpUpstreamInputPublicationFrameReport& report) {
+    return "FGSCTU s=" + std::to_string(report.sequence) +
+           " st=" + std::to_string(static_cast<u32>(report.final.status)) +
+           " lm=" + std::to_string(FinalGuestSurfaceLossMask(report.final.loss, 0)) +
+           " ci=" + std::to_string(report.candidate_index) +
+           " pm=" + std::to_string(report.recorded_plane_mask) +
+           " r=" + std::to_string(report.region_count) +
+           " ts=" + std::to_string(static_cast<u32>(report.take.status)) +
+           " tlm=" + std::to_string(FinalGuestSurfaceLossMask(report.take.loss, 0)) +
+           " tc=" + std::to_string(report.take.copy ? 1 : 0) +
+           " ps=" + std::to_string(static_cast<u32>(report.publication.status)) +
+           " plm=" + std::to_string(FinalGuestSurfaceLossMask(report.publication.loss, 0)) +
+           " pc=" + std::to_string(report.publication.copy ? 1 : 0) +
+           " ie=" + std::to_string(report.input_enabled ? 1 : 0) +
+           " ir=" + std::to_string(report.input_ready ? 1 : 0) +
+           " ce=" + std::to_string(report.candidate_equal ? 1 : 0) +
+           " pd=" + std::to_string(static_cast<u32>(report.disposition)) +
+           " fc=" + std::to_string(report.final.copy ? 1 : 0) +
+           " ff=" + std::to_string(static_cast<u32>(report.first_failure));
 }
 
 [[nodiscard]] constexpr PpUpstreamInputPublication ReconcilePpUpstreamInputSlotRelease(

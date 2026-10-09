@@ -408,6 +408,8 @@ public:
                                       TextureInstInfo info);
     [[nodiscard]] Value ImageRead(const Value& handle, const Value& coords, const U32& lod,
                                   const U32& multisampling, TextureInstInfo info);
+    void PpUpstreamSampleTee(const Value& value, u32 resource_index,
+                             const U32& cube_metadata, const U32& dependency_metadata);
     void ImageWrite(const Value& handle, const Value& coords, const U32& lod,
                     const U32& multisampling, const Value& color, TextureInstInfo info);
 

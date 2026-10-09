@@ -6,6 +6,7 @@
 #include "video_core/amdgpu/regs_texture.h"
 #include "video_core/amdgpu/resource.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/texture_cache/sampler_observation.h"
 
 namespace Vulkan {
 class Instance;
@@ -29,10 +30,15 @@ public:
         return *handle;
     }
 
+    [[nodiscard]] const SamplerRealizationFact& CreationObservation() const noexcept {
+        return creation_observation;
+    }
+
     size_t lru_id{};
 
 private:
     vk::UniqueSampler handle;
+    SamplerRealizationFact creation_observation{};
 };
 
 } // namespace VideoCore

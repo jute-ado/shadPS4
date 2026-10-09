@@ -62,6 +62,47 @@ static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     }
 }
 
+void Image::MarkDiagnosticTransfer(ImageTransferKind kind, vk::ImageAspectFlags aspect,
+                                   SubresourceRange range, u32 old_samples, u32 new_samples,
+                                   u32 source_samples, bool range_exact,
+                                   bool request_matches_encoded, bool full_xy) noexcept {
+    if (!IsPpSourceProducerTrackingEnabled()) {
+        return;
+    }
+    diagnostic_depth_stencil = {};
+    diagnostic_depth_writer_scope =
+        InvalidateImageDepthWriterScope(diagnostic_depth_writer_scope);
+    diagnostic_producer.Mark(ImageProducerClass::Transfer);
+    const u64 mutation_epoch = diagnostic_producer.MutationEpoch();
+    const u64 backing_generation = backing ? EnsureDiagnosticBackingGeneration() : 0;
+    diagnostic_transfer = {
+        .kind = kind,
+        .mutation_epoch = mutation_epoch,
+        .backing_generation = backing_generation,
+        .aspect_mask = static_cast<u32>(static_cast<VkImageAspectFlags>(aspect)),
+        .base_mip = range.base.level,
+        .mip_count = range.extent.levels,
+        .base_layer = range.base.layer,
+        .layer_count = range.extent.layers,
+        .source_samples = source_samples,
+        .old_samples = old_samples,
+        .new_samples = new_samples,
+        .range_exact = range_exact,
+        .request_matches_encoded = request_matches_encoded,
+        .full_xy = full_xy,
+        .valid = kind != ImageTransferKind::None && mutation_epoch != 0 &&
+                 backing_generation != 0 && aspect && range.extent.levels != 0 &&
+                 range.extent.layers != 0,
+    };
+    if (kind != ImageTransferKind::CopyImage) {
+        diagnostic_transfer_source_uid = 0;
+        diagnostic_transfer_source_backing_generation = 0;
+        diagnostic_transfer_source_mutation_epoch = 0;
+    }
+    diagnostic_transfer_source_token =
+        RetainDiagnosticTransferSourceToken(kind, diagnostic_transfer_source_token);
+}
+
 static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usage_flags) {
     vk::FormatFeatureFlags2 feature_flags{};
     if (usage_flags & vk::ImageUsageFlagBits::eTransferSrc) {
@@ -203,7 +244,8 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 
 Image::~Image() = default;
 
-ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_samples) {
+ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_samples,
+                           bool* view_owner_exact) {
     if (ensure_guest_samples && backing->num_samples > 1 != info.num_samples > 1) {
         SetBackingSamples(info.num_samples);
     }
@@ -211,12 +253,21 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     const auto it = std::ranges::find(view_infos, view_info);
     if (it != view_infos.end()) {
         const auto view_id = backing->image_view_ids[std::distance(view_infos.begin(), it)];
-        return (*slot_image_views)[view_id];
+        auto& view = (*slot_image_views)[view_id];
+        if (view_owner_exact != nullptr) {
+            *view_owner_exact =
+                view.info == view_info && view.CreationObservation().image_exact;
+        }
+        return view;
     }
     const auto view_id = slot_image_views->insert(*instance, view_info, *this);
     backing->image_view_infos.emplace_back(view_info);
     backing->image_view_ids.emplace_back(view_id);
-    return (*slot_image_views)[view_id];
+    auto& view = (*slot_image_views)[view_id];
+    if (view_owner_exact != nullptr) {
+        *view_owner_exact = view.info == view_info && view.CreationObservation().image_exact;
+    }
+    return view;
 }
 
 Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
@@ -259,10 +310,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 
-                constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                             vk::AccessFlagBits2::eShaderWrite |
-                                             vk::AccessFlagBits2::eMemoryWrite;
-                const bool is_write = static_cast<bool>(state.access_mask & write_flags);
+                const bool is_write = IsImageWriteAccess(state.access_mask);
                 if (state.layout != dst_layout || state.access_mask != dst_mask || is_write) {
                     barriers.emplace_back(vk::ImageMemoryBarrier2{
                         .srcStageMask = state.pl_stage,
@@ -293,10 +341,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
             subresource_states.clear();
         }
     } else { // Full resource transition
-        constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                     vk::AccessFlagBits2::eShaderWrite |
-                                     vk::AccessFlagBits2::eMemoryWrite;
-        const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
+        const bool is_write = IsImageWriteAccess(last_state.access_mask);
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             return {};
         }
@@ -328,8 +373,80 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
     return barriers;
 }
 
+ImageReadStateObservation Image::ObserveReadState(
+    vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
+    std::optional<SubresourceRange> subres_range) const noexcept {
+    const vk::PipelineStageFlags2 dst_stage =
+        (dst_mask == vk::AccessFlagBits2::eTransferRead ||
+         dst_mask == vk::AccessFlagBits2::eTransferWrite)
+            ? vk::PipelineStageFlagBits2::eTransfer
+            : ImageShaderReadStages;
+    const SubresourceRange request =
+        subres_range.value_or(SubresourceRange{.base = {}, .extent = info.resources});
+    const bool uniform = backing && backing->subresource_states.empty();
+    const ImageReadStateObservationSeed seed{
+        .request_range = request,
+        .resource_levels = info.resources.levels,
+        .resource_layers = info.resources.layers,
+        .request_aspect_mask = static_cast<u32>(static_cast<VkImageAspectFlags>(aspect_mask)),
+        .destination_layout = dst_layout,
+        .destination_access = dst_mask,
+        .destination_stages = dst_stage,
+        .uniform = uniform,
+    };
+
+    boost::container::static_vector<ImageReadStateSample,
+                                    ImageTransitBarrierReceiptMaxSubresources>
+        samples;
+    if (!backing) {
+        return BuildImageReadStateObservation(seed, samples);
+    }
+    if (uniform) {
+        samples.emplace_back(ImageReadStateSample{
+            .stages = backing->state.pl_stage,
+            .access = backing->state.access_mask,
+            .layout = backing->state.layout,
+        });
+        return BuildImageReadStateObservation(seed, samples);
+    }
+
+    const bool request_base_valid = request.base.level < seed.resource_levels &&
+                                    request.base.layer < seed.resource_layers;
+    const bool request_extent_valid = request.extent.levels != 0 &&
+                                      request.extent.layers != 0 && request_base_valid &&
+                                      request.extent.levels <=
+                                          seed.resource_levels - request.base.level &&
+                                      request.extent.layers <=
+                                          seed.resource_layers - request.base.layer;
+    const u64 selected_count = static_cast<u64>(request.extent.levels) *
+                               static_cast<u64>(request.extent.layers);
+    const u64 resource_count = static_cast<u64>(seed.resource_levels) *
+                               static_cast<u64>(seed.resource_layers);
+    if (!request_extent_valid ||
+        selected_count > ImageTransitBarrierReceiptMaxSubresources ||
+        backing->subresource_states.size() != resource_count) {
+        return BuildImageReadStateObservation(seed, samples);
+    }
+
+    for (u32 mip_offset = 0; mip_offset < request.extent.levels; ++mip_offset) {
+        const u32 mip = request.base.level + mip_offset;
+        for (u32 layer_offset = 0; layer_offset < request.extent.layers; ++layer_offset) {
+            const u32 layer = request.base.layer + layer_offset;
+            const auto& state =
+                backing->subresource_states[mip * seed.resource_layers + layer];
+            samples.emplace_back(ImageReadStateSample{
+                .stages = state.pl_stage,
+                .access = state.access_mask,
+                .layout = state.layout,
+            });
+        }
+    }
+    return BuildImageReadStateObservation(seed, samples);
+}
+
 void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
-                    std::optional<SubresourceRange> range, vk::CommandBuffer cmdbuf /*= {}*/) {
+                    std::optional<SubresourceRange> range, vk::CommandBuffer cmdbuf /*= {}*/,
+                    ImageTransitBarrierReceipt* receipt /*= nullptr*/) {
     // Adjust pipeline stage
     const vk::PipelineStageFlags2 dst_pl_stage =
         (dst_mask == vk::AccessFlagBits2::eTransferRead ||
@@ -337,7 +454,110 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
             ? vk::PipelineStageFlagBits2::eTransfer
             : vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader;
 
-    const auto barriers = GetBarriers(dst_layout, dst_mask, dst_pl_stage, range);
+    ImageTransitBarrierReceiptSeed receipt_seed{};
+    if (receipt) {
+        receipt_seed.request_range =
+            range.value_or(SubresourceRange{.base = {}, .extent = info.resources});
+        receipt_seed.resource_levels = info.resources.levels;
+        receipt_seed.resource_layers = info.resources.layers;
+        receipt_seed.request_aspect_mask =
+            static_cast<u32>(static_cast<VkImageAspectFlags>(aspect_mask));
+        receipt_seed.destination_layout = dst_layout;
+        receipt_seed.destination_access = dst_mask;
+        receipt_seed.destination_stages = dst_pl_stage;
+        receipt_seed.transition_writer = diagnostic_depth_stencil;
+        receipt_seed.uniform_before = backing->subresource_states.empty();
+        receipt_seed.transit_invoked = true;
+    }
+
+    const auto capture_state_masks = [&](ImageTransitBarrierReceiptSeed& seed,
+                                         u64* depth_stencil_write_mask,
+                                         u64* readable_mask) noexcept {
+        if (!receipt) {
+            return;
+        }
+        if (depth_stencil_write_mask) {
+            *depth_stencil_write_mask = 0;
+        }
+        if (readable_mask) {
+            *readable_mask = 0;
+        }
+
+        const auto& request = seed.request_range;
+        if (request.extent.levels == 0 || request.extent.layers == 0 ||
+            request.base.level >= seed.resource_levels ||
+            request.base.layer >= seed.resource_layers ||
+            request.extent.levels > seed.resource_levels - request.base.level ||
+            request.extent.layers > seed.resource_layers - request.base.layer) {
+            seed.malformed = true;
+            return;
+        }
+        const u64 selected_count = static_cast<u64>(request.extent.levels) *
+                                   static_cast<u64>(request.extent.layers);
+        if (selected_count > ImageTransitBarrierReceiptMaxSubresources) {
+            seed.malformed = true;
+            seed.overflowed = true;
+            return;
+        }
+
+        const auto& subresource_states = backing->subresource_states;
+        const u64 resource_count = static_cast<u64>(seed.resource_levels) *
+                                   static_cast<u64>(seed.resource_layers);
+        if (!subresource_states.empty() && subresource_states.size() != resource_count) {
+            seed.malformed = true;
+            return;
+        }
+
+        constexpr auto any_write = vk::AccessFlagBits2::eTransferWrite |
+                                   vk::AccessFlagBits2::eShaderWrite |
+                                   vk::AccessFlagBits2::eMemoryWrite |
+                                   vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+                                   vk::AccessFlagBits2::eColorAttachmentWrite;
+        for (u32 mip_offset = 0; mip_offset < request.extent.levels; ++mip_offset) {
+            const u32 mip = request.base.level + mip_offset;
+            for (u32 layer_offset = 0; layer_offset < request.extent.layers; ++layer_offset) {
+                const u32 layer = request.base.layer + layer_offset;
+                const u32 dense_index = mip_offset * request.extent.layers + layer_offset;
+                const u64 bit = u64{1} << dense_index;
+                const auto& state = subresource_states.empty()
+                                        ? backing->state
+                                        : subresource_states[mip * seed.resource_layers +
+                                                             layer];
+                if (depth_stencil_write_mask &&
+                    static_cast<bool>(state.access_mask &
+                                      vk::AccessFlagBits2::eDepthStencilAttachmentWrite)) {
+                    *depth_stencil_write_mask |= bit;
+                }
+                const bool access_covers =
+                    (state.access_mask & dst_mask) == dst_mask &&
+                    !static_cast<bool>(state.access_mask & any_write);
+                const bool stages_cover =
+                    (state.pl_stage & dst_pl_stage) == dst_pl_stage;
+                if (readable_mask && dst_mask != vk::AccessFlagBits2::eNone &&
+                    state.layout == dst_layout && access_covers && stages_cover) {
+                    *readable_mask |= bit;
+                }
+            }
+        }
+    };
+
+    Barriers barriers;
+    if (receipt) {
+        capture_state_masks(receipt_seed, &receipt_seed.prior_depth_stencil_write_mask,
+                            &receipt_seed.already_readable_mask);
+        auto result = QueryImageTransitBarriersAndBuildReceipt(
+            receipt_seed,
+            [&] { return GetBarriers(dst_layout, dst_mask, dst_pl_stage, range); },
+            [&](ImageTransitBarrierReceiptSeed& observed_seed) {
+                observed_seed.uniform_after = backing->subresource_states.empty();
+                capture_state_masks(observed_seed, nullptr,
+                                    &observed_seed.post_readable_mask);
+            });
+        barriers = std::move(result.first);
+        *receipt = result.second;
+    } else {
+        barriers = GetBarriers(dst_layout, dst_mask, dst_pl_stage, range);
+    }
     if (barriers.empty()) {
         return;
     }
@@ -490,8 +710,9 @@ static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const I
     return std::make_pair(src_layers, dst_layers);
 }
 
-void Image::CopyImage(Image& src_image) {
+void Image::CopyImage(Image& src_image, ImageTransferOrigin origin, ImageId source_id) {
     const auto& src_info = src_image.info;
+    const u32 old_samples = backing ? backing->num_samples : 0;
 
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
 
@@ -590,12 +811,117 @@ void Image::CopyImage(Image& src_image) {
 
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
-    MarkDiagnosticProducer(ImageProducerClass::Transfer);
+    u32 guaranteed_layers{};
+    bool range_exact = true;
+    bool full_xy = !regions.empty();
+    for (u32 mip = 0; mip < regions.size(); ++mip) {
+        const auto& region = regions[mip];
+        const u32 layers = region.dstSubresource.layerCount;
+        if (guaranteed_layers != 0 && guaranteed_layers != layers) {
+            range_exact = false;
+        }
+        guaranteed_layers = guaranteed_layers == 0 ? layers : std::min(guaranteed_layers, layers);
+        full_xy &= region.extent.width >= std::max(info.size.width >> mip, 1u) &&
+                   region.extent.height >= std::max(info.size.height >> mip, 1u);
+    }
+    MarkDiagnosticTransfer(
+        ImageTransferKind::CopyImage, dst_aspect,
+        {.base = {.level = 0, .layer = 0},
+         .extent = {.levels = static_cast<u32>(regions.size()), .layers = guaranteed_layers}},
+        old_samples, backing ? backing->num_samples : 0,
+        src_image.backing ? src_image.backing->num_samples : 0, range_exact, true, full_xy);
+    if (diagnostic_transfer.valid) {
+        diagnostic_transfer.origin = origin;
+        const u64 source_generation = src_image.EnsureDiagnosticBackingGeneration();
+        const u64 source_mutation_epoch = src_image.DiagnosticMutationEpoch();
+        diagnostic_transfer_source_token = {
+            .link = {.id = source_id, .uid = src_image.image_uid},
+            .backing_generation = source_generation,
+            .mutation_epoch = source_mutation_epoch,
+        };
+        if (!diagnostic_transfer_source_token.Valid()) {
+            diagnostic_transfer_source_token = {};
+        }
+        const auto source_producer = src_image.PeekDiagnosticProducer();
+        const auto source_transfer = src_image.PeekDiagnosticTransfer();
+        const auto source_depth_stencil = src_image.PeekDiagnosticDepthStencilProducer();
+        diagnostic_transfer.source_producer = source_producer.classification;
+        diagnostic_transfer.source_is_depth = src_image.info.props.is_depth;
+        diagnostic_transfer.source_depth_stencil_exact =
+            source_depth_stencil.valid &&
+            source_depth_stencil.mutation_epoch == source_mutation_epoch &&
+            source_depth_stencil.backing_generation == source_generation;
+        if (diagnostic_transfer.source_depth_stencil_exact) {
+            diagnostic_transfer.source_depth_stencil_kind = source_depth_stencil.kind;
+            diagnostic_transfer.source_depth_stencil_element_count =
+                source_depth_stencil.element_count;
+            diagnostic_transfer.source_depth_stencil_instance_count =
+                source_depth_stencil.instance_count;
+            diagnostic_transfer.source_depth_stencil_sampled_images =
+                source_depth_stencil.sampled_images;
+            diagnostic_transfer.source_depth_stencil_storage_writes =
+                source_depth_stencil.storage_writes;
+            diagnostic_transfer.source_depth_stencil_upstream_candidate_index =
+                source_depth_stencil.upstream_candidate_index;
+            diagnostic_transfer.source_depth_stencil_upstream_candidate_generation =
+                source_depth_stencil.upstream_candidate_generation;
+            diagnostic_transfer.source_depth_stencil_indexed = source_depth_stencil.indexed;
+            diagnostic_transfer.source_depth_write = source_depth_stencil.depth_write;
+            diagnostic_transfer.source_stencil_write = source_depth_stencil.stencil_write;
+            diagnostic_transfer.source_depth_stencil_upstream_candidate_valid =
+                source_depth_stencil.upstream_candidate_valid;
+        }
+        diagnostic_transfer.source_transfer_exact =
+            source_producer.classification == ImageProducerClass::Transfer &&
+            source_transfer.valid &&
+            source_transfer.mutation_epoch == src_image.DiagnosticMutationEpoch() &&
+            source_transfer.backing_generation == source_generation;
+        if (diagnostic_transfer.source_transfer_exact) {
+            diagnostic_transfer.source_transfer_kind = source_transfer.kind;
+            diagnostic_transfer.source_transfer_origin = source_transfer.origin;
+            diagnostic_transfer.nested_source_producer = source_transfer.source_producer;
+            diagnostic_transfer.nested_source_transfer_kind =
+                source_transfer.source_transfer_kind;
+            diagnostic_transfer.nested_source_transfer_origin =
+                source_transfer.source_transfer_origin;
+            diagnostic_transfer.nested_source_transfer_exact =
+                source_transfer.source_transfer_exact;
+            diagnostic_transfer.nested_source_is_depth = source_transfer.source_is_depth;
+        }
+        diagnostic_transfer.source_identity_comparable = diagnostic_transfer_source_uid != 0;
+        diagnostic_transfer.source_image_changed =
+            diagnostic_transfer.source_identity_comparable &&
+            diagnostic_transfer_source_uid != src_image.image_uid;
+        diagnostic_transfer.source_backing_changed =
+            diagnostic_transfer.source_identity_comparable &&
+            (diagnostic_transfer.source_image_changed ||
+             diagnostic_transfer_source_backing_generation != source_generation);
+        diagnostic_transfer.source_mutation_comparable =
+            diagnostic_transfer.source_identity_comparable &&
+            !diagnostic_transfer.source_image_changed && diagnostic_transfer_source_mutation_epoch != 0 &&
+            source_mutation_epoch != 0;
+        diagnostic_transfer.source_mutation_changed =
+            diagnostic_transfer.source_mutation_comparable &&
+            diagnostic_transfer_source_mutation_epoch != source_mutation_epoch;
+        diagnostic_transfer_source_uid = src_image.image_uid;
+        diagnostic_transfer_source_backing_generation = source_generation;
+        diagnostic_transfer_source_mutation_epoch = source_mutation_epoch;
+    } else {
+        diagnostic_transfer_source_token = {};
+    }
 }
 void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
     const auto& src_info = src_image.info;
+    const u32 old_samples = backing ? backing->num_samples : 0;
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
     const u32 num_layers = std::min(src_info.resources.layers, info.resources.layers);
+    bool full_xy = num_mips != 0;
+    for (u32 mip = 0; mip < num_mips; ++mip) {
+        full_xy &= std::max(src_info.size.width >> mip, 1u) >=
+                       std::max(info.size.width >> mip, 1u) &&
+                   std::max(src_info.size.height >> mip, 1u) >=
+                       std::max(info.size.height >> mip, 1u);
+    }
     ASSERT(src_info.resources.layers == info.resources.layers || num_mips == 1);
 
     SetBackingSamples(info.num_samples, false);
@@ -670,11 +996,16 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
                              buffer_copies);
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
-    MarkDiagnosticProducer(ImageProducerClass::Transfer);
+    MarkDiagnosticTransfer(
+        ImageTransferKind::CopyViaBuffer, aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+        {.base = {.level = 0, .layer = 0}, .extent = {.levels = num_mips, .layers = num_layers}},
+        old_samples, backing ? backing->num_samples : 0,
+        src_image.backing ? src_image.backing->num_samples : 0, true, true, full_xy);
 }
 
 void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     const auto& src_info = src_image.info;
+    const u32 old_samples = backing ? backing->num_samples : 0;
 
     const auto dst_dim = info.props.is_block ? 2 : 0;
     const auto mip_block_w = std::max(info.size.width >> (mip + dst_dim), 1u);
@@ -687,6 +1018,8 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     ASSERT(mip_block_p == (src_info.pitch >> src_dim));
 
     const auto [src_layers, dst_layers] = SanitizeCopyLayers(src_info, info, src_info.size.depth);
+    const bool full_xy = src_info.size.width >= std::max(info.size.width >> mip, 1u) &&
+                         src_info.size.height >= std::max(info.size.height >> mip, 1u);
 
     const vk::ImageCopy image_copy{
         .srcSubresource{
@@ -716,11 +1049,17 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
                      backing->state.layout, image_copy);
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
-    MarkDiagnosticProducer(ImageProducerClass::Transfer);
+    MarkDiagnosticTransfer(
+        ImageTransferKind::CopyMip, image_copy.dstSubresource.aspectMask,
+        {.base = {.level = mip, .layer = slice},
+         .extent = {.levels = 1, .layers = image_copy.dstSubresource.layerCount}},
+        old_samples, backing ? backing->num_samples : 0,
+        src_image.backing ? src_image.backing->num_samples : 0, true, true, full_xy);
 }
 
 void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
                     const VideoCore::SubresourceRange& mrt1_range) {
+    const u32 old_samples = backing ? backing->num_samples : 0;
     SetBackingSamples(1, false);
     scheduler->EndRendering();
 
@@ -775,7 +1114,16 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
 
     flags |= VideoCore::ImageFlagBits::GpuModified;
     flags &= ~VideoCore::ImageFlagBits::Dirty;
-    MarkDiagnosticProducer(ImageProducerClass::Transfer);
+    const bool request_matches_encoded =
+        mrt0_range.base.level == 0 && mrt0_range.extent.levels == 1 &&
+        mrt0_range.extent.layers == src_layers && mrt1_range.base.level == 0 &&
+        mrt1_range.extent.levels == 1 && mrt1_range.extent.layers == dst_layers;
+    MarkDiagnosticTransfer(ImageTransferKind::Resolve, vk::ImageAspectFlagBits::eColor,
+                           {.base = {.level = 0, .layer = mrt1_range.base.layer},
+                            .extent = {.levels = 1, .layers = dst_layers}},
+                           old_samples, backing ? backing->num_samples : 0,
+                           src_image.backing ? src_image.backing->num_samples : 0, true,
+                           request_matches_encoded);
 }
 
 void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range) {
@@ -791,13 +1139,16 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
     const auto cmdbuf = scheduler->CommandBuffer();
     cmdbuf.clearColorImage(GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
-    MarkDiagnosticProducer(ImageProducerClass::Transfer);
+    const u32 samples = backing ? backing->num_samples : 0;
+    MarkDiagnosticTransfer(ImageTransferKind::Clear, vk::ImageAspectFlagBits::eColor, range,
+                           samples, samples, 0);
 }
 
 void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     if (!backing || backing->num_samples == num_samples) {
         return;
     }
+    const u32 old_samples = backing->num_samples;
     ResetDiagnosticProducer();
     ASSERT_MSG(!info.props.is_depth, "Swapping samples is only valid for color images");
     BackingImage* new_backing;
@@ -871,7 +1222,10 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
 
     backing = new_backing;
     if (copy_backing) {
-        MarkDiagnosticProducer(ImageProducerClass::Transfer);
+        MarkDiagnosticTransfer(ImageTransferKind::BackingSampleCopy, aspect_mask,
+                               {.base = {.level = 0, .layer = 0},
+                                .extent = {.levels = 1, .layers = info.resources.layers}},
+                               old_samples, backing->num_samples, old_samples);
     }
 }
 

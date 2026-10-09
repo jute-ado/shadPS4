@@ -10,6 +10,8 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/final_guest_surface_content.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_feedback_pre_post.h"
+#include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_tee.h"
 #include "video_core/renderer_vulkan/host_passes/pp_upstream_sample_route.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -28,6 +30,7 @@ class Scheduler;
 class RenderState;
 class GraphicsPipeline;
 class PpTerminalScopeContentRuntime;
+struct PpTerminalScopeRuntimeConfig;
 
 class Rasterizer {
 public:
@@ -104,6 +107,9 @@ public:
     }
 
 private:
+    Rasterizer(const Instance& instance, Scheduler& scheduler, AmdGpu::Liverpool* liverpool,
+               PpTerminalScopeRuntimeConfig config);
+
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
@@ -113,18 +119,24 @@ private:
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
-    void UpdatePrimitiveState(bool is_indexed) const;
+    void UpdatePrimitiveState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 
     bool FilterDraw();
 
-    void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
-                     Shader::PushData& push_data);
-    void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
-    bool BindResources(const Pipeline* pipeline);
-    void CapturePpTerminalScopePreDraw(const RenderState& state,
-                                       const VideoCore::ImageColorScopeDrawDescriptor& draw);
+    bool BindBuffers(const Shader::Info& stage, const Shader::StageResourceSnapshot& resources,
+                     Shader::Backend::Bindings& binding, Shader::PushData& push_data);
+    void BindTextures(const Shader::Info& stage, const Shader::StageResourceSnapshot& resources,
+                      Shader::Backend::Bindings& binding);
+    bool BindResources(
+        const Pipeline* pipeline,
+        const std::array<Shader::StageResourceSnapshot, MaxShaderStages>* resources = nullptr);
+    [[nodiscard]] bool CapturePpTerminalScopePreDraw(
+        const GraphicsPipeline* pipeline, const RenderState& state,
+        const VideoCore::ImageColorScopeDrawDescriptor& draw);
+    void CheckpointDepthWriteBoundaryBeforeExternalBegin();
+    void CheckpointDepthWriteBoundaryAfterExternalBegin();
     void MarkEncodedImageProducers(const RenderState& state,
                                    VideoCore::ImageColorScopeDrawDescriptor draw);
     void MarkEncodedStorageImageProducers();
@@ -165,15 +177,75 @@ private:
     struct DiagnosticSampledImage {
         VideoCore::ImageId id{};
         VideoCore::ImageViewInfo view{};
+        u64 backing_generation{};
+        u32 aspect_mask{};
+        u32 requested_width{};
+        u32 requested_height{};
+        HostPasses::PpUpstreamFeedbackSampledImageTransitAccumulator transit{};
         bool view_conflict{};
+        bool extent_conflict{};
+        bool backing_conflict{};
+        bool aspect_conflict{};
     };
     boost::container::static_vector<DiagnosticSampledImage, Shader::NUM_IMAGES>
         diagnostic_sampled_images;
     boost::container::static_vector<HostPasses::PpUpstreamSampleRouteObservation,
                                     Shader::NUM_IMAGES * Shader::MaxStageTypes>
         diagnostic_sampled_routes;
+    struct DiagnosticSampledViewBinding {
+        VideoCore::ImageId image_id{};
+        u32 logical_stage{};
+        u32 image_resource_index{};
+        HostPasses::PpUpstreamFeedbackSampledViewBindingFact fact{};
+        VideoCore::ImageSubresourceLookupFact subresource_lookup{};
+    };
+    boost::container::static_vector<DiagnosticSampledViewBinding,
+                                    Shader::NUM_IMAGES * Shader::MaxStageTypes>
+        diagnostic_sampled_view_bindings;
+    boost::container::static_vector<
+        HostPasses::PpUpstreamFeedbackCubeLiveObservation,
+        Shader::NUM_IMAGES * Shader::MaxStageTypes>
+        diagnostic_sampled_cube_bindings;
+    boost::container::static_vector<
+        HostPasses::PpUpstreamFeedbackSamplerPairObservation,
+        Shader::NUM_SAMPLERS * Shader::NUM_IMAGES * Shader::MaxStageTypes>
+        diagnostic_sampler_pair_bindings;
+    HostPasses::PpUpstreamFeedbackSampledViewBindingAccumulator
+        diagnostic_sampled_view_binding;
     u32 diagnostic_sampled_bindings{};
     u32 diagnostic_storage_writes{};
+    struct DiagnosticDepthWriteBoundaryPending {
+        VideoCore::ImageColorScopePrivateLink link{};
+        VideoCore::SubresourceRange range{};
+        u64 backing_generation{};
+        u64 mutation_epoch{};
+        u64 host_rendering_instance_before{};
+        u64 host_rendering_instance_after{};
+        u64 guest_rendering_serial_before{};
+        u64 guest_rendering_serial_after{};
+        u64 pre_external_host_rendering_instance{};
+        u64 pre_external_guest_rendering_serial{};
+        bool active{};
+        bool tracked{};
+        bool uniform_state{};
+        bool encoded_depth_writer{};
+        bool writer_image_identity_exact{};
+        bool writer_backing_exact{};
+        bool writer_range_exact{};
+        bool writer_mutation_exact{};
+        bool writer_guest_serial_exact{};
+        bool writer_host_instance_exact{};
+        bool pre_rendering{};
+        bool post_transit_rendering{};
+        bool pre_external_begin_rendering{};
+        bool pre_external_diagnostic_resume{};
+        bool after_rendering{};
+        bool state_exact{};
+        bool source_depth_stencil_attachment_write{};
+        bool source_barrier_recognized_write{};
+        bool before_diagnostic_resume{};
+        bool after_diagnostic_resume{};
+    } diagnostic_depth_write_boundary{};
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;

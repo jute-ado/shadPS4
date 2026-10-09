@@ -5,6 +5,7 @@
 #include "common/div_ceil.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
+#include "shader_recompiler/pp_upstream_sample_tee.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 
@@ -724,8 +725,12 @@ void EmitContext::DefineOutputs() {
 
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
+    const bool uses_sample_tee_push_data =
+        UsesPpUpstreamSampleTeePushData(info.l_stage, info.buffers);
+    const auto push_layout = PlanPushDataLayout(uses_sample_tee_push_data);
     const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2]),
+                                         U32[4], U32[4], U32[4],
+                                         U32[push_layout.tail_components]),
                               "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -738,7 +743,9 @@ void EmitContext::DefinePushDataBlock() {
     MemberName(struct_type, PushData::UdRegsIndex + 3, "ud_regs3");
     MemberName(struct_type, PushData::BufOffsetIndex + 0, "buf_offsets0");
     MemberName(struct_type, PushData::BufOffsetIndex + 1, "buf_offsets1");
-    MemberName(struct_type, PushData::BufOffsetIndex + 2, "buf_offsets2");
+    MemberName(struct_type, PushData::PpUpstreamSampleTeeMemberIndex,
+               uses_sample_tee_push_data ? "buf_offsets2_and_pp_upstream_sample_tee"
+                                         : "buf_offsets2");
     MemberDecorate(struct_type, PushData::XOffsetIndex, spv::Decoration::Offset, 0U);
     MemberDecorate(struct_type, PushData::YOffsetIndex, spv::Decoration::Offset, 4U);
     MemberDecorate(struct_type, PushData::XScaleIndex, spv::Decoration::Offset, 8U);
@@ -749,7 +756,8 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::UdRegsIndex + 3, spv::Decoration::Offset, 64U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 80U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 96U);
-    MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 112U);
+    MemberDecorate(struct_type, PushData::PpUpstreamSampleTeeMemberIndex,
+                   spv::Decoration::Offset, 112U);
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
@@ -759,8 +767,11 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_writte
                                                  BufferType buffer_type, Id data_type) {
     // Define array type.
     const Id max_num_items = ConstU32(u32(profile.max_ubo_size) >> elem_shift);
-    const Id record_array_type{is_storage ? TypeRuntimeArray(data_type)
-                                          : TypeArray(data_type, max_num_items)};
+    const bool fixed_sample_tee = buffer_type == BufferType::PpUpstreamSampleTee;
+    const Id record_array_type{fixed_sample_tee
+                                   ? TypeArray(data_type, ConstU32(PpUpstreamSampleTeeBufferDwords))
+                               : is_storage ? TypeRuntimeArray(data_type)
+                                            : TypeArray(data_type, max_num_items)};
     // Define block struct type. Don't perform decorations twice on the same Id.
     const Id struct_type{TypeStruct(record_array_type)};
     if (std::ranges::find(buf_type_ids, record_array_type.value, &Id::value) ==
@@ -795,6 +806,9 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_writte
     case BufferType::FaultBuffer:
         Name(id, "fault_buffer");
         break;
+    case BufferType::PpUpstreamSampleTee:
+        Name(id, "pp_upstream_sample_tee");
+        break;
     case BufferType::SharedMemory:
         Name(id, "ssbo_shmem");
         break;
@@ -818,6 +832,9 @@ void EmitContext::DefineBuffers() {
             bda_pagetable_index = buffers.size();
         } else if (desc.buffer_type == BufferType::FaultBuffer) {
             fault_buffer_index = buffers.size();
+        } else if (desc.buffer_type == BufferType::PpUpstreamSampleTee) {
+            ASSERT(pp_upstream_sample_tee_buffer_index == InvalidBufferIndex);
+            pp_upstream_sample_tee_buffer_index = buffers.size();
         }
 
         // Define aliases depending on the shader usage.

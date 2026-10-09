@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <unordered_map>
 #include <sirit/sirit.h>
 
@@ -352,6 +353,8 @@ public:
     size_t flatbuf_index{};
     size_t bda_pagetable_index{};
     size_t fault_buffer_index{};
+    static constexpr size_t InvalidBufferIndex = std::numeric_limits<size_t>::max();
+    size_t pp_upstream_sample_tee_buffer_index{InvalidBufferIndex};
     Id physical_pointer_type_u32;
 
     Id sampler_type{};

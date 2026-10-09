@@ -28,13 +28,17 @@ Scheduler::~Scheduler() {
 #endif
 }
 
-void Scheduler::BeginRendering(const RenderState& new_state) {
+void Scheduler::BeginRendering(const RenderState& new_state, HostRenderingInstanceOrigin origin) {
     if (is_rendering && render_state == new_state) {
         return;
     }
     EndRendering();
     is_rendering = true;
     ++rendering_serial;
+    if (++host_rendering_instance_id == 0) {
+        ++host_rendering_instance_id;
+    }
+    host_rendering_origin = origin;
     render_state = new_state;
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
@@ -102,7 +106,7 @@ bool Scheduler::ResumeRenderingForDiagnostic(const RenderState& state, u64 expec
     }
     load_state.depth_stencil_attachment.depth_clear = false;
     load_state.depth_stencil_attachment.stencil_clear = false;
-    BeginRendering(load_state);
+    BeginRendering(load_state, HostRenderingInstanceOrigin::DiagnosticResume);
     rendering_serial = expected_serial;
     return is_rendering;
 }
@@ -135,12 +139,8 @@ void Scheduler::Wait(u64 tick) {
 }
 
 void Scheduler::PopPendingOperations() {
-    std::unique_lock lk(priority_pending_ops_mutex);
     master_semaphore.Refresh();
-    while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        pending_ops.front().callback();
-        pending_ops.pop();
-    }
+    pending_ops.PopReady([this](u64 tick) { return master_semaphore.IsFree(tick); });
 }
 
 void Scheduler::AllocateWorkerCommandBuffers() {

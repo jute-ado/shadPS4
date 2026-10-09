@@ -45,6 +45,12 @@ struct PpTerminalScopeContentConfig {
     bool capture_upstream_pre_post{};
     bool capture_upstream_input_content{};
     bool capture_upstream_sample_routes{};
+    bool capture_upstream_sample_tee{};
+    bool capture_upstream_fragment_export_tee{};
+    bool capture_upstream_depth_pre_post{};
+    bool capture_upstream_depth_predecessor_hint{};
+    u32 upstream_depth_predecessor_hint_hops{};
+    u64 upstream_sample_tee_fragment_pgm_hash{};
     u32 upstream_input_index{};
     u32 upstream_candidate_index{};
     u32 upstream_sample_route_input_index{};
@@ -55,6 +61,17 @@ struct PpTerminalScopeContentConfig {
     PpTerminalScopeDrawSelector consumer{};
 };
 
+[[nodiscard]] constexpr bool MatchesPpTerminalScopeUpstreamTarget(
+    const PpTerminalScopeContentConfig& config, const PpTerminalScopeDrawSelector& observed,
+    u64 observed_fragment_pgm_hash) noexcept {
+    if (!MatchesPpTerminalScopeDraw(config.upstream, observed)) {
+        return false;
+    }
+    return (!config.capture_upstream_sample_tee && !config.capture_upstream_depth_pre_post) ||
+           (config.upstream_sample_tee_fragment_pgm_hash != 0 &&
+            config.upstream_sample_tee_fragment_pgm_hash == observed_fragment_pgm_hash);
+}
+
 struct PpTerminalScopeRuntimeConfig {
     PpTerminalScopeContentConfig content{};
     FinalGuestSurfaceCaptureWindow window{};
@@ -62,6 +79,112 @@ struct PpTerminalScopeRuntimeConfig {
     u32 expected_calibrations{};
     bool join_final_backing{};
 };
+
+struct PpTerminalScopeDepthWriteBoundaryObservation {
+    bool tracked{};
+    bool uniform_state{};
+    bool image_identity_exact{};
+    bool backing_exact{};
+    bool range_exact{};
+    bool encoded_depth_writer{};
+    bool writer_image_identity_exact{};
+    bool writer_backing_exact{};
+    bool writer_range_exact{};
+    bool writer_mutation_exact{};
+    bool writer_guest_serial_exact{};
+    bool writer_host_instance_exact{};
+    bool pre_rendering{};
+    bool post_transit_rendering{};
+    bool pre_external_begin_rendering{};
+    bool after_rendering{};
+    bool target_guest_serial_exact{};
+    bool guest_serial_advanced{};
+    bool target_depth_load{};
+    bool state_exact{};
+    bool source_depth_stencil_attachment_write{};
+    bool source_barrier_recognized_write{};
+    bool before_diagnostic_resume{};
+    bool after_diagnostic_resume{};
+    u64 host_rendering_instance_before{};
+    u64 host_rendering_instance_after{};
+};
+
+struct PpTerminalScopeDepthWriteBoundary {
+    bool valid{};
+    bool join_exact{};
+    bool writer_exact{};
+    bool pre_rendering{};
+    bool post_transit_rendering{};
+    bool pre_external_begin_rendering{};
+    bool after_rendering{};
+    bool split_interval_observed{};
+    bool target_depth_load{};
+    bool state_exact{};
+    bool skipped_same_state_depth_stencil_write{};
+    bool same_host_rendering_instance{};
+    bool cross_host_rendering_instance{};
+    bool instrumented_cross_host_rendering_instance{};
+    bool before_diagnostic_resume{};
+    bool diagnostic_resume_excluded{};
+    bool barrier_recognized_write{};
+};
+
+[[nodiscard]] constexpr PpTerminalScopeDepthWriteBoundary
+ClassifyPpTerminalScopeDepthWriteBoundary(
+    const PpTerminalScopeDepthWriteBoundaryObservation& observation) noexcept {
+    const bool join_exact = observation.image_identity_exact && observation.backing_exact &&
+                            observation.range_exact;
+    const bool writer_exact = observation.encoded_depth_writer &&
+                              observation.writer_image_identity_exact &&
+                              observation.writer_backing_exact &&
+                              observation.writer_range_exact &&
+                              observation.writer_mutation_exact &&
+                              observation.writer_guest_serial_exact &&
+                              observation.writer_host_instance_exact;
+    const bool valid = observation.tracked && observation.uniform_state && join_exact &&
+                       writer_exact && observation.pre_rendering &&
+                       observation.post_transit_rendering && observation.after_rendering &&
+                       observation.target_guest_serial_exact &&
+                       observation.host_rendering_instance_before != 0 &&
+                       observation.host_rendering_instance_after != 0;
+    const bool skipped = valid && observation.state_exact &&
+                         observation.source_depth_stencil_attachment_write &&
+                         !observation.source_barrier_recognized_write;
+    const bool same_host = skipped && observation.pre_external_begin_rendering &&
+                           !observation.guest_serial_advanced &&
+                           observation.host_rendering_instance_before ==
+                               observation.host_rendering_instance_after;
+    const bool split_interval = skipped && !observation.pre_external_begin_rendering &&
+                                observation.guest_serial_advanced &&
+                                observation.host_rendering_instance_before !=
+                                    observation.host_rendering_instance_after;
+    const bool diagnostic_excluded = split_interval && observation.after_diagnostic_resume;
+    const bool regular_cross = split_interval && observation.target_depth_load &&
+                               !observation.before_diagnostic_resume &&
+                               !observation.after_diagnostic_resume;
+    const bool instrumented_cross = split_interval && observation.target_depth_load &&
+                                    observation.before_diagnostic_resume &&
+                                    !observation.after_diagnostic_resume;
+    return {
+        .valid = valid,
+        .join_exact = join_exact,
+        .writer_exact = writer_exact,
+        .pre_rendering = observation.pre_rendering,
+        .post_transit_rendering = observation.post_transit_rendering,
+        .pre_external_begin_rendering = observation.pre_external_begin_rendering,
+        .after_rendering = observation.after_rendering,
+        .split_interval_observed = split_interval,
+        .target_depth_load = observation.target_depth_load,
+        .state_exact = valid && observation.state_exact,
+        .skipped_same_state_depth_stencil_write = skipped,
+        .same_host_rendering_instance = same_host,
+        .cross_host_rendering_instance = regular_cross,
+        .instrumented_cross_host_rendering_instance = instrumented_cross,
+        .before_diagnostic_resume = observation.before_diagnostic_resume,
+        .diagnostic_resume_excluded = diagnostic_excluded,
+        .barrier_recognized_write = valid && observation.source_barrier_recognized_write,
+    };
+}
 
 [[nodiscard]] inline std::optional<PpTerminalScopeDrawSelector> ParsePpTerminalScopeDrawSelector(
     std::string_view value) noexcept {
@@ -145,6 +268,16 @@ template <typename ReadValue>
         read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_CANDIDATE");
     const auto upstream_sample_route_value =
         read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_ROUTE_INPUT");
+    const auto upstream_sample_tee_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_TEE");
+    const auto upstream_fragment_export_tee_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_FRAGMENT_EXPORT_TEE");
+    const auto upstream_depth_pre_post_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_DEPTH_PRE_POST");
+    const auto upstream_depth_predecessor_hint_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_DEPTH_PREDECESSOR_HINT");
+    const auto upstream_sample_tee_fragment_pgm_hash_value =
+        read_value("SHADPS4_PP_TERMINAL_SCOPE_UPSTREAM_SAMPLE_TEE_FRAGMENT_PGM_HASH");
     const auto final_backing_join_value = read_value("SHADPS4_PP_TERMINAL_FINAL_BACKING_JOIN");
     if (!first_value || !second_value || !consumer_value) {
         return std::nullopt;
@@ -169,6 +302,58 @@ template <typename ReadValue>
     }
     if (upstream_sample_route_value && !upstream_input_content_value) {
         return std::nullopt;
+    }
+    if (upstream_sample_tee_value && upstream_depth_pre_post_value) {
+        return std::nullopt;
+    }
+    if (upstream_sample_tee_fragment_pgm_hash_value.has_value() !=
+        (upstream_sample_tee_value.has_value() || upstream_depth_pre_post_value.has_value())) {
+        return std::nullopt;
+    }
+    if (upstream_sample_tee_value &&
+        (*upstream_sample_tee_value != "1" || !upstream_sample_route_value ||
+         final_config->watch_ordinals.count != 1)) {
+        return std::nullopt;
+    }
+    if (upstream_fragment_export_tee_value &&
+        (*upstream_fragment_export_tee_value != "1" || !upstream_sample_tee_value)) {
+        return std::nullopt;
+    }
+    if (upstream_depth_pre_post_value &&
+        (*upstream_depth_pre_post_value != "1" || !upstream_pre_post_value ||
+         upstream_input_content_value || upstream_sample_route_value ||
+         final_config->watch_ordinals.count != 1)) {
+        return std::nullopt;
+    }
+    if (upstream_depth_predecessor_hint_value &&
+        ((*upstream_depth_predecessor_hint_value != "1" &&
+          *upstream_depth_predecessor_hint_value != "2" &&
+          *upstream_depth_predecessor_hint_value != "3" &&
+          *upstream_depth_predecessor_hint_value != "4") ||
+         !upstream_depth_pre_post_value)) {
+        return std::nullopt;
+    }
+    const u32 upstream_depth_predecessor_hint_hops =
+        upstream_depth_predecessor_hint_value
+            ? (*upstream_depth_predecessor_hint_value == "4"
+                   ? 4u
+                   : *upstream_depth_predecessor_hint_value == "3"
+                         ? 3u
+                         : *upstream_depth_predecessor_hint_value == "2" ? 2u : 1u)
+            : 0u;
+    u64 upstream_sample_tee_fragment_pgm_hash{};
+    if (upstream_sample_tee_fragment_pgm_hash_value) {
+        const auto value = *upstream_sample_tee_fragment_pgm_hash_value;
+        if (!value.starts_with("0x") || value.size() <= 2) {
+            return std::nullopt;
+        }
+        const auto* begin = value.data() + 2;
+        const auto* end = value.data() + value.size();
+        const auto [ptr, error] =
+            std::from_chars(begin, end, upstream_sample_tee_fragment_pgm_hash, 16);
+        if (error != std::errc{} || ptr != end || upstream_sample_tee_fragment_pgm_hash == 0) {
+            return std::nullopt;
+        }
     }
     const auto first = ParsePpTerminalScopeDrawSelector(*first_value);
     const auto second = ParsePpTerminalScopeDrawSelector(*second_value);
@@ -221,6 +406,16 @@ template <typename ReadValue>
                     .capture_upstream_pre_post = upstream_pre_post_value.has_value(),
                     .capture_upstream_input_content = upstream_input_content_value.has_value(),
                     .capture_upstream_sample_routes = upstream_sample_route_value.has_value(),
+                    .capture_upstream_sample_tee = upstream_sample_tee_value.has_value(),
+                    .capture_upstream_fragment_export_tee =
+                        upstream_fragment_export_tee_value.has_value(),
+                    .capture_upstream_depth_pre_post =
+                        upstream_depth_pre_post_value.has_value(),
+                    .capture_upstream_depth_predecessor_hint =
+                        upstream_depth_predecessor_hint_value.has_value(),
+                    .upstream_depth_predecessor_hint_hops =
+                        upstream_depth_predecessor_hint_hops,
+                    .upstream_sample_tee_fragment_pgm_hash = upstream_sample_tee_fragment_pgm_hash,
                     .upstream_input_index = upstream_input_index,
                     .upstream_candidate_index = upstream_candidate_index,
                     .upstream_sample_route_input_index = upstream_sample_route_input_index,
@@ -484,6 +679,213 @@ struct PpTerminalScopeSampledInputs {
     FinalGuestSurfaceLoss loss{};
 };
 
+struct PpUpstreamSampleTeeProducerTraceDescriptor {
+    bool enabled{};
+    u32 selected_input_index{};
+    std::span<const VideoCore::ImageColorScopeTrackedView> current_views{};
+    std::span<const VideoCore::ImageColorScopeProducerObservation> producer_scopes{};
+};
+
+struct PpUpstreamSampleTeeProducerTrace {
+    u32 selected_input_index{};
+    u32 source_input_index{PpTerminalScopeSampledInputs::MaxInputs};
+    u64 producer_fragment_pgm_hash{};
+    VideoCore::ImageColorScopeAncestry ancestry{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool ready{};
+    bool source_link_in_current_inputs{};
+    bool source_subresource_matches{};
+    bool source_view_matches{};
+    bool source_backing_matches{};
+    bool source_epoch_matches{};
+    bool source_raw_captured{};
+    bool source_unavailable{};
+    bool source_alias{};
+    bool exact_source_raw_plane{};
+    bool output_subresource_matches{};
+    bool output_view_matches{};
+    bool output_backing_matches{};
+    bool output_epoch_matches{};
+    bool output_raw_captured{};
+    bool output_unavailable{};
+    bool output_alias{};
+    bool exact_output_raw_plane{};
+    bool retains_private_link{};
+    bool logs_private_id{};
+};
+
+[[nodiscard]] constexpr bool IsObservedImageColorScopeTrackedView(
+    const VideoCore::ImageColorScopeTrackedView& view) noexcept {
+    return view.valid && view.link.Valid() && view.backing_generation != 0 &&
+           view.mutation_epoch != 0 && view.width != 0 && view.height != 0 && view.mip_count != 0 &&
+           view.layer_count != 0 && view.samples != 0;
+}
+
+[[nodiscard]] constexpr bool IsRawEligibleImageColorScopeTrackedView(
+    const VideoCore::ImageColorScopeTrackedView& view) noexcept {
+    const bool supported_bytes = view.bytes_per_texel == 1 || view.bytes_per_texel == 2 ||
+                                 view.bytes_per_texel == 4 || view.bytes_per_texel == 8 ||
+                                 view.bytes_per_texel == 16;
+    return IsObservedImageColorScopeTrackedView(view) && supported_bytes && view.mip_count == 1 &&
+           view.layer_count == 1 && view.samples == 1 && view.color && view.type_2d &&
+           view.uniform_state && !view.view_conflict && !view.storage;
+}
+
+[[nodiscard]] constexpr bool SameImageColorScopeTrackedRawSubresource(
+    const VideoCore::ImageColorScopeTrackedView& lhs,
+    const VideoCore::ImageColorScopeTrackedView& rhs) noexcept {
+    return IsObservedImageColorScopeTrackedView(lhs) && IsObservedImageColorScopeTrackedView(rhs) &&
+           lhs.width == rhs.width && lhs.height == rhs.height &&
+           lhs.bytes_per_texel == rhs.bytes_per_texel && lhs.base_mip == rhs.base_mip &&
+           lhs.mip_count == rhs.mip_count && lhs.base_layer == rhs.base_layer &&
+           lhs.layer_count == rhs.layer_count && lhs.samples == rhs.samples &&
+           lhs.color == rhs.color && lhs.type_2d == rhs.type_2d &&
+           lhs.uniform_state == rhs.uniform_state && lhs.view_conflict == rhs.view_conflict &&
+           lhs.storage == rhs.storage;
+}
+
+[[nodiscard]] constexpr bool SameImageColorScopeTrackedViewShape(
+    const VideoCore::ImageColorScopeTrackedView& lhs,
+    const VideoCore::ImageColorScopeTrackedView& rhs) noexcept {
+    return SameImageColorScopeTrackedRawSubresource(lhs, rhs) && lhs.type == rhs.type &&
+           lhs.format == rhs.format && lhs.mapping == rhs.mapping && lhs.min_lod == rhs.min_lod;
+}
+
+[[nodiscard]] inline PpUpstreamSampleTeeProducerTrace PlanPpUpstreamSampleTeeProducerTrace(
+    const PpUpstreamSampleTeeProducerTraceDescriptor& descriptor) noexcept {
+    if (!descriptor.enabled) {
+        return {};
+    }
+    const auto reject = [] {
+        return PpUpstreamSampleTeeProducerTrace{
+            .status = FinalGuestSurfaceStatus::InvalidationLoss,
+            .loss = {.invalidation = 1},
+        };
+    };
+    if (descriptor.selected_input_index >= descriptor.current_views.size() ||
+        descriptor.selected_input_index >= descriptor.producer_scopes.size() ||
+        descriptor.current_views.size() > PpTerminalScopeSampledInputs::MaxInputs ||
+        descriptor.producer_scopes.size() != descriptor.current_views.size()) {
+        return reject();
+    }
+    const auto& scope = descriptor.producer_scopes[descriptor.selected_input_index];
+    if (!scope.valid || scope.overflow || scope.draw_count != 1 || scope.sampled_images != 1 ||
+        scope.storage_writes != 0 || scope.sampled_input_alias || !scope.sampled_input_valid ||
+        !scope.sampled_input_image.Valid() ||
+        scope.sampled_input_view.link != scope.sampled_input_image ||
+        !IsObservedImageColorScopeTrackedView(scope.sampled_input_view) ||
+        !IsRawEligibleImageColorScopeTrackedView(scope.output_view) ||
+        scope.output_view.link != descriptor.current_views[descriptor.selected_input_index].link ||
+        scope.sampled_input_view.link == scope.output_view.link ||
+        scope.ancestry.depth > VideoCore::MaxImageColorScopeAncestryDepth) {
+        return reject();
+    }
+    const auto& current_output = descriptor.current_views[descriptor.selected_input_index];
+    PpUpstreamSampleTeeProducerTrace result{
+        .selected_input_index = descriptor.selected_input_index,
+        .producer_fragment_pgm_hash = scope.fragment_pgm_hash,
+        .ancestry = scope.ancestry,
+        .status = FinalGuestSurfaceStatus::Complete,
+        .ready = true,
+        .output_subresource_matches =
+            SameImageColorScopeTrackedRawSubresource(scope.output_view, current_output),
+        .output_view_matches =
+            SameImageColorScopeTrackedViewShape(scope.output_view, current_output),
+        .output_backing_matches =
+            scope.output_view.backing_generation == current_output.backing_generation,
+        .output_epoch_matches = scope.output_view.mutation_epoch == current_output.mutation_epoch,
+    };
+    for (u32 input = 0; input < descriptor.current_views.size(); ++input) {
+        if (descriptor.current_views[input].link == scope.sampled_input_image) {
+            const auto& current_source = descriptor.current_views[input];
+            result.source_input_index = input;
+            result.source_link_in_current_inputs = true;
+            result.source_subresource_matches =
+                SameImageColorScopeTrackedRawSubresource(scope.sampled_input_view, current_source);
+            result.source_view_matches =
+                SameImageColorScopeTrackedViewShape(scope.sampled_input_view, current_source);
+            result.source_backing_matches =
+                scope.sampled_input_view.backing_generation == current_source.backing_generation;
+            result.source_epoch_matches =
+                scope.sampled_input_view.mutation_epoch == current_source.mutation_epoch;
+            break;
+        }
+    }
+    return result;
+}
+
+struct PpUpstreamSampleTeeProducerTraceFinalizationDescriptor {
+    PpUpstreamSampleTeeProducerTrace trace{};
+    u32 input_count{};
+    u32 capture_mask{};
+    u32 unavailable_mask{};
+    u32 alias_mask{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    FinalGuestSurfaceLoss loss{};
+    bool copy{};
+};
+
+[[nodiscard]] inline PpUpstreamSampleTeeProducerTrace FinalizePpUpstreamSampleTeeProducerTrace(
+    const PpUpstreamSampleTeeProducerTraceFinalizationDescriptor& descriptor) noexcept {
+    auto result = descriptor.trace;
+    result.source_raw_captured = false;
+    result.source_unavailable = false;
+    result.source_alias = false;
+    result.exact_source_raw_plane = false;
+    result.output_raw_captured = false;
+    result.output_unavailable = false;
+    result.output_alias = false;
+    result.exact_output_raw_plane = false;
+    if (descriptor.status != FinalGuestSurfaceStatus::Complete || descriptor.loss.Any() ||
+        !descriptor.copy) {
+        return result;
+    }
+    if (!result.ready || result.status != FinalGuestSurfaceStatus::Complete || result.loss.Any()) {
+        return result;
+    }
+    if (descriptor.input_count == 0 ||
+        descriptor.input_count > PpTerminalScopeSampledInputs::MaxInputs ||
+        result.selected_input_index >= descriptor.input_count) {
+        result.ready = false;
+        result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        result.loss = {.invalidation = 1};
+        return result;
+    }
+    const u32 valid_bits = (1u << descriptor.input_count) - 1u;
+    if (((descriptor.capture_mask | descriptor.unavailable_mask | descriptor.alias_mask) &
+         ~valid_bits) != 0 ||
+        (descriptor.capture_mask & descriptor.unavailable_mask) != 0 ||
+        (descriptor.capture_mask & descriptor.alias_mask) != 0 ||
+        (descriptor.unavailable_mask & descriptor.alias_mask) != 0 ||
+        (result.source_link_in_current_inputs &&
+         result.source_input_index >= descriptor.input_count)) {
+        result.ready = false;
+        result.status = FinalGuestSurfaceStatus::InvalidationLoss;
+        result.loss = {.invalidation = 1};
+        return result;
+    }
+    const u32 output_bit = 1u << result.selected_input_index;
+    result.output_raw_captured = (descriptor.capture_mask & output_bit) != 0;
+    result.output_unavailable = (descriptor.unavailable_mask & output_bit) != 0;
+    result.output_alias = (descriptor.alias_mask & output_bit) != 0;
+    result.exact_output_raw_plane = result.output_subresource_matches &&
+                                    result.output_backing_matches && result.output_epoch_matches &&
+                                    result.output_raw_captured && !result.output_unavailable &&
+                                    !result.output_alias;
+    if (result.source_link_in_current_inputs) {
+        const u32 source_bit = 1u << result.source_input_index;
+        result.source_raw_captured = (descriptor.capture_mask & source_bit) != 0;
+        result.source_unavailable = (descriptor.unavailable_mask & source_bit) != 0;
+        result.source_alias = (descriptor.alias_mask & source_bit) != 0;
+        result.exact_source_raw_plane = result.source_subresource_matches &&
+                                        result.source_backing_matches &&
+                                        result.source_epoch_matches && result.source_raw_captured &&
+                                        !result.source_unavailable && !result.source_alias;
+    }
+    return result;
+}
+
 [[nodiscard]] constexpr PpTerminalScopeSampledInputs ClassifyPpTerminalScopeSampledInputs(
     u32 expected_count, std::span<const PpTerminalScopeSampledInput> inputs) noexcept {
     PpTerminalScopeSampledInputs result{};
@@ -536,6 +938,15 @@ public:
     explicit constexpr PpTerminalScopeUpstreamInputRegistry(
         PpTerminalScopeDrawSelector selector_) noexcept
         : selector{selector_} {}
+
+    [[nodiscard]] constexpr bool MatchesSelector(
+        const PpTerminalScopeDrawSelector& draw) const noexcept {
+        return MatchesPpTerminalScopeDraw(selector, draw);
+    }
+
+    [[nodiscard]] constexpr u32 ExpectedSampledInputCount() const noexcept {
+        return selector.sampled_images;
+    }
 
     [[nodiscard]] constexpr PpTerminalScopeUpstreamInputRegistryObservation Observe(
         VideoCore::ImageColorScopePrivateLink output, const PpTerminalScopeDrawSelector& draw,
@@ -1826,10 +2237,70 @@ struct PpTerminalScopeContentHistoryLayout {
         regions{};
     u32 bytes_per_pixel{4};
     FinalGuestSurfaceFormat format{FinalGuestSurfaceFormat::Unsupported};
+    bool raw_compare{};
     HostPasses::PpUpstreamSampleRouteSet upstream_sample_routes{};
 
     bool operator==(const PpTerminalScopeContentHistoryLayout&) const = default;
 };
+
+// A deliberately bounded loss summary for the target pre/post comparison.  The
+// diagnostic must not retain the authorized layout or its copied bytes after
+// the immediate CPU reduction.
+struct PpUpstreamFeedbackTeeTargetSameFrameLoss {
+    u32 unsupported_type : 1 {};
+    u32 unsupported_samples : 1 {};
+    u32 unsupported_mip : 1 {};
+    u32 unsupported_layer : 1 {};
+    u32 unsupported_aspect : 1 {};
+    u32 unsupported_format : 1 {};
+    u32 invalid_extent : 1 {};
+    u32 logical_mapping : 1 {};
+    u32 tile_capacity : 1 {};
+    u32 byte_capacity : 1 {};
+    u32 ordinal_capacity : 1 {};
+    u32 busy : 1 {};
+    u32 invalidation : 1 {};
+    u32 gap : 1 {};
+    u32 history : 1 {};
+    u32 tile_detail : 1 {};
+    u32 reserved : 16 {};
+
+    [[nodiscard]] constexpr bool Any() const noexcept {
+        return unsupported_type || unsupported_samples || unsupported_mip || unsupported_layer ||
+               unsupported_aspect || unsupported_format || invalid_extent || logical_mapping ||
+               tile_capacity || byte_capacity || ordinal_capacity || busy || invalidation || gap ||
+               history || tile_detail;
+    }
+
+    bool operator==(const PpUpstreamFeedbackTeeTargetSameFrameLoss&) const = default;
+};
+
+struct PpUpstreamFeedbackTeeTargetSameFrameFact {
+    u64 sequence{};
+    u32 covered_pixel_count{};
+    u32 equal_pixel_count{};
+    u32 changed_pixel_count{};
+    FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
+    PpUpstreamFeedbackTeeTargetSameFrameLoss loss{};
+    bool available{};
+    bool overflowed{};
+
+    bool operator==(const PpUpstreamFeedbackTeeTargetSameFrameFact&) const = default;
+};
+
+[[nodiscard]] constexpr bool IsPpTerminalScopeContentHistoryEncodingCanonical(
+    const PpTerminalScopeContentHistoryLayout& layout) noexcept {
+    const bool semantic_format = layout.format == FinalGuestSurfaceFormat::Rgba8 ||
+                                 layout.format == FinalGuestSurfaceFormat::Bgra8;
+    const bool supported_raw_bytes = layout.bytes_per_pixel == 1 ||
+                                     layout.bytes_per_pixel == 2 ||
+                                     layout.bytes_per_pixel == 4 ||
+                                     layout.bytes_per_pixel == 8 ||
+                                     layout.bytes_per_pixel == 16;
+    return layout.raw_compare
+               ? layout.format == FinalGuestSurfaceFormat::Unsupported && supported_raw_bytes
+               : semantic_format && layout.bytes_per_pixel == 4;
+}
 
 struct PpTerminalScopeFinalBackingLayout {
     u32 region_count{};
@@ -1916,6 +2387,10 @@ PlanPpTerminalScopeFinalBackingObservation(bool enabled, FinalGuestSurfaceStage 
 struct PpTerminalScopeCalibratedReport {
     u32 request_ordinal{};
     std::array<u64, 3> sequences{};
+    std::array<bool, 3> tee_target_same_frame_available{};
+    std::array<u32, 3> tee_target_same_frame_covered{};
+    std::array<u32, 3> tee_target_same_frame_equal_pixels{};
+    std::array<u32, 3> tee_target_same_frame_changed_pixels{};
     std::vector<u32> first_aba_ordinals{};
     std::vector<u32> first_stable_ordinals{};
     std::vector<u32> first_ambiguous_ordinals{};
@@ -2016,11 +2491,34 @@ public:
         : window{window_}, history_capacity{std::clamp(history_capacity_, 1u, 32u)},
           join_final_backing{join_final_backing_} {}
 
-    void ObserveContent(u64 sequence, const PpTerminalScopeContentHistoryLayout& layout,
-                        std::span<const std::byte> bytes, FinalGuestSurfaceStatus status,
-                        FinalGuestSurfaceLoss loss) {
+    void ObserveContent(
+        u64 sequence, const PpTerminalScopeContentHistoryLayout& layout,
+        std::span<const std::byte> bytes, FinalGuestSurfaceStatus status,
+        FinalGuestSurfaceLoss loss,
+        PpUpstreamFeedbackTeeTargetSameFrameFact tee_target_same_frame_fact = {}) {
         if (!window.Contains(sequence)) {
             return;
+        }
+        const bool duplicate =
+            std::ranges::find(history, sequence, &Observation::sequence) != history.end();
+        const auto invalidate_same_frame = [](u64 observed_sequence) {
+            return PpUpstreamFeedbackTeeTargetSameFrameFact{
+                .sequence = observed_sequence,
+                .status = FinalGuestSurfaceStatus::InvalidationLoss,
+                .loss = {.invalidation = 1},
+            };
+        };
+        if (duplicate) {
+            for (auto& observation : history) {
+                if (observation.sequence == sequence) {
+                    observation.tee_target_same_frame_fact = invalidate_same_frame(sequence);
+                }
+            }
+        }
+        if (duplicate ||
+            (tee_target_same_frame_fact.sequence != 0 &&
+             tee_target_same_frame_fact.sequence != sequence)) {
+            tee_target_same_frame_fact = invalidate_same_frame(sequence);
         }
         if (history.size() == history_capacity) {
             history.pop_front();
@@ -2031,6 +2529,7 @@ public:
             .bytes = std::vector<std::byte>{bytes.begin(), bytes.end()},
             .status = status,
             .loss = loss,
+            .tee_target_same_frame_fact = tee_target_same_frame_fact,
         });
         last_content_sequence = std::max(last_content_sequence, sequence);
         Reconcile();
@@ -2108,6 +2607,7 @@ private:
         std::vector<std::byte> bytes{};
         FinalGuestSurfaceStatus status{FinalGuestSurfaceStatus::AlreadyConsumed};
         FinalGuestSurfaceLoss loss{};
+        PpUpstreamFeedbackTeeTargetSameFrameFact tee_target_same_frame_fact{};
     };
 
     struct FinalBackingObservation {
@@ -2151,7 +2651,7 @@ private:
     [[nodiscard]] static bool EqualVisibleRegion(const Observation& left, const Observation& right,
                                                  u32 plane, u32 region_index) noexcept {
         if (left.layout != right.layout || region_index >= left.layout.region_count || plane > 6 ||
-            left.layout.bytes_per_pixel != 4) {
+            !IsPpTerminalScopeContentHistoryEncodingCanonical(left.layout)) {
             return false;
         }
         const auto& region = left.layout.regions[region_index];
@@ -2172,7 +2672,7 @@ private:
             return false;
         }
         for (u32 offset = 0; offset < region.byte_size; ++offset) {
-            if (offset % left.layout.bytes_per_pixel == 3) {
+            if (!left.layout.raw_compare && offset % left.layout.bytes_per_pixel == 3) {
                 continue;
             }
             if (left.bytes[left_offset + offset] != right.bytes[right_offset + offset]) {
@@ -2297,7 +2797,8 @@ private:
     [[nodiscard]] static bool ClassifyLocalizedPlane(const Observation& a, const Observation& b,
                                                      const Observation& c, u32 plane,
                                                      std::vector<u32>& localized_visual_return) {
-        if (a.layout != b.layout || a.layout != c.layout || plane > 6) {
+        if (a.layout != b.layout || a.layout != c.layout || plane > 6 ||
+            !IsPpTerminalScopeContentHistoryEncodingCanonical(a.layout)) {
             return false;
         }
         const auto plane_offset = [plane](const PpTerminalScopeContentHistoryLayout& layout) {
@@ -2319,10 +2820,14 @@ private:
         for (u32 index = 0; index < a.layout.region_count; ++index) {
             const auto& region = a.layout.regions[index];
             if (region.logical_ordinal == 0 || region.byte_size == 0 ||
+                region.byte_size % a.layout.bytes_per_pixel != 0 ||
                 a_plane_offset + region.buffer_offset + region.byte_size > a.bytes.size() ||
                 b_plane_offset + region.buffer_offset + region.byte_size > b.bytes.size() ||
                 c_plane_offset + region.buffer_offset + region.byte_size > c.bytes.size()) {
                 return false;
+            }
+            if (a.layout.raw_compare) {
+                continue;
             }
             const auto result = IsPpTerminalScopeLocalizedVisualReturn(
                 a.layout.format,
@@ -2343,7 +2848,8 @@ private:
     [[nodiscard]] static std::optional<bool> EqualOutputToFinalBacking(
         const Observation& output, const FinalBackingObservation& backing,
         u32 region_index) noexcept {
-        if (region_index >= output.layout.region_count || output.layout.bytes_per_pixel != 4 ||
+        if (region_index >= output.layout.region_count || output.layout.raw_compare ||
+            output.layout.bytes_per_pixel != 4 ||
             backing.layout.bytes_per_pixel != 4 ||
             output.layout.format == FinalGuestSurfaceFormat::Unsupported ||
             output.layout.format != backing.layout.format ||
@@ -2400,6 +2906,34 @@ private:
             }
         }
         return true;
+    }
+
+    [[nodiscard]] static bool IsExactTeeTargetSameFrameFact(
+        const PpUpstreamFeedbackTeeTargetSameFrameFact& fact, u64 sequence) noexcept {
+        return sequence != 0 && fact.sequence == sequence && fact.available &&
+               fact.status == FinalGuestSurfaceStatus::Complete && !fact.loss.Any() &&
+               !fact.overflowed && fact.covered_pixel_count != 0 &&
+               static_cast<u64>(fact.equal_pixel_count) + fact.changed_pixel_count ==
+                   fact.covered_pixel_count;
+    }
+
+    static void JoinTeeTargetSameFrameFacts(PpTerminalScopeCalibratedReport& report,
+                                            const Observation& a, const Observation& b,
+                                            const Observation& c) noexcept {
+        const std::array<const Observation*, 3> observations{&a, &b, &c};
+        for (u32 index = 0; index < observations.size(); ++index) {
+            if (!IsExactTeeTargetSameFrameFact(
+                    observations[index]->tee_target_same_frame_fact, report.sequences[index])) {
+                return;
+            }
+        }
+        for (u32 index = 0; index < observations.size(); ++index) {
+            const auto& fact = observations[index]->tee_target_same_frame_fact;
+            report.tee_target_same_frame_available[index] = true;
+            report.tee_target_same_frame_covered[index] = fact.covered_pixel_count;
+            report.tee_target_same_frame_equal_pixels[index] = fact.equal_pixel_count;
+            report.tee_target_same_frame_changed_pixels[index] = fact.changed_pixel_count;
+        }
     }
 
     [[nodiscard]] PpTerminalScopeCalibratedReport Evaluate(
@@ -2562,6 +3096,9 @@ private:
             report.status = FinalGuestSurfaceStatus::InvalidationLoss;
             report.loss.invalidation = 1;
         }
+        if (report.status == FinalGuestSurfaceStatus::Complete && !report.loss.Any()) {
+            JoinTeeTargetSameFrameFacts(report, *a, *b, *c);
+        }
         return report;
     }
 
@@ -2630,6 +3167,23 @@ private:
     u32 coverage_loss{};
     bool join_final_backing{};
 };
+
+[[nodiscard]] inline std::string FormatPpUpstreamFeedbackTeeTargetSameFrameSuffix(
+    const PpTerminalScopeCalibratedReport& report) {
+    const auto format_bool_array = [](const std::array<bool, 3>& values) {
+        return std::to_string(values[0] ? 1 : 0) + "/" +
+               std::to_string(values[1] ? 1 : 0) + "/" +
+               std::to_string(values[2] ? 1 : 0);
+    };
+    const auto format_u32_array = [](const std::array<u32, 3>& values) {
+        return std::to_string(values[0]) + "/" + std::to_string(values[1]) + "/" +
+               std::to_string(values[2]);
+    };
+    return "ta=" + format_bool_array(report.tee_target_same_frame_available) +
+           " tc=" + format_u32_array(report.tee_target_same_frame_covered) +
+           " te=" + format_u32_array(report.tee_target_same_frame_equal_pixels) +
+           " tx=" + format_u32_array(report.tee_target_same_frame_changed_pixels);
+}
 
 [[nodiscard]] inline std::string FormatPpTerminalScopeOrdinalList(std::span<const u32> ordinals) {
     if (ordinals.empty()) {

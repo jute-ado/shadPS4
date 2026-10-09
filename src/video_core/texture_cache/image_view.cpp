@@ -8,6 +8,8 @@
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
 
+#include <algorithm>
+
 #include <magic_enum/magic_enum.hpp>
 
 namespace VideoCore {
@@ -97,11 +99,13 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
     }
     vk::ImageViewMinLodCreateInfoEXT min_lod_ci{};
+    const vk::ImageViewMinLodCreateInfoEXT* min_lod_info{};
     if (info.min_lod != 0 && instance.IsImageViewMinLodSupported()) {
         const float last_level =
             static_cast<float>(info.range.base.level + info.range.extent.levels - 1);
         min_lod_ci.minLod = std::min(static_cast<float>(info.min_lod) / 256.f, last_level);
         usage_ci.pNext = &min_lod_ci;
+        min_lod_info = &min_lod_ci;
     }
     // When sampling D32/D16 texture from shader, the T# specifies R32/R16 format so adjust it.
     vk::Format format = info.format;
@@ -117,14 +121,17 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         aspect = vk::ImageAspectFlagBits::eStencil;
     }
 
+    const vk::Image backing_image = image.GetImage();
+    const vk::Format resolved_format = instance.GetSupportedFormat(format, image.format_features);
+    const vk::ImageAspectFlags resolved_aspect = aspect;
     const vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
-        .image = image.GetImage(),
+        .image = backing_image,
         .viewType = ConvertImageViewType(info.type),
-        .format = instance.GetSupportedFormat(format, image.format_features),
+        .format = resolved_format,
         .components = info.mapping,
         .subresourceRange{
-            .aspectMask = aspect,
+            .aspectMask = resolved_aspect,
             .baseMipLevel = info.range.base.level,
             .levelCount = info.range.extent.levels,
             .baseArrayLayer = info.range.base.layer,
@@ -137,6 +144,10 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
     }
 
     auto [view_result, view] = instance.GetDevice().createImageViewUnique(image_view_ci);
+    creation_observation = BuildImageViewCreationObservation(
+        info, image.info.pixel_format, image.aspect_mask, image.usage_flags, backing_image,
+        resolved_format, resolved_aspect, image_view_ci, usage_ci, min_lod_info,
+        view_result == vk::Result::eSuccess);
     ASSERT_MSG(view_result == vk::Result::eSuccess, "Failed to create image view: {}",
                vk::to_string(view_result));
     image_view = std::move(view);
