@@ -4,6 +4,9 @@
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
+#include <chrono>
+#include <thread>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
@@ -2296,6 +2299,8 @@ int PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     auto complete_boundary = submission_gate.BeginBoundary();
     liverpool->SubmitDone(std::move(complete_boundary));
+    submission_gate.WaitUntilOpen();
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
