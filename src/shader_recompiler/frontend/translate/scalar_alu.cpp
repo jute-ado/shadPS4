@@ -524,6 +524,7 @@ void Translator::S_MOV_B64(const GcnInst& inst) {
                         ir.GetScalarReg(IR::ScalarReg(inst.src[0].code)));
         ir.SetScalarReg(IR::ScalarReg(inst.dst[0].code + 1),
                         ir.GetScalarReg(IR::ScalarReg(inst.src[0].code + 1)));
+        return;
     }
     SetDst1(inst.dst[0], GetSrc1(inst.src[0]));
 }

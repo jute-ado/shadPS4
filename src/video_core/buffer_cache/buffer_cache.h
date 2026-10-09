@@ -127,6 +127,9 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
+    /// Flushes exactly the requested GPU-modified range from an existing containing buffer.
+    [[nodiscard]] bool ReadMemoryExact(VAddr device_addr, u64 size);
+
     /// Acquires host vertex buffers without recording command-buffer-local state.
     [[nodiscard]] PreparedVertexBuffers PrepareVertexBuffers(
         const Vulkan::GraphicsPipeline& pipeline,
@@ -166,6 +169,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// Return true when the exact byte range has been written by the GPU.
+    [[nodiscard]] bool IsRegionGpuModifiedExact(VAddr addr, size_t size) const;
+
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
 
@@ -195,7 +201,7 @@ private:
         return !buffer_id || slot_buffers[buffer_id].is_deleted;
     }
 
-    template <bool async>
+    template <bool async, bool exact = false>
     void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);

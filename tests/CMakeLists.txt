@@ -148,6 +148,37 @@ target_compile_features(shadps4_image_layout_policy_test PRIVATE cxx_std_23)
 target_link_libraries(shadps4_image_layout_policy_test PRIVATE GTest::gtest_main)
 list(APPEND TEST_TARGETS shadps4_image_layout_policy_test)
 
+add_executable(shadps4_download_readback_policy_test
+    test_download_readback_policy.cpp
+)
+target_include_directories(shadps4_download_readback_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_download_readback_policy_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_download_readback_policy_test PRIVATE
+    SHADPS4_BUFFER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer.cpp"
+    SHADPS4_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+)
+target_link_libraries(shadps4_download_readback_policy_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_download_readback_policy_test)
+
+add_executable(shadps4_srt_memory_sync_test
+    test_srt_memory_sync.cpp
+    test_srt_pipeline_sync_source.cpp
+    test_srt_memory_sync_source.cpp
+)
+target_include_directories(shadps4_srt_memory_sync_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_features(shadps4_srt_memory_sync_test PRIVATE cxx_std_23)
+target_compile_definitions(shadps4_srt_memory_sync_test PRIVATE
+    SHADPS4_BUFFER_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/buffer_cache/buffer_cache.cpp"
+    SHADPS4_PIPELINE_CACHE_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp"
+    SHADPS4_RASTERIZER_SOURCE_PATH="${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+)
+target_link_libraries(shadps4_srt_memory_sync_test PRIVATE GTest::gtest_main)
+list(APPEND TEST_TARGETS shadps4_srt_memory_sync_test)
+
 add_executable(shadps4_image_usage_policy_test
     test_image_usage_policy.cpp
 )
@@ -549,6 +580,7 @@ set(GCN_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/dead_code_elimination_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/identity_removal_pass.cpp
+    ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/lower_buffer_format_to_raw.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/shader_info_collection_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/passes/ssa_rewrite_pass.cpp
     ${CMAKE_SOURCE_DIR}/src/shader_recompiler/ir/post_order.cpp
@@ -590,6 +622,8 @@ set(GCN_TEST_SOURCES
     gcn/test_buffer_access_range_pass.cpp
     gcn/test_barycentric_spirv.cpp
     gcn/test_gcn_instructions.cpp
+    gcn/test_lower_buffer_format_to_raw.cpp
+    gcn/test_srt_walker.cpp
     gcn/test_ssa_rewrite.cpp
 )
 
