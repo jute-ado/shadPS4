@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <span>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <magic_enum/magic_enum.hpp>
@@ -76,6 +78,8 @@ ArgType Arg(EmitContext& ctx, const IR::Value& arg) {
         return arg.ScalarReg();
     } else if constexpr (std::is_same_v<ArgType, IR::VectorReg>) {
         return arg.VectorReg();
+    } else if constexpr (std::is_same_v<ArgType, IR::VirtualReg>) {
+        return arg.VirtualReg();
     } else if constexpr (std::is_same_v<ArgType, const char*>) {
         return arg.StringLiteral();
     } else if constexpr (std::is_same_v<ArgType, IR::Patch>) {
@@ -142,6 +146,44 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
 }
 
 void Traverse(EmitContext& ctx, const IR::Program& program) {
+    struct ActiveLoop {
+        IR::Block* header{};
+        bool materializes_dynamic_scalar_mask{};
+    };
+    std::vector<ActiveLoop> active_loops;
+    std::vector<IR::Block*> partial_unroll_headers;
+    IR::Block* scan_current_block{};
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        switch (node.type) {
+        case IR::AbstractSyntaxNode::Type::Block:
+            scan_current_block = node.data.block;
+            if (!active_loops.empty() &&
+                std::ranges::any_of(scan_current_block->Instructions(), [](const IR::Inst& inst) {
+                    return inst.GetOpcode() == IR::Opcode::MaterializeScalarMaskWord;
+                })) {
+                active_loops.back().materializes_dynamic_scalar_mask = true;
+            }
+            break;
+        case IR::AbstractSyntaxNode::Type::Loop:
+            active_loops.push_back({.header = scan_current_block});
+            scan_current_block = nullptr;
+            break;
+        case IR::AbstractSyntaxNode::Type::Repeat:
+            if (!active_loops.empty()) {
+                if (active_loops.back().materializes_dynamic_scalar_mask) {
+                    partial_unroll_headers.push_back(active_loops.back().header);
+                }
+                active_loops.pop_back();
+            }
+            scan_current_block = nullptr;
+            break;
+        default:
+            scan_current_block = nullptr;
+            break;
+        }
+    }
+    program.info.has_dynamic_scalar_mask_loop = !partial_unroll_headers.empty();
+
     IR::Block* current_block{};
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
@@ -170,6 +212,10 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             const Id continue_label{node.data.loop.continue_block->Definition<Id>()};
             const Id endloop_label{node.data.loop.merge->Definition<Id>()};
 
+            // Scalar-mask walks carry guest execution-state through loop backedges. Keep their
+            // structured control flow exact: PartialCount is only an optimization hint, but
+            // drivers may transform these ballot-heavy loops in ways that change their result.
+            // The classification above remains useful for dispatch tiling.
             ctx.OpLoopMerge(endloop_label, continue_label, spv::LoopControlMask::MaskNone);
             ctx.OpBranch(body_label);
             break;
@@ -205,13 +251,239 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
     }
 }
 
+void TraverseWave64Lockstep(EmitContext& ctx, const IR::Program& program) {
+    constexpr u32 ExitState = std::numeric_limits<u32>::max();
+    enum class TransitionKind { Unset, Direct, Conditional, Exit };
+    struct Transition {
+        TransitionKind kind{TransitionKind::Unset};
+        IR::U1 condition{};
+        u32 taken{ExitState};
+        u32 fallthrough{ExitState};
+    };
+
+    std::unordered_map<IR::Block*, u32> block_indices;
+    block_indices.reserve(program.blocks.size());
+    for (u32 index = 0; index < program.blocks.size(); ++index) {
+        block_indices.emplace(program.blocks[index], index);
+    }
+    const auto index_of = [&](IR::Block* block) { return block_indices.at(block); };
+
+    std::vector<Transition> transitions(program.blocks.size());
+    IR::Block* current_block{};
+    const auto direct = [&](IR::Block* from, IR::Block* to) {
+        transitions[index_of(from)] = {
+            .kind = TransitionKind::Direct, .taken = index_of(to)};
+    };
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        using Type = IR::AbstractSyntaxNode::Type;
+        switch (node.type) {
+        case Type::Block:
+            if (current_block && transitions[index_of(current_block)].kind == TransitionKind::Unset) {
+                direct(current_block, node.data.block);
+            }
+            current_block = node.data.block;
+            break;
+        case Type::If:
+            transitions[index_of(current_block)] = {
+                .kind = TransitionKind::Conditional,
+                .condition = node.data.if_node.cond,
+                .taken = index_of(node.data.if_node.body),
+                .fallthrough = index_of(node.data.if_node.merge),
+            };
+            current_block = nullptr;
+            break;
+        case Type::Loop:
+            direct(current_block, node.data.loop.body);
+            current_block = nullptr;
+            break;
+        case Type::Break:
+            transitions[index_of(current_block)] = {
+                .kind = TransitionKind::Conditional,
+                .condition = node.data.break_node.cond,
+                .taken = index_of(node.data.break_node.merge),
+                .fallthrough = index_of(node.data.break_node.skip),
+            };
+            current_block = nullptr;
+            break;
+        case Type::EndIf:
+            if (current_block) {
+                direct(current_block, node.data.end_if.merge);
+            }
+            current_block = nullptr;
+            break;
+        case Type::Repeat:
+            transitions[index_of(current_block)] = {
+                .kind = TransitionKind::Conditional,
+                .condition = node.data.repeat.cond,
+                .taken = index_of(node.data.repeat.loop_header),
+                .fallthrough = index_of(node.data.repeat.merge),
+            };
+            current_block = nullptr;
+            break;
+        case Type::Return:
+        case Type::Unreachable:
+            if (current_block) {
+                transitions[index_of(current_block)].kind = TransitionKind::Exit;
+            }
+            current_block = nullptr;
+            break;
+        }
+    }
+    if (current_block && transitions[index_of(current_block)].kind == TransitionKind::Unset) {
+        transitions[index_of(current_block)].kind = TransitionKind::Exit;
+    }
+
+    const Id entry_label = ctx.OpLabel();
+    const Id loop_header = ctx.OpLabel();
+    const Id scan_blocks = ctx.OpLabel();
+    const Id continue_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    ctx.AddLabel(entry_label);
+    const Id state = ctx.DefineVar<false>(ctx.U32[1], spv::StorageClass::Function);
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if ((inst.GetOpcode() == IR::Opcode::GetVirtualRegister ||
+                 inst.GetOpcode() == IR::Opcode::SetVirtualRegister)) {
+                const IR::VirtualReg reg = inst.Arg(0).VirtualReg();
+                if (!ctx.virtual_registers.contains(reg.Key())) {
+                    ctx.virtual_registers.emplace(
+                        reg.Key(), ctx.DefineVar<false>(ctx.ValueType(reg.type),
+                                                        spv::StorageClass::Function));
+                }
+            }
+            if (inst.Type() == IR::Type::Void || inst.Type() == IR::Type::Opaque) {
+                continue;
+            }
+            // A dispatcher destroys the host CFG dominance relationships assumed by SSA. Spill
+            // every value rather than trying to infer only cross-case values: backend helpers can
+            // introduce internal SPIR-V blocks which are deliberately absent from the guest IR.
+            ctx.cross_block_values.emplace(
+                &inst, ctx.DefineVar<false>(ctx.ValueType(inst.Type()),
+                                            spv::StorageClass::Function));
+        }
+    }
+    ctx.spill_all_values = true;
+    // Prologue emission defines backend context values (for example packed buffer offsets) that
+    // are consumed by instructions in multiple guest blocks. Those definitions are shader-entry
+    // state, not guest control-flow state, so they must dominate the dispatcher loop.
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() == IR::Opcode::Prologue) {
+                EmitInst(ctx, &inst);
+            }
+        }
+    }
+    ctx.OpStore(state, ctx.u32_zero_value);
+    ctx.OpBranch(loop_header);
+
+    ctx.AddLabel(loop_header);
+    // Reset and repopulate one workgroup-wide active flag. Every invocation performs both atomics,
+    // so the barriers and loop decision remain workgroup-uniform even after guest lanes retire.
+    ASSERT(ctx.runtime_info.cs_info.shared_memory_size >= 2 * sizeof(u32));
+    const u32 active_word = (ctx.runtime_info.cs_info.shared_memory_size - 2 * sizeof(u32)) /
+                            sizeof(u32);
+    const Id active_ptr = ctx.EmitSharedMemoryAccess(
+        ctx.shared_u32, ctx.shared_memory_u32, ctx.ConstU32(active_word));
+    const Id workgroup_scope = ctx.ConstU32(static_cast<u32>(spv::Scope::Workgroup));
+    const Id workgroup_semantics = ctx.ConstU32(static_cast<u32>(
+        spv::MemorySemanticsMask::AcquireRelease | spv::MemorySemanticsMask::WorkgroupMemory));
+    ctx.OpAtomicAnd(ctx.U32[1], active_ptr, workgroup_scope, workgroup_semantics,
+                    ctx.u32_zero_value);
+    EmitBarrier(ctx);
+    const Id current_state = ctx.OpLoad(ctx.U32[1], state);
+    const Id lane_active =
+        ctx.OpINotEqual(ctx.U1[1], current_state, ctx.ConstU32(ExitState));
+    ctx.OpAtomicOr(ctx.U32[1], active_ptr, workgroup_scope, workgroup_semantics,
+                   ctx.OpSelect(ctx.U32[1], lane_active, ctx.u32_one_value,
+                                ctx.u32_zero_value));
+    EmitBarrier(ctx);
+    const Id any_active = ctx.OpLoad(ctx.U32[1], active_ptr);
+    const Id is_exit = ctx.OpIEqual(ctx.U1[1], any_active, ctx.u32_zero_value);
+    ctx.OpLoopMerge(merge_label, continue_label, spv::LoopControlMask::MaskNone);
+    ctx.OpBranchConditional(is_exit, merge_label, scan_blocks);
+
+    ctx.AddLabel(scan_blocks);
+    for (u32 index = 0; index < program.blocks.size(); ++index) {
+        IR::Block* const block = program.blocks[index];
+        ctx.current_block = block;
+        const Id block_state = ctx.OpLoad(ctx.U32[1], state);
+        const Id block_active =
+            ctx.OpIEqual(ctx.U1[1], block_state, ctx.ConstU32(index));
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() == IR::Opcode::Prologue) {
+                continue;
+            }
+            const IR::Opcode opcode = inst.GetOpcode();
+            const bool is_barrier = opcode == IR::Opcode::Barrier ||
+                                    opcode == IR::Opcode::WorkgroupMemoryBarrier ||
+                                    opcode == IR::Opcode::DeviceMemoryBarrier;
+            const bool is_metadata = opcode == IR::Opcode::ConditionRef ||
+                                     opcode == IR::Opcode::Reference ||
+                                     opcode == IR::Opcode::PhiMove ||
+                                     opcode == IR::Opcode::Epilogue;
+            const bool predicate_effect = !is_barrier && !is_metadata &&
+                                          (opcode == IR::Opcode::SetVirtualRegister ||
+                                           inst.MayHaveSideEffects());
+            Id effect_merge{};
+            if (predicate_effect) {
+                const Id effect_body = ctx.OpLabel();
+                effect_merge = ctx.OpLabel();
+                ctx.OpSelectionMerge(effect_merge, spv::SelectionControlMask::MaskNone);
+                ctx.OpBranchConditional(block_active, effect_body, effect_merge);
+                ctx.AddLabel(effect_body);
+            }
+            EmitInst(ctx, &inst);
+            if (const auto spill = ctx.cross_block_values.find(&inst);
+                spill != ctx.cross_block_values.end()) {
+                const Id prior = ctx.OpLoad(ctx.ValueType(inst.Type()), spill->second);
+                ctx.OpStore(spill->second,
+                            ctx.OpSelect(ctx.ValueType(inst.Type()), block_active,
+                                         inst.Definition<Id>(), prior));
+            }
+            if (predicate_effect) {
+                ctx.OpBranch(effect_merge);
+                ctx.AddLabel(effect_merge);
+            }
+        }
+        const Transition& transition = transitions[index];
+        Id next_state{};
+        switch (transition.kind) {
+        case TransitionKind::Direct:
+            next_state = ctx.ConstU32(transition.taken);
+            break;
+        case TransitionKind::Conditional:
+            next_state = ctx.OpSelect(ctx.U32[1], ctx.Def(transition.condition),
+                                      ctx.ConstU32(transition.taken),
+                                      ctx.ConstU32(transition.fallthrough));
+            break;
+        case TransitionKind::Unset:
+        case TransitionKind::Exit:
+            next_state = ctx.ConstU32(ExitState);
+            break;
+        }
+        const Id prior_state = ctx.OpLoad(ctx.U32[1], state);
+        ctx.OpStore(state,
+                    ctx.OpSelect(ctx.U32[1], block_active, next_state, prior_state));
+    }
+    ctx.OpBranch(continue_label);
+    ctx.AddLabel(continue_label);
+    ctx.OpBranch(loop_header);
+    ctx.AddLabel(merge_label);
+    ctx.current_block = nullptr;
+    ctx.OpReturn();
+}
+
 Id DefineMain(EmitContext& ctx, const IR::Program& program) {
     const Id void_function{ctx.TypeFunction(ctx.void_id)};
     const Id main{ctx.OpFunction(ctx.void_id, spv::FunctionControlMask::MaskNone, void_function)};
     for (IR::Block* const block : program.blocks) {
         block->SetDefinition(ctx.OpLabel());
     }
-    Traverse(ctx, program);
+    if (program.info.emulate_wave64_control_flow) {
+        TraverseWave64Lockstep(ctx, program);
+    } else {
+        Traverse(ctx, program);
+    }
     ctx.OpFunctionEnd();
     return main;
 }
@@ -284,7 +556,7 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
         ctx.AddExtension("SPV_EXT_shader_atomic_float_min_max");
         ctx.AddCapability(spv::Capability::AtomicFloat32MinMaxEXT);
     }
-    if (info.uses_lane_id) {
+    if (info.uses_lane_id || info.emulate_wave64) {
         ctx.AddCapability(spv::Capability::GroupNonUniform);
     }
     if (info.uses_group_quad) {
@@ -292,6 +564,12 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     }
     if (info.uses_group_ballot) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
+    }
+    if (info.uses_group_vote) {
+        ctx.AddCapability(spv::Capability::GroupNonUniformVote);
+    }
+    if (info.uses_group_shuffle) {
+        ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
     }
     const auto stage = info.l_stage;
     if (stage == LogicalStage::Vertex) {
@@ -374,6 +652,15 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
         execution_model = spv::ExecutionModel::GLCompute;
         ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, workgroup_size[0],
                              workgroup_size[1], workgroup_size[2]);
+        if (ctx.profile.supports_subgroup_uniform_control_flow &&
+            (info.uses_lane_id || info.uses_group_quad || info.uses_group_ballot ||
+             info.uses_group_vote ||
+             info.uses_group_shuffle || info.requires_subgroup_uniform_control_flow)) {
+            ctx.AddExtension("SPV_KHR_subgroup_uniform_control_flow");
+            // SPV_KHR_subgroup_uniform_control_flow assigns execution-mode value 4421. The
+            // vendored SPIR-V enum predates the symbolic name.
+            ctx.AddExecutionMode(main, static_cast<spv::ExecutionMode>(4421));
+        }
         break;
     }
     case LogicalStage::Vertex:

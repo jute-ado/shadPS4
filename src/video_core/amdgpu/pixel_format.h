@@ -97,6 +97,20 @@ enum class CompSwizzle : u8 {
     Alpha = 7,
 };
 
+constexpr bool IsValidCompSwizzle(CompSwizzle swizzle) {
+    switch (swizzle) {
+    case CompSwizzle::Zero:
+    case CompSwizzle::One:
+    case CompSwizzle::Red:
+    case CompSwizzle::Green:
+    case CompSwizzle::Blue:
+    case CompSwizzle::Alpha:
+        return true;
+    default:
+        return false;
+    }
+}
+
 enum class NumberConversion : u32 {
     None = 0,
     UintToUscaled = 1,
@@ -106,6 +120,7 @@ enum class NumberConversion : u32 {
     Sint16ToSnormNz = 5,
     Uint32ToUnorm = 6,
     SrgbToNorm = 7,
+    Sint32ToSnormNz = 8,
 };
 
 union CompMapping {
@@ -254,6 +269,60 @@ constexpr NumberFormat RemapNumberFormat(const NumberFormat format, const DataFo
     }
 }
 
+// Returns whether a remapped image data/number-format pair has a native Vulkan representation in
+// LiverpoolToVK::SurfaceFormats. Runtime texture descriptors are guest data and can be malformed;
+// validate the pair before constructing an ImageInfo, whose format conversion is intentionally
+// strict for trusted render-target state.
+constexpr bool IsSupportedImageFormatPair(const DataFormat data_format,
+                                          const NumberFormat number_format) {
+    const auto is_one_of = [number_format](const auto... formats) {
+        return ((number_format == formats) || ...);
+    };
+    switch (data_format) {
+    case DataFormat::Format8:
+    case DataFormat::Format8_8:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Snorm, NumberFormat::Uint,
+                         NumberFormat::Sint, NumberFormat::Srgb);
+    case DataFormat::Format16:
+    case DataFormat::Format16_16:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Snorm, NumberFormat::Uint,
+                         NumberFormat::Sint, NumberFormat::Float);
+    case DataFormat::Format32:
+    case DataFormat::Format32_32:
+    case DataFormat::Format32_32_32:
+    case DataFormat::Format32_32_32_32:
+        return is_one_of(NumberFormat::Uint, NumberFormat::Sint, NumberFormat::Float);
+    case DataFormat::Format10_11_11:
+        return number_format == NumberFormat::Float;
+    case DataFormat::Format2_10_10_10:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Snorm, NumberFormat::Uint,
+                         NumberFormat::Sint);
+    case DataFormat::Format8_8_8_8:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Snorm, NumberFormat::Uint,
+                         NumberFormat::Sint, NumberFormat::Srgb);
+    case DataFormat::Format16_16_16_16:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Snorm, NumberFormat::Uint,
+                         NumberFormat::Sint, NumberFormat::Float);
+    case DataFormat::Format5_6_5:
+    case DataFormat::Format1_5_5_5:
+    case DataFormat::Format4_4_4_4:
+        return number_format == NumberFormat::Unorm;
+    case DataFormat::Format5_9_9_9:
+        return number_format == NumberFormat::Float;
+    case DataFormat::FormatBc1:
+    case DataFormat::FormatBc2:
+    case DataFormat::FormatBc3:
+    case DataFormat::FormatBc7:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Srgb);
+    case DataFormat::FormatBc4:
+    case DataFormat::FormatBc5:
+    case DataFormat::FormatBc6:
+        return is_one_of(NumberFormat::Unorm, NumberFormat::Snorm);
+    default:
+        return false;
+    }
+}
+
 constexpr CompMapping RemapSwizzle(const DataFormat format, const CompMapping swizzle) {
     switch (format) {
     case DataFormat::Format1_5_5_5:
@@ -355,6 +424,11 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16:
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
+        case DataFormat::Format32:
+        case DataFormat::Format32_32:
+        case DataFormat::Format32_32_32:
+        case DataFormat::Format32_32_32_32:
+            return NumberConversion::Sint32ToSnormNz;
         default:
             UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
         }

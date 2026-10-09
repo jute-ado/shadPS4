@@ -772,10 +772,15 @@ static auto surface_format_table = []() constexpr {
     return result;
 }();
 
-vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
+vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format,
+                         const std::source_location& source) {
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
     bool found =
         result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
+    if (!found) {
+        LOG_CRITICAL(Render_Vulkan, "Unsupported surface format requested by {}:{} ({})",
+                     source.file_name(), source.line(), source.function_name());
+    }
     ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
                static_cast<u32>(num_format));
     return result;

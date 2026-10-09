@@ -341,7 +341,7 @@ void Translator::S_AND_B64(NegateMode negate, const GcnInst& inst) {
     if (negate == NegateMode::Result) {
         result = ir.LogicalNot(result);
     }
-    ir.SetScc(result);
+    ir.SetScc(ir.GuestWaveAny(result));
     SetDst1(inst.dst[0], result);
 }
 
@@ -363,7 +363,7 @@ void Translator::S_OR_B64(NegateMode negate, bool is_xor, const GcnInst& inst) {
     if (negate == NegateMode::Result) {
         result = ir.LogicalNot(result);
     }
-    ir.SetScc(result);
+    ir.SetScc(ir.GuestWaveAny(result));
     SetDst1(inst.dst[0], result);
 }
 
@@ -524,6 +524,7 @@ void Translator::S_MOV_B64(const GcnInst& inst) {
                         ir.GetScalarReg(IR::ScalarReg(inst.src[0].code)));
         ir.SetScalarReg(IR::ScalarReg(inst.dst[0].code + 1),
                         ir.GetScalarReg(IR::ScalarReg(inst.src[0].code + 1)));
+        return;
     }
     SetDst1(inst.dst[0], GetSrc1(inst.src[0]));
 }
@@ -531,7 +532,7 @@ void Translator::S_MOV_B64(const GcnInst& inst) {
 void Translator::S_NOT_B64(const GcnInst& inst) {
     const IR::U1 src0{GetSrc1(inst.src[0])};
     const IR::U1 result = ir.LogicalNot(src0);
-    ir.SetScc(result);
+    ir.SetScc(ir.GuestWaveAny(result));
     SetDst1(inst.dst[0], result);
 }
 
@@ -607,7 +608,7 @@ void Translator::S_SAVEEXEC_B64(NegateMode negate, bool is_or, const GcnInst& in
         result = ir.LogicalNot(result);
     }
     ir.SetExec(result);
-    ir.SetScc(result);
+    ir.SetScc(ir.GuestWaveAny(result));
 }
 
 void Translator::S_ABS_I32(const GcnInst& inst) {

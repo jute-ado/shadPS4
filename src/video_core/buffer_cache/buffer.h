@@ -77,6 +77,7 @@ public:
     explicit Buffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
                     MemoryUsage usage, VAddr cpu_addr_, vk::BufferUsageFlags flags,
                     u64 size_bytes_);
+    ~Buffer();
 
     Buffer& operator=(const Buffer&) = delete;
     Buffer(const Buffer&) = delete;
@@ -149,6 +150,9 @@ public:
     }
 
     void Fill(u64 offset, u32 num_bytes, u32 value);
+
+    /// Makes device writes to a mapped range visible to the host.
+    [[nodiscard]] bool InvalidateMappedRange(u64 offset, u64 size) const;
 
 public:
     VAddr cpu_addr = 0;

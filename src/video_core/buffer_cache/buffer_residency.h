@@ -3,9 +3,57 @@
 
 #pragma once
 
+#include <unordered_set>
+
 #include "common/types.h"
 
 namespace VideoCore {
+
+template <size_t Capacity>
+class BoundedDiagnosticDeduplicator {
+public:
+    [[nodiscard]] bool ShouldLog(u64 key) {
+        if (keys.contains(key) || keys.size() >= Capacity) {
+            return false;
+        }
+        keys.insert(key);
+        return true;
+    }
+
+private:
+    std::unordered_set<u64> keys;
+};
+
+template <typename PageManager>
+[[nodiscard]] bool IsGuestBufferBindingMapped(PageManager& page_manager, bool is_special,
+                                              VAddr address, u64 size) {
+    if (is_special) {
+        return true;
+    }
+    return address != 0 && size != 0 && page_manager.IsGpuMapped(address, size);
+}
+
+template <typename PageManager>
+[[nodiscard]] bool IsGuestImageBindingMapped(PageManager& page_manager, VAddr address, u64 size) {
+    return address != 0 && size != 0 && page_manager.IsGpuMapped(address, size);
+}
+
+template <typename PageManager, typename MipLayouts>
+[[nodiscard]] bool IsGuestImageViewBindingMapped(PageManager& page_manager, VAddr address,
+                                                 const MipLayouts& layouts, u32 base_level,
+                                                 u32 level_count) {
+    if (address == 0 || level_count == 0 || base_level >= layouts.size() ||
+        level_count > layouts.size() - base_level) {
+        return false;
+    }
+    for (u32 mip = base_level; mip < base_level + level_count; ++mip) {
+        const auto& layout = layouts[mip];
+        if (layout.size == 0 || !page_manager.IsGpuMapped(address + layout.offset, layout.size)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 template <typename Buffer, typename Synchronize, typename Publish>
 void PublishDmaBufferAfterSynchronization(Buffer& buffer, Synchronize&& synchronize,
@@ -35,6 +83,26 @@ void PrepareDrawBuffersThenBindCommandState(PrepareVertexBuffers&& prepare_verte
     prepare_indirect_buffers();
     bind_vertex_buffers(prepared_vertex_state);
     bind_index_buffer(prepared_index_state);
+}
+
+template <typename PrepareFixedBuffers, typename RefreshResourceBuffers,
+          typename PublishResourceBuffers, typename PublishFixedBuffers>
+void RefreshDrawBufferStateBeforePublication(PrepareFixedBuffers&& prepare_fixed_buffers,
+                                             RefreshResourceBuffers&& refresh_resource_buffers,
+                                             PublishResourceBuffers&& publish_resource_buffers,
+                                             PublishFixedBuffers&& publish_fixed_buffers) {
+    // Resource and fixed-function ranges can overlap. Acquire both sets before resolving their
+    // Vulkan handles, then prepare the fixed-function state once more after resource refresh. The
+    // second fixed pass operates on already-known ranges, so neither published set can refer to a
+    // buffer replaced by a later topology-changing acquisition.
+    // The discovery pass may replace cache entries, but it must not advance access tracking:
+    // any barriers it creates would be discarded when resource handles are refreshed below.
+    prepare_fixed_buffers(false);
+    refresh_resource_buffers();
+    // Record access transitions only for the final handles that will be published.
+    prepare_fixed_buffers(true);
+    publish_resource_buffers();
+    publish_fixed_buffers();
 }
 
 } // namespace VideoCore

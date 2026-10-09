@@ -199,6 +199,13 @@ struct Image {
         return (type & 0x8u) != 0;
     }
 
+    bool HasValidDstSelect() const {
+        return IsValidCompSwizzle(CompSwizzle(dst_sel_x)) &&
+               IsValidCompSwizzle(CompSwizzle(dst_sel_y)) &&
+               IsValidCompSwizzle(CompSwizzle(dst_sel_z)) &&
+               IsValidCompSwizzle(CompSwizzle(dst_sel_w));
+    }
+
     VAddr Address() const {
         return base_address << 8;
     }

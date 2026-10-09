@@ -4,6 +4,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -31,7 +32,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .pName = "main",
     };
 
-    u32 binding{};
+    VideoCore::DescriptorBindingCursor binding;
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     for (const auto& buffer : info->buffers) {
         // During deserialization, we don't have access to the UD to fetch sharp data. To address
@@ -40,7 +41,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         // shortcut there.
         const auto sharp = preloading ? AmdGpu::Buffer{} : buffer.GetSharp(*info);
         bindings.push_back({
-            .binding = binding++,
+            .binding = binding.Add(),
             .descriptorType = buffer.IsStorage(sharp) ? vk::DescriptorType::eStorageBuffer
                                                       : vk::DescriptorType::eUniformBuffer,
             .descriptorCount = 1,
@@ -50,17 +51,16 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     for (const auto& image : info->images) {
         const u32 num_bindings = image.NumBindings(*info);
         bindings.push_back({
-            .binding = binding,
+            .binding = binding.Add(num_bindings),
             .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
                                                : vk::DescriptorType::eSampledImage,
             .descriptorCount = num_bindings,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });
-        binding += num_bindings;
     }
     for (const auto& sampler : info->samplers) {
         bindings.push_back({
-            .binding = binding++,
+            .binding = binding.Add(),
             .descriptorType = vk::DescriptorType::eSampler,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
@@ -73,7 +73,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .size = sizeof(Shader::PushData),
     };
 
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
+    uses_push_descriptors = binding.CanUsePushDescriptors(instance.MaxPushDescriptors());
     const auto flags = uses_push_descriptors
                            ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
                            : vk::DescriptorSetLayoutCreateFlagBits{};
@@ -104,6 +104,9 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
     const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+        .flags = info->has_dynamic_scalar_mask_loop
+                     ? vk::PipelineCreateFlagBits::eDispatchBase
+                     : vk::PipelineCreateFlags{},
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };

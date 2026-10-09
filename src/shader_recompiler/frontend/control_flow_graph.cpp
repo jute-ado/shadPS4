@@ -198,6 +198,106 @@ void CFG::SplitDivergenceScopes() {
                 const auto start = inst_list.begin() + curr_begin + 1;
                 if (!std::ranges::all_of(start, inst_list.begin() + index + !is_close,
                                          IgnoresExecMask)) {
+                    struct MaskedRun {
+                        u32 begin;
+                        u32 end;
+                    };
+                    std::vector<MaskedRun> masked_runs;
+                    const u32 scope_begin = static_cast<u32>(curr_begin + 1);
+                    const u32 scope_end = static_cast<u32>(index + !is_close);
+                    for (u32 run_index = scope_begin; run_index < scope_end;) {
+                        while (run_index < scope_end && IgnoresExecMask(inst_list[run_index])) {
+                            ++run_index;
+                        }
+                        if (run_index == scope_end) {
+                            break;
+                        }
+                        const u32 run_begin = run_index;
+                        while (run_index < scope_end &&
+                               !IgnoresExecMask(inst_list[run_index])) {
+                            ++run_index;
+                        }
+                        masked_runs.push_back({run_begin, run_index - 1});
+                    }
+
+                    if (masked_runs.size() > 1 && masked_runs.back().end < blk->end_index) {
+                        // Scalar instructions ignore EXEC on GCN. Keeping a scalar gap inside a
+                        // per-lane host branch lets an inactive host subgroup skip guest scalar
+                        // state, which is especially destructive when a wave64 guest is split
+                        // across two subgroup32 halves. Build a separate EXEC-masked block for
+                        // every consecutive vector run and reconverge around each scalar gap.
+                        const auto old_end = blk->end;
+                        const auto old_end_index = blk->end_index;
+                        const auto old_end_inst = blk->end_inst;
+                        const auto old_cond = blk->cond;
+                        const auto old_end_class = blk->end_class;
+                        Block* const old_branch_true = blk->branch_true;
+                        Block* const old_branch_false = blk->branch_false;
+
+                        std::vector<Block*> masked_blocks;
+                        std::vector<Block*> after_blocks;
+                        masked_blocks.reserve(masked_runs.size());
+                        after_blocks.reserve(masked_runs.size());
+
+                        for (u32 run = 0; run < masked_runs.size(); ++run) {
+                            const auto [run_begin, run_end] = masked_runs[run];
+                            Block* const masked = block_pool.Create();
+                            masked->begin = index_to_pc[run_begin];
+                            masked->end = index_to_pc[run_end + 1];
+                            masked->begin_index = run_begin;
+                            masked->end_index = run_end;
+                            masked->end_inst = inst_list[run_end];
+                            masked->cond = IR::Condition::True;
+                            masked->end_class = EndClass::Branch;
+                            blocks.insert_before(next_blk, *masked);
+                            masked_blocks.push_back(masked);
+
+                            const u32 after_begin = run_end + 1;
+                            const u32 after_end = run + 1 < masked_runs.size()
+                                                      ? masked_runs[run + 1].begin - 1
+                                                      : old_end_index;
+                            ASSERT(after_begin <= after_end);
+                            Block* const after = block_pool.Create();
+                            after->begin = index_to_pc[after_begin];
+                            after->end = run + 1 < masked_runs.size()
+                                             ? index_to_pc[after_end + 1]
+                                             : old_end;
+                            after->begin_index = after_begin;
+                            after->end_index = after_end;
+                            after->end_inst = inst_list[after_end];
+                            blocks.insert_before(next_blk, *after);
+                            after_blocks.push_back(after);
+                        }
+
+                        for (u32 run = 0; run < masked_blocks.size(); ++run) {
+                            masked_blocks[run]->branch_true = after_blocks[run];
+                            if (run + 1 < masked_blocks.size()) {
+                                after_blocks[run]->cond = IR::Condition::Execnz;
+                                after_blocks[run]->is_exec_mask_branch = true;
+                                after_blocks[run]->end_class = EndClass::Branch;
+                                after_blocks[run]->branch_true = masked_blocks[run + 1];
+                                after_blocks[run]->branch_false = after_blocks[run + 1];
+                            } else {
+                                after_blocks[run]->cond = old_cond;
+                                after_blocks[run]->end_class = old_end_class;
+                                after_blocks[run]->branch_true = old_branch_true;
+                                after_blocks[run]->branch_false = old_branch_false;
+                            }
+                        }
+
+                        const u32 prefix_end = masked_runs.front().begin - 1;
+                        blk->end = index_to_pc[prefix_end + 1];
+                        blk->end_index = prefix_end;
+                        blk->end_inst = inst_list[prefix_end];
+                        blk->cond = IR::Condition::Execnz;
+                        blk->is_exec_mask_branch = true;
+                        blk->end_class = EndClass::Branch;
+                        blk->branch_true = masked_blocks.front();
+                        blk->branch_false = after_blocks.front();
+                        curr_begin = -1;
+                        break;
+                    }
+
                     // Determine the first instruction affected by the exec mask.
                     do {
                         ++curr_begin;
@@ -261,6 +361,7 @@ void CFG::SplitDivergenceScopes() {
                     blk->end_index = curr_begin;
                     blk->end_inst = inst_list[curr_begin];
                     blk->cond = IR::Condition::Execnz;
+                    blk->is_exec_mask_branch = true;
                     blk->end_class = EndClass::Branch;
                     blk->branch_true = block;
                 }

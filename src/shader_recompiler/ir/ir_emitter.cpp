@@ -137,6 +137,17 @@ void IREmitter::SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value) {
     Inst(Opcode::SetThreadBitScalarReg, reg, value);
 }
 
+void IREmitter::SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value) {
+    ASSERT(static_cast<u32>(reg) + 1 < IR::NumScalarRegs);
+    Inst(Opcode::SetThreadBitScalarRegPair, reg, value);
+}
+
+void IREmitter::CopyScalarRegPair(IR::ScalarReg dst, IR::ScalarReg src) {
+    ASSERT(static_cast<u32>(dst) + 1 < IR::NumScalarRegs);
+    ASSERT(static_cast<u32>(src) + 1 < IR::NumScalarRegs);
+    Inst(Opcode::CopyScalarRegPair, dst, src);
+}
+
 template <>
 U32 IREmitter::GetScalarReg(IR::ScalarReg reg) {
     ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
@@ -320,15 +331,20 @@ Value IREmitter::LoadShared(int bit_size, bool is_signed, const U32& offset, boo
 }
 
 void IREmitter::WriteShared(int bit_size, const Value& value, const U32& offset, bool is_gds) {
+    WriteShared(bit_size, value, offset, is_gds, Imm1(true));
+}
+
+void IREmitter::WriteShared(int bit_size, const Value& value, const U32& offset, bool is_gds,
+                            const U1& predicate) {
     switch (bit_size) {
     case 16:
-        Inst(Opcode::WriteSharedU16, Flags{is_gds}, offset, value);
+        Inst(Opcode::WriteSharedU16, Flags{is_gds}, offset, value, predicate);
         break;
     case 32:
-        Inst(Opcode::WriteSharedU32, Flags{is_gds}, offset, value);
+        Inst(Opcode::WriteSharedU32, Flags{is_gds}, offset, value, predicate);
         break;
     case 64:
-        Inst(Opcode::WriteSharedU64, Flags{is_gds}, offset, value);
+        Inst(Opcode::WriteSharedU64, Flags{is_gds}, offset, value, predicate);
         break;
     default:
         UNREACHABLE_MSG("Invalid bit size {}", bit_size);
@@ -673,7 +689,11 @@ U32 IREmitter::QuadShuffle(const U32& value, const U32& index) {
 }
 
 U32 IREmitter::ReadFirstLane(const U32& value) {
-    return Inst<U32>(Opcode::ReadFirstLane, value);
+    return ReadFirstLane(value, Imm1(true));
+}
+
+U32 IREmitter::ReadFirstLane(const U32& value, const U1& active) {
+    return Inst<U32>(Opcode::ReadFirstLane, value, active);
 }
 
 U32 IREmitter::ReadLane(const U32& value, const U32& lane) {
@@ -688,12 +708,76 @@ Value IREmitter::Ballot(const U1& bit) {
     return Inst(Opcode::Ballot, bit);
 }
 
+U32 IREmitter::CaptureScalarMaskWord(const U1& bit, const U32& scalar, u32 word) {
+    return Inst<U32>(Opcode::CaptureScalarMaskWord, bit, scalar, Imm32(word));
+}
+
+U32 IREmitter::ShuffleXor(const U32& value, const U32& mask) {
+    return Inst<U32>(Opcode::ShuffleXor, value, mask);
+}
+
+U32 IREmitter::MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                         const U32& scalar, u32 word) {
+    return Inst<U32>(Opcode::MaterializeScalarMaskWord, is_thread_bit, bit, scalar, Imm32(word));
+}
+
 U32 IREmitter::BallotFindLsb(const Value& mask) {
     return Inst<U32>(Opcode::BallotFindLsb, mask);
 }
 
 U1 IREmitter::GroupAny(const U1& bit) {
     return Inst<U1>(Opcode::GroupAny, bit);
+}
+
+U1 IREmitter::GuestWaveAny(const U1& bit) {
+    return Inst<U1>(Opcode::GuestWaveAny, bit);
+}
+
+U1 IREmitter::Wave64GroupAny(const U1& bit, const U32& invocation,
+                             const U32& scratch_base) {
+    return Inst<U1>(Opcode::Wave64GroupAny, bit, invocation, scratch_base);
+}
+
+U32 IREmitter::Wave64CaptureScalarMaskWord(const U1& bit, u32 word,
+                                           const U32& invocation,
+                                           const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64CaptureScalarMaskWord, bit, Imm32(word), invocation,
+                     scratch_base);
+}
+
+U32 IREmitter::Wave64LockstepMaterializeScalarMaskWord(
+    const U1& is_thread_bit, const U1& bit, const U32& scalar, u32 word,
+    const U32& invocation, const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64LockstepMaterializeScalarMaskWord, is_thread_bit, bit, scalar,
+                     Imm32(word), invocation, scratch_base);
+}
+
+void IREmitter::Wave64LaneRetirementInit(const U1& active, const U32& invocation,
+                                         const U32& scratch_base) {
+    Inst(Opcode::Wave64LaneRetirementInit, active, invocation, scratch_base);
+}
+
+void IREmitter::Wave64LaneRetirementSync(const U1& continues, const U32& invocation,
+                                         const U32& scratch_base) {
+    Inst(Opcode::Wave64LaneRetirementSync, continues, invocation, scratch_base);
+}
+
+U32 IREmitter::Wave64ReadFirstLane(const U32& value, const U1& active,
+                                   const U32& invocation, const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64ReadFirstLane, value, active, invocation, scratch_base);
+}
+
+U32 IREmitter::Wave64ReadFirstActiveLane(const U32& value, const U1& active,
+                                         const U32& invocation, const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64ReadFirstActiveLane, value, active, invocation,
+                     scratch_base);
+}
+
+U32 IREmitter::Wave64MaterializeScalarMaskWord(
+    const U1& is_thread_bit, const U1& bit, const U32& scalar, u32 word,
+    const U32& invocation, const U32& scratch_base) {
+    return Inst<U32>(Opcode::Wave64MaterializeScalarMaskWord, is_thread_bit, bit, scalar,
+                     Imm32(word), invocation, scratch_base);
 }
 
 F32F64 IREmitter::FPAdd(const F32F64& a, const F32F64& b) {
@@ -2149,7 +2233,13 @@ Value IREmitter::ImageRead(const Value& handle, const Value& coords, const U32& 
 
 void IREmitter::ImageWrite(const Value& handle, const Value& coords, const U32& lod,
                            const U32& multisampling, const Value& color, TextureInstInfo info) {
-    Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, multisampling, color);
+    ImageWrite(handle, coords, lod, multisampling, color, info, Imm1(true));
+}
+
+void IREmitter::ImageWrite(const Value& handle, const Value& coords, const U32& lod,
+                           const U32& multisampling, const Value& color, TextureInstInfo info,
+                           const U1& predicate) {
+    Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, multisampling, color, predicate);
 }
 
 [[nodiscard]] F32 IREmitter::CubeFaceIndex(const Value& cube_coords) {

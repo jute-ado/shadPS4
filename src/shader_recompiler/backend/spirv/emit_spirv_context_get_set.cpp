@@ -566,6 +566,14 @@ void EmitSetThreadBitScalarReg(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
+void EmitSetThreadBitScalarRegPair(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitCopyScalarRegPair(EmitContext&) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
 void EmitGetScalarRegister(EmitContext&) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
@@ -582,12 +590,12 @@ void EmitSetVectorRegister(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
-void EmitSetVirtualRegister(EmitContext& ctx) {
-    UNREACHABLE_MSG("Unreachable instruction");
+void EmitSetVirtualRegister(EmitContext& ctx, IR::VirtualReg reg, Id value) {
+    ctx.OpStore(ctx.virtual_registers.at(reg.Key()), value);
 }
 
-void EmitGetVirtualRegister(EmitContext& ctx) {
-    UNREACHABLE_MSG("Unreachable instruction");
+Id EmitGetVirtualRegister(EmitContext& ctx, IR::VirtualReg reg) {
+    return ctx.OpLoad(ctx.ValueType(reg.type), ctx.virtual_registers.at(reg.Key()));
 }
 
 void EmitSetGotoVariable(EmitContext&) {

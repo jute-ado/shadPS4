@@ -54,6 +54,8 @@ public:
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
     [[nodiscard]] U1 GetThreadBitScalarReg(IR::ScalarReg reg);
     void SetThreadBitScalarReg(IR::ScalarReg reg, const U1& value);
+    void SetThreadBitScalarRegPair(IR::ScalarReg reg, const U1& value);
+    void CopyScalarRegPair(IR::ScalarReg dst, IR::ScalarReg src);
 
     template <typename T = U32>
     [[nodiscard]] T GetScalarReg(IR::ScalarReg reg);
@@ -104,6 +106,8 @@ public:
     [[nodiscard]] Value LoadShared(int bit_size, bool is_signed, const U32& offset,
                                    bool is_gds = false);
     void WriteShared(int bit_size, const Value& value, const U32& offset, bool is_gds = false);
+    void WriteShared(int bit_size, const Value& value, const U32& offset, bool is_gds,
+                     const U1& predicate);
 
     [[nodiscard]] U32U64 SharedAtomicIAdd(const U32& address, const U32U64& data, bool is_gds);
     [[nodiscard]] U32U64 SharedAtomicISub(const U32& address, const U32U64& data, bool is_gds);
@@ -183,12 +187,38 @@ public:
     [[nodiscard]] U32 LaneId();
     [[nodiscard]] U32 WarpId();
     [[nodiscard]] U32 QuadShuffle(const U32& value, const U32& index);
+    [[nodiscard]] U32 ShuffleXor(const U32& value, const U32& mask);
     [[nodiscard]] U32 ReadFirstLane(const U32& value);
+    [[nodiscard]] U32 ReadFirstLane(const U32& value, const U1& active);
     [[nodiscard]] U32 ReadLane(const U32& value, const U32& lane);
     [[nodiscard]] U32 WriteLane(const U32& value, const U32& write_value, const U32& lane);
     [[nodiscard]] Value Ballot(const U1& bit);
+    [[nodiscard]] U32 CaptureScalarMaskWord(const U1& bit, const U32& scalar, u32 word);
+    [[nodiscard]] U32 MaterializeScalarMaskWord(const U1& is_thread_bit, const U1& bit,
+                                                const U32& scalar, u32 word);
     [[nodiscard]] U32 BallotFindLsb(const Value& mask);
     [[nodiscard]] U1 GroupAny(const U1& bit);
+    [[nodiscard]] U1 GuestWaveAny(const U1& bit);
+    [[nodiscard]] U1 Wave64GroupAny(const U1& bit, const U32& invocation,
+                                    const U32& scratch_base);
+    [[nodiscard]] U32 Wave64CaptureScalarMaskWord(const U1& bit, u32 word,
+                                                  const U32& invocation,
+                                                  const U32& scratch_base);
+    [[nodiscard]] U32 Wave64LockstepMaterializeScalarMaskWord(
+        const U1& is_thread_bit, const U1& bit, const U32& scalar, u32 word,
+        const U32& invocation, const U32& scratch_base);
+    void Wave64LaneRetirementInit(const U1& active, const U32& invocation,
+                                  const U32& scratch_base);
+    void Wave64LaneRetirementSync(const U1& continues, const U32& invocation,
+                                  const U32& scratch_base);
+    [[nodiscard]] U32 Wave64ReadFirstLane(const U32& value, const U1& active,
+                                          const U32& invocation, const U32& scratch_base);
+    [[nodiscard]] U32 Wave64ReadFirstActiveLane(const U32& value, const U1& active,
+                                                const U32& invocation,
+                                                const U32& scratch_base);
+    [[nodiscard]] U32 Wave64MaterializeScalarMaskWord(
+        const U1& is_thread_bit, const U1& bit, const U32& scalar, u32 word,
+        const U32& invocation, const U32& scratch_base);
 
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2);
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2, const Value& e3);
@@ -413,6 +443,9 @@ public:
                                   const U32& multisampling, TextureInstInfo info);
     void ImageWrite(const Value& handle, const Value& coords, const U32& lod,
                     const U32& multisampling, const Value& color, TextureInstInfo info);
+    void ImageWrite(const Value& handle, const Value& coords, const U32& lod,
+                    const U32& multisampling, const Value& color, TextureInstInfo info,
+                    const U1& predicate);
 
     [[nodiscard]] F32 CubeFaceIndex(const Value& cube_coords);
 

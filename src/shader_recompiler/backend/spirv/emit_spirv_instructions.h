@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "shader_recompiler/ir/reg.h"
+
 #include <sirit/sirit.h>
 #include "common/types.h"
 
@@ -54,12 +56,14 @@ void EmitDeviceMemoryBarrier(EmitContext& ctx);
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg);
 void EmitGetThreadBitScalarReg(EmitContext& ctx);
 void EmitSetThreadBitScalarReg(EmitContext& ctx);
+void EmitSetThreadBitScalarRegPair(EmitContext& ctx);
+void EmitCopyScalarRegPair(EmitContext& ctx);
 void EmitGetScalarRegister(EmitContext& ctx);
 void EmitSetScalarRegister(EmitContext& ctx);
 void EmitGetVectorRegister(EmitContext& ctx);
 void EmitSetVectorRegister(EmitContext& ctx);
-void EmitSetVirtualRegister(EmitContext& ctx);
-void EmitGetVirtualRegister(EmitContext& ctx);
+void EmitSetVirtualRegister(EmitContext& ctx, IR::VirtualReg reg, Id value);
+Id EmitGetVirtualRegister(EmitContext& ctx, IR::VirtualReg reg);
 void EmitSetGotoVariable(EmitContext& ctx);
 void EmitGetGotoVariable(EmitContext& ctx);
 void EmitSetMaskLaneVariable(EmitContext& ctx);
@@ -140,9 +144,9 @@ Id EmitUndefU64(EmitContext& ctx);
 Id EmitLoadSharedU16(EmitContext& ctx, Id offset);
 Id EmitLoadSharedU32(EmitContext& ctx, Id offset);
 Id EmitLoadSharedU64(EmitContext& ctx, Id offset);
-void EmitWriteSharedU16(EmitContext& ctx, Id offset, Id value);
-void EmitWriteSharedU32(EmitContext& ctx, Id offset, Id value);
-void EmitWriteSharedU64(EmitContext& ctx, Id offset, Id value);
+void EmitWriteSharedU16(EmitContext& ctx, Id offset, Id value, Id predicate);
+void EmitWriteSharedU32(EmitContext& ctx, Id offset, Id value, Id predicate);
+void EmitWriteSharedU64(EmitContext& ctx, Id offset, Id value, Id predicate);
 Id EmitSharedAtomicIAdd32(EmitContext& ctx, Id offset, Id value);
 Id EmitSharedAtomicIAdd64(EmitContext& ctx, Id offset, Id value);
 Id EmitSharedAtomicUMax32(EmitContext& ctx, Id offset, Id value);
@@ -448,7 +452,7 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id
                      Id derivatives_dy, const IR::Value& offset, const IR::Value& lod_clamp);
 Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms);
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms,
-                    Id color);
+                    Id color, Id predicate);
 
 Id EmitImageAtomicIAdd32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id value);
 Id EmitImageAtomicSMin32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id value);
@@ -469,12 +473,30 @@ Id EmitCubeFaceIndex(EmitContext& ctx, IR::Inst* inst, Id cube_coords);
 Id EmitLaneId(EmitContext& ctx);
 Id EmitWarpId(EmitContext& ctx);
 Id EmitQuadShuffle(EmitContext& ctx, Id value, Id index);
-Id EmitReadFirstLane(EmitContext& ctx, Id value);
+Id EmitShuffleXor(EmitContext& ctx, Id value, Id mask);
+Id EmitReadFirstLane(EmitContext& ctx, Id value, Id active);
 Id EmitReadLane(EmitContext& ctx, Id value, Id lane);
 Id EmitWriteLane(EmitContext& ctx, Id value, Id write_value, u32 lane);
 Id EmitBallot(EmitContext& ctx, Id bit);
+Id EmitCaptureScalarMaskWord(EmitContext& ctx, Id bit, Id scalar, u32 word);
+Id EmitMaterializeScalarMaskWord(EmitContext& ctx, Id is_thread_bit, Id bit, Id scalar, u32 word);
 Id EmitBallotFindLsb(EmitContext& ctx, Id mask);
 Id EmitGroupAny(EmitContext& ctx, Id bit);
+Id EmitGuestWaveAny(EmitContext& ctx, Id bit);
+Id EmitWave64GroupAny(EmitContext& ctx, Id bit, Id invocation, Id scratch_base);
+Id EmitWave64CaptureScalarMaskWord(EmitContext& ctx, Id bit, u32 word, Id invocation,
+                                   Id scratch_base);
+Id EmitWave64LockstepMaterializeScalarMaskWord(EmitContext& ctx, Id is_thread_bit, Id bit,
+                                               Id scalar, u32 word, Id invocation,
+                                               Id scratch_base);
+void EmitWave64LaneRetirementInit(EmitContext& ctx, Id active, Id invocation, Id scratch_base);
+void EmitWave64LaneRetirementSync(EmitContext& ctx, Id continues, Id invocation, Id scratch_base);
+Id EmitWave64ReadFirstLane(EmitContext& ctx, Id value, Id active, Id invocation,
+                           Id scratch_base);
+Id EmitWave64ReadFirstActiveLane(EmitContext& ctx, Id value, Id active, Id invocation,
+                                 Id scratch_base);
+Id EmitWave64MaterializeScalarMaskWord(EmitContext& ctx, Id is_thread_bit, Id bit, Id scalar,
+                                      u32 word, Id invocation, Id scratch_base);
 Id EmitDataAppend(EmitContext& ctx, u32 gds_addr, u32 binding);
 Id EmitDataConsume(EmitContext& ctx, u32 gds_addr, u32 binding);
 

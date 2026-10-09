@@ -543,7 +543,7 @@ void Translator::IMAGE_STORE(bool has_mip, const GcnInst& inst) {
         comps.push_back(ir.GetVectorReg<IR::F32>(data_reg++));
     }
     const IR::Value value = ir.CompositeConstruct(comps[0], comps[1], comps[2], comps[3]);
-    ir.ImageWrite(handle, body, {}, {}, value, info);
+    ir.ImageWrite(handle, body, {}, {}, value, info, ir.GetExec());
 }
 
 void Translator::IMAGE_GET_RESINFO(const GcnInst& inst) {

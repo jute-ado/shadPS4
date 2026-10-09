@@ -4,6 +4,7 @@
 #pragma once
 
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
@@ -13,12 +14,13 @@ void InjectClipDistanceAttributes(IR::Program& program, RuntimeInfo& runtime_inf
 
 namespace Shader::Optimization {
 
-void SsaRewritePass(IR::Program& program);
-void SsaDestroyPass(IR::Program& program);
+void SsaRewritePass(IR::Program& program, bool predicate_vector_by_exec = false,
+                    bool capture_split_wave64_masks = false);
+void SsaDestroyPass(IR::Program& program, bool spill_cross_block_values = false);
 void IdentityRemovalPass(IR::BlockList& program);
 void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
-void FlattenExtendedUserdataPass(IR::Program& program);
+void FlattenExtendedUserdataPass(IR::Program& program, SrtMemoryReader reader = {});
 void ReadLaneEliminationPass(IR::Program& program);
 void ResourceTrackingPass(IR::Program& program, const Profile& profile);
 void BufferAccessRangePass(IR::Program& program);
@@ -32,6 +34,11 @@ void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info);
 void DomainShaderTransform(const IR::Program& program, const RuntimeInfo& runtime_info);
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile);
+void Wave64SubgroupLoweringPass(IR::Program& program, RuntimeInfo& runtime_info,
+                                const Profile& profile, bool guest_exec_predication = false,
+                                bool enable_split_wave64_scalar_control = false,
+                                bool enable_wave64_read_first_lane = false);
+void Wave64ProtocolCleanupPass(IR::Program& program);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);

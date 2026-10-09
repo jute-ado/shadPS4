@@ -228,7 +228,7 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
     inst.SetArg(0, ir.Imm32(buffer_binding));
 }
 
-IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
+IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst,
                                const AmdGpu::Buffer& buffer, u32 stride) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
@@ -262,8 +262,6 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         index = ir.IAdd(index, vgpr_index);
     }
     if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.l_stage == LogicalStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
         const IR::U32 thread_id{ir.LaneId()};
         index = ir.IAdd(index, thread_id);
     }
@@ -320,7 +318,7 @@ void PatchBufferArgs(IR::Block& block, IR::Inst& inst, Info& info) {
 
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     inst.SetArg(IR::LoadBufferArgs::Address,
-                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
+                CalculateBufferAddress(ir, inst, buffer, buffer.stride));
 }
 
 void ResourceTrackingPassStub(IR::Program& program, const Profile& profile) {

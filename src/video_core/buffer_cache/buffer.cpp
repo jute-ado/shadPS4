@@ -4,6 +4,8 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/device_address_registry.h"
+#include "video_core/buffer_cache/download_readback_policy.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -112,6 +114,12 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     VmaAllocationInfo alloc_info{};
     buffer.Create(buffer_ci, usage, &alloc_info);
 
+    if (buffer.bda_addr != 0) {
+        GlobalDeviceAddressRegistry().Register(
+            buffer.bda_addr, size_bytes, cpu_addr,
+            reinterpret_cast<u64>(static_cast<VkBuffer>(buffer.buffer)));
+    }
+
     const auto device = instance->GetDevice();
     Vulkan::SetObjectName(device, Handle(), "Buffer {:#x}:{:#x}", cpu_addr, size_bytes);
 
@@ -122,6 +130,18 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
         mapped_data = std::span<u8>{std::bit_cast<u8*>(alloc_info.pMappedData), size_bytes};
     }
     is_coherent = property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+}
+
+Buffer::~Buffer() {
+    GlobalDeviceAddressRegistry().Retire(buffer.bda_addr);
+    if (buffer.buffer) {
+        LOG_INFO(Render_Vulkan,
+                 "Destroying buffer: handle={:#x} bda={:#x} guest={:#x} size={:#x} "
+                 "current_tick={} gpu_tick={}",
+                 reinterpret_cast<u64>(static_cast<VkBuffer>(buffer.buffer)), buffer.bda_addr,
+                 cpu_addr, size_bytes, scheduler->CurrentTick(),
+                 scheduler->GetMasterSemaphore()->KnownGpuTick());
+    }
 }
 
 void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
@@ -160,6 +180,17 @@ void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
     });
 }
 
+bool Buffer::InvalidateMappedRange(u64 offset, u64 size) const {
+    ASSERT_MSG(offset <= size_bytes && size <= size_bytes - offset,
+               "Mapped invalidation range {:#x}:{:#x} exceeds buffer size {:#x}", offset, size,
+               size_bytes);
+    if (is_coherent) {
+        return true;
+    }
+    return vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset, size) ==
+           VK_SUCCESS;
+}
+
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x1000;
 
@@ -174,7 +205,12 @@ StreamBuffer::StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& 
 }
 
 std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) {
-    if (!is_coherent && usage == MemoryUsage::Stream) {
+    if (usage == MemoryUsage::Download) {
+        const auto reservation =
+            PlanDownloadReservation(size, alignment, instance->NonCoherentAtomSize(), is_coherent);
+        size = reservation.size;
+        alignment = reservation.alignment;
+    } else if (!is_coherent && usage == MemoryUsage::Stream) {
         size = Common::AlignUp(size, instance->NonCoherentAtomSize());
     }
 
@@ -210,10 +246,7 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
 
 void StreamBuffer::Commit() {
     if (!is_coherent) {
-        if (usage == MemoryUsage::Download) {
-            vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset,
-                                    mapped_size);
-        } else {
+        if (usage != MemoryUsage::Download) {
             vmaFlushAllocation(instance->GetAllocator(), buffer.allocation, offset, mapped_size);
         }
     }

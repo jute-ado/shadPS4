@@ -84,7 +84,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
         instance.GetDevice().createImageView(depth_view_ci);
     ASSERT_MSG(depth_view_result == vk::Result::eSuccess, "Failed to create image view: {}",
                vk::to_string(depth_view_result));
-    scheduler.DeferOperation([device = instance.GetDevice(), color_view, depth_view] {
+    scheduler.DeferResourceDestruction([device = instance.GetDevice(), color_view, depth_view] {
         device.destroyImageView(color_view);
         device.destroyImageView(depth_view);
     });
@@ -185,7 +185,7 @@ void BlitHelper::CopyBetweenMsImages(u32 width, u32 height, u32 num_samples,
     const auto [dst_view_result, dst_view] = instance.GetDevice().createImageView(dst_view_ci);
     ASSERT_MSG(dst_view_result == vk::Result::eSuccess, "Failed to create image view: {}",
                vk::to_string(dst_view_result));
-    scheduler.DeferOperation([device = instance.GetDevice(), src_view, dst_view] {
+    scheduler.DeferResourceDestruction([device = instance.GetDevice(), src_view, dst_view] {
         device.destroyImageView(src_view);
         device.destroyImageView(dst_view);
     });

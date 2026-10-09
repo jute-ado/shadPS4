@@ -17,6 +17,7 @@ public:
     struct Settings {
         float gamma = 1.0f;
         u32 hdr = 0;
+        u32 input_srgb_unorm = 0;
     };
 
     void Create(vk::Device device, vk::Format surface_format);
