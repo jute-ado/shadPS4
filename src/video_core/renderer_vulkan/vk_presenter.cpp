@@ -19,6 +19,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_command_checkpoint.h"
 #include "video_core/renderer_vulkan/presented_frame_timing_trace.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -653,6 +654,75 @@ Frame* Presenter::PrepareLastFrame() {
         }
         if (result == vk::Result::eTimeout) {
             continue;
+        }
+        if (result == vk::Result::eErrorDeviceLost && instance.SupportsDiagnosticCheckpoints()) {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            u64 first_sequence = std::numeric_limits<u64>::max();
+            u64 last_sequence{};
+            const auto checkpoints = instance.GetGraphicsQueue().getCheckpointDataNV();
+            for (const auto& checkpoint : checkpoints) {
+                const auto command = FindCommandCheckpoint(checkpoint.pCheckpointMarker);
+                if (command) {
+                    first_sequence = std::min(first_sequence, command->sequence);
+                    last_sequence = std::max(last_sequence, command->sequence);
+                    LOG_CRITICAL(
+                        Render_Vulkan,
+                        "GPU command checkpoint: stage={}, sequence={}, type={}, pipeline={:#018x}, "
+                        "vs={:#010x}, args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}], fs={:#010x}",
+                        vk::to_string(checkpoint.stage), command->sequence,
+                        static_cast<u64>(command->type), command->pipeline_hash,
+                        command->shader_hash, command->arguments[0], command->arguments[1],
+                        command->arguments[2], command->arguments[3], command->arguments[4],
+                        command->arguments[5]);
+                    LOG_CRITICAL(
+                        Render_Vulkan,
+                        "GPU command resources: sequence={}, bound={}, render={}x{}, "
+                        "image0=[id={}, addr={:#x}, size={:#x}, layout={}], "
+                        "image1=[id={}, addr={:#x}, size={:#x}, layout={}]",
+                        command->sequence, command->arguments[6],
+                        static_cast<u32>(command->arguments[7]),
+                        static_cast<u32>(command->arguments[7] >> 32), command->arguments[8],
+                        command->arguments[9], command->arguments[10], command->arguments[11],
+                        command->arguments[12], command->arguments[13], command->arguments[14],
+                        command->arguments[15]);
+                } else {
+                    LOG_CRITICAL(Render_Vulkan,
+                                 "GPU command checkpoint: stage={}, marker={:#x} (history expired)",
+                                 vk::to_string(checkpoint.stage),
+                                 reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker));
+                }
+            }
+            if (first_sequence != std::numeric_limits<u64>::max() &&
+                last_sequence > first_sequence &&
+                last_sequence - first_sequence <
+                    CommandCheckpointDetail::HistorySize) {
+                for (u64 sequence = first_sequence + 1; sequence < last_sequence; ++sequence) {
+                    const auto command = FindCommandCheckpoint(reinterpret_cast<const void*>(
+                        static_cast<uintptr_t>(sequence)));
+                    if (!command) {
+                        continue;
+                    }
+                    LOG_CRITICAL(
+                        Render_Vulkan,
+                        "GPU outstanding command: sequence={}, type={}, pipeline={:#018x}, "
+                        "vs={:#010x}, args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}], fs={:#010x}",
+                        command->sequence, static_cast<u64>(command->type),
+                        command->pipeline_hash, command->shader_hash, command->arguments[0],
+                        command->arguments[1], command->arguments[2], command->arguments[3],
+                        command->arguments[4], command->arguments[5]);
+                    LOG_CRITICAL(
+                        Render_Vulkan,
+                        "GPU outstanding resources: sequence={}, bound={}, render={}x{}, "
+                        "image0=[id={}, addr={:#x}, size={:#x}, layout={}], "
+                        "image1=[id={}, addr={:#x}, size={:#x}, layout={}]",
+                        command->sequence, command->arguments[6],
+                        static_cast<u32>(command->arguments[7]),
+                        static_cast<u32>(command->arguments[7] >> 32), command->arguments[8],
+                        command->arguments[9], command->arguments[10], command->arguments[11],
+                        command->arguments[12], command->arguments[13], command->arguments[14],
+                        command->arguments[15]);
+                }
+            }
         }
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
