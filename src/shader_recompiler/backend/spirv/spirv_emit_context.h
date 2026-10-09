@@ -39,7 +39,7 @@ struct VectorIds {
 class EmitContext final : public Sirit::Module {
 public:
     explicit EmitContext(const Profile& profile, const RuntimeInfo& runtime_info, Info& info,
-                         Bindings& binding);
+                         Bindings& binding, SrtMemoryReader reader = {});
     ~EmitContext();
 
     Id Def(const IR::Value& value);
@@ -191,6 +191,7 @@ public:
     }
 
     Info& info;
+    SrtMemoryReader guest_memory_reader;
     const RuntimeInfo& runtime_info;
     const Profile& profile;
     Stage stage;
@@ -297,9 +298,12 @@ public:
         Id id;
         Id sampled_type;
         Id image_type;
+        Id element_pointer_type;
         AmdGpu::ImageType view_type;
+        u32 descriptor_count{};
         bool is_integer = false;
         bool is_storage = false;
+        bool is_dynamic_descriptor_table = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
 
@@ -401,8 +405,8 @@ private:
     SpirvAttribute GetAttributeInfo(AmdGpu::NumberFormat fmt, Id id, u32 num_components,
                                     bool output, bool loaded = false, bool array = false);
 
-    BufferSpv DefineBuffer(bool is_storage, bool is_written, u32 elem_shift, BufferType buffer_type,
-                           Id data_type);
+    BufferSpv DefineBuffer(bool is_storage, bool is_written, bool is_coherent, u32 elem_shift,
+                           BufferType buffer_type, Id data_type, u32 descriptor_binding);
 
     Id DefineFloat32ToUfloatM5(u32 mantissa_bits, std::string_view name);
     Id DefineUfloatM5ToFloat32(u32 mantissa_bits, std::string_view name);
