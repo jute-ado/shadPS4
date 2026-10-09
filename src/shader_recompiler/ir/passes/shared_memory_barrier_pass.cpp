@@ -79,8 +79,6 @@ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
     }
 }
 
-static constexpr u32 GcnSubgroupSize = 64;
-
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile) {
     if (program.info.stage != Stage::Compute) {
@@ -90,10 +88,10 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     const u32 shared_memory_size = cs_info.shared_memory_size;
     const u32 threadgroup_size =
         cs_info.workgroup_size[0] * cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
-    // The compiler can only omit barriers when the local workgroup size is the same as the HW
-    // subgroup.
-    if (shared_memory_size == 0 || threadgroup_size != GcnSubgroupSize ||
-        !profile.needs_lds_barriers) {
+    // Guest shaders can rely on wave-synchronous LDS visibility for partial and multi-wave
+    // workgroups. Preserve that visibility on hosts whose subgroups do not provide equivalent
+    // ordering. The pass below keeps barriers outside divergent control flow.
+    if (shared_memory_size == 0 || threadgroup_size == 0 || !profile.needs_lds_barriers) {
         return;
     }
     using Type = IR::AbstractSyntaxNode::Type;
