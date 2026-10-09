@@ -114,6 +114,11 @@ public:
         return vk12_features.shaderInt8;
     }
 
+    /// Returns true when sampled-image descriptor arrays may use nonuniform indices.
+    bool IsSampledImageArrayNonUniformIndexingSupported() const {
+        return vk12_features.shaderSampledImageArrayNonUniformIndexing;
+    }
+
     /// Returns true if VK_KHR_maintenance8 is supported
     bool IsMaintenance8Supported() const {
         return maintenance_8;
@@ -353,6 +358,21 @@ public:
     /// Returns the maximum number of push descriptors.
     u32 MaxPushDescriptors() const {
         return push_descriptor_props.maxPushDescriptors;
+    }
+
+    /// Returns the per-stage sampled-image descriptor limit used to cap emulated tables.
+    u32 MaxPerStageDescriptorSampledImages() const {
+        return properties.limits.maxPerStageDescriptorSampledImages;
+    }
+
+    /// Returns the sampled-image descriptor limit for one descriptor set.
+    u32 MaxDescriptorSetSampledImages() const {
+        return properties.limits.maxDescriptorSetSampledImages;
+    }
+
+    /// Returns the aggregate resource descriptor limit for one shader stage.
+    u32 MaxPerStageResources() const {
+        return properties.limits.maxPerStageResources;
     }
 
     /// Returns the vulkan 1.2 physical device properties.
