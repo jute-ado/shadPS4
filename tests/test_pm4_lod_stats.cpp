@@ -7,13 +7,14 @@
 #include "video_core/amdgpu/pm4_lod_stats.h"
 
 TEST(Pm4LodStats, DecodesLiverpoolReportPacket) {
-    constexpr std::array<u32, 3> payload{0x1020, 0x09210001, 0x000bfc00};
+    // PM4_ME_GET_LOD_STATS body: bu_size, base_lo, base_hi, control.
+    constexpr std::array<u32, 4> payload{0x1020, 0x09210001, 0x000bfc00, 0xc0044700};
 
     const AmdGpu::LodStatsReport report = AmdGpu::DecodeLodStatsReport(payload);
 
     EXPECT_EQ(report.size, 0x1020);
-    EXPECT_EQ(report.address, 0x09210000);
-    EXPECT_EQ(report.control, 0x000bfc00);
+    EXPECT_EQ(report.address, 0x000bfc0009210000);
+    EXPECT_EQ(report.control, 0xc0044700);
 }
 
 TEST(Pm4LodStats, InitializesCompletedEmptyReport) {

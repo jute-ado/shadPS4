@@ -13,7 +13,7 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
 #include "core/platform.h"
-#include "video_core/amdgpu/eop_flip_completion.h"
+#include "video_core/amdgpu/eop_flip_submission.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/amdgpu/pm4_lod_stats.h"
@@ -291,9 +291,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     // The flip marker follows the frame's EOP packet. Preserve that ordering so
                     // the guest cannot recycle the frame before its fence and interrupt.
-                    auto eop_completion = std::move(last_eop_completion);
-                    if (eop_completion) {
-                        eop_completion->AttachFlip([this] {
+                    auto eop_submission = std::move(last_eop_submission);
+                    if (eop_submission) {
+                        eop_submission->AttachFlip([this] {
                             SendCommand([] {
                                 Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                             });
@@ -444,6 +444,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
+                // DecodeSetPredication requires at least the shortest two-dword
+                // body.  Check the declared packet extent before forming the
+                // dynamic span so truncated command buffers fail closed.
+                if (count < 2 || dcb.size() < static_cast<size_t>(count) + 1) {
+                    LOG_WARNING(Render, "Ignoring truncated IT_SET_PREDICATION packet");
+                    break;
+                }
                 const auto packet = DecodeSetPredication(dcb.subspan(1, count));
                 if (!packet) {
                     LOG_WARNING(Render, "Ignoring truncated IT_SET_PREDICATION packet");
@@ -777,8 +784,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 if (rasterizer) {
-                    auto eop_completion = std::make_shared<EopFlipCompletion>();
-                    last_eop_completion = eop_completion;
+                    auto eop_submission = std::make_shared<EopFlipSubmission>();
+                    last_eop_submission = eop_submission;
                     rasterizer->ProcessDownloadImages();
                     SubmitEop(
                         *event_eop,
@@ -793,11 +800,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             }
                         },
                         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
-                        [eop_completion] { eop_completion->CompleteEop(); });
+                        [eop_submission] { eop_submission->CompleteSubmission(); });
                     break;
                 }
-                auto eop_completion = std::make_shared<EopFlipCompletion>();
-                last_eop_completion = eop_completion;
+                auto eop_submission = std::make_shared<EopFlipSubmission>();
+                last_eop_submission = eop_submission;
                 event_eop->SignalFence(
                     [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
@@ -806,7 +813,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         }
                     },
                     [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
-                eop_completion->CompleteEop();
+                eop_submission->CompleteSubmission();
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -961,16 +968,31 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
+                // The decoder below reads a fixed four-dword body.  Check both the
+                // packet's declared body size and the command-buffer extent before
+                // forming that span; malformed packets must not trigger an OOB read.
+                if (count < 4 || dcb.size() < static_cast<size_t>(count) + 1) {
+                    LOG_WARNING(Render, "Ignoring truncated IT_GET_LOD_STATS packet");
+                    break;
+                }
                 const auto report =
-                    DecodeLodStatsReport(std::span<const u32, 3>{dcb.data() + 1, 3});
+                    DecodeLodStatsReport(std::span<const u32, 4>{dcb.data() + 1, 4});
                 if (report.address != 0 && report.size != 0) {
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->IsValidMapping(report.address, report.size)) {
+                        LOG_WARNING(
+                            Render,
+                            "Ignoring IT_GET_LOD_STATS with invalid address {:#x}, size={:#x}",
+                            report.address, report.size);
+                        break;
+                    }
                     InitializeLodStatsReport(std::span<std::byte>{
                         reinterpret_cast<std::byte*>(report.address), report.size});
+                    LOG_DEBUG(Render_Vulkan,
+                              "IT_GET_LOD_STATS initialized empty report at {:#x}, size={:#x}, "
+                              "control={:#x} (STUBBED)",
+                              report.address, report.size, report.control);
                 }
-                LOG_DEBUG(Render_Vulkan,
-                          "IT_GET_LOD_STATS initialized empty report at {:#x}, size={:#x}, "
-                          "control={:#x} (STUBBED)",
-                          report.address, report.size, report.control);
                 break;
             }
             case PM4ItOpcode::CondExec: {
