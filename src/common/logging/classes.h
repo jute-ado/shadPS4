@@ -110,6 +110,7 @@ constexpr auto Loader = "Loader";                                   ///< ROM loa
 constexpr auto Log = "Log";                                         ///< Messages about the log system itself
 constexpr auto NpHandler = "NpHandler";                             ///< NpHandler shadNet manager
 constexpr auto Render = "Render";                                   ///< Video Core
+constexpr auto Render_Compilation = "Render.Compilation";           ///< Opt-in pipeline compilation timings
 constexpr auto Render_Recompiler = "Render.Recompiler";             ///< Shader recompiler
 constexpr auto Render_Vulkan = "Render.Vulkan";                     ///< Vulkan backend
 constexpr auto ShadNet = "ShadNet";                                 ///< shadNet binary protocol client

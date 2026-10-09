@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -14,6 +15,7 @@
 namespace Libraries::AudioOut {
 
 constexpr auto TEST_LAB_AUDIO_CAPTURE_ENV = "EMULATOR_TEST_LAB_AUDIO_PCM16";
+constexpr auto TEST_LAB_AUDIO_PORT_CAPTURE_ENV = "EMULATOR_TEST_LAB_AUDIO_PORT_PCM16_DIR";
 
 class TestLabPcm16CaptureFile {
 public:
@@ -40,5 +42,12 @@ struct TestLabAudioFormat {
 
 void CaptureTestLabMainPortAudio(const void* source, u32 frames,
                                  const TestLabAudioFormat& format, bool is_main);
+
+[[nodiscard]] std::unique_ptr<TestLabPcm16CaptureFile> CreateTestLabPortPcm16Capture(
+    const std::filesystem::path& output_directory, u64 capture_index, u32 port_type,
+    u32 sample_rate);
+
+[[nodiscard]] std::unique_ptr<TestLabPcm16CaptureFile> CreateTestLabPortPcm16Capture(
+    u32 port_type, u32 sample_rate);
 
 } // namespace Libraries::AudioOut

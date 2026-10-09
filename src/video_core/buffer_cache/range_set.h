@@ -139,6 +139,14 @@ public:
         m_ranges_map.add({interval, value});
     }
 
+    // Replace any existing owner for this interval before publishing the new value.  A plain
+    // interval-map add keeps the previous value for overlaps, which is incorrect for a guest
+    // address that has been rebound to a replacement allocation.
+    void Assign(VAddr base_address, size_t size, const T& value) {
+        Subtract(base_address, size);
+        Add(base_address, size, value);
+    }
+
     void Subtract(VAddr base_address, size_t size) {
         const VAddr end_address = base_address + size;
         IntervalType interval{base_address, end_address};

@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <queue>
 
@@ -359,6 +360,11 @@ public:
     /// and increments the scheduler timeline semaphore.
     void Flush();
 
+    /// Registers successful submission on the caller before enabling the worker
+    /// wakeup after this exact GPU tick. Neither callback may wait for the owner.
+    void FlushWithGpuCompletion(Common::UniqueFunction<void, u64>&& on_submitted,
+                                Common::UniqueFunction<void>&& wake_owner);
+
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish();
 
@@ -367,6 +373,29 @@ public:
 
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
+
+    /// Defers owner callbacks while a cache operation may replace resources and wait for a
+    /// stream-buffer watch. The scope is nestable; the enclosing owner boundary performs the
+    /// eventual PopPendingOperations call after the mutation window has closed.
+    class ScopedPendingOperationDrainSuppression {
+    public:
+        explicit ScopedPendingOperationDrainSuppression(Scheduler& scheduler_) noexcept
+            : scheduler{scheduler_} {
+            scheduler.BeginPendingOperationDrainSuppression();
+        }
+
+        ScopedPendingOperationDrainSuppression(
+            const ScopedPendingOperationDrainSuppression&) = delete;
+        ScopedPendingOperationDrainSuppression& operator=(
+            const ScopedPendingOperationDrainSuppression&) = delete;
+
+        ~ScopedPendingOperationDrainSuppression() {
+            scheduler.EndPendingOperationDrainSuppression();
+        }
+
+    private:
+        Scheduler& scheduler;
+    };
 
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
@@ -388,6 +417,11 @@ public:
     vk::CommandBuffer CommandBuffer() const {
         return current_cmdbuf;
     }
+
+    /// Called only after recording a guest draw/dispatch, never for presentation or copies.
+    void MarkGuestWork(std::optional<u64> compute_shader_hash = std::nullopt,
+                       std::optional<u64> vertex_shader_hash = std::nullopt,
+                       bool has_color_attachment = false) noexcept;
 
     void BindPipeline(PipelineBindPoint point, vk::Pipeline pipeline) {
         if (!pipeline_bind_tracker.NeedsBind(point, static_cast<VkPipeline>(pipeline))) {
@@ -428,19 +462,34 @@ public:
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
-        {
-            std::unique_lock lk(priority_pending_ops_mutex);
-            priority_pending_ops.emplace(std::move(func), CurrentTick());
-        }
+        QueuePriorityOperationAtTick(std::move(func), CurrentTick());
         priority_pending_ops_cv.notify_one();
     }
 
     static std::mutex submit_mutex;
 
 private:
+    void BeginPendingOperationDrainSuppression() noexcept {
+        ++pending_operation_drain_suppression_depth;
+    }
+
+    void EndPendingOperationDrainSuppression() noexcept {
+        --pending_operation_drain_suppression_depth;
+    }
+
+    [[nodiscard]] bool IsPendingOperationDrainSuppressed() const noexcept {
+        return pending_operation_drain_suppression_depth != 0;
+    }
+
+    void QueuePriorityOperationAtTick(Common::UniqueFunction<void>&& func, u64 tick) {
+        std::unique_lock lk(priority_pending_ops_mutex);
+        priority_pending_ops.emplace(std::move(func), tick);
+    }
+
     void AllocateWorkerCommandBuffers();
 
     void SubmitExecution(SubmitInfo& info);
+    u64 SubmitExecutionWithSubmitLockHeld(SubmitInfo& info);
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
@@ -451,6 +500,8 @@ private:
     DynamicState dynamic_state;
     PipelineBindTracker<VkPipeline> pipeline_bind_tracker;
     vk::CommandBuffer current_cmdbuf;
+    bool pending_guest_work{};
+    u32 pending_operation_drain_suppression_depth{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;
