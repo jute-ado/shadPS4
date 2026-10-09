@@ -76,7 +76,7 @@ public:
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
 
-    const GraphicsPipeline* GetGraphicsPipeline();
+    const GraphicsPipeline* GetGraphicsPipeline(AmdGpu::PrimitiveType primitive_type);
 
     const ComputePipeline* GetComputePipeline();
 
@@ -96,7 +96,7 @@ public:
     }
 
 private:
-    bool RefreshGraphicsKey();
+    bool RefreshGraphicsKey(AmdGpu::PrimitiveType primitive_type);
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
 

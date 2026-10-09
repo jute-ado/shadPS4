@@ -14,4 +14,8 @@ constexpr bool IsCacheableFaultRange(VAddr start, VAddr end, VAddr address_space
            end - start <= std::numeric_limits<u32>::max();
 }
 
+constexpr u32 ClampFaultCount(u32 reported_count, u32 capacity) {
+    return reported_count < capacity ? reported_count : capacity;
+}
+
 } // namespace VideoCore
