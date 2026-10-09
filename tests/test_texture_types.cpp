@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 
 #include <gtest/gtest.h>
 
+#include "shader_recompiler/backend/bindings.h"
 #include "video_core/amdgpu/resource.h"
+#include "video_core/descriptor_binding_cursor.h"
 #include "video_core/texture_cache/types.h"
 
 namespace {
@@ -22,8 +26,8 @@ std::string ReadText(const char* path) {
 }
 
 TEST(ImageDescriptorLayers, NonArrayTypesIgnoreUnusedDepthBits) {
-    for (const auto type : {AmdGpu::ImageType::Color1D, AmdGpu::ImageType::Color2D,
-                            AmdGpu::ImageType::Color2DMsaa}) {
+    for (const auto type :
+         {AmdGpu::ImageType::Color1D, AmdGpu::ImageType::Color2D, AmdGpu::ImageType::Color2DMsaa}) {
         AmdGpu::Image image{};
         image.type = static_cast<u64>(type);
         image.depth = 3277;
@@ -71,7 +75,8 @@ TEST(SubresourceExtent, RejectsMoreLayersDespiteFewerMipLevels) {
 TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
     const auto source = ReadText(SHADPS4_RASTERIZER_SOURCE_PATH);
     const auto function_begin = source.find("void Rasterizer::BindTextures(");
-    const auto function_end = source.find("RenderState Rasterizer::BeginRendering(", function_begin);
+    const auto function_end =
+        source.find("RenderState Rasterizer::BeginRendering(", function_begin);
     ASSERT_NE(function_begin, std::string::npos);
     ASSERT_NE(function_end, std::string::npos);
     const auto body = source.substr(function_begin, function_end - function_begin);
@@ -96,3 +101,95 @@ TEST(TextureBindingBookkeeping, InvalidBindingsAppendAllParallelMetadata) {
 }
 
 } // namespace
+
+TEST(DescriptorBindingCursor, MultipleArraysConsumeOneBindingEachAndAllCapacity) {
+    VideoCore::DescriptorBindingCursor cursor;
+    EXPECT_EQ(cursor.TryAdd(3), 0U);
+    EXPECT_EQ(cursor.TryAdd(5), 1U);
+    EXPECT_EQ(cursor.BindingCount(), 2U);
+    EXPECT_EQ(cursor.DescriptorCount(), 8U);
+}
+
+TEST(DescriptorBindingCursor, MixedSinglesAndArraysKeepDeterministicOrigins) {
+    VideoCore::DescriptorBindingCursor cursor;
+    EXPECT_EQ(cursor.TryAdd(1), 0U);
+    EXPECT_EQ(cursor.TryAdd(4), 1U);
+    EXPECT_EQ(cursor.TryAdd(1), 2U);
+    EXPECT_EQ(cursor.BindingCount(), 3U);
+    EXPECT_EQ(cursor.DescriptorCount(), 6U);
+}
+
+TEST(DescriptorBindingCursor, ExactCapacityIsAllowed) {
+    VideoCore::DescriptorBindingCursor cursor;
+    ASSERT_TRUE(cursor.TryAdd(8).has_value());
+    EXPECT_TRUE(cursor.CanUsePushDescriptors(8));
+    EXPECT_FALSE(cursor.CanUsePushDescriptors(7));
+}
+
+TEST(DescriptorBindingCursor, ZeroAndOverflowFailWithoutMutation) {
+    VideoCore::DescriptorBindingCursor cursor;
+    EXPECT_FALSE(cursor.TryAdd(0).has_value());
+    EXPECT_EQ(cursor.BindingCount(), 0U);
+    EXPECT_EQ(cursor.DescriptorCount(), 0U);
+
+    ASSERT_TRUE(cursor.TryAdd(std::numeric_limits<u32>::max()).has_value());
+    EXPECT_FALSE(cursor.TryAdd(1).has_value());
+    EXPECT_EQ(cursor.BindingCount(), 1U);
+    EXPECT_EQ(cursor.DescriptorCount(), std::numeric_limits<u32>::max());
+}
+
+TEST(DescriptorArrayBinding, EmissionAndWritesReuseDeterministicArrayOrigins) {
+    Shader::Backend::Bindings emitted;
+    Shader::Backend::Bindings written;
+
+    for (const u32 descriptor_count : {3U, 5U, 1U}) {
+        const u32 expected_binding = emitted.unified;
+        EXPECT_EQ(emitted.TryAddImageBinding(descriptor_count), expected_binding);
+        EXPECT_EQ(written.TryAddImageBinding(descriptor_count), expected_binding);
+    }
+    EXPECT_EQ(emitted.unified, 3U);
+    EXPECT_EQ(written, emitted);
+}
+
+TEST(DescriptorArrayBinding, MalformedAndOverflowInputsFailWithoutMutation) {
+    Shader::Backend::Bindings binding;
+    EXPECT_FALSE(binding.TryAddImageBinding(0).has_value());
+    EXPECT_EQ(binding.unified, 0U);
+
+    binding.unified = std::numeric_limits<u32>::max();
+    EXPECT_FALSE(binding.TryAddImageBinding(1).has_value());
+    EXPECT_EQ(binding.unified, std::numeric_limits<u32>::max());
+}
+
+TEST(DescriptorArrayBinding, MixedStagesKeepProductionOriginsAligned) {
+    Shader::Backend::Bindings spirv;
+    Shader::Backend::Bindings writes;
+    VideoCore::DescriptorBindingCursor layout;
+
+    const auto apply_stage = [](Shader::Backend::Bindings& bindings, u32 first_array,
+                                u32 second_array) {
+        std::array<std::optional<u32>, 5> origins{
+            bindings.TryAddBufferBinding(), bindings.TryAddImageBinding(first_array),
+            bindings.TryAddImageBinding(second_array), bindings.TryAddSamplerBinding(),
+            bindings.TryAddBufferBinding()};
+        return origins;
+    };
+
+    const auto apply_layout_stage = [](VideoCore::DescriptorBindingCursor& bindings,
+                                       u32 first_array, u32 second_array) {
+        std::array<std::optional<u32>, 5> origins{bindings.TryAdd(), bindings.TryAdd(first_array),
+                                                  bindings.TryAdd(second_array), bindings.TryAdd(),
+                                                  bindings.TryAdd()};
+        return origins;
+    };
+
+    const auto spirv_origins = apply_stage(spirv, 3, 5);
+    const auto layout_origins = apply_layout_stage(layout, 3, 5);
+    const auto write_origins = apply_stage(writes, 3, 5);
+    EXPECT_EQ(spirv_origins, layout_origins);
+    EXPECT_EQ(layout_origins, write_origins);
+    EXPECT_EQ(spirv_origins, (std::array<std::optional<u32>, 5>{0U, 1U, 2U, 3U, 4U}));
+    EXPECT_EQ(spirv.unified, 5U);
+    EXPECT_EQ(spirv.buffer, 2U);
+    EXPECT_EQ(layout.DescriptorCount(), 11U);
+}

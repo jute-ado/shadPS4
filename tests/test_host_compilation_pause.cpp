@@ -120,8 +120,7 @@ TEST(PersistentShaderCache, BackendSemanticChangesInvalidateStoredSpirv) {
     const auto source = ReadSource(SHADPS4_PIPELINE_SERIALIZATION_SOURCE_PATH);
 
     ASSERT_FALSE(source.empty());
-    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 4u;"),
-              std::string::npos);
+    EXPECT_NE(source.find("static constexpr u32 ShaderBinaryVersion = 5u;"), std::string::npos);
 }
 
 } // namespace
