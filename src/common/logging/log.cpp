@@ -134,6 +134,7 @@ std::unordered_map<std::string_view, std::shared_ptr<spdlog::logger>> ALL_LOGGER
     {Class::Log, nullptr},
     {Class::NpHandler, nullptr},
     {Class::Render, nullptr},
+    {Class::Render_Compilation, nullptr},
     {Class::Render_Recompiler, nullptr},
     {Class::Render_Vulkan, nullptr},
     {Class::ShadNet, nullptr},
