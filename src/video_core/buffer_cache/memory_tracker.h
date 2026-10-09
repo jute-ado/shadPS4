@@ -12,6 +12,7 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "video_core/buffer_cache/guest_upload_transaction.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -114,26 +115,28 @@ public:
 
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
-                            auto&& on_upload) {
-        IteratePages<true>(query_cpu_range, query_size,
-                           [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
-                               manager->lock.lock();
-                               manager->template ForEachModifiedRange<Type::CPU, true>(
-                                   manager->GetCpuAddr() + offset, size, func);
-                               if (!is_written) {
-                                   manager->lock.unlock();
-                               }
-                           });
-        on_upload();
-        if (!is_written) {
-            return;
-        }
-        IteratePages<false>(query_cpu_range, query_size,
-                            [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
-                                manager->template ChangeRegionState<Type::GPU, true>(
-                                    manager->GetCpuAddr() + offset, size);
-                                manager->lock.unlock();
-                            });
+                            auto&& on_snapshot, auto&& on_publish) {
+        WithGuestUploadTransaction(
+            [&] {
+                IteratePages<true>(query_cpu_range, query_size,
+                                   [&func](RegionManager* manager, u64 offset, size_t size) {
+                                       manager->lock.lock();
+                                       manager->template ForEachModifiedRange<Type::CPU, true>(
+                                           manager->GetCpuAddr() + offset, size, func);
+                                   });
+            },
+            std::forward<decltype(on_snapshot)>(on_snapshot),
+            [&] {
+                IteratePages<false>(query_cpu_range, query_size,
+                                    [is_written](RegionManager* manager, u64 offset, size_t size) {
+                                        if (is_written) {
+                                            manager->template ChangeRegionState<Type::GPU, true>(
+                                                manager->GetCpuAddr() + offset, size);
+                                        }
+                                        manager->lock.unlock();
+                                    });
+            },
+            std::forward<decltype(on_publish)>(on_publish));
     }
 
     /// Call 'func' for each GPU modified range and unmark those pages as GPU modified

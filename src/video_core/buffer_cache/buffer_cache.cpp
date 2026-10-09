@@ -663,6 +663,8 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
     size_t total_size_bytes = 0;
     VAddr buffer_start = buffer.CpuAddr();
     vk::Buffer src_buffer = VK_NULL_HANDLE;
+    u64 staging_offset = 0;
+    bool snapshot_in_staging = false;
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](VAddr device_addr_out, u64 range_size) {
@@ -690,7 +692,40 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
                 page_addr += TRACKER_BYTES_PER_PAGE;
             }
         },
-        [&] { src_buffer = UploadCopies(buffer, copies, total_size_bytes); });
+        [&] {
+            if (copies.empty()) {
+                return;
+            }
+            // A pending staging allocation must not wait while guest pages are locked.
+            const auto [staging, offset] = staging_buffer.Map(total_size_bytes, 0, false);
+            snapshot_in_staging = staging != nullptr;
+            staging_offset = offset;
+            if (!snapshot_in_staging) {
+                guest_upload_snapshot.resize(total_size_bytes);
+            }
+            for (const auto& copy : copies) {
+                const VAddr source = buffer.CpuAddr() + copy.dstOffset;
+                u8* const destination = snapshot_in_staging
+                                            ? staging + copy.srcOffset
+                                            : guest_upload_snapshot.data() + copy.srcOffset;
+                memory->CopySparseMemory(source, destination, copy.size);
+            }
+        },
+        [&] {
+            if (copies.empty()) {
+                return;
+            }
+            if (snapshot_in_staging) {
+                for (auto& copy : copies) {
+                    copy.srcOffset += staging_offset;
+                }
+                staging_buffer.Commit();
+                src_buffer = staging_buffer.Handle();
+            } else {
+                src_buffer = UploadCopies(
+                    copies, std::span<const u8>{guest_upload_snapshot.data(), total_size_bytes});
+            }
+        });
 
     boost::container::small_vector<VAddr, 16> uploaded_pages;
     for (const auto& [upload_addr, upload_size] : uploaded_cpu_ranges) {
@@ -754,18 +789,15 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
     return false;
 }
 
-vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
-                                     size_t total_size_bytes) {
+vk::Buffer BufferCache::UploadCopies(std::span<vk::BufferCopy> copies,
+                                     std::span<const u8> snapshot) {
     if (copies.empty()) {
         return VK_NULL_HANDLE;
     }
-    const auto [staging, offset] = staging_buffer.Map(total_size_bytes);
+    const auto [staging, offset] = staging_buffer.Map(snapshot.size());
     if (staging) {
+        std::memcpy(staging, snapshot.data(), snapshot.size());
         for (auto& copy : copies) {
-            u8* const src_pointer = staging + copy.srcOffset;
-            const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
-            memory->CopySparseMemory(device_addr, src_pointer, copy.size);
-            // Apply the staging offset
             copy.srcOffset += offset;
         }
         staging_buffer.Commit();
@@ -774,14 +806,10 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
         // For large one time transfers use a temporary host buffer.
         auto temp_buffer =
             std::make_unique<Buffer>(instance, scheduler, MemoryUsage::Upload, 0,
-                                     vk::BufferUsageFlagBits::eTransferSrc, total_size_bytes);
+                                     vk::BufferUsageFlagBits::eTransferSrc, snapshot.size());
         const vk::Buffer src_buffer = temp_buffer->Handle();
         u8* const staging = temp_buffer->mapped_data.data();
-        for (const auto& copy : copies) {
-            u8* const src_pointer = staging + copy.srcOffset;
-            const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
-            memory->CopySparseMemory(device_addr, src_pointer, copy.size);
-        }
+        std::memcpy(staging, snapshot.data(), snapshot.size());
         scheduler.DeferOperation([buffer = std::move(temp_buffer)]() mutable { buffer.reset(); });
         return src_buffer;
     }
